@@ -3717,6 +3717,7 @@ name = "shardline"
 version = "1.11.2"
 dependencies = [
  "axum",
+ "blake3",
  "bytes",
  "clap",
  "clap_complete",
@@ -3729,9 +3730,11 @@ dependencies = [
  "sdx",
  "serde",
  "serde_json",
+ "sha2",
  "shardline-auth",
  "shardline-index",
  "shardline-protocol",
+ "shardline-protocol-adapters",
  "shardline-server",
  "shardline-server-core",
  "shardline-storage",

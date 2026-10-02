@@ -49,6 +49,7 @@ mod fsck;
 mod gc;
 mod gc_schedule;
 mod hold;
+mod hub_repair;
 mod lfs_repair;
 pub mod local_output;
 pub mod local_path;
@@ -88,6 +89,7 @@ pub use hold::{
     HoldRuntimeError, print_hold_list_summary, print_hold_summary, run_hold_list, run_hold_release,
     run_hold_set,
 };
+pub use hub_repair::{HubTreeRecoveryInput, HubTreeRepairRuntimeError, run_hub_tree_repair};
 pub use lfs_repair::{LfsRepairRuntimeError, run_lfs_evidence_repair};
 pub use local_output::write_output_bytes;
 pub use providerless::{

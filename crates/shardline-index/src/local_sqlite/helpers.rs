@@ -2797,6 +2797,7 @@ pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         ),
         other @ LocalIndexStoreError::Io(_)
         | other @ LocalIndexStoreError::Sqlite(_)
+        | other @ LocalIndexStoreError::HubTreeRecoveryRequired(_)
         | other @ LocalIndexStoreError::Json(_)
         | other @ LocalIndexStoreError::MetadataLengthMismatch { .. }
         | other @ LocalIndexStoreError::HashParse(_)

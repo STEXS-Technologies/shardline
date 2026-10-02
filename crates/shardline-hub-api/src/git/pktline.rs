@@ -88,7 +88,7 @@ pub fn sideband_data(data: &[u8]) -> Vec<u8> {
     for chunk in data.chunks(65516) {
         let len = chunk.len().wrapping_add(5); // 4-byte length prefix + 1-byte channel
         out.extend_from_slice(format!("{len:04x}").as_bytes());
-        out.push(b'1'); // channel 1 = pack data
+        out.push(1); // channel 1 = pack data
         out.extend_from_slice(chunk);
     }
     out
@@ -99,7 +99,7 @@ pub fn sideband_data(data: &[u8]) -> Vec<u8> {
 pub fn sideband_progress(msg: &str) -> Vec<u8> {
     let len = msg.len().wrapping_add(5);
     let mut out = format!("{len:04x}").into_bytes();
-    out.push(b'2');
+    out.push(2);
     out.extend_from_slice(msg.as_bytes());
     out
 }
@@ -109,7 +109,7 @@ pub fn sideband_progress(msg: &str) -> Vec<u8> {
 pub fn sideband_fatal(msg: &str) -> Vec<u8> {
     let len = msg.len().wrapping_add(5);
     let mut out = format!("{len:04x}").into_bytes();
-    out.push(b'3');
+    out.push(3);
     out.extend_from_slice(msg.as_bytes());
     out
 }
@@ -200,8 +200,8 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
         };
 
         match channel {
-            b'1' => pack_data.extend_from_slice(payload),
-            b'2' | b'3' => {
+            1 => pack_data.extend_from_slice(payload),
+            2 | 3 => {
                 if let Ok(msg) = std::str::from_utf8(payload) {
                     messages.push(msg.to_owned());
                 }
@@ -279,13 +279,13 @@ mod tests {
     #[test]
     fn sideband_progress_is_channel_2() {
         let msg = sideband_progress("working");
-        assert_eq!(msg[4], b'2');
+        assert_eq!(msg[4], 2);
     }
 
     #[test]
     fn sideband_fatal_is_channel_3() {
         let msg = sideband_fatal("error");
-        assert_eq!(msg[4], b'3');
+        assert_eq!(msg[4], 3);
         let content = String::from_utf8_lossy(&msg[5..]);
         assert_eq!(content, "error");
     }
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn sideband_fatal_is_channel_3_and_parseable() {
         let msg = sideband_fatal("fatal error occurred");
-        assert_eq!(msg[4], b'3');
+        assert_eq!(msg[4], 3);
         let (pack, msgs) = decode_sideband(&msg);
         assert!(pack.is_empty());
         assert_eq!(msgs, vec!["fatal error occurred"]);
@@ -498,7 +498,7 @@ mod tests {
         // Channel 2 with invalid UTF-8 — should not be collected as message string
         let len = 7u16; // 4 prefix + 1 channel + 2 payload
         let mut packet = format!("{len:04x}").into_bytes();
-        packet.push(b'2');
+        packet.push(2);
         packet.extend_from_slice(b"\xff\xfe");
         let (pack, msgs) = decode_sideband(&packet);
         assert!(pack.is_empty());
@@ -551,7 +551,7 @@ mod tests {
         // Channel 3 with invalid UTF-8 — should not be collected as message
         let len = 7u16; // 4 prefix + 1 channel + 2 payload
         let mut packet = format!("{len:04x}").into_bytes();
-        packet.push(b'3');
+        packet.push(3);
         packet.extend_from_slice(b"\xff\xfe");
         let (pack, msgs) = decode_sideband(&packet);
         assert!(pack.is_empty());

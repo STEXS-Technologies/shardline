@@ -133,6 +133,13 @@ pub enum CliCommand {
         /// Unit basename without `.service` or `.timer`.
         unit_prefix: String,
     },
+    /// Restore one quarantined Hub ref from an authoritative full-tree manifest.
+    RepairHubTree {
+        /// Optional deployment-root override.
+        root: Option<PathBuf>,
+        /// JSON manifest containing the operator-verified tree and expected head.
+        state_file: PathBuf,
+    },
     /// Repair stale lifecycle metadata.
     Repair {
         /// Optional deployment-root override for the active Shardline config.

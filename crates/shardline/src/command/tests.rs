@@ -1413,3 +1413,23 @@ fn completion_shell_value_enum_variants() {
     assert_eq!(super::CompletionShell::PowerShell as u8, 3);
     assert_eq!(super::CompletionShell::Zsh as u8, 4);
 }
+
+#[test]
+fn parse_explicit_hub_tree_recovery() {
+    assert_eq!(
+        CliCommand::parse([
+            "shardline",
+            "repair",
+            "hub-tree",
+            "--root",
+            "/data",
+            "--state-file",
+            "/backup/tree.json"
+        ]),
+        Ok(CliCommand::RepairHubTree {
+            root: Some(PathBuf::from("/data")),
+            state_file: PathBuf::from("/backup/tree.json")
+        })
+    );
+    assert!(CliCommand::parse(["shardline", "repair", "hub-tree"]).is_err());
+}

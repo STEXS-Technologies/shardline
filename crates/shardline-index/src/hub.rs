@@ -53,7 +53,11 @@ pub struct HubRepo {
 }
 
 impl HubRepo {
-    /// Generates a deterministic SHA for a commit.
+    /// Generates the legacy 16-hex NDJSON identity for diagnosis and compatibility.
+    ///
+    /// This identity omits repository and complete-tree ownership and must never
+    /// be used for new stored trees. Persistence quarantines these identities;
+    /// recovery uses a repository-bound full-tree digest instead.
     ///
     /// # Errors
     ///
@@ -110,12 +114,22 @@ pub fn canonical_ref_name(ref_name: &str) -> &str {
 }
 
 /// A Hub file entry within a commit tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HubFileEntry {
     pub path: String,
     pub size: u64,
     pub sha: String,
     pub is_lfs: bool,
+}
+
+/// Shared initial revision: its tree is always empty, even if legacy rows exist.
+pub const EMPTY_HUB_REVISION: &str = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+
+/// Legacy NDJSON identities did not bind paths, deletions, or repository identity.
+/// Their stored trees cannot be trusted, even with only one current owner.
+pub(crate) fn hub_tree_requires_recovery(commit_sha: &str) -> bool {
+    commit_sha.len() == 16 && commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// A registered webhook for a Hub repository.
@@ -181,7 +195,10 @@ pub trait HubStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<HubRepo>, Self::Error>;
 
-    /// Creates a new revision (commit) in a repository.
+    /// Creates a revision or points a ref at an existing immutable revision.
+    ///
+    /// Reusing an existing repository revision changes only the target ref;
+    /// its original parent, message, timestamp and history record stay intact.
     ///
     /// If `parent_sha` is provided, implements optimistic concurrency: returns
     /// `Err` if the current HEAD does not match.
@@ -206,6 +223,23 @@ pub trait HubStore: Send + Sync {
     /// Returns an error when the storage backend operation fails.
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error>;
 
+    /// Lists refs only when the complete result fits `limit`; `None` means overflow.
+    ///
+    /// Built-in adapters apply the ceiling in SQL before row decoding. Custom
+    /// adapters should override this fallback to provide the same memory bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata or reliability verification fails.
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRef>>, Self::Error> {
+        let entries = self.list_refs(repo_id)?;
+        Ok((entries.len() <= limit).then_some(entries))
+    }
+
     /// Deletes an active branch or tag only if it still points to `expected_sha`.
     ///
     /// The compare-and-delete semantics prevent a stale Git receive-pack request
@@ -229,6 +263,23 @@ pub trait HubStore: Send + Sync {
     /// Returns an error when the storage backend operation fails.
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error>;
 
+    /// Lists revisions only when the complete result fits `limit`; `None` means overflow.
+    ///
+    /// Built-in adapters apply the ceiling in SQL before row decoding. Custom
+    /// adapters should override this fallback to provide the same memory bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata or reliability verification fails.
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRevision>>, Self::Error> {
+        let entries = self.list_revisions(repo_id)?;
+        Ok((entries.len() <= limit).then_some(entries))
+    }
+
     /// Resolves a revision string ("main", a SHA, or a ref name) to a SHA.
     ///
     /// # Errors
@@ -249,10 +300,30 @@ pub trait HubStore: Send + Sync {
 
     /// Returns all file entries at a given commit SHA.
     ///
+    /// Built-in adapters reject trees above 100,000 entries; they never return a
+    /// silently truncated tree. Legacy 16-hex identities require explicit recovery.
+    ///
     /// # Errors
     ///
     /// Returns an error when the storage backend operation fails.
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error>;
+
+    /// Reads a complete tree only when it fits `limit`; `None` means overflow.
+    ///
+    /// Built-in adapters apply the ceiling in SQL before row decoding. Custom
+    /// adapters should override the fallback to provide the same memory bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on recovery-required revisions or storage failures.
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubFileEntry>>, Self::Error> {
+        let files = self.get_files(commit_sha)?;
+        Ok((files.len() <= limit).then_some(files))
+    }
 
     /// Creates a webhook for a repository.
     ///
@@ -364,6 +435,11 @@ trait ErasedHubStore: Send + Sync {
         &self,
         repo_id: &str,
     ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>>;
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn delete_ref(
         &self,
@@ -375,6 +451,11 @@ trait ErasedHubStore: Send + Sync {
     fn list_revisions(
         &self,
         repo_id: &str,
+    ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
     ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn resolve_revision(
@@ -392,6 +473,11 @@ trait ErasedHubStore: Send + Sync {
     fn get_files(
         &self,
         commit_sha: &str,
+    ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>>;
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn create_webhook(
@@ -473,6 +559,23 @@ impl<T: HubStore> ErasedHubStore for T {
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_refs_bounded(self, repo_id, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub refs exceed the requested listing limit",
+                )) as _
+            })
+    }
+
     fn list_refs(
         &self,
         repo_id: &str,
@@ -488,6 +591,23 @@ impl<T: HubStore> ErasedHubStore for T {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::delete_ref(self, repo_id, ref_name, expected_sha)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_revisions_bounded(self, repo_id, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub revisions exceed the requested listing limit",
+                )) as _
+            })
     }
 
     fn list_revisions(
@@ -514,6 +634,23 @@ impl<T: HubStore> ErasedHubStore for T {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::store_files(self, commit_sha, files)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_files_bounded(self, commit_sha, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub tree exceeds the requested listing limit",
+                )) as _
+            })
     }
 
     fn get_files(
@@ -662,11 +799,24 @@ impl BoxedHubStore {
             .create_revision(repo_id, parent_sha, new_sha, ref_name, message)
     }
 
+    /// Lists refs, failing before returning a partial result if `limit` is exceeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on listing overflow, storage or reliability failure.
+    pub fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.list_refs_bounded(repo_id, limit)
+    }
+
     /// Lists active branches and tags.
     ///
     /// # Errors
     ///
-    /// Returns an error when the storage backend operation fails.
+    /// Returns an error when metadata storage or reliability verification fails.
     pub fn list_refs(
         &self,
         repo_id: &str,
@@ -689,11 +839,24 @@ impl BoxedHubStore {
         self.inner.delete_ref(repo_id, ref_name, expected_sha)
     }
 
+    /// Lists revisions, failing before returning a partial result if `limit` is exceeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on listing overflow, storage or reliability failure.
+    pub fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.list_revisions_bounded(repo_id, limit)
+    }
+
     /// Lists all revisions.
     ///
     /// # Errors
     ///
-    /// Returns an error when the storage backend operation fails.
+    /// Returns an error when metadata storage or reliability verification fails.
     pub fn list_revisions(
         &self,
         repo_id: &str,
@@ -732,6 +895,24 @@ impl BoxedHubStore {
     /// # Errors
     ///
     /// Returns an error when the storage backend operation fails.
+    /// Reads a complete tree, failing on overflow rather than returning partial data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on overflow, recovery-required revisions or storage failure.
+    pub fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.get_files_bounded(commit_sha, limit)
+    }
+
+    /// Returns all entries for a tree within the adapter's supported ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on overflow, recovery-required revisions or storage failure.
     pub fn get_files(
         &self,
         commit_sha: &str,
@@ -868,6 +1049,23 @@ where
             .map_err(Into::into)
     }
 
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_refs_bounded(&self.0, repo_id, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub refs exceed the requested listing limit",
+                )) as _
+            })
+    }
+
     fn list_refs(
         &self,
         repo_id: &str,
@@ -882,6 +1080,23 @@ where
         expected_sha: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::delete_ref(&self.0, repo_id, ref_name, expected_sha).map_err(Into::into)
+    }
+
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_revisions_bounded(&self.0, repo_id, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub revisions exceed the requested listing limit",
+                )) as _
+            })
     }
 
     fn list_revisions(
@@ -905,6 +1120,23 @@ where
         files: &[HubFileEntry],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::store_files(&self.0, commit_sha, files).map_err(Into::into)
+    }
+
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_files_bounded(&self.0, commit_sha, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub tree exceeds the requested listing limit",
+                )) as _
+            })
     }
 
     fn get_files(
@@ -1292,7 +1524,15 @@ mod tests {
                 message: Some(message.to_owned()),
                 created_at_unix_seconds: 200,
             };
-            repo_revisions.push(revision.clone());
+            let revision = if let Some(existing) = repo_revisions
+                .iter()
+                .find(|existing| existing.sha == new_sha)
+            {
+                existing.clone()
+            } else {
+                repo_revisions.push(revision.clone());
+                revision
+            };
             drop(revisions);
             self.refs
                 .lock()

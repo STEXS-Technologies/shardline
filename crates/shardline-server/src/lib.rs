@@ -109,6 +109,7 @@ mod rebuild;
 mod reconstruction_cache;
 mod record_store;
 mod repository_scope_path;
+mod retention_runtime;
 mod route_policy;
 mod runtime_check;
 mod server_frontend;
@@ -201,6 +202,10 @@ pub use rebuild::{
 };
 pub use reconstruction_cache::{
     ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache,
+};
+pub use retention_runtime::{
+    MetadataWriteBarrier, acquire_metadata_write_barrier, release_retention_hold,
+    set_retention_hold,
 };
 pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};

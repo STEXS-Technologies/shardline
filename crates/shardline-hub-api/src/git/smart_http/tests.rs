@@ -552,7 +552,7 @@ fn is_valid_refname_with_dotdot() {
 // --- collect_refs dedup/HEAD logic tests ---
 
 /// Helper to create a temporary HubState backed by SQLite.
-fn make_hub_state() -> (tempfile::TempDir, HubState) {
+pub(super) fn make_hub_state() -> (tempfile::TempDir, HubState) {
     use shardline_index::LocalIndexStore;
     use shardline_index::hub::BoxedHubStore;
 
@@ -1505,6 +1505,7 @@ fn parse_pack_data_ofs_delta_two_objects() {
     pack.extend_from_slice(&base_compressed);
 
     // Object 2: OFS_DELTA (type=6), size delta
+    let delta_start = pack.len();
     let delta_size = delta.len();
     if delta_size <= 0x0f {
         pack.push((6 << 4) | delta_size as u8);
@@ -1522,9 +1523,10 @@ fn parse_pack_data_ofs_delta_two_objects() {
             pack.push(byte);
         }
     }
-    // OFS_DELTA offset: negative offset of 1 (the base object is 1 before this one)
-    // Offset 1 → single byte: 0x01 (MSB clear, value=1)
-    pack.push(0x01);
+    // OFS_DELTA measures bytes between object headers, not object count.
+    let byte_distance = u8::try_from(delta_start - 12).unwrap();
+    assert!(byte_distance < 128);
+    pack.push(byte_distance);
     pack.extend_from_slice(&delta_compressed);
 
     let objects = parse_pack_data(&pack).unwrap();
@@ -1644,7 +1646,7 @@ fn parse_receive_pack_request_skips_empty_lines() {
 // --- receive_pack error paths ---
 
 #[tokio::test]
-async fn upload_pack_empty_refs_returns_empty_pack() {
+async fn upload_pack_rejects_unowned_want() {
     let (_tmp, state) = make_hub_state();
     let body = pktline::encode_line("want 0000000000000000000000000000000000000000\n")
         .unwrap()
@@ -1656,7 +1658,10 @@ async fn upload_pack_empty_refs_returns_empty_pack() {
         axum::body::Body::from(body),
     )
     .await;
-    assert!(result.is_ok(), "upload_pack should succeed: {result:?}");
+    assert!(
+        matches!(result, Err(crate::error::HubApiError::BadRequest(_))),
+        "unowned wants must be rejected: {result:?}"
+    );
 }
 
 // --- decompress_zlib error on garbage input ---

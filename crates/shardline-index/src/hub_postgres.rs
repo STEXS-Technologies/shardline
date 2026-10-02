@@ -8,8 +8,8 @@ use shardline_protocol::SecretString;
 
 use crate::{
     hub::{
-        HubFileEntry, HubRef, HubRepo, HubRepoType, HubRevision, HubStore, HubWebhook,
-        canonical_ref_name,
+        EMPTY_HUB_REVISION, HubFileEntry, HubRef, HubRepo, HubRepoType, HubRevision, HubStore,
+        HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
@@ -532,7 +532,8 @@ impl HubStore for PostgresIndexStore {
 
             sqlx::query(
                 "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM now())::bigint)",
+                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM now())::bigint)
+                 ON CONFLICT (repo_id, sha) DO NOTHING",
             )
             .bind(&repo_id)
             .bind(&ref_name)
@@ -587,6 +588,17 @@ impl HubStore for PostgresIndexStore {
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
+        Ok(self
+            .list_refs_bounded(repo_id, usize::MAX)?
+            .unwrap_or_default())
+    }
+
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRef>>, Self::Error> {
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
 
@@ -594,9 +606,10 @@ impl HubStore for PostgresIndexStore {
             let mut tx = pool.begin().await?;
             let refs = {
                 let mut rows = sqlx::query(
-                    "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = $1 ORDER BY ref_name",
+                    "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = $1 ORDER BY ref_name LIMIT $2",
                 )
                 .bind(&repo_id)
+                .bind(query_limit)
                 .fetch(&mut *tx);
                 let mut refs = Vec::new();
                 while let Some(row) = rows.try_next().await? {
@@ -608,9 +621,12 @@ impl HubStore for PostgresIndexStore {
                 }
                 refs
             };
+            if refs.len() > limit {
+                return Ok(None);
+            }
             verify_hub_ref_evidence_batch(&mut tx, &refs).await?;
             tx.commit().await?;
-            Ok(refs)
+            Ok(Some(refs))
         })
     }
 
@@ -656,6 +672,17 @@ impl HubStore for PostgresIndexStore {
     }
 
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
+        Ok(self
+            .list_revisions_bounded(repo_id, usize::MAX)?
+            .unwrap_or_default())
+    }
+
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRevision>>, Self::Error> {
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
 
@@ -663,9 +690,10 @@ impl HubStore for PostgresIndexStore {
             let mut rows = sqlx::query(
                 "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
                  FROM shardline_hub_revisions WHERE repo_id = $1
-                 ORDER BY created_at_unix_seconds DESC",
+                 ORDER BY created_at_unix_seconds DESC LIMIT $2",
             )
             .bind(&repo_id)
+            .bind(query_limit)
             .fetch(&pool);
 
             let mut revisions = Vec::new();
@@ -681,7 +709,7 @@ impl HubStore for PostgresIndexStore {
                     )?,
                 });
             }
-            Ok(revisions)
+            Ok((revisions.len() <= limit).then_some(revisions))
         })
     }
 
@@ -742,6 +770,16 @@ impl HubStore for PostgresIndexStore {
     }
 
     fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
+        if hub_tree_requires_recovery(commit_sha)
+            || (commit_sha == EMPTY_HUB_REVISION && !files.is_empty())
+        {
+            return Err(PostgresMetadataStoreError::HubTreeRecoveryRequired(
+                commit_sha.to_owned(),
+            ));
+        }
+        if commit_sha == EMPTY_HUB_REVISION {
+            return Ok(());
+        }
         let pool = self.pool().clone();
         let commit_sha = commit_sha.to_owned();
         let files = files.to_vec();
@@ -769,15 +807,37 @@ impl HubStore for PostgresIndexStore {
     }
 
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
+        self.get_files_bounded(commit_sha, 100_000)?.ok_or_else(|| {
+            PostgresMetadataStoreError::Unsupported(
+                "Hub tree exceeds the 100000-entry metadata read ceiling".to_owned(),
+            )
+        })
+    }
+
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubFileEntry>>, Self::Error> {
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        if commit_sha == EMPTY_HUB_REVISION {
+            return Ok(Some(Vec::new()));
+        }
+        if hub_tree_requires_recovery(commit_sha) {
+            return Err(PostgresMetadataStoreError::HubTreeRecoveryRequired(
+                commit_sha.to_owned(),
+            ));
+        }
         let pool = self.pool().clone();
         let commit_sha = commit_sha.to_owned();
 
         block_on_async(async {
             let mut rows = sqlx::query(
                 "SELECT path, size, sha, is_lfs FROM shardline_hub_file_entries
-                 WHERE commit_sha = $1 ORDER BY path LIMIT 100000",
+                 WHERE commit_sha = $1 ORDER BY path LIMIT $2",
             )
             .bind(&commit_sha)
+            .bind(query_limit)
             .fetch(&pool);
 
             let mut entries = Vec::new();
@@ -789,7 +849,7 @@ impl HubStore for PostgresIndexStore {
                     is_lfs: row.try_get::<bool, _>("is_lfs")?,
                 });
             }
-            Ok(entries)
+            Ok((entries.len() <= limit).then_some(entries))
         })
     }
 
@@ -845,7 +905,7 @@ impl HubStore for PostgresIndexStore {
 
             // Delete file entries for all revisions in this repo
             sqlx::query(
-                "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1)",
+                "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1) AND LENGTH(commit_sha) <> 16 AND NOT EXISTS (SELECT 1 FROM shardline_hub_revisions other WHERE other.sha = shardline_hub_file_entries.commit_sha AND other.repo_id <> $1)",
             )
             .bind(&repo_id)
             .execute(&mut *tx)

@@ -333,10 +333,22 @@ pub(crate) struct RepairCommandArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum RepairSubcommand {
+    /// Restore a quarantined Hub tree from an authoritative manifest and advance its ref.
+    HubTree(RepairHubTreeArgs),
     /// Repair lifecycle state only.
     Lifecycle(RepairOptionsArgs),
     /// Rebuild one local LFS patch evidence envelope from an operator-verified state file.
     LfsEvidence(RepairLfsEvidenceArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RepairHubTreeArgs {
+    /// Deployment root (local Hub metadata is in ROOT/hub).
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    /// Authoritative JSON full tree, repository, ref, expected head and object namespace.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) state_file: PathBuf,
 }
 
 #[derive(Debug, Args)]
