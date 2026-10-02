@@ -197,7 +197,8 @@ impl OciTagStore for LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             super::helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
-                let transaction = connection.transaction()?;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let before = current_tag(
                     &transaction,
                     &entry.scope_namespace,

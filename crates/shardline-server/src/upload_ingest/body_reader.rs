@@ -266,9 +266,11 @@ impl RequestBodyReader {
 pub(crate) async fn read_body_to_bytes(
     reader: &mut RequestBodyReader,
 ) -> Result<Vec<u8>, ServerError> {
-    let mut body = reader
-        .expected_total_bytes
-        .map_or_else(Vec::new, Vec::with_capacity);
+    let mut body = Vec::new();
+    if let Some(expected) = reader.expected_total_bytes {
+        body.try_reserve(expected)
+            .map_err(|_error| ServerError::RequestBodyTooLarge)?;
+    }
     while let Some(bytes) = reader.next_bytes().await? {
         let expected_len = body
             .len()
@@ -398,6 +400,16 @@ mod tests {
                 .with_expected_md5(Md5::digest(b"12345").into());
         assert!(matches!(
             read_body_to_bytes(&mut capped).await,
+            Err(crate::ServerError::RequestBodyTooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_body_to_bytes_rejects_unallocatable_size_hint() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::new());
+        reader.expected_total_bytes = Some(usize::MAX);
+        assert!(matches!(
+            read_body_to_bytes(&mut reader).await,
             Err(crate::ServerError::RequestBodyTooLarge)
         ));
     }

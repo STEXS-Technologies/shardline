@@ -1,3 +1,8 @@
+// Read-before-write mutations acquire the SQLite writer lock before observing
+// authoritative rows or evidence. A deferred read transaction cannot wait out
+// a competing writer when upgrading its snapshot, even with a busy timeout.
+// Read-only operations retain deferred transactions and can run alongside WAL
+// writers; no callbacks or mutations are replayed by an automatic retry.
 use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
@@ -103,7 +108,8 @@ impl ReconstructionStore for LocalIndexStore {
         expected: &FileReconstruction,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let Some(terms) = transaction
             .query_row(
                 "SELECT terms FROM shardline_file_reconstructions WHERE file_id = ?1",
@@ -202,7 +208,8 @@ impl DedupeStore for LocalIndexStore {
         expected: &DedupeShardMapping,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let Some(current) = transaction
             .query_row(
                 "SELECT chunk_hash, shard_object_key
@@ -316,7 +323,8 @@ impl LifecycleStore for LocalIndexStore {
         candidate: &QuarantineCandidate,
     ) -> Result<(), Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous = transaction
             .query_row(
                 "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
@@ -385,7 +393,8 @@ impl LifecycleStore for LocalIndexStore {
 
     fn delete_quarantine_candidate(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let candidate = transaction
             .query_row(
                 "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
@@ -433,7 +442,8 @@ impl LifecycleStore for LocalIndexStore {
         expected: &QuarantineCandidate,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let candidate = transaction
             .query_row(
                 "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
@@ -562,7 +572,8 @@ impl LifecycleStore for LocalIndexStore {
 
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous = transaction
             .query_row(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
@@ -623,7 +634,8 @@ impl LifecycleStore for LocalIndexStore {
 
     fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let hold = transaction
             .query_row(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
@@ -659,7 +671,8 @@ impl LifecycleStore for LocalIndexStore {
         expected: &RetentionHold,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let hold = transaction
             .query_row(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
@@ -712,7 +725,8 @@ impl LifecycleStore for LocalIndexStore {
 
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
                 "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
@@ -817,7 +831,8 @@ impl LifecycleStore for LocalIndexStore {
 
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
                 "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
@@ -867,7 +882,8 @@ impl LifecycleStore for LocalIndexStore {
         expected: &WebhookDelivery,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
                 "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
@@ -927,7 +943,8 @@ impl LifecycleStore for LocalIndexStore {
         older_than_unix_seconds: u64,
     ) -> Result<u64, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut statement = transaction.prepare(
             "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
              FROM shardline_webhook_deliveries
@@ -1096,7 +1113,8 @@ impl LifecycleStore for LocalIndexStore {
         state: &ProviderRepositoryState,
     ) -> Result<(), Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
                 "SELECT provider,
@@ -1263,7 +1281,8 @@ impl LifecycleStore for LocalIndexStore {
         repo: &str,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
                 "SELECT provider,
@@ -1698,7 +1717,7 @@ impl UploadIntentStore for super::LocalIndexStore {
         let operation_id = event.operation.operation_id.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = store.open_connection()?;
-            let transaction = conn.transaction()?;
+            let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let (object_key, object_hash, state_text) = transaction
                 .query_row(
                     "SELECT object_key, object_hash, state

@@ -1866,3 +1866,248 @@ async fn upload_intent_evidence_batch_spans_chunks_and_rejects_late_corruption()
     );
     assert!(matches!(result, Err(LocalIndexStoreError::Reliability(_))));
 }
+
+#[test]
+fn concurrent_sqlite_lifecycle_writers_preserve_records_and_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    for round in 0..5 {
+        let store = LocalIndexStore::new(directory.path().join(format!("round-{round}"))).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::with_capacity(8);
+        for worker in 0..8 {
+            let store = store.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                let object_key = ObjectKey::parse(&format!("objects/worker-{worker}")).unwrap();
+                let hold =
+                    RetentionHold::new(object_key.clone(), "retain".to_owned(), 1, None).unwrap();
+                let candidate = QuarantineCandidate::new(object_key, 1, 1, 2).unwrap();
+                barrier.wait();
+                store.upsert_retention_hold(&hold).unwrap();
+                store.upsert_quarantine_candidate(&candidate).unwrap();
+                (hold, candidate)
+            }));
+        }
+        let records = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(store.list_retention_holds().unwrap().len(), 8);
+        assert_eq!(store.list_quarantine_candidates().unwrap().len(), 8);
+        let deletes = records
+            .into_iter()
+            .map(|(hold, candidate)| {
+                let store = store.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    assert!(store.delete_retention_hold_if_matches(&hold).unwrap());
+                    assert!(
+                        store
+                            .delete_quarantine_candidate_if_matches(&candidate)
+                            .unwrap()
+                    );
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in deletes {
+            worker.join().unwrap();
+        }
+        assert!(store.list_retention_holds().unwrap().is_empty());
+        assert!(store.list_quarantine_candidates().unwrap().is_empty());
+        store.verify_reliability_events().unwrap();
+    }
+}
+
+#[test]
+fn sqlite_readers_progress_while_a_writer_owns_the_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let object_key = ObjectKey::parse("objects/reader").unwrap();
+    let hold = RetentionHold::new(object_key.clone(), "retain".to_owned(), 1, None).unwrap();
+    store.upsert_retention_hold(&hold).unwrap();
+    let root = directory.path().to_owned();
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let mut connection = open_sqlite_connection(&root).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        ready_sender.send(()).unwrap();
+        release_receiver.recv().unwrap();
+        transaction.rollback().unwrap();
+    });
+    ready_receiver.recv().unwrap();
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        result_sender
+            .send(store.retention_hold(&object_key))
+            .unwrap()
+    });
+    let result = result_receiver.recv_timeout(std::time::Duration::from_secs(5));
+    release_sender.send(()).unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
+    assert_eq!(result.unwrap().unwrap(), Some(hold));
+}
+
+#[test]
+fn sqlite_writer_rolls_back_deletion_when_evidence_is_invalid() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let object_key = ObjectKey::parse("objects/rollback").unwrap();
+    let hold = RetentionHold::new(object_key.clone(), "retain".to_owned(), 1, None).unwrap();
+    store.upsert_retention_hold(&hold).unwrap();
+    let connection = open_sqlite_connection(directory.path()).unwrap();
+    connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_kind = 'RetentionHold'", []).unwrap();
+    let before = connection
+        .query_row(
+            "SELECT count(*) FROM shardline_reliability_events",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert!(store.delete_retention_hold(&object_key).is_err());
+    let persisted = connection
+        .query_row(
+            "SELECT reason FROM shardline_retention_holds WHERE object_key = ?1",
+            [object_key.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, "retain");
+    let after = connection
+        .query_row(
+            "SELECT count(*) FROM shardline_reliability_events",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn concurrent_sqlite_oci_reclamation_preserves_generations_and_evidence() {
+    use crate::{OciObjectKey, OciObjectKind, OciObjectStore};
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = std::sync::Arc::new(tokio::runtime::Runtime::new().unwrap());
+    for round in 0..5 {
+        let store = LocalIndexStore::new(directory.path().join(format!("oci-{round}"))).unwrap();
+        for worker in 0..8 {
+            let key = OciObjectKey {
+                scope_namespace: "scope".to_owned(),
+                repository: "repo".to_owned(),
+                kind: OciObjectKind::Blob,
+                digest_hex: format!("{worker:064x}"),
+            };
+            runtime.block_on(store.delete_oci_object(&key)).unwrap();
+        }
+        let tombstones = runtime
+            .block_on(store.list_oci_object_tombstones())
+            .unwrap();
+        assert_eq!(tombstones.len(), 8);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::with_capacity(8);
+        for tombstone in tombstones {
+            let store = store.clone();
+            let runtime = std::sync::Arc::clone(&runtime);
+            let barrier = std::sync::Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                let mut stale = tombstone.clone();
+                stale.deleted_at_unix_seconds = stale.deleted_at_unix_seconds.saturating_add(1);
+                barrier.wait();
+                assert!(
+                    !runtime
+                        .block_on(store.delete_oci_object_tombstone_if_unchanged(&stale))
+                        .unwrap()
+                );
+                assert!(
+                    runtime
+                        .block_on(store.oci_object_is_deleted(&tombstone.key))
+                        .unwrap()
+                );
+                assert!(
+                    runtime
+                        .block_on(store.delete_oci_object_tombstone_if_unchanged(&tombstone))
+                        .unwrap()
+                );
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(
+            runtime
+                .block_on(store.list_oci_object_tombstones())
+                .unwrap()
+                .is_empty()
+        );
+        store.verify_reliability_events().unwrap();
+    }
+}
+
+fn run_sqlite_mutation_with_brief_writer(
+    root: &Path,
+    action: impl FnOnce() -> Result<(), LocalIndexStoreError>,
+) {
+    let root = root.to_owned();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let mut connection = open_sqlite_connection(&root).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        sender.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        transaction.rollback().unwrap();
+    });
+    receiver.recv().unwrap();
+    let result = action();
+    writer.join().unwrap();
+    assert!(result.is_ok(), "mutation failed: {result:?}");
+}
+
+#[test]
+fn sqlite_oci_and_hub_writers_wait_for_brief_contention() {
+    use crate::hub::{HubRepoType, HubStore};
+    use crate::{OciObjectKey, OciObjectKind, OciObjectStore, OciTagEntry, OciTagStore};
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let key = OciObjectKey {
+        scope_namespace: "scope".to_owned(),
+        repository: "repo".to_owned(),
+        kind: OciObjectKind::Blob,
+        digest_hex: "a".repeat(64),
+    };
+    run_sqlite_mutation_with_brief_writer(directory.path(), || {
+        runtime.block_on(store.delete_oci_object(&key))
+    });
+    assert!(runtime.block_on(store.oci_object_is_deleted(&key)).unwrap());
+    run_sqlite_mutation_with_brief_writer(directory.path(), || {
+        runtime.block_on(store.publish_oci_object(&key, &[]))
+    });
+    assert!(!runtime.block_on(store.oci_object_is_deleted(&key)).unwrap());
+    let tag = OciTagEntry {
+        scope_namespace: "scope".to_owned(),
+        repository: "repo".to_owned(),
+        tag: "latest".to_owned(),
+        digest_hex: "b".repeat(64),
+    };
+    run_sqlite_mutation_with_brief_writer(directory.path(), || {
+        runtime.block_on(store.upsert_oci_tag(&tag))
+    });
+    assert_eq!(
+        runtime
+            .block_on(store.oci_tag("scope", "repo", "latest"))
+            .unwrap(),
+        Some(tag)
+    );
+    HubStore::create_repo(&store, HubRepoType::Model, "model", false).unwrap();
+    run_sqlite_mutation_with_brief_writer(directory.path(), || {
+        HubStore::delete_repo(&store, "model")
+    });
+    assert!(HubStore::get_repo(&store, "model").unwrap().is_none());
+    store.verify_reliability_events().unwrap();
+}

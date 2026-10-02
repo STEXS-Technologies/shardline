@@ -2964,3 +2964,29 @@ fn runtime_chunk_size_validation_matches_supported_cdc_interval() {
             .unwrap();
     }
 }
+
+#[test]
+fn session_ttl_validation_checks_timestamp_representation_boundaries() {
+    let now = 1_700_000_000;
+    let latest = chrono::DateTime::<chrono::Utc>::MAX_UTC
+        .timestamp()
+        .unsigned_abs();
+    let maximum = latest - now;
+    assert!(
+        config::validate_session_ttl_at("test", NonZeroU64::new(maximum).unwrap(), now).is_ok()
+    );
+    for seconds in [maximum + 1, i64::MAX as u64, u64::MAX] {
+        assert!(
+            matches!(config::validate_session_ttl_at("test", NonZeroU64::new(seconds).unwrap(), now), Err(ServerConfigError::SessionTtlOutOfRange { name: "test", seconds: rejected, maximum: limit }) if rejected == seconds && limit == maximum)
+        );
+    }
+    assert!(matches!(
+        config::validate_session_ttl_at("test", NonZeroU64::MIN, u64::MAX),
+        Err(ServerConfigError::SessionTtlOutOfRange { maximum: 0, .. })
+    ));
+    assert!(matches!(
+        config::validate_session_ttl_at("test", NonZeroU64::MIN, latest),
+        Err(ServerConfigError::SessionTtlOutOfRange { maximum: 0, .. })
+    ));
+    assert!(config::validate_session_ttl_at("test", NonZeroU64::MIN, latest - 1).is_ok());
+}

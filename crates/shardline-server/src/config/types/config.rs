@@ -58,6 +58,32 @@ pub(crate) const fn validate_chunk_size(chunk_size: NonZeroUsize) -> Result<(), 
     Ok(())
 }
 
+/// Checks the exact timestamp representation used by durable session storage.
+/// The clock is explicit so boundary behavior can be checked without waiting.
+pub(super) fn validate_session_ttl_at(
+    name: &'static str,
+    ttl: NonZeroU64,
+    now_unix_seconds: u64,
+) -> Result<(), ServerConfigError> {
+    let latest_expiry = chrono::DateTime::<chrono::Utc>::MAX_UTC
+        .timestamp()
+        .unsigned_abs();
+    let maximum = latest_expiry.saturating_sub(now_unix_seconds);
+    let representable = now_unix_seconds
+        .checked_add(ttl.get())
+        .and_then(|expiry| i64::try_from(expiry).ok())
+        .and_then(|expiry| chrono::DateTime::<chrono::Utc>::from_timestamp(expiry, 0))
+        .is_some();
+    if !representable {
+        return Err(ServerConfigError::SessionTtlOutOfRange {
+            name,
+            seconds: ttl.get(),
+            maximum,
+        });
+    }
+    Ok(())
+}
+
 /// Default bounded-parser limits for native Xet shard metadata.
 pub use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
 
@@ -1377,6 +1403,8 @@ impl ServerConfig {
     /// [`ServerConfigError::ChunkSizeTooLarge`], or
     /// [`ServerConfigError::ChunkSizeNotPowerOfTwo`] when the target chunk size
     /// is not a power of two in 128 bytes through 1 GiB.
+    /// Returns [`ServerConfigError::SessionTtlOutOfRange`] when an enabled
+    /// PostgreSQL session expiry cannot fit its durable timestamp representation.
     pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
         crate::admission::validate_capacity(
             "admission_max_weight",
@@ -1394,6 +1422,31 @@ impl ServerConfig {
             tokio::sync::Semaphore::MAX_PERMITS,
         )?;
         validate_chunk_size(self.chunk_size)?;
+
+        if self.index_postgres_url().is_some() {
+            let now = shardline_protocol::unix_now_seconds_lossy();
+            for (frontend, name, ttl) in [
+                (
+                    ServerFrontend::Oci,
+                    "oci_upload_session_ttl_seconds",
+                    self.oci_upload_session_ttl_seconds(),
+                ),
+                (
+                    ServerFrontend::S3,
+                    "s3_upload_session_ttl_seconds",
+                    self.s3_upload_session_ttl_seconds(),
+                ),
+                (
+                    ServerFrontend::Lfs,
+                    "lfs_patch_ttl_seconds",
+                    self.lfs_patch_ttl_seconds(),
+                ),
+            ] {
+                if self.server_frontends.contains(&frontend) {
+                    validate_session_ttl_at(name, ttl, now)?;
+                }
+            }
+        }
 
         if self.auth.token_signing_key.is_none()
             && (self.server_role.serves_api() || self.server_role.serves_transfer())

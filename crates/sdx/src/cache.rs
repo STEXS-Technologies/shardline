@@ -26,8 +26,8 @@
 //!   mtimes at startup) is evicted until the cache fits `budget_bytes`. A
 //!   budget of `0` disables the cache (writes no-op, reads always miss).
 //! - **Concurrency**: all state transitions are serialized behind a
-//!   [`tokio::sync::Mutex`]; the file I/O under the lock is synchronous and
-//!   never spans an await.
+//!   [`tokio::sync::Mutex`]. File I/O and checksums run on bounded blocking
+//!   workers, with the lock covering both files and their accounting.
 //!
 //! Deviations from upstream (`xet-client-1.5.4` `chunk_cache/disk.rs`):
 //! - No process-global cache-manager dedup; each [`ChunkCache`] owns its
@@ -46,10 +46,11 @@
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::{error::SdxError, hash::parse_xet_hash_hex};
 
@@ -145,7 +146,10 @@ static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 pub struct ChunkCache {
     cache_dir: PathBuf,
     budget_bytes: u64,
-    state: Mutex<CacheState>,
+    state: Arc<Mutex<CacheState>>,
+    io_slots: Arc<Semaphore>,
+    #[cfg(test)]
+    read_gate: Option<Arc<TestReadGate>>,
 }
 
 impl ChunkCache {
@@ -164,7 +168,10 @@ impl ChunkCache {
         Ok(Self {
             cache_dir,
             budget_bytes,
-            state: Mutex::new(state),
+            state: Arc::new(Mutex::new(state)),
+            io_slots: Arc::new(Semaphore::new(8)),
+            #[cfg(test)]
+            read_gate: None,
         })
     }
 
@@ -234,35 +241,54 @@ impl ChunkCache {
         let key = cache_key(xorb_hash, chunk_range);
         let path = self.item_path(&key)?;
 
-        let (cached, was_corrupt) = match read_entry_bounded(&path, decoded_limit) {
-            Ok(Some(cached)) if cached.chunk_range == chunk_range => (Some(cached), false),
-            Ok(Some(_)) => (None, false),
-            Ok(None) => (None, false),
-            Err(_) => (None, true),
-        };
-        if was_corrupt {
-            drop(remove_entry_file(&path));
-        }
-
-        let mut state = self.state.lock().await;
-        if was_corrupt {
-            // Drop the stale index entry so `total_bytes` accounting stays
-            // accurate after the corrupt file is deleted.
-            if let Some(existing) = state.entries.remove(&key) {
-                state.total_bytes = state.total_bytes.saturating_sub(existing.size);
+        let permit = self
+            .io_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| {
+                SdxError::StreamInternal(format!("cache worker admission failed: {error}"))
+            })?;
+        let state = Arc::clone(&self.state);
+        #[cfg(test)]
+        let read_gate = self.read_gate.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            #[cfg(test)]
+            if let Some(gate) = read_gate {
+                gate.wait()?;
             }
-            return Ok(None);
-        }
-        let Some(cached) = cached else {
-            return Ok(None);
-        };
-        // Re-check the index after acquiring the lock so a concurrent eviction
-        // cannot leave a stale entry (a miss here is fine — the file remains
-        // on disk until overwritten).
-        if let Some(entry) = state.entries.get_mut(&key) {
-            entry.last_accessed = clock_tick();
-        }
-        Ok(Some(cached))
+
+            let mut state = state.blocking_lock();
+            let (cached, was_corrupt) = match read_entry_bounded(&path, decoded_limit) {
+                Ok(Some(cached)) if cached.chunk_range == chunk_range => (Some(cached), false),
+                Ok(Some(_)) => (None, false),
+                Ok(None) => (None, false),
+                Err(_) => (None, true),
+            };
+            if was_corrupt {
+                drop(remove_entry_file(&path));
+            }
+
+            if was_corrupt {
+                // Drop the stale index entry so `total_bytes` accounting stays
+                // accurate after the corrupt file is deleted.
+                if let Some(existing) = state.entries.remove(&key) {
+                    state.total_bytes = state.total_bytes.saturating_sub(existing.size);
+                }
+                return Ok(None);
+            }
+            let Some(cached) = cached else {
+                return Ok(None);
+            };
+            // File reads and index updates share the lock with writes and eviction.
+            if let Some(entry) = state.entries.get_mut(&key) {
+                entry.last_accessed = clock_tick();
+            }
+            Ok(Some(cached))
+        })
+        .await
+        .map_err(|error| SdxError::StreamInternal(format!("cache read worker failed: {error}")))?
     }
 
     /// Stores the decoded xorb range `data`/`chunk_offsets` under `xorb_hash`
@@ -290,55 +316,99 @@ impl ChunkCache {
             return Ok(());
         }
         validate_key(xorb_hash)?;
-        validate_offsets(chunk_range, chunk_offsets, data)?;
-        let key = cache_key(xorb_hash, chunk_range);
-
-        let serialized = serialize_entry(chunk_range, chunk_offsets, data);
-        let size = u64::try_from(serialized.len()).unwrap_or(u64::MAX);
+        validate_offsets_shape(chunk_range, chunk_offsets, data)?;
+        for (index, pair) in chunk_offsets.windows(2).enumerate() {
+            validate_offset_pair(pair)?;
+            if index.is_multiple_of(4096) {
+                tokio::task::yield_now().await;
+            }
+        }
+        let size = u64::try_from(HEADER_LEN)
+            .unwrap_or(u64::MAX)
+            .saturating_add(
+                u64::try_from(chunk_offsets.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(4),
+            )
+            .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
         if size > self.budget_bytes {
-            // The entry alone cannot fit; refuse to store it (mirror upstream
-            // `put_impl`: "refusing to add this item as it is too large").
             return Ok(());
         }
-
+        let key = cache_key(xorb_hash, chunk_range);
         let path = self.item_path(&key)?;
-        write_atomic(&path, &serialized)?;
-
-        let mut state = self.state.lock().await;
-        if let Some(existing) = state.entries.get(&key) {
-            state.total_bytes = state.total_bytes.saturating_sub(existing.size);
+        // Admission precedes the owned copy, bounding queued payloads. The
+        // worker retains its permit if its awaiting caller is cancelled.
+        let permit = self
+            .io_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| {
+                SdxError::StreamInternal(format!("cache worker admission failed: {error}"))
+            })?;
+        let mut offsets = Vec::new();
+        offsets
+            .try_reserve_exact(chunk_offsets.len())
+            .map_err(|error| {
+                SdxError::StreamInternal(format!("cache offsets allocation failed: {error}"))
+            })?;
+        for part in chunk_offsets.chunks(4096) {
+            offsets.extend_from_slice(part);
+            tokio::task::yield_now().await;
         }
-        state.total_bytes = state.total_bytes.saturating_add(size);
-        state.entries.insert(
-            key.clone(),
-            CacheEntry {
-                size,
-                last_accessed: clock_tick(),
-            },
-        );
-
-        // Evict oldest entries until the cache fits the budget. File deletion
-        // happens while holding the lock; it is synchronous and quick.
-        let mut evicted = Vec::new();
-        while state.total_bytes > self.budget_bytes {
-            let Some((oldest_key, oldest_size)) = state
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_accessed)
-                .map(|(oldest_key, entry)| (oldest_key.clone(), entry.size))
-            else {
-                break;
-            };
-            state.entries.remove(&oldest_key);
-            state.total_bytes = state.total_bytes.saturating_sub(oldest_size);
-            evicted.push(oldest_key);
+        let mut owned_data = Vec::new();
+        owned_data.try_reserve_exact(data.len()).map_err(|error| {
+            SdxError::StreamInternal(format!("cache payload allocation failed: {error}"))
+        })?;
+        for part in data.chunks(64 * 1024) {
+            owned_data.extend_from_slice(part);
+            tokio::task::yield_now().await;
         }
-        drop(state);
-
-        for evicted_key in evicted {
-            drop(remove_entry_file(&self.item_path(&evicted_key)?));
-        }
-        Ok(())
+        let state = Arc::clone(&self.state);
+        let budget_bytes = self.budget_bytes;
+        let cache_dir = self.cache_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut state = state.blocking_lock();
+            let serialized = serialize_entry(chunk_range, &offsets, &owned_data);
+            write_atomic(&path, &serialized)?;
+            if let Some(existing) = state.entries.get(&key) {
+                state.total_bytes = state.total_bytes.saturating_sub(existing.size);
+            }
+            state.total_bytes = state.total_bytes.saturating_add(size);
+            state.entries.insert(
+                key,
+                CacheEntry {
+                    size,
+                    last_accessed: clock_tick(),
+                },
+            );
+            while state.total_bytes > budget_bytes {
+                let Some((oldest_key, oldest_size)) = state
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.last_accessed)
+                    .map(|(oldest_key, entry)| (oldest_key.clone(), entry.size))
+                else {
+                    break;
+                };
+                state.entries.remove(&oldest_key);
+                state.total_bytes = state.total_bytes.saturating_sub(oldest_size);
+                // Keep physical eviction under the same lock as publication:
+                // another writer must not recreate a file before its deletion.
+                let (hash, ..) = &oldest_key;
+                if let Some(prefix) = hash.get(..2) {
+                    let evicted_path = cache_dir
+                        .join("xorbs")
+                        .join(prefix)
+                        .join(entry_file_name(&oldest_key));
+                    drop(remove_entry_file(&evicted_path));
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| SdxError::StreamInternal(format!("cache write worker failed: {error}")))?
     }
 
     /// Resolves the on-disk path for a cache key
@@ -356,6 +426,37 @@ impl ChunkCache {
     }
 }
 
+// A per-instance test gate makes executor progress and cancelled-worker
+// admission observable without depending on disk speed or timing thresholds.
+#[cfg(test)]
+#[derive(Debug)]
+struct TestReadGate {
+    started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl TestReadGate {
+    fn wait(&self) -> Result<(), SdxError> {
+        let mut started = self
+            .started
+            .lock()
+            .map_err(|error| SdxError::StreamInternal(format!("test gate poisoned: {error}")))?;
+        if let Some(sender) = started.take() {
+            let _ = sender.send(());
+            drop(started);
+            self.release
+                .lock()
+                .map_err(|error| SdxError::StreamInternal(format!("test gate poisoned: {error}")))?
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|error| {
+                    SdxError::StreamInternal(format!("test gate release failed: {error}"))
+                })?;
+        }
+        Ok(())
+    }
+}
+
 /// Builds the cache key for `xorb_hash` / `chunk_range`.
 fn cache_key(xorb_hash: &str, chunk_range: (u64, u64)) -> CacheKey {
     (xorb_hash.to_owned(), chunk_range.0, chunk_range.1)
@@ -368,7 +469,7 @@ fn validate_key(xorb_hash: &str) -> Result<(), SdxError> {
 }
 
 /// Validates the `chunk_offsets`/`data` shape against `chunk_range`.
-fn validate_offsets(
+fn validate_offsets_shape(
     chunk_range: (u64, u64),
     chunk_offsets: &[u32],
     data: &[u8],
@@ -406,16 +507,28 @@ fn validate_offsets(
             *last
         )));
     }
+    Ok(())
+}
+
+fn validate_offset_pair(pair: &[u32]) -> Result<(), SdxError> {
+    if let [previous, next] = pair
+        && previous > next
+    {
+        return Err(SdxError::StreamInternal(
+            "cache put offsets must be non-decreasing".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_offsets(
+    chunk_range: (u64, u64),
+    chunk_offsets: &[u32],
+    data: &[u8],
+) -> Result<(), SdxError> {
+    validate_offsets_shape(chunk_range, chunk_offsets, data)?;
     for pair in chunk_offsets.windows(2) {
-        // Non-decreasing: zero-length chunks (empty payloads) are legal, so
-        // equal consecutive offsets are allowed.
-        if let [previous, next] = pair
-            && previous > next
-        {
-            return Err(SdxError::StreamInternal(
-                "cache put offsets must be non-decreasing".to_owned(),
-            ));
-        }
+        validate_offset_pair(pair)?;
     }
     Ok(())
 }
@@ -673,7 +786,7 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
         return Ok(state);
     }
     std::fs::create_dir_all(cache_dir)?;
-    let Some(read_dir) = read_dir_ok(cache_dir)? else {
+    let Some(read_dir) = read_dir_ok(&cache_dir.join("xorbs"))? else {
         return Ok(state);
     };
     for prefix_dir in read_dir.flatten() {
@@ -740,7 +853,7 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
             .entries
             .iter()
             .min_by_key(|(_, entry)| entry.last_accessed)
-            .map(|(key, entry)| (key.clone(), entry.size))
+            .map(|(oldest_key, entry)| (oldest_key.clone(), entry.size))
         else {
             break;
         };
@@ -791,6 +904,136 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_cache_worker_keeps_executor_responsive_and_retains_cancelled_permit() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut cache = ChunkCache::new(directory.path(), 1024).unwrap();
+        let key = hash('4');
+        put(&cache, &key, b"valid").await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        cache.read_gate = Some(Arc::new(TestReadGate {
+            started: std::sync::Mutex::new(Some(started_tx)),
+            release: std::sync::Mutex::new(release_rx),
+        }));
+        let cache = Arc::new(cache);
+        let held = cache.io_slots.clone().acquire_many_owned(7).await.unwrap();
+        let reader_cache = Arc::clone(&cache);
+        let reader_key = key.clone();
+        let reader = tokio::spawn(async move { reader_cache.get(&reader_key, (0, 1)).await });
+        started_rx.await.unwrap();
+        // The worker is synchronously blocked until this current-thread task
+        // progresses and releases it. Cancelling its caller must not free its slot.
+        tokio::task::yield_now().await;
+        reader.abort();
+        assert!(reader.await.unwrap_err().is_cancelled());
+        assert_eq!(cache.io_slots.available_permits(), 0);
+        release_tx.send(()).unwrap();
+        let finished = cache.io_slots.clone().acquire_owned().await.unwrap();
+        drop(finished);
+        drop(held);
+        assert_eq!(
+            cache
+                .get(&key, (0, 1))
+                .await
+                .unwrap()
+                .unwrap()
+                .data
+                .as_ref(),
+            b"valid"
+        );
+        assert_eq!(cache.entry_count().await.unwrap(), 1);
+        assert_eq!(cache.total_bytes().await.unwrap(), 53);
+    }
+
+    #[tokio::test]
+    async fn restart_scans_persisted_layout_and_enforces_changed_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ChunkCache::new(directory.path(), 1024).unwrap();
+        put(&cache, &hash('a'), b"first").await;
+        put(&cache, &hash('b'), b"second").await;
+        drop(cache);
+        let reopened = ChunkCache::new(directory.path(), 1024).unwrap();
+        assert_eq!(reopened.entry_count().await.unwrap(), 2);
+        assert_eq!(reopened.total_bytes().await.unwrap(), 107);
+        assert_eq!(
+            get(&reopened, &hash('a')).await.unwrap().data.as_ref(),
+            b"first"
+        );
+        drop(reopened);
+        let reduced = ChunkCache::new(directory.path(), 54).unwrap();
+        assert_eq!(reduced.entry_count().await.unwrap(), 1);
+        assert!(reduced.total_bytes().await.unwrap() <= 54);
+        drop(reduced);
+        let checked = ChunkCache::new(directory.path(), 1024).unwrap();
+        assert_eq!(checked.entry_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_entry_is_rejected_before_worker_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ChunkCache::new(directory.path(), 1).unwrap();
+        let held = cache.io_slots.clone().acquire_many_owned(8).await.unwrap();
+        // No worker slot exists; an oversized valid write must nevertheless
+        // finish immediately without owned payload copies or serialization.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                cache.put(&hash('5'), (0, 1), &[0, 8], b"oversize")
+            )
+            .await
+            .unwrap()
+            .is_ok()
+        );
+        assert!(
+            cache
+                .put(&hash('5'), (0, 1), &[1, 8], b"oversize")
+                .await
+                .is_err()
+        );
+        assert_eq!(cache.entry_count().await.unwrap(), 0);
+        assert_eq!(cache.total_bytes().await.unwrap(), 0);
+        drop(held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_eviction_and_rewrite_preserve_files_and_accounting() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Arc::new(ChunkCache::new(directory.path(), 64).unwrap());
+        let mut tasks = Vec::new();
+        for start in 0..4 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..100 {
+                    cache
+                        .put(&hash('6'), (start, start + 1), &[0, 16], &[6; 16])
+                        .await
+                        .unwrap();
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(cache.entry_count().await.unwrap(), 1);
+        assert_eq!(cache.total_bytes().await.unwrap(), 64);
+        let mut hits = 0;
+        for start in 0..4 {
+            if let Some(cached) = cache.get(&hash('6'), (start, start + 1)).await.unwrap() {
+                assert_eq!(cached.data.as_ref(), &[6; 16]);
+                hits += 1;
+            }
+        }
+        assert_eq!(hits, 1);
+        let files = std::fs::read_dir(directory.path().join("xorbs").join("66"))
+            .unwrap()
+            .count();
+        assert_eq!(files, 1);
+        let reopened = ChunkCache::new(directory.path(), 64).unwrap();
+        assert_eq!(reopened.entry_count().await.unwrap(), 1);
+        assert_eq!(reopened.total_bytes().await.unwrap(), 64);
+    }
 
     #[tokio::test]
     async fn bounded_cache_read_invalidates_sparse_and_forged_payloads() {
