@@ -27,8 +27,10 @@ pub async fn acquire_metadata_write_barrier(
     config: &ServerConfig,
 ) -> Result<MetadataWriteBarrier, ServerError> {
     let guard = if let Some(url) = config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(url, 4)?;
-        maintenance_barrier::acquire_postgres_shared(&pool).await?
+        maintenance_barrier::acquire_postgres_shared(
+            &maintenance_barrier::postgres_coordination_pool(url)?,
+        )
+        .await?
     } else {
         maintenance_barrier::acquire_local_shared(config.root_dir()).await?
     };
@@ -51,7 +53,10 @@ pub async fn set_retention_hold(
 ) -> Result<(), ServerError> {
     if let Some(url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(url, 4)?;
-        let _barrier = maintenance_barrier::acquire_postgres_shared(&pool).await?;
+        let _barrier = maintenance_barrier::acquire_postgres_shared(
+            &maintenance_barrier::postgres_coordination_pool(url)?,
+        )
+        .await?;
         PostgresIndexStore::new(pool)
             .upsert_retention_hold(hold)
             .await?;
@@ -75,7 +80,10 @@ pub async fn release_retention_hold(
 ) -> Result<bool, ServerError> {
     if let Some(url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(url, 4)?;
-        let _barrier = maintenance_barrier::acquire_postgres_shared(&pool).await?;
+        let _barrier = maintenance_barrier::acquire_postgres_shared(
+            &maintenance_barrier::postgres_coordination_pool(url)?,
+        )
+        .await?;
         Ok(PostgresIndexStore::new(pool)
             .delete_retention_hold(object_key)
             .await?)

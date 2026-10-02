@@ -27,7 +27,8 @@ use md5::{Digest, Md5};
 use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_s3_adapter::{
     CopyObjectResult, S3Error, S3SubResource, classify, etag_header, format_iso8601,
-    parse_copy_source, parse_s3_range, read_conditional_headers, require_s3_bucket_binding,
+    parse_content_md5, parse_copy_source, parse_s3_range, read_conditional_headers,
+    require_s3_bucket_binding,
 };
 use shardline_server_core::AuthorizedRepository;
 
@@ -182,6 +183,9 @@ pub(crate) async fn s3_put_object(
         }
     });
     if let (Some(part_number), Some(upload_id)) = (part_number, upload_id) {
+        if resources.len() != 2 || headers.contains_key(COPY_SOURCE) {
+            return Err(S3Error::not_implemented());
+        }
         return multipart::s3_upload_part(&state, &context, part_number, upload_id, &headers, body)
             .await;
     }
@@ -192,13 +196,18 @@ pub(crate) async fn s3_put_object(
     // `CopyObject` is a PUT with the `x-amz-copy-source` header (S3's COPY is
     // not a separate method): read the source within the caller's bucket and
     // write it to this key.
-    if let Some(copy_source) = headers
-        .get(COPY_SOURCE)
-        .and_then(|value| value.to_str().ok())
-    {
+    let mut copy_sources = headers.get_all(COPY_SOURCE).iter();
+    if let Some(copy_source) = copy_sources.next() {
+        if copy_sources.next().is_some() {
+            return Err(S3Error::invalid_argument("Repeated copy source header"));
+        }
+        let copy_source = copy_source
+            .to_str()
+            .map_err(|_error| S3Error::invalid_argument("Invalid copy source header"))?;
         return s3_copy_object(&state, auth.capability(), &context, copy_source, &headers).await;
     }
 
+    let expected_md5 = parse_content_md5(&headers)?;
     // Bodies larger than SHARDLINE_S3_MAX_PART_BYTES must use multipart.
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
         .map_err(|_error| S3Error::internal())?;
@@ -236,6 +245,11 @@ pub(crate) async fn s3_put_object(
         ))
     } else {
         body
+    };
+
+    let body = match expected_md5 {
+        Some(expected) => body.with_expected_md5(expected),
+        None => body,
     };
 
     // Conditional requests (If-Match / If-None-Match) are evaluated against
@@ -1034,10 +1048,7 @@ pub(crate) async fn s3_delete_object(
     // out of scope.
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
-    if let Some(S3SubResource::UploadId(upload_id)) = resources
-        .iter()
-        .find(|resource| matches!(resource, S3SubResource::UploadId(_)))
-    {
+    if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
         return multipart::s3_abort_multipart_upload(&state, &context, upload_id).await;
     }
     if !resources.is_empty() {
@@ -1082,9 +1093,8 @@ pub(crate) async fn s3_delete_object(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// `POST /{bucket}/{*key}` — `CreateMultipartUpload`/`UploadPart` are Lane 4
-/// work; `PostObject` is out of scope. Everything is `501 NotImplemented`
-/// today.
+/// `POST /{bucket}/{*key}` dispatches multipart creation or completion.
+/// Unsupported or conflicting operation selectors return `501 NotImplemented`.
 #[tracing::instrument(skip(auth, state, headers, body), fields(bucket, key))]
 pub(crate) async fn s3_post_object(
     auth: S3Repository,
@@ -1100,16 +1110,10 @@ pub(crate) async fn s3_post_object(
     // anything else (PostObject) is out of scope.
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
-    if resources
-        .iter()
-        .any(|resource| matches!(resource, S3SubResource::Uploads))
-    {
+    if let [S3SubResource::Uploads] = resources.as_slice() {
         return multipart::s3_create_multipart_upload(&state, &context, &headers).await;
     }
-    if let Some(S3SubResource::UploadId(upload_id)) = resources
-        .iter()
-        .find(|resource| matches!(resource, S3SubResource::UploadId(_)))
-    {
+    if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
         return multipart::s3_complete_multipart_upload(
             &state, &context, upload_id, &headers, body,
         )
