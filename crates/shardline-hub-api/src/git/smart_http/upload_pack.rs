@@ -53,26 +53,34 @@ pub async fn upload_pack(
         )?,
         None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
     };
-    let projection = super::projection::project_history(&state, &repo_id, &capability)?;
+    let projection =
+        super::projection::project_history_async(state.clone(), repo_id.clone(), capability)
+            .await?;
+    let identities: std::collections::HashSet<_> = projection.identities.values().collect();
     for want in &wants {
-        if !projection.identities.values().any(|sha| sha == want) {
+        if !identities.contains(want) {
             return Err(HubApiError::BadRequest(
                 "wanted Git commit is not in this repository".to_owned(),
             ));
         }
     }
-    let pack_data = generate_pack(&projection.objects)?;
-    let mut response_body = pktline::encode_line("NAK\n")?.into_bytes();
     let sideband = request_lines.iter().any(|line| {
         std::str::from_utf8(line)
             .is_ok_and(|line| line.split_whitespace().any(|word| word == "side-band-64k"))
     });
-    if sideband {
-        response_body.extend_from_slice(&pktline::sideband_data(&pack_data));
-        response_body.extend_from_slice(FLUSH.as_bytes());
-    } else {
-        response_body.extend_from_slice(&pack_data);
-    }
+    let response_body = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, HubApiError> {
+        let pack_data = generate_pack(&projection.objects)?;
+        let mut response_body = pktline::encode_line("NAK\n")?.into_bytes();
+        if sideband {
+            response_body.extend_from_slice(&pktline::sideband_data(&pack_data));
+            response_body.extend_from_slice(FLUSH.as_bytes());
+        } else {
+            response_body.extend_from_slice(&pack_data);
+        }
+        Ok(response_body)
+    })
+    .await
+    .map_err(|error| HubApiError::CasError(error.to_string()))??;
 
     let mut resp_headers = axum::http::HeaderMap::new();
     resp_headers.insert(

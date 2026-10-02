@@ -17,7 +17,7 @@ use shardline_storage::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared, fd_child_path,
     open_directory_chain as open_directory_chain_shared, open_new_file as open_new_file_shared,
-    remove_at, remove_if_present, rename_at, temporary_file_name,
+    remove_at, remove_if_present, rename_at, sync_parent_directory, temporary_file_name,
 };
 
 #[cfg(test)]
@@ -170,6 +170,10 @@ pub(crate) struct AtomicOutputFile {
 
 #[cfg(unix)]
 impl AtomicOutputFile {
+    pub(crate) fn try_clone_file(&self) -> io::Result<File> {
+        self.file.try_clone()
+    }
+
     pub(crate) fn create(path: &Path, create_parent: bool) -> io::Result<Self> {
         let anchored = open_anchored_target(path, create_parent)?;
         let final_path = anchored.final_path();
@@ -189,6 +193,7 @@ impl AtomicOutputFile {
 
     pub(crate) fn commit(mut self) -> io::Result<()> {
         self.file.flush()?;
+        self.file.sync_all()?;
         run_before_local_write_hook(&self.anchored.logical_path());
         ensure_existing_target_is_regular_or_missing(&self.final_path)?;
         let temp_name = self
@@ -200,6 +205,7 @@ impl AtomicOutputFile {
             temp_name,
             self.anchored.file_name(),
         )?;
+        sync_parent_directory(&self.anchored)?;
         if let Err(error) = ensure_parent_path_matches_anchor(&self.anchored) {
             drop(remove_at(
                 self.anchored.parent_dir(),

@@ -3532,6 +3532,7 @@ dependencies = [
  "serde_json",
  "shardline-protocol",
  "shardline-server",
+ "shardline-storage",
  "shardline-xet-adapter",
  "tempfile",
  "thiserror 2.0.18",

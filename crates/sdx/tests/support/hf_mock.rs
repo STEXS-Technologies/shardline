@@ -336,7 +336,9 @@ fn serialized_byte_range(xorb: &StoredXorb, start: u64, end: u64) -> Option<(u64
     } else {
         *xorb.boundaries.get(first.saturating_sub(1))?
     };
-    let packed_end = *xorb.boundaries.get(last)?;
+    // Footer boundaries are end-exclusive offsets; the wire descriptor and
+    // HTTP Range end are inclusive.
+    let packed_end = xorb.boundaries.get(last)?.checked_sub(1)?;
     Some((packed_start, packed_end))
 }
 
