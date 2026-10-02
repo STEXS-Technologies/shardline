@@ -496,22 +496,81 @@ fn project_revision(
         tree_cache.insert(fingerprint, root);
         root
     };
+    let mut counter = CountSink {
+        length: 0,
+        cap: super::limits::MAX_GIT_PROJECTED_BYTES,
+    };
+    format_commit(&mut counter, root, parent, revision).map_err(failure)?;
+    let mut digest = Sha1::new();
+    digest.update(format!("commit {}\0", counter.length).as_bytes());
+    let mut hash = HashSink(digest);
+    format_commit(&mut hash, root, parent, revision).map_err(failure)?;
+    let candidate: [u8; 20] = hash.0.finalize().into();
+    if budget.seen.contains(&candidate) {
+        return Ok((objects, candidate));
+    }
+    if counter.length > budget.remaining_bytes {
+        return Err(failure("Git commit exceeds byte limit"));
+    }
+    if budget.remaining_objects == 0 {
+        return Err(failure("Git commit exceeds object count limit"));
+    }
     let mut data = BoundedCommit {
         text: String::new(),
         limit: budget.remaining_bytes,
     };
-    use std::fmt::Write;
-    writeln!(&mut data, "tree {}", hex::encode(root)).map_err(failure)?;
-    if let Some(parent) = parent {
-        writeln!(&mut data, "parent {parent}").map_err(failure)?;
-    }
-    writeln!(&mut data, "author Shardline Hub <hub@shardline.dev> {} +0000\ncommitter Shardline Hub <hub@shardline.dev> {} +0000\n\n{}\n\nShardline-Revision: {}\nShardline-Repository: {}", revision.created_at_unix_seconds, revision.created_at_unix_seconds, revision.message.as_deref().unwrap_or(""), revision.sha, revision.repo_id).map_err(failure)?;
+    format_commit(&mut data, root, parent, revision).map_err(failure)?;
     // Deduplication may emit no objects for a commit already loaded from an
     // archive. Its identity remains valid independently of the output vector.
     let commit_sha = budget.append(&mut objects, GitObject::commit(data.text.into_bytes()))?;
     Ok((objects, commit_sha))
 }
 
+// Count and hash the same borrowed fields before allocating a commit body.
+// The per-object cap remains the total export ceiling; only unseen objects
+// consume the remaining unique-object quota.
+struct CountSink {
+    length: usize,
+    cap: usize,
+}
+impl std::fmt::Write for CountSink {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let next = self.length.checked_add(text.len()).ok_or(std::fmt::Error)?;
+        if next > self.cap {
+            return Err(std::fmt::Error);
+        }
+        self.length = next;
+        Ok(())
+    }
+}
+struct HashSink(Sha1);
+impl std::fmt::Write for HashSink {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.0.update(text.as_bytes());
+        Ok(())
+    }
+}
+fn format_commit(
+    out: &mut impl std::fmt::Write,
+    root: [u8; 20],
+    parent: Option<&String>,
+    revision: &HubRevision,
+) -> std::fmt::Result {
+    writeln!(out, "tree {}", hex::encode(root))?;
+    if let Some(parent) = parent {
+        writeln!(out, "parent {parent}")?;
+    }
+    writeln!(
+        out,
+        "author Shardline Hub <hub@shardline.dev> {} +0000\ncommitter Shardline Hub <hub@shardline.dev> {} +0000\n\n{}\n\nShardline-Revision: {}\nShardline-Repository: {}",
+        revision.created_at_unix_seconds,
+        revision.created_at_unix_seconds,
+        revision.message.as_deref().unwrap_or(""),
+        revision.sha,
+        revision.repo_id
+    )?;
+    Ok(())
+}
 /// Formatting commit metadata also obeys the quota before growing a buffer.
 struct BoundedCommit {
     text: String,
@@ -807,6 +866,130 @@ mod tests {
         assert!(duplicate.is_empty());
         assert_eq!(duplicate_sha, first_sha);
         assert_eq!((budget.remaining_bytes, budget.remaining_objects), before);
+    }
+
+    #[test]
+    fn repeated_commit_at_exact_payload_quota_preserves_sha_and_unique_budget() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        let auth = AuthorizedRepository::anonymous_full_access();
+        let parent = "c".repeat(40);
+        for message in ["same commit", "μ-model 😀\n東京", "", "line1\nline2"] {
+            for timestamp in [0, 42, 1_700_000_000, i64::MAX as u64] {
+                for parent in [None, Some(&parent)] {
+                    let mut revision = revision(&"a".repeat(64));
+                    revision.message = Some(message.to_owned());
+                    revision.created_at_unix_seconds = timestamp;
+                    let (original, expected_sha) = project_revision(
+                        &state,
+                        &revision,
+                        &[],
+                        parent,
+                        &auth,
+                        &mut HashMap::new(),
+                        &mut HashMap::new(),
+                        &mut test_budget(4096, 100),
+                    )
+                    .unwrap();
+                    let payload_bytes: usize =
+                        original.iter().map(|object| object.data.len()).sum();
+                    let mut budget = test_budget(payload_bytes, 2);
+                    let mut blobs = HashMap::new();
+                    let mut trees = HashMap::new();
+                    let (first, sha) = project_revision(
+                        &state,
+                        &revision,
+                        &[],
+                        parent,
+                        &auth,
+                        &mut blobs,
+                        &mut trees,
+                        &mut budget,
+                    )
+                    .unwrap();
+                    assert_eq!(sha, expected_sha);
+                    assert_eq!(first.len(), 2);
+                    assert_eq!((budget.remaining_bytes, budget.remaining_objects), (0, 0));
+                    let seen = budget.seen.clone();
+                    let (duplicate, duplicate_sha) = project_revision(
+                        &state,
+                        &revision,
+                        &[],
+                        parent,
+                        &auth,
+                        &mut blobs,
+                        &mut trees,
+                        &mut budget,
+                    )
+                    .unwrap();
+                    assert!(duplicate.is_empty());
+                    assert_eq!(duplicate_sha, expected_sha);
+                    assert_eq!((budget.remaining_bytes, budget.remaining_objects), (0, 0));
+                    assert_eq!(budget.seen, seen);
+                    // The same bytes are still subject to both quotas when the
+                    // commit has not already been included in this export.
+                    budget.seen.remove(&expected_sha);
+                    budget.remaining_bytes = payload_bytes - 1;
+                    budget.remaining_objects = 1;
+                    assert!(
+                        project_revision(
+                            &state,
+                            &revision,
+                            &[],
+                            parent,
+                            &auth,
+                            &mut blobs,
+                            &mut trees,
+                            &mut budget
+                        )
+                        .is_err()
+                    );
+                    budget.remaining_bytes = payload_bytes;
+                    budget.remaining_objects = 0;
+                    assert!(
+                        project_revision(
+                            &state,
+                            &revision,
+                            &[],
+                            parent,
+                            &auth,
+                            &mut blobs,
+                            &mut trees,
+                            &mut budget
+                        )
+                        .is_err()
+                    );
+                    budget.remaining_objects = 1;
+                    let (new_objects, new_sha) = project_revision(
+                        &state,
+                        &revision,
+                        &[],
+                        parent,
+                        &auth,
+                        &mut blobs,
+                        &mut trees,
+                        &mut budget,
+                    )
+                    .unwrap();
+                    assert_eq!(new_objects.len(), 1);
+                    assert_eq!(new_sha, expected_sha);
+                    assert_eq!((budget.remaining_bytes, budget.remaining_objects), (0, 0));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn counted_commit_enforces_existing_global_cap_in_utf8_bytes() {
+        use std::fmt::Write;
+        let limit = super::super::limits::MAX_GIT_PROJECTED_BYTES;
+        let mut counter = CountSink {
+            length: limit - 2,
+            cap: limit,
+        };
+        assert!(counter.write_str("μ").is_ok());
+        assert_eq!(counter.length, limit);
+        assert!(counter.write_str("x").is_err());
+        assert_eq!(counter.length, limit);
     }
 
     fn revision(sha: &str) -> HubRevision {
