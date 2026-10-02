@@ -12,7 +12,7 @@ use super::super::pack::{GitObject, ObjectType};
 use super::super::pktline::{self, FLUSH};
 use super::MAX_RECEIVE_PACK_REQUEST_BYTES;
 use super::error::SmartHttpError;
-use super::pack_parse::parse_pack_data;
+use super::pack_parse::parse_pack_data_with_bases;
 use super::ref_advertisement::{authorize_write_with_context, is_valid_refname, resolve_repo_id};
 use super::tree_walk::{parse_commit_object, walk_git_tree};
 use super::upload_pack::build_lfs_pointer_blob;
@@ -68,11 +68,17 @@ pub async fn receive_pack(
         return build_report_response(&[], true);
     }
 
+    let projection = super::projection::project_history(&state, &repo_id, &capability)?;
+    let bases: HashMap<_, _> = projection
+        .objects
+        .iter()
+        .map(|object| (object.sha1(), object))
+        .collect();
     let has_object_updates = updates
         .iter()
         .any(|(_, new_sha, _)| new_sha != "0000000000000000000000000000000000000000");
-    let objects = if has_object_updates {
-        match parse_pack_data(pack_data) {
+    let mut objects = if has_object_updates {
+        match parse_pack_data_with_bases(pack_data, &bases) {
             Ok(objects) => objects,
             Err(e) => {
                 tracing::warn!("failed to parse receive-pack data: {e}");
@@ -89,16 +95,27 @@ pub async fn receive_pack(
         Vec::new()
     };
 
+    let mut seen: std::collections::HashSet<_> = objects.iter().map(GitObject::sha1).collect();
+    for object in projection.objects {
+        if seen.insert(object.sha1()) {
+            objects.push(object);
+        }
+    }
     let mut results = Vec::new();
 
     for (old_sha, new_sha, refname) in &updates {
+        let resolved_old = projection
+            .identities
+            .iter()
+            .find_map(|(hub, git)| (git == old_sha).then(|| hub.clone()))
+            .unwrap_or_else(|| old_sha.clone());
         let result = if new_sha == "0000000000000000000000000000000000000000" {
-            delete_push_ref(&state, &repo_id, old_sha, refname)
+            delete_push_ref(&state, &repo_id, &resolved_old, refname)
         } else {
             store_push_objects(
                 &state,
                 &repo_id,
-                old_sha,
+                &resolved_old,
                 new_sha,
                 refname,
                 &objects,
@@ -122,7 +139,11 @@ pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, S
     let lines = pktline::decode_lines(body);
     for line in &lines {
         let s = match std::str::from_utf8(line) {
-            Ok(s) => s.trim().to_owned(),
+            Ok(s) => s
+                .split_once('\0')
+                .map_or(s, |(command, _)| command)
+                .trim()
+                .to_owned(),
             Err(_) => continue,
         };
 
@@ -255,6 +276,29 @@ async fn store_push_objects(
         .map(|obj| (content_sha256(&obj.data), obj))
         .collect();
 
+    // Keep inline bytes available to both Hub resolve and later NDJSON edits.
+    // Exact Git packs retain modes/authorship; this shared CAS retains content.
+    let inline_by_hash: HashMap<_, _> = objects
+        .iter()
+        .filter(|obj| obj.object_type == ObjectType::Blob)
+        .map(|obj| (blake3::hash(&obj.data).to_hex().to_string(), obj))
+        .collect();
+    for file in files.iter().filter(|file| !file.is_lfs) {
+        let blob = inline_by_hash
+            .get(&file.sha)
+            .ok_or_else(|| SmartHttpError::BlobObjectNotFound(file.sha.clone()))?;
+        let key = lfs_object_key(&file.sha, auth)
+            .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+        let integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3::hash(&blob.data).as_bytes()),
+            file.size,
+        );
+        state
+            .object_store
+            .put_if_absent(&key, ObjectBody::from_slice(&blob.data), &integrity)
+            .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+    }
+
     // Store LFS objects that were included in the pack.
     // LFS pointer blobs only contain metadata; the actual file content is
     // uploaded separately via PUT /lfs/objects/{oid}.  If the client bundled
@@ -280,6 +324,9 @@ async fn store_push_objects(
                 .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
         }
     }
+
+    super::projection::archive_objects(state, repo_id, new_sha, objects, auth)
+        .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
     // Create revision in the store.
     state

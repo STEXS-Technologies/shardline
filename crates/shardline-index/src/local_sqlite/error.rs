@@ -21,6 +21,11 @@ pub enum LocalIndexStoreError {
     /// SQLite access failed.
     #[error("local sqlite metadata operation failed")]
     Sqlite(#[from] SqliteError),
+    /// A legacy Hub tree has no trustworthy repository and complete-tree identity.
+    #[error(
+        "Hub revision {0} requires recovery from an authoritative tree; run shardline repair hub-tree --state-file PATH"
+    )]
+    HubTreeRecoveryRequired(String),
     /// JSON serialization or deserialization failed.
     #[error("local metadata json operation failed")]
     Json(#[from] JsonError),

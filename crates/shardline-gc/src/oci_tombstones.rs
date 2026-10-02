@@ -214,9 +214,10 @@ where
         ],
     };
     for object_key in keys {
-        // CLI holds can be placed without the metadata writer barrier. Match
-        // ordinary quarantine sweeping by rechecking each key immediately
-        // before physical reclamation, including the manifest companion.
+        // Recheck for callers that supplied equivalent writer exclusion around
+        // the low-level GC entrypoint, including the manifest companion.
+        // Supported hold mutations and GC share the maintenance barrier for the
+        // whole operation; this lookup alone cannot synchronize deletion.
         if held_keys.contains(object_key.as_str())
             || index_store
                 .retention_hold(&object_key)

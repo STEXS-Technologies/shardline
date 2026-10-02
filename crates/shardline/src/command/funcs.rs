@@ -194,6 +194,10 @@ impl TryFrom<CliDefinition> for CliCommand {
                 IndexSubcommand::Rebuild(args) => Ok(Self::IndexRebuild { root: args.root }),
             },
             CliDefinitionCommand::Repair(args) => match args.command {
+                Some(RepairSubcommand::HubTree(options)) => Ok(Self::RepairHubTree {
+                    root: options.root,
+                    state_file: options.state_file,
+                }),
                 Some(RepairSubcommand::Lifecycle(options)) => Ok(Self::RepairLifecycle {
                     root: options.root,
                     webhook_retention_seconds: options.webhook_retention_seconds,

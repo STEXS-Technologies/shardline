@@ -30,6 +30,9 @@ name = "shardline"
 path = "src/main.rs"
 
 [dependencies]
+blake3.workspace = true
+sha2.workspace = true
+shardline-protocol-adapters.workspace = true
 bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
 dotenvy.workspace = true

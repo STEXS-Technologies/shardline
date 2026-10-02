@@ -146,6 +146,18 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Ok(CliCommand::RepairHubTree { root, state_file }) => {
+            match crate::run_hub_tree_repair(root.as_deref(), &state_file).await {
+                Ok(revision) => {
+                    println!("recovered Hub revision: {revision}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    print_error_chain(&error);
+                    ExitCode::from(2)
+                }
+            }
+        }
         Ok(CliCommand::Fsck { root }) => match run_fsck(root.as_deref()).await {
             Ok(report) => {
                 let root = match resolve_root(root.as_deref()) {
