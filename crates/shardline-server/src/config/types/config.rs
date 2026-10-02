@@ -1424,6 +1424,34 @@ impl ServerConfig {
         validate_chunk_size(self.chunk_size)?;
 
         if self.index_postgres_url().is_some() {
+            // PostgreSQL counts and quota parameters use signed BIGINT values.
+            let maximum = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+            for (frontend, name, capacity) in [
+                (
+                    ServerFrontend::Oci,
+                    "oci_upload_max_active_sessions",
+                    self.oci_upload_max_active_sessions(),
+                ),
+                (
+                    ServerFrontend::S3,
+                    "s3_upload_max_active_sessions",
+                    self.s3_upload_max_active_sessions(),
+                ),
+                (
+                    ServerFrontend::S3,
+                    "s3_upload_max_active_part_files",
+                    self.s3_upload_max_active_part_files(),
+                ),
+                (
+                    ServerFrontend::Lfs,
+                    "lfs_patch_max_active_sessions",
+                    self.lfs_patch_max_active_sessions(),
+                ),
+            ] {
+                if self.server_frontends.contains(&frontend) {
+                    crate::admission::validate_capacity(name, capacity, maximum)?;
+                }
+            }
             let now = shardline_protocol::unix_now_seconds_lossy();
             for (frontend, name, ttl) in [
                 (
