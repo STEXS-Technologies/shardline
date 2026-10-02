@@ -518,7 +518,7 @@ pub async fn lock_session_parts(
 }
 
 async fn acquire_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3SessionError> {
-    spawn_blocking(move || {
+    let file = spawn_blocking(move || {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -528,15 +528,15 @@ async fn acquire_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3Sessio
             .read(true)
             .write(true)
             .open(path)?;
-        file.lock()?;
-        Ok(S3FileLock { file })
+        Ok::<_, S3SessionError>(file)
     })
     .await
-    .map_err(S3SessionError::BlockingTask)?
+    .map_err(S3SessionError::BlockingTask)??;
+    wait_for_session_file_lock(file).await
 }
 
 async fn acquire_existing_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3SessionError> {
-    spawn_blocking(move || {
+    let file = spawn_blocking(move || {
         let file = match std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -550,11 +550,30 @@ async fn acquire_existing_session_file_lock(path: PathBuf) -> Result<S3FileLock,
             }
             Err(error) => return Err(S3SessionError::Io(error)),
         };
-        file.lock()?;
-        Ok(S3FileLock { file })
+        Ok::<_, S3SessionError>(file)
     })
     .await
-    .map_err(S3SessionError::BlockingTask)?
+    .map_err(S3SessionError::BlockingTask)??;
+    wait_for_session_file_lock(file).await
+}
+
+// OS lock waiting must remain cancellable; opening the file is the only
+// operation admitted to the runtime's blocking pool.
+async fn wait_for_session_file_lock(file: std::fs::File) -> Result<S3FileLock, S3SessionError> {
+    let mut delay = std::time::Duration::from_millis(10);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(S3FileLock { file }),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error))
+                if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(S3SessionError::Io(error)),
+        }
+        tokio::time::sleep(delay).await;
+        delay = delay
+            .saturating_mul(2)
+            .min(std::time::Duration::from_millis(50));
+    }
 }
 
 // ── Session lifecycle ────────────────────────────────────────────────────────
@@ -3652,5 +3671,70 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod session_lock_cancellation_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::time::Duration;
+
+    #[test]
+    fn cancelled_session_waiters_leave_blocking_work_and_shutdown_available() {
+        let storage = tempfile::TempDir::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = runtime
+            .block_on(super::lock_upload_sessions(storage.path()))
+            .unwrap();
+        let waiters: Vec<_> = (0..2)
+            .map(|_| {
+                let root = storage.path().to_path_buf();
+                runtime.spawn(async move {
+                    let _guard = super::lock_upload_sessions(&root).await.unwrap();
+                })
+            })
+            .collect();
+        runtime.block_on(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        runtime.block_on(async {
+            for waiter in waiters {
+                waiter.abort();
+                assert!(waiter.await.unwrap_err().is_cancelled());
+            }
+        });
+        let unrelated_work_progressed = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                tokio::task::spawn_blocking(|| 17),
+            )
+            .await
+            .is_ok()
+        });
+        let (shutdown_done, shutdown_received) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(runtime);
+            shutdown_done.send(()).unwrap();
+        });
+        let shutdown_without_unlock = shutdown_received
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+        // Always release the owner before assertions, so an old implementation
+        // fails cleanly instead of hanging the test process during runtime drop.
+        drop(owner);
+        shutdown.join().unwrap();
+        assert!(
+            unrelated_work_progressed,
+            "cancelled waiters retained both blocking workers"
+        );
+        assert!(
+            shutdown_without_unlock,
+            "cancelled lock tasks stalled runtime shutdown"
+        );
     }
 }

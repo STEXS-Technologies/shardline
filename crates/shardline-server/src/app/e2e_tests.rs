@@ -2516,10 +2516,14 @@ async fn single_chunk_file_ingest_is_xorb_backed_and_reconstructs_byte_identical
 
     // The server download stream returns byte-identical data.
     use futures_util::StreamExt;
-    let mut stream =
-        crate::download_stream::file_record_byte_stream(object_store, record.clone(), None)
-            .await
-            .unwrap();
+    let mut stream = crate::download_stream::file_record_byte_stream(
+        object_store,
+        record.clone(),
+        None,
+        crate::admission::ExecutionPools::default_sizes().blocking_io,
+    )
+    .await
+    .unwrap();
     let mut downloaded = Vec::new();
     while let Some(item) = stream.next().await {
         downloaded.extend_from_slice(&item.unwrap());

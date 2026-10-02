@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     io::{Error as IoError, ErrorKind, Seek, SeekFrom},
     pin::Pin,
 };
@@ -12,18 +13,52 @@ use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore}
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
-    sync::mpsc,
 };
 use tracing::{debug, trace, warn};
 
 use crate::{
-    ServerError, chunk_store::chunk_object_key, error::ObjectStoreError, local_backend::chunk_hash,
-    object_store::ServerObjectStore, object_store::run_before_local_object_read_hook,
+    ServerError, admission::BoundedPool, chunk_store::chunk_object_key, error::ObjectStoreError,
+    local_backend::chunk_hash, object_store::ServerObjectStore,
+    object_store::run_before_local_object_read_hook,
 };
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
+
+// A queued job is aborted when its polling future is dropped. Running jobs
+// retain admission until completion, including initial whole-xorb validation.
+// Subsequent polls read or decode only one bounded portion.
+struct AbortBlockingJob(tokio::task::AbortHandle);
+impl Drop for AbortBlockingJob {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn blocking_stream_work<T: Send + 'static>(
+    pool: &BoundedPool,
+    work: impl FnOnce() -> Result<T, ServerError> + Send + 'static,
+) -> Result<T, ServerError> {
+    let permit = pool
+        .acquire()
+        .await
+        .map_err(|error| ServerError::Io(IoError::other(error)))?;
+    let job = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    });
+    let _abort = AbortBlockingJob(job.abort_handle());
+    job.await
+        .map_err(|error| ServerError::Io(IoError::other(error)))?
+}
+
+struct SerializedXorbStreamState {
+    file: tempfile::NamedTempFile,
+    offset: u64,
+    end: u64,
+    pool: BoundedPool,
+}
 
 /// Reads and validates a complete content-addressed xorb before exposing a requested
 /// serialized-byte range.
@@ -37,64 +72,61 @@ pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>
 ///
 /// Returns [`ServerError`] when the object is missing, its stored length or requested
 /// range is invalid, or the serialized xorb does not match `hash_hex`.
-pub(crate) fn validated_xorb_byte_range_stream(
+pub(crate) async fn validated_xorb_byte_range_stream(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
     hash_hex: &str,
     total_length: u64,
     range: ByteRange,
+    pool: BoundedPool,
 ) -> Result<ServerByteStream, ServerError> {
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
     }
-
-    let mut xorb_data = object_store.materialize_object_to_tempfile(object_key, total_length)?;
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    {
-        let mut cursor = xorb_data.as_file_mut();
-        crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?;
-    }
-
-    let start = range.start();
-    let end = range.end_inclusive();
-    let (sender, receiver) = mpsc::channel::<Result<Bytes, ServerError>>(2);
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let cursor = xorb_data.as_file_mut();
-        let mut offset = start;
-        while offset <= end {
-            let length = end
-                .checked_sub(offset)
-                .and_then(|value| value.checked_add(1))
-                .unwrap_or(0)
-                .min(STREAM_READ_BUFFER_BYTES);
-            let Ok(length) = usize::try_from(length) else {
-                drop(sender.blocking_send(Err(ServerError::Overflow)));
-                return;
-            };
-            if cursor.seek(std::io::SeekFrom::Start(offset)).is_err() {
-                drop(
-                    sender.blocking_send(Err(ServerError::Io(IoError::other("xorb seek failed")))),
-                );
-                return;
+    let store = object_store.clone();
+    let key = object_key.clone();
+    let file = blocking_stream_work(&pool, move || {
+        let mut file = store.materialize_object_to_tempfile(&key, total_length)?;
+        crate::xet_adapter::validate_serialized_xorb(file.as_file_mut(), expected_hash)?;
+        Ok(file)
+    })
+    .await?;
+    let state = SerializedXorbStreamState {
+        file,
+        offset: range.start(),
+        end: range.end_inclusive(),
+        pool,
+    };
+    Ok(Box::pin(stream::try_unfold(
+        state,
+        |mut state| async move {
+            if state.offset > state.end {
+                return Ok(None);
             }
-            let mut bytes = vec![0_u8; length];
-            if let Err(error) = cursor.read_exact(&mut bytes) {
-                drop(sender.blocking_send(Err(ServerError::Io(error))));
-                return;
-            }
-            if sender.blocking_send(Ok(Bytes::from(bytes))).is_err() {
-                return;
-            }
-            offset = match offset.checked_add(u64::try_from(length).unwrap_or(0)) {
-                Some(next) => next,
-                None => break,
-            };
-        }
-    });
-    Ok(Box::pin(stream::unfold(receiver, |mut receiver| async {
-        receiver.recv().await.map(|item| (item, receiver))
-    })))
+            let work_pool = state.pool.clone();
+            blocking_stream_work(&work_pool, move || {
+                use std::io::Read;
+                let length = state
+                    .end
+                    .checked_sub(state.offset)
+                    .and_then(|n| n.checked_add(1))
+                    .ok_or(ServerError::Overflow)?
+                    .min(STREAM_READ_BUFFER_BYTES);
+                let length = usize::try_from(length)?;
+                let cursor = state.file.as_file_mut();
+                cursor.seek(SeekFrom::Start(state.offset))?;
+                let mut bytes = vec![0_u8; length];
+                cursor.read_exact(&mut bytes)?;
+                state.offset = state
+                    .offset
+                    .checked_add(u64::try_from(length)?)
+                    .ok_or(ServerError::Overflow)?;
+                Ok(Some((Bytes::from(bytes), state)))
+            })
+            .await
+        },
+    )))
 }
 
 /// Returns the serialized xorb length when an object is stored under `hash_hex`.
@@ -115,6 +147,16 @@ fn xorb_object_length(object_store: &ServerObjectStore, hash_hex: &str) -> Optio
     }
 }
 
+struct DecodedXorbStreamState {
+    file: tempfile::NamedTempFile,
+    descriptors: VecDeque<shardline_xet_adapter::ValidatedXorbChunk>,
+    chunks: Vec<shardline_index::FileChunkRecord>,
+    next_chunk_index: usize,
+    requested_start: u64,
+    requested_end: u64,
+    pool: BoundedPool,
+}
+
 /// Reads a xorb-backed file record by fetching the single xorb object, parsing
 /// all chunks, and extracting the requested byte range.
 ///
@@ -126,30 +168,25 @@ async fn read_xorb_backed_chunks(
     record: FileRecord,
     range: Option<ByteRange>,
     known_xorb_length: Option<u64>,
+    pool: BoundedPool,
 ) -> Result<ServerByteStream, ServerError> {
-    // 1. Read the entire xorb from storage.
     let chunk_zero = record.chunks.first().ok_or(ServerError::Overflow)?;
-    let xorb_hash_hex = &chunk_zero.hash;
-    let xorb_key = crate::xet_adapter::xorb_object_key(xorb_hash_hex)?;
-    let xorb_length = match known_xorb_length {
-        Some(length) => length,
-        None => object_store
-            .metadata(&xorb_key)?
-            .ok_or(ServerError::NotFound)?
-            .length(),
-    };
-    let mut xorb_data = object_store.materialize_object_to_tempfile(&xorb_key, xorb_length)?;
-
-    // 2. Parse and validate the xorb (verifies xorb hash against expected hash).
-    let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let validated = {
-        let mut cursor = xorb_data.as_file_mut();
-        crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?
-    };
-
-    // 3. Decode and emit one chunk at a time. A bounded channel provides
-    // backpressure from the HTTP response to the decoder and keeps decoded
-    // memory proportional to one chunk rather than the complete xorb.
+    let expected_hash = parse_xet_hash_hex(&chunk_zero.hash)?;
+    let key = crate::xet_adapter::xorb_object_key(&chunk_zero.hash)?;
+    let (file, validated) = blocking_stream_work(&pool, move || {
+        let length = match known_xorb_length {
+            Some(length) => length,
+            None => object_store
+                .metadata(&key)?
+                .ok_or(ServerError::NotFound)?
+                .length(),
+        };
+        let mut file = object_store.materialize_object_to_tempfile(&key, length)?;
+        let validated =
+            crate::xet_adapter::validate_serialized_xorb(file.as_file_mut(), expected_hash)?;
+        Ok((file, validated))
+    })
+    .await?;
     let requested_start = range.map_or(0, |value| value.start());
     let requested_end = range.map_or_else(
         || {
@@ -160,70 +197,105 @@ async fn read_xorb_backed_chunks(
         },
         |value| Ok(value.end_inclusive()),
     )?;
-
-    let (sender, receiver) = mpsc::channel::<Result<Bytes, ServerError>>(2);
-    let chunks = record.chunks;
-    tokio::task::spawn_blocking(move || {
-        let mut cursor = xorb_data.as_file_mut();
-        let mut next_chunk_index = 0_usize;
-        let result = crate::xet_adapter::try_for_each_serialized_xorb_chunk_trusted(
-            &mut cursor,
-            &validated,
-            |decoded| {
-                let chunk_index = decoded.descriptor().unpacked_start();
-                while chunks
-                    .get(next_chunk_index)
-                    .is_some_and(|chunk| chunk.offset < chunk_index)
-                {
-                    next_chunk_index = next_chunk_index
+    let state = DecodedXorbStreamState {
+        file,
+        descriptors: validated.chunks().iter().cloned().collect(),
+        chunks: record.chunks,
+        next_chunk_index: 0,
+        requested_start,
+        requested_end,
+        pool,
+    };
+    Ok(Box::pin(stream::try_unfold(
+        state,
+        |mut state| async move {
+            if state.descriptors.is_empty() {
+                return Ok(None);
+            }
+            let work_pool = state.pool.clone();
+            blocking_stream_work(&work_pool, move || {
+                while let Some(descriptor) = state.descriptors.pop_front() {
+                    let chunk_index = descriptor.unpacked_start();
+                    while state
+                        .chunks
+                        .get(state.next_chunk_index)
+                        .is_some_and(|chunk| chunk.offset < chunk_index)
+                    {
+                        state.next_chunk_index = state
+                            .next_chunk_index
+                            .checked_add(1)
+                            .ok_or(ServerError::Overflow)?;
+                    }
+                    let chunk = state
+                        .chunks
+                        .get(state.next_chunk_index)
+                        .ok_or(ServerError::Overflow)?;
+                    if chunk.offset != chunk_index {
+                        return Err(ServerError::Overflow);
+                    }
+                    state.next_chunk_index = state
+                        .next_chunk_index
                         .checked_add(1)
                         .ok_or(ServerError::Overflow)?;
-                }
-                let Some(chunk) = chunks.get(next_chunk_index) else {
-                    return Err(ServerError::Overflow);
-                };
-                if chunk.offset != chunk_index {
-                    return Err(ServerError::Overflow);
-                }
-                next_chunk_index = next_chunk_index
-                    .checked_add(1)
-                    .ok_or(ServerError::Overflow)?;
-                let chunk_end = chunk
-                    .offset
-                    .checked_add(chunk.length)
-                    .and_then(|v| v.checked_sub(1))
-                    .ok_or(ServerError::Overflow)?;
-                let start = requested_start.max(chunk.offset);
-                let end = requested_end.min(chunk_end);
-                if start <= end {
+                    let chunk_end = chunk
+                        .offset
+                        .checked_add(chunk.length)
+                        .and_then(|v| v.checked_sub(1))
+                        .ok_or(ServerError::Overflow)?;
+                    let start = state.requested_start.max(chunk.offset);
+                    let end = state.requested_end.min(chunk_end);
+                    if start > end {
+                        continue;
+                    }
                     let relative_start = usize::try_from(
                         start
                             .checked_sub(chunk.offset)
                             .ok_or(ServerError::Overflow)?,
                     )?;
                     let relative_end = usize::try_from(
-                        end.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?,
+                        end.checked_sub(chunk.offset)
+                            .ok_or(ServerError::Overflow)?
+                            .checked_add(1)
+                            .ok_or(ServerError::Overflow)?,
                     )?;
-                    let sliced = decoded
-                        .data()
-                        .get(relative_start..=relative_end)
-                        .ok_or(ServerError::Overflow)?
-                        .to_vec();
-                    sender
-                        .blocking_send(Ok(Bytes::from(sliced)))
-                        .map_err(|_error| ServerError::RequestBodyTooLarge)?;
+                    if descriptor.unpacked_len()
+                        > shardline_xet_core::xorb_object::constants::MAX_CHUNK_SIZE
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return Err(ServerError::Overflow);
+                    }
+                    let cursor = state.file.as_file_mut();
+                    cursor.seek(SeekFrom::Start(descriptor.packed_start()))?;
+                    // Full object integrity was verified before headers. The private
+                    // temporary file is immutable; still check each decoder length
+                    // against the validated footer before applying the output slice.
+                    let (data, packed_len, unpacked_len) =
+                        shardline_xet_core::xorb_object::deserialize_chunk(cursor).map_err(
+                            |error| ServerError::Io(IoError::new(ErrorKind::InvalidData, error)),
+                        )?;
+                    if u64::try_from(packed_len)?
+                        != descriptor
+                            .packed_end()
+                            .checked_sub(descriptor.packed_start())
+                            .ok_or(ServerError::Overflow)?
+                        || u64::from(unpacked_len) != descriptor.unpacked_len()
+                    {
+                        return Err(ServerError::Io(IoError::new(
+                            ErrorKind::InvalidData,
+                            "xorb chunk length disagrees with validated footer",
+                        )));
+                    }
+                    let bytes = Bytes::from(data);
+                    if bytes.get(relative_start..relative_end).is_none() {
+                        return Err(ServerError::Overflow);
+                    }
+                    return Ok(Some((bytes.slice(relative_start..relative_end), state)));
                 }
-                Ok(())
-            },
-        );
-        if let Err(error) = result.map_err(crate::server_frontend::xet::map_xorb_visit_error_server)
-        {
-            drop(sender.blocking_send(Err(error)));
-        }
-    });
-    Ok(Box::pin(stream::unfold(receiver, |mut receiver| async {
-        receiver.recv().await.map(|item| (item, receiver))
-    })))
+                Ok(None)
+            })
+            .await
+        },
+    )))
 }
 
 /// Streams a chunk-backed file record without materializing the complete object.
@@ -239,6 +311,7 @@ pub(crate) async fn file_record_byte_stream(
     object_store: ServerObjectStore,
     record: FileRecord,
     range: Option<ByteRange>,
+    pool: BoundedPool,
 ) -> Result<ServerByteStream, ServerError> {
     record.validate_reconstruction_plan()?;
     if record.total_bytes == 0 {
@@ -300,7 +373,7 @@ pub(crate) async fn file_record_byte_stream(
             xorb_hash = %xorb_hash,
             "reading xorb-backed file"
         );
-        return read_xorb_backed_chunks(object_store, record, range, known_xorb_length).await;
+        return read_xorb_backed_chunks(object_store, record, range, known_xorb_length, pool).await;
     }
 
     debug!(
@@ -635,7 +708,8 @@ async fn s3_store_byte_range_stream(
 mod tests {
     use std::io::Write;
 
-    use futures_util::StreamExt;
+    use futures_util::{StreamExt, TryStreamExt};
+    use shardline_index::FileRecord;
     use shardline_protocol::ByteRange;
     use shardline_storage::{LocalObjectStore, ObjectKey};
     use tokio::fs;
@@ -1399,9 +1473,14 @@ mod tests {
             }],
         };
 
-        let mut stream = super::file_record_byte_stream(object_store, record, None)
-            .await
-            .unwrap();
+        let mut stream = super::file_record_byte_stream(
+            object_store,
+            record,
+            None,
+            crate::admission::ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .unwrap();
         let mut result = Vec::new();
         while let Some(chunk) = stream.next().await {
             result.extend_from_slice(&chunk.unwrap());
@@ -1492,9 +1571,14 @@ mod tests {
             }],
         };
 
-        let mut stream = super::file_record_byte_stream(object_store, record, None)
-            .await
-            .unwrap();
+        let mut stream = super::file_record_byte_stream(
+            object_store,
+            record,
+            None,
+            crate::admission::ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .unwrap();
         let mut result = Vec::new();
         while let Some(chunk) = stream.next().await {
             result.extend_from_slice(&chunk.unwrap());
@@ -1670,7 +1754,9 @@ mod tests {
             &packed.xorb_hash_hex,
             corrupt.len() as u64,
             ByteRange::new(0, 0).unwrap(),
-        );
+            crate::admission::ExecutionPools::default_sizes().blocking_io,
+        )
+        .await;
         assert!(
             result.is_err(),
             "full xorb validation must precede delivery"
@@ -1733,9 +1819,14 @@ mod tests {
         };
 
         // 4. Call file_record_byte_stream (no range = full file).
-        let mut stream = super::file_record_byte_stream(object_store, record, None)
-            .await
-            .unwrap();
+        let mut stream = super::file_record_byte_stream(
+            object_store,
+            record,
+            None,
+            crate::admission::ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .unwrap();
 
         // 5. Collect and verify all decompressed content matches.
         let mut result = Vec::new();
@@ -1809,9 +1900,14 @@ mod tests {
         //    Chunk 2: bytes 20-29, we want 20-24 (5 bytes: "abcde")
         //    Expected: "56789ABCDEFGHIJabcde"
         let range = ByteRange::new(5, 24).unwrap();
-        let mut stream = super::file_record_byte_stream(object_store, record, Some(range))
-            .await
-            .unwrap();
+        let mut stream = super::file_record_byte_stream(
+            object_store,
+            record,
+            Some(range),
+            crate::admission::ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .unwrap();
 
         let mut result = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -1883,9 +1979,14 @@ mod tests {
 
         // 4. Request a range within the single chunk (bytes 5-15).
         let range = ByteRange::new(5, 15).unwrap();
-        let mut stream = super::file_record_byte_stream(object_store, record, Some(range))
-            .await
-            .unwrap();
+        let mut stream = super::file_record_byte_stream(
+            object_store,
+            record,
+            Some(range),
+            crate::admission::ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .unwrap();
 
         let mut result = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -1901,5 +2002,268 @@ mod tests {
             11,
             "byte range 5-15 inclusive should be 11 bytes"
         );
+    }
+    async fn pull_stream_fixture() -> (
+        shardline_test_support::TempStorage,
+        ServerObjectStore,
+        FileRecord,
+        Vec<u8>,
+        Vec<u8>,
+    ) {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = ServerObjectStore::local(storage.path()).unwrap();
+        let mut seed = 0x53a4_f792_6295_14be_u64;
+        let mut chunks = Vec::new();
+        let mut offset = 0_u64;
+        for _ in 0..4 {
+            let mut data = vec![0_u8; 1_048_576];
+            for byte in &mut data {
+                seed ^= seed.wrapping_shl(13);
+                seed ^= seed.wrapping_shr(7);
+                seed ^= seed.wrapping_shl(17);
+                *byte = seed.to_le_bytes().first().copied().unwrap();
+            }
+            chunks.push((data, offset));
+            offset = offset.checked_add(1_048_576).unwrap();
+        }
+        let packed = crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
+        crate::upload_ingest::xorb_packer::store_xorb(
+            &object_store,
+            &packed.xorb_hash_hex,
+            &packed.serialized,
+        )
+        .await
+        .unwrap();
+        let records = packed
+            .chunk_entries
+            .iter()
+            .map(|entry| shardline_index::FileChunkRecord {
+                hash: packed.xorb_hash_hex.clone(),
+                offset: entry.raw_offset,
+                length: 1_048_576,
+                range_start: u64::from(entry.chunk_index),
+                range_end: u64::from(entry.chunk_index.checked_add(1).unwrap()),
+                packed_start: u64::from(entry.packed_offset),
+                packed_end: u64::from(
+                    entry
+                        .packed_offset
+                        .checked_add(entry.packed_length)
+                        .unwrap(),
+                ),
+            })
+            .collect();
+        let record = FileRecord {
+            file_id: "pull-stream.bin".to_owned(),
+            content_hash: packed.xorb_hash_hex,
+            total_bytes: offset,
+            chunk_size: 1_048_576,
+            storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+            repository_scope: None,
+            chunks: records,
+        };
+        let raw = chunks.into_iter().flat_map(|(data, _)| data).collect();
+        (storage, object_store, record, packed.serialized, raw)
+    }
+
+    #[test]
+    fn unpolled_xorb_streams_leave_blocking_work_and_shutdown_available() {
+        use std::time::Duration;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (storage, mut streams, work_progressed) = runtime.block_on(async {
+            let (storage, store, record, serialized, _raw) = pull_stream_fixture().await;
+            let pool = crate::admission::BoundedPool::new(std::num::NonZeroUsize::MIN);
+            let key = crate::xet_adapter::xorb_object_key(&record.content_hash).unwrap();
+            let length = u64::try_from(serialized.len()).unwrap();
+            let mut streams = Vec::new();
+            streams.push(
+                super::validated_xorb_byte_range_stream(
+                    &store,
+                    &key,
+                    &record.content_hash,
+                    length,
+                    ByteRange::new(0, length.checked_sub(1).unwrap()).unwrap(),
+                    pool.clone(),
+                )
+                .await
+                .unwrap(),
+            );
+            streams.push(
+                super::file_record_byte_stream(store, record, None, pool.clone())
+                    .await
+                    .unwrap(),
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                pool.available_permits(),
+                1,
+                "idle bodies retain no work permit"
+            );
+            let progressed = tokio::time::timeout(
+                Duration::from_millis(250),
+                tokio::task::spawn_blocking(|| 17),
+            )
+            .await
+            .is_ok();
+            (storage, streams, progressed)
+        });
+        let (shutdown_done, shutdown_received) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(runtime);
+            shutdown_done.send(()).unwrap();
+        });
+        let shutdown_with_live_streams = shutdown_received
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+        // Cleanup before asserting so the old channel-backed implementation
+        // fails without hanging runtime destruction.
+        streams.clear();
+        shutdown.join().unwrap();
+        drop(storage);
+        assert!(
+            work_progressed,
+            "idle body producer parked the only blocking worker"
+        );
+        assert!(
+            shutdown_with_live_streams,
+            "idle response body prevented runtime shutdown"
+        );
+    }
+
+    #[test]
+    fn one_work_slot_streams_full_and_partial_serialized_and_decoded_bytes() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (_storage, store, record, serialized, raw) = pull_stream_fixture().await;
+            let pool = crate::admission::BoundedPool::new(std::num::NonZeroUsize::MIN);
+            let key = crate::xet_adapter::xorb_object_key(&record.content_hash).unwrap();
+            let length = u64::try_from(serialized.len()).unwrap();
+            for range in [
+                ByteRange::new(0, length.checked_sub(1).unwrap()).unwrap(),
+                ByteRange::new(17, 2_097_181).unwrap(),
+            ] {
+                let stream = super::validated_xorb_byte_range_stream(
+                    &store,
+                    &key,
+                    &record.content_hash,
+                    length,
+                    range,
+                    pool.clone(),
+                )
+                .await
+                .unwrap();
+                let chunks = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    stream.try_collect::<Vec<_>>(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let got: Vec<_> = chunks.into_iter().flatten().collect();
+                assert_eq!(
+                    got.as_slice(),
+                    serialized
+                        .get(
+                            usize::try_from(range.start()).unwrap()
+                                ..=usize::try_from(range.end_inclusive()).unwrap()
+                        )
+                        .unwrap()
+                );
+                assert_eq!(pool.available_permits(), 1);
+            }
+            for range in [None, Some(ByteRange::new(17, 2_097_181).unwrap())] {
+                let stream = super::file_record_byte_stream(
+                    store.clone(),
+                    record.clone(),
+                    range,
+                    pool.clone(),
+                )
+                .await
+                .unwrap();
+                let chunks = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    stream.try_collect::<Vec<_>>(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let got: Vec<_> = chunks.into_iter().flatten().collect();
+                let expected = range.map_or(raw.as_slice(), |range| {
+                    raw.get(
+                        usize::try_from(range.start()).unwrap()
+                            ..=usize::try_from(range.end_inclusive()).unwrap(),
+                    )
+                    .unwrap()
+                });
+                assert_eq!(got, expected);
+                assert_eq!(pool.available_permits(), 1);
+            }
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_running_stream_work_keeps_admission_until_job_completes() {
+        use std::sync::Arc;
+        let pool = crate::admission::BoundedPool::new(std::num::NonZeroUsize::MIN);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (release, gate) = std::sync::mpsc::channel();
+        let job_pool = pool.clone();
+        let job_started = started.clone();
+        let job = tokio::spawn(async move {
+            super::blocking_stream_work(&job_pool, move || {
+                job_started.notify_one();
+                gate.recv().unwrap();
+                Ok(17)
+            })
+            .await
+        });
+        started.notified().await;
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            pool.available_permits(),
+            0,
+            "running job still owns capacity after caller cancellation"
+        );
+        let waiting_pool = pool.clone();
+        let queued_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let queued_flag = queued_started.clone();
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let waiting_flag = waiting.clone();
+        let queued = tokio::spawn(async move {
+            waiting_flag.notify_one();
+            super::blocking_stream_work(&waiting_pool, move || {
+                queued_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(19)
+            })
+            .await
+        });
+        waiting.notified().await;
+        tokio::task::yield_now().await;
+        queued.abort();
+        assert!(queued.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        let recovered = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::blocking_stream_work(&pool, || Ok(23)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered, 23);
+        assert!(
+            !queued_started.load(std::sync::atomic::Ordering::SeqCst),
+            "cancelled queued closure executed"
+        );
+        assert_eq!(pool.available_permits(), 1);
     }
 }

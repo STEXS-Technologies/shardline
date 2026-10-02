@@ -32,6 +32,7 @@ pub struct LocalBackend {
     pub(super) index_store: LocalIndexStore,
     pub(super) record_store: LocalRecordStore,
     pub(super) object_store: ServerObjectStore,
+    pub(crate) stream_work_pool: crate::admission::BoundedPool,
     pub(super) metadata_write_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) protocol_upload_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -130,6 +131,7 @@ impl LocalBackend {
             upload_max_in_flight_chunks,
             server_frontends: server_frontends.to_vec(),
             object_store,
+            stream_work_pool: crate::admission::ExecutionPools::default_sizes().blocking_io,
             metadata_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             protocol_upload_lock: Arc::new(tokio::sync::Mutex::new(())),
         };

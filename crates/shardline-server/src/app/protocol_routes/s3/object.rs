@@ -8,6 +8,7 @@
 //! record + direct object (crash-safe ordering).
 
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::Instant,
@@ -22,6 +23,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::{Stream, StreamExt, stream};
 use md5::{Digest, Md5};
 use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
@@ -62,51 +64,163 @@ const META_PREFIX: &str = "x-amz-meta-";
 // User metadata, ETag (MD5) helpers.
 // ---------------------------------------------------------------------------
 
-/// Captures `x-amz-meta-*` request headers as sorted `(name, value)` pairs,
-/// stripped of the prefix with names lowercased (S3 canonicalization).
-pub(super) fn capture_user_metadata(headers: &HeaderMap) -> Vec<(String, String)> {
-    let mut metadata: Vec<(String, String)> = headers
-        .iter()
-        .filter_map(|(name, value)| {
-            let suffix = name.as_str().strip_prefix(META_PREFIX)?;
-            let value = value.to_str().ok()?.to_owned();
-            Some((suffix.to_ascii_lowercase(), value))
-        })
-        .collect();
-    metadata.sort();
-    metadata
+/// Canonicalize user metadata, preserving the order of repeated field values.
+pub(super) fn capture_user_metadata(headers: &HeaderMap) -> Result<Vec<(String, String)>, S3Error> {
+    let mut metadata = Vec::new();
+    for name in headers.keys() {
+        let Some(suffix) = name.as_str().strip_prefix(META_PREFIX) else {
+            continue;
+        };
+        let mut values = Vec::new();
+        for value in headers.get_all(name) {
+            let text = std::str::from_utf8(value.as_bytes())
+                .map_err(|_error| S3Error::invalid_argument("Invalid UTF-8 user metadata"))?;
+            values.push(decode_metadata_value(text));
+        }
+        metadata.push((suffix.to_ascii_lowercase(), values.join(",")));
+    }
+    metadata.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(metadata)
+}
+
+/// Decode UTF-8 RFC2047 B/Q encoded words emitted by S3 REST clients.
+/// Other ASCII metadata (including unsupported or malformed encoded words) is
+/// retained verbatim, preserving existing accepted values without data loss.
+fn decode_metadata_value(value: &str) -> String {
+    decode_utf8_metadata_words(value).unwrap_or_else(|| value.to_owned())
+}
+
+fn decode_utf8_metadata_words(value: &str) -> Option<String> {
+    let mut remaining = value;
+    let mut decoded = String::new();
+    let mut previous_encoded = false;
+    while let Some(start) = remaining.find("=?") {
+        let (prefix, word) = remaining.split_at(start);
+        if !previous_encoded || !prefix.chars().all(char::is_whitespace) {
+            decoded.push_str(prefix);
+        }
+        let word = word.strip_prefix("=?")?;
+        let (charset, word) = word.split_once('?')?;
+        let (encoding, word) = word.split_once('?')?;
+        let (payload, tail) = word.split_once("?=")?;
+        if !charset.eq_ignore_ascii_case("UTF-8") {
+            return None;
+        }
+        let bytes = if encoding.eq_ignore_ascii_case("B") {
+            STANDARD.decode(payload).ok()?
+        } else if encoding.eq_ignore_ascii_case("Q") {
+            decode_metadata_q(payload)?
+        } else {
+            return None;
+        };
+        decoded.push_str(&String::from_utf8(bytes).ok()?);
+        remaining = tail;
+        previous_encoded = true;
+    }
+    decoded.push_str(remaining);
+    Some(decoded)
+}
+
+fn decode_metadata_q(payload: &str) -> Option<Vec<u8>> {
+    let mut decoded = Vec::new();
+    let mut bytes = payload.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'_' => decoded.push(b' '),
+            b'=' => {
+                let high = char::from(bytes.next()?).to_digit(16)?;
+                let low = char::from(bytes.next()?).to_digit(16)?;
+                decoded.push(u8::try_from(high.checked_mul(16)?.checked_add(low)?).ok()?);
+            }
+            byte if byte.is_ascii_graphic() && byte != b'?' => decoded.push(byte),
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
+/// Keep each RFC2047 word below 75 characters without splitting UTF-8 scalars.
+fn encode_metadata_value(value: &str) -> String {
+    if value.is_ascii() {
+        return value.to_owned();
+    }
+    let mut words = Vec::new();
+    let mut chunk = String::new();
+    for character in value.chars() {
+        if chunk.len().saturating_add(character.len_utf8()) > 45 {
+            words.push(format!("=?UTF-8?B?{}?=", STANDARD.encode(chunk.as_bytes())));
+            chunk.clear();
+        }
+        chunk.push(character);
+    }
+    if !chunk.is_empty() {
+        words.push(format!("=?UTF-8?B?{}?=", STANDARD.encode(chunk.as_bytes())));
+    }
+    words.join(" ")
 }
 
 /// The CopyObject `x-amz-metadata-directive` value.
 enum MetadataDirective {
-    /// Propagate the source object's user metadata (S3 default).
     Copy,
-    /// Overwrite the destination's metadata with `x-amz-meta-*` headers.
     Replace,
 }
 
-/// Resolves the CopyObject metadata directive; anything other than `REPLACE`
-/// (case-insensitive) is treated as `COPY`.
-fn metadata_directive(headers: &HeaderMap) -> MetadataDirective {
-    match headers
-        .get(&METADATA_DIRECTIVE)
-        .and_then(|value| value.to_str().ok())
-    {
-        Some(directive) if directive.eq_ignore_ascii_case("REPLACE") => MetadataDirective::Replace,
-        _ => MetadataDirective::Copy,
+/// Only an absent directive defaults to COPY; malformed singleton fields fail.
+fn metadata_directive(headers: &HeaderMap) -> Result<MetadataDirective, S3Error> {
+    let mut values = headers.get_all(&METADATA_DIRECTIVE).iter();
+    let Some(value) = values.next() else {
+        return Ok(MetadataDirective::Copy);
+    };
+    if values.next().is_some() {
+        return Err(S3Error::invalid_argument(
+            "Repeated x-amz-metadata-directive header",
+        ));
+    }
+    let directive = value
+        .to_str()
+        .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-metadata-directive header"))?;
+    if directive.eq_ignore_ascii_case("COPY") {
+        Ok(MetadataDirective::Copy)
+    } else if directive.eq_ignore_ascii_case("REPLACE") {
+        Ok(MetadataDirective::Replace)
+    } else {
+        Err(S3Error::invalid_argument(
+            "Invalid x-amz-metadata-directive header",
+        ))
     }
 }
 
-/// Inserts stored user metadata as `x-amz-meta-*` response headers.
+/// Combine legacy repeated stored names as well as newly canonicalized rows.
+/// Unicode is returned as a mail-safe UTF-8 encoded word. Unprintable metadata
+/// is suppressed and accounted for by x-amz-missing-meta, as documented by S3.
 fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) {
+    let mut combined: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for (name, value) in metadata {
-        let Ok(value) = HeaderValue::from_str(value) else {
+        combined
+            .entry(name.to_ascii_lowercase())
+            .or_default()
+            .push(value);
+    }
+    let mut missing = 0u64;
+    for (name, values) in combined {
+        let value = values.join(",");
+        if value.chars().any(char::is_control) {
+            missing = missing.saturating_add(1);
+            continue;
+        }
+        let value = encode_metadata_value(&value);
+        let Ok(value) = HeaderValue::from_str(&value) else {
             continue;
         };
         let Ok(header) = HeaderName::try_from(format!("{META_PREFIX}{name}")) else {
             continue;
         };
         response.headers_mut().insert(header, value);
+    }
+    if missing > 0
+        && let Ok(value) = HeaderValue::from_str(&missing.to_string())
+    {
+        response.headers_mut().insert("x-amz-missing-meta", value);
     }
 }
 
@@ -263,7 +377,7 @@ pub(crate) async fn s3_put_object(
     // Capture S3 user metadata (x-amz-meta-*) and compute the ETag (hex MD5 of
     // the object bytes) while the body streams — standard S3 semantics that
     // checksum-verifying clients (s3cmd, the AWS SDKs) depend on.
-    let user_metadata = capture_user_metadata(&headers);
+    let user_metadata = capture_user_metadata(&headers)?;
     let hasher = Arc::new(Mutex::new(Md5::new()));
     let body = body.with_md5_tee(hasher.clone());
 
@@ -302,6 +416,7 @@ async fn s3_copy_object(
     copy_source: &str,
     headers: &HeaderMap,
 ) -> Result<Response, S3Error> {
+    let directive = metadata_directive(headers)?;
     let source = parse_copy_source(copy_source)
         .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-copy-source header"))?;
     // The source must be inside the caller's bound bucket (which must equal the
@@ -355,8 +470,8 @@ async fn s3_copy_object(
     // — resolved from the SAME snapshot as the source bytes, so the copied
     // metadata always belongs to the copied content (F-79); REPLACE overrides
     // it with the x-amz-meta-* headers of this request.
-    let user_metadata = match metadata_directive(headers) {
-        MetadataDirective::Replace => capture_user_metadata(headers),
+    let user_metadata = match directive {
+        MetadataDirective::Replace => capture_user_metadata(headers)?,
         MetadataDirective::Copy => snapshot.user_metadata,
     };
 
@@ -1136,6 +1251,37 @@ fn last_modified_from_entry(entry: Option<&S3ObjectEntry>) -> String {
 mod conditional_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    #[test]
+    fn metadata_legacy_pairs_and_unprintable_values_are_served_without_loss() {
+        let mut response = axum::response::Response::new(Body::empty());
+        insert_user_metadata(
+            &mut response,
+            &[
+                ("Label".to_owned(), "first".to_owned()),
+                ("label".to_owned(), "second".to_owned()),
+                ("unprintable".to_owned(), "hidden\tvalue".to_owned()),
+            ],
+        );
+        assert_eq!(response.headers()["x-amz-meta-label"], "first,second");
+        assert!(!response.headers().contains_key("x-amz-meta-unprintable"));
+        assert_eq!(response.headers()["x-amz-missing-meta"], "1");
+    }
+
+    #[test]
+    fn metadata_unicode_words_are_bounded_and_recover_exact_text() {
+        let text = "é東京🙂".repeat(40);
+        let encoded = encode_metadata_value(&text);
+        assert!(encoded.split(' ').all(|word| word.len() <= 75));
+        assert_eq!(decode_metadata_value(&encoded), text);
+        assert_eq!(
+            decode_metadata_value("prefix =?UTF-8?B?Y2Fm?= \t =?utf-8?Q?=C3=A9?= suffix"),
+            "prefix café suffix"
+        );
+        for literal in ["=?custom?B?YWJj?=", "=?UTF-8?B?bad?=", "=?UTF-8?Q?bad=XY?="] {
+            assert_eq!(decode_metadata_value(literal), literal);
+        }
+    }
+
     #[test]
     fn unknown_copy_source_validators_preserve_existence_wildcards() {
         let snapshot = crate::backend::S3ObjectReadSnapshot {
