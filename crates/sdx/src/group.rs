@@ -863,6 +863,58 @@ mod tests {
     const XORB_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const READ_TOKEN: &str = "read-token";
 
+    async fn upload_controls_inside_runtime() {
+        // These controls never make a request: even an untouched upload must
+        // be safe to inspect, cancel, abort, and drop on an executor thread.
+        let auth = Auth::new(
+            "http://127.0.0.1:1",
+            RepositoryId {
+                provider: "github".to_owned(),
+                owner: "team".to_owned(),
+                repo: "assets".to_owned(),
+                revision: "main".to_owned(),
+            },
+        )
+        .unwrap()
+        .with_api_key("local-test".to_owned());
+        let client = XetClientBuilder::new()
+            .endpoint("xet://127.0.0.1:1/github/team/assets/main")
+            .auth(auth)
+            .build()
+            .unwrap();
+        let direct = client.upload_session().unwrap().upload_stream_handle();
+        direct.abort();
+        assert!(direct.write(Bytes::from_static(b"late")).await.is_err());
+        assert!(direct.finish().await.is_err());
+
+        let group = client.new_upload_group().unwrap();
+        let first = group.upload_stream().unwrap();
+        let second = group.upload_stream().unwrap();
+        assert_eq!(first.status(), XetTaskState::Queued);
+        assert_eq!(group.status().len(), 2);
+        first.cancel();
+        assert_eq!(first.status(), XetTaskState::Cancelled);
+        assert_eq!(second.status(), XetTaskState::Queued);
+        drop(first);
+        assert_eq!(group.active_upload_count(), 1);
+        group.abort();
+        assert_eq!(second.status(), XetTaskState::Cancelled);
+        assert!(group.upload_stream().is_err());
+        drop(second);
+        assert_eq!(group.active_upload_count(), 0);
+        assert!(group.status().is_empty());
+    }
+
+    #[tokio::test]
+    async fn upload_controls_are_safe_in_current_thread_runtime() {
+        upload_controls_inside_runtime().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upload_controls_are_safe_in_multithread_runtime() {
+        upload_controls_inside_runtime().await;
+    }
+
     fn serialize_payload(chunks: &[&[u8]]) -> Vec<u8> {
         use xet_core_structures::xorb_object::{CompressionScheme, serialize_chunk};
         let mut payload = Vec::new();

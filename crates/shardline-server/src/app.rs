@@ -371,8 +371,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/api/v1/integrity", get(admin_integrity))
         .route("/api/v1/nodes", get(admin_nodes))
         .route("/api/v1/tasks", get(admin_tasks))
-        .route("/api/v1/metrics", get(admin_metrics))
-        .layer(MetricsLayer);
+        .route("/api/v1/metrics", get(admin_metrics));
     if role.serves_api() {
         app = app
             .route(
@@ -457,7 +456,11 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .layer(middleware::from_fn(request_timeout_middleware))
         // Generated timeout responses retain CORS and security headers too.
         .layer(cors)
-        .layer(middleware::from_fn(security_headers_middleware));
+        .layer(middleware::from_fn(security_headers_middleware))
+        // Count every route, including frontend fallbacks and generated errors.
+        // This measures handler futures through response headers, not TCP connections
+        // or the lifetime of a streaming response body.
+        .layer(MetricsLayer);
 
     // Register route auth policies for auditability and fail-closed enforcement.
     let mut policy_registry = RoutePolicyRegistry::new();

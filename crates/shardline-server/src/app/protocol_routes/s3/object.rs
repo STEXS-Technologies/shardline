@@ -1061,7 +1061,12 @@ pub(crate) async fn s3_get_object(
         );
         insert_user_metadata(&mut response, &entry.user_metadata);
     }
-    metrics::record_download("s3", total_length, 0.0, true);
+    // Count the payload selected for this response before its body is polled.
+    // This is not a count of bytes acknowledged by the client.
+    let selected_length = range
+        .map_or(Some(total_length), |range| range.len())
+        .ok_or(ServerError::Overflow)?;
+    metrics::record_download("s3", selected_length, 0.0, true);
     Ok(response)
 }
 

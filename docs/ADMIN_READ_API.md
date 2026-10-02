@@ -182,14 +182,14 @@ Pagination is keyset-ordered by session id and pushed into the store query, so a
 | --- | --- | --- |
 | `api_version`, `observed_at_unix_seconds` | common | Common fields. |
 | `prometheus_path` | string | Always `/metrics`; use it for full time-series scraping. |
-| `active_connections` | signed integer | Connections active in this process at observation time. |
+| `active_connections` | signed integer | Active HTTP handler requests at observation time, through response headers. The historical field name does not count TCP connections or streaming response bodies. |
 | `admitted_requests` | unsigned integer | Requests admitted during this process lifetime. |
 | `queued_requests` | unsigned integer | Requests queued during this process lifetime. |
 | `rejected_requests` | unsigned integer | Requests rejected by admission control during this process lifetime. |
 | `upload_requests` | unsigned integer | Upload requests observed during this process lifetime. |
 | `upload_bytes` | unsigned integer | Upload bytes observed during this process lifetime. |
 | `download_requests` | unsigned integer | Download requests observed during this process lifetime. |
-| `download_bytes` | unsigned integer | Download bytes observed during this process lifetime. |
+| `download_bytes` | unsigned integer | Payload bytes selected for download responses during this process lifetime, including selected ranges. Counted before body streaming; not a guarantee of bytes delivered to clients. |
 | `range_requests` | unsigned integer | Range requests observed during this process lifetime. |
 | `server_uptime_seconds` | signed integer | Seconds since the server process started. |
 | `reconstruction_requests` | unsigned integer | Total reconstruction requests. |

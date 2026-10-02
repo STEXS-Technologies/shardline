@@ -10,6 +10,8 @@ use std::{
 
 #[cfg(not(unix))]
 use std::io::Write;
+#[cfg(not(unix))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;

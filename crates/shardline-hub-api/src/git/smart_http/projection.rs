@@ -1180,41 +1180,60 @@ mod tests {
                 false,
             )
             .unwrap();
-        let database = temp.path().join("metadata.sqlite3");
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let connection = rusqlite::Connection::open(database).unwrap();
-            connection
-                .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
-                .unwrap();
-            ready_tx.send(()).unwrap();
-            // Watchdog lets a regressed synchronous handler return so the test
-            // reports a failure rather than hanging the entire test process.
-            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
-            connection.execute_batch("COMMIT;").unwrap();
-        });
-        ready_rx.recv().unwrap();
-        let started = std::time::Instant::now();
-        let state_for_refs = state.clone();
-        let refs = tokio::spawn(async move {
-            super::super::ref_advertisement::collect_refs(&state_for_refs, "alice/repo").await
-        });
-        let projection = tokio::spawn(project_history_async(
-            state,
-            "alice/repo".to_owned(),
-            AuthorizedRepository::anonymous_full_access(),
-        ));
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let elapsed = started.elapsed();
-        release_tx.send(()).unwrap();
-        holder.join().unwrap();
-        projection.await.unwrap().unwrap();
-        refs.await.unwrap().unwrap();
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "blocked storage must leave the async timer runnable: {elapsed:?}"
-        );
+        // Exercise each async adapter under its own blocking read. Running both
+        // together also races their DELETE-to-WAL promotion, which is unrelated
+        // to whether storage work stalls the current-thread executor.
+        for project in [true, false] {
+            let database = temp.path().join("metadata.sqlite3");
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let connection = rusqlite::Connection::open(database).unwrap();
+                connection
+                    .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+                    .unwrap();
+                ready_tx.send(()).unwrap();
+                // Watchdog lets a regressed synchronous handler return so the test
+                // reports a failure rather than hanging the entire test process.
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+                connection.execute_batch("COMMIT;").unwrap();
+            });
+            ready_rx.recv().unwrap();
+            let started = std::time::Instant::now();
+            let state_for_operation = state.clone();
+            let operation = tokio::spawn(async move {
+                if project {
+                    project_history_async(
+                        state_for_operation,
+                        "alice/repo".to_owned(),
+                        AuthorizedRepository::anonymous_full_access(),
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    super::super::ref_advertisement::collect_refs(
+                        &state_for_operation,
+                        "alice/repo",
+                    )
+                    .await
+                    .map(|_| ())
+                }
+            });
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let elapsed = started.elapsed();
+            let still_blocked = !operation.is_finished();
+            release_tx.send(()).unwrap();
+            holder.join().unwrap();
+            operation.await.unwrap().unwrap();
+            assert!(
+                still_blocked,
+                "storage operation must wait for lock release"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "blocked storage must leave the async timer runnable: {elapsed:?}"
+            );
+        }
     }
 }

@@ -72,7 +72,12 @@ pub(crate) async fn direct_object_response_from_snapshot(
             .headers_mut()
             .insert("Docker-Content-Digest", digest_value);
     }
-    metrics::record_download(protocol, total_length, 0.0, true);
+    // Count the payload selected for this response before its body is polled.
+    // This is not a count of bytes acknowledged by the client.
+    let selected_length = range
+        .map_or(Some(total_length), |range| range.len())
+        .ok_or(ServerError::Overflow)?;
+    metrics::record_download(protocol, selected_length, 0.0, true);
     Ok(response)
 }
 
