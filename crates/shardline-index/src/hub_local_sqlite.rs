@@ -6,9 +6,9 @@ use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 use crate::{
     hub::{
         EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
-        HubRepo, HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage,
-        HubTreePageEntry, HubTreePageOptions, HubWebhook, canonical_ref_name,
-        hub_tree_requires_recovery,
+        HubRefPublicationMode, HubRefUpdateOutcome, HubRepo, HubRepoSearchOptions, HubRepoType,
+        HubRevision, HubStore, HubTreePage, HubTreePageEntry, HubTreePageOptions, HubWebhook,
+        canonical_ref_name, hub_tree_requires_recovery,
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
@@ -289,13 +289,42 @@ impl HubStore for LocalIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error> {
-        match self.publish_hub_revision(repo_id, parent_sha, new_sha, ref_name, message, false)? {
+        match self.publish_hub_revision(
+            repo_id,
+            parent_sha,
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::Upsert,
+        )? {
             HubRefCreateOutcome::Created(revision) => Ok(revision),
             HubRefCreateOutcome::AlreadyExists | HubRefCreateOutcome::Unsupported => {
                 Err(rusqlite::Error::QueryReturnedNoRows.into())
             }
         }
     }
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        match self.publish_hub_revision(
+            repo_id,
+            Some(expected_sha),
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::UpdateOnly,
+        )? {
+            HubRefCreateOutcome::Created(revision) => Ok(HubRefUpdateOutcome::Updated(revision)),
+            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
+            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
+        }
+    }
+
     fn create_revision_if_absent(
         &self,
         repo_id: &str,
@@ -304,7 +333,14 @@ impl HubStore for LocalIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRefCreateOutcome, Self::Error> {
-        self.publish_hub_revision(repo_id, parent_sha, new_sha, ref_name, message, true)
+        self.publish_hub_revision(
+            repo_id,
+            parent_sha,
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::CreateOnly,
+        )
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
@@ -871,7 +907,7 @@ impl LocalIndexStore {
         new_sha: &str,
         ref_name: &str,
         message: &str,
-        require_absent: bool,
+        mode: HubRefPublicationMode,
     ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
         let ref_name = canonical_ref_name(ref_name);
         let root = self.root().to_owned();
@@ -891,7 +927,14 @@ impl LocalIndexStore {
                 )
                 .optional()?;
 
-            if require_absent && current_ref.is_some() {
+            if matches!(mode, HubRefPublicationMode::CreateOnly) && current_ref.is_some() {
+                return Ok(HubRefCreateOutcome::AlreadyExists);
+            }
+
+            // Strict updates never reinterpret a deleted ref as branch creation.
+            if matches!(mode, HubRefPublicationMode::UpdateOnly)
+                && (parent_sha.is_none() || current_ref.as_deref() != parent_sha.as_deref())
+            {
                 return Ok(HubRefCreateOutcome::AlreadyExists);
             }
 
@@ -2542,5 +2585,69 @@ mod tests {
         let files = store.get_files(commit_sha).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "model.safetensors");
+    }
+    #[test]
+    fn strict_updates_reject_absent_deleted_and_moved_refs_without_revision_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(temp.path().to_owned()).unwrap();
+        let repo = "owner/strict";
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        store
+            .create_revision(repo, Some(EMPTY_HUB_REVISION), "old", "selected", "old")
+            .unwrap();
+        let before = store.list_revisions(repo).unwrap().len();
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "old", "missing-new", "missing", "missing")
+                .unwrap(),
+            HubRefUpdateOutcome::Conflict
+        ));
+        assert_eq!(store.list_revisions(repo).unwrap().len(), before);
+        store.delete_ref(repo, "selected", "old").unwrap();
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "old", "deleted-new", "selected", "deleted")
+                .unwrap(),
+            HubRefUpdateOutcome::Conflict
+        ));
+        assert!(
+            !store
+                .list_refs(repo)
+                .unwrap()
+                .iter()
+                .any(|r| r.ref_name == "selected")
+        );
+        assert_eq!(store.list_revisions(repo).unwrap().len(), before);
+        // Historical-parent branch creation remains intentional and supported.
+        store
+            .create_revision(repo, Some("old"), "moved", "selected", "branch")
+            .unwrap();
+        let before = store.list_revisions(repo).unwrap().len();
+        assert!(matches!(
+            store
+                .update_revision_if_current(
+                    repo,
+                    "old",
+                    "stale-new",
+                    "refs/heads/selected",
+                    "stale"
+                )
+                .unwrap(),
+            HubRefUpdateOutcome::Conflict
+        ));
+        assert_eq!(store.list_revisions(repo).unwrap().len(), before);
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "moved", "new", "refs/heads/selected", "update")
+                .unwrap(),
+            HubRefUpdateOutcome::Updated(_)
+        ));
+        assert!(
+            store
+                .list_refs(repo)
+                .unwrap()
+                .iter()
+                .any(|r| r.ref_name == "selected" && r.sha == "new")
+        );
     }
 }
