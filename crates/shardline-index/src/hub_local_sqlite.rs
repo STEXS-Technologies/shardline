@@ -689,7 +689,7 @@ impl HubStore for LocalIndexStore {
         let repo_id = repo_id.to_owned();
         retry_sqlite_busy(|| {
             let mut conn = open_hub_connection_rw(&root)?;
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let ref_names = {
                 let mut statement =
                     tx.prepare("SELECT ref_name FROM shardline_hub_refs WHERE repo_id = ?1")?;

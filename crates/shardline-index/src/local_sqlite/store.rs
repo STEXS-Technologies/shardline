@@ -174,7 +174,8 @@ impl LocalIndexStore {
         batch_size: usize,
     ) -> Result<usize, LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let updated = helpers::backfill_reliability_merkle_commits(&transaction, batch_size)?;
         transaction.commit()?;
         Ok(updated)
@@ -189,7 +190,8 @@ impl LocalIndexStore {
     /// persisted event is invalid or has a broken sequence.
     pub fn repair_reliability_merkle_commits(&self) -> Result<usize, LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let repaired = helpers::repair_reliability_merkle_commits(&transaction)?;
         transaction.commit()?;
         Ok(repaired)

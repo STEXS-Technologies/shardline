@@ -2324,6 +2324,11 @@ impl FileReconstructor {
 // DownloadStream
 // ============================================================================
 
+struct PendingDownloadData {
+    receiver: oneshot::Receiver<Bytes>,
+    permit: Option<BufferPermit>,
+}
+
 /// A streaming download handle that yields data chunks as they are
 /// reconstructed (mirror `data_writer/download_stream.rs`).
 ///
@@ -2337,6 +2342,7 @@ impl FileReconstructor {
 /// surfaces on the call that would have returned the next chunk (or on the
 /// final `None`) via the shared run state.
 pub struct DownloadStream {
+    pending_data: Option<PendingDownloadData>,
     receiver: UnboundedReceiver<SequentialRetrievalItem>,
     finished: bool,
     run_state: Arc<RunState>,
@@ -2371,6 +2377,7 @@ impl DownloadStream {
         }
         Self {
             receiver,
+            pending_data: None,
             finished: false,
             run_state,
             start_signal: Some(start_signal),
@@ -2407,6 +2414,9 @@ impl DownloadStream {
     ///
     /// Returns `Ok(None)` when the download is complete or cancelled.
     ///
+    /// Dropping this future before it completes preserves any pending chunk
+    /// for the next call. Use [`cancel`](Self::cancel) to stop the download.
+    ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when a background reconstruction task failed.
@@ -2416,52 +2426,63 @@ impl DownloadStream {
         }
         self.ensure_started();
 
-        let item = if let Ok(item) = self.receiver.try_recv() {
-            Some(item)
-        } else {
-            tokio::select! {
-                biased;
-                recv = self.receiver.recv() => recv,
-                () = self.run_state.cancelled() => None,
-            }
-        };
-
-        match item {
-            Some(SequentialRetrievalItem::Data { receiver, permit }) => {
-                // The term's bytes may still be in flight (the data future is
-                // resolving the xorb fetch/decode), so awaiting the oneshot
-                // must race cancellation: a group/session abort has to surface
-                // as a prompt `Ok(None)` rather than hanging on the fetch
-                // (M2b2 stream-group abort semantics).
-                let data = tokio::select! {
+        if self.pending_data.is_none() {
+            let item = if let Ok(item) = self.receiver.try_recv() {
+                Some(item)
+            } else {
+                tokio::select! {
                     biased;
-                    data = receiver => match data {
-                        Ok(data) => data,
-                        Err(_) => {
-                            self.run_state.check_error()?;
-                            if self.run_state.is_cancelled() {
-                                self.finished = true;
-                                return Ok(None);
-                            }
-                            return Err(SdxError::StreamInternal(
-                                "data sender was dropped before sending data".to_owned(),
-                            ));
-                        }
-                    },
-                    () = self.run_state.cancelled() => {
-                        self.finished = true;
-                        self.run_state.check_error()?;
-                        return Ok(None);
-                    }
-                };
+                    recv = self.receiver.recv() => recv,
+                    () = self.run_state.cancelled() => None,
+                }
+            };
+            match item {
+                Some(SequentialRetrievalItem::Data { receiver, permit }) => {
+                    self.pending_data = Some(PendingDownloadData { receiver, permit });
+                }
+                Some(SequentialRetrievalItem::Finish) | None => {
+                    self.finished = true;
+                    self.run_state.check_error()?;
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Keep the in-flight receiver and its buffer permit in the stream.
+        // Dropping a `next()` future (for example, on a timeout) must leave
+        // this term available for the consumer's next attempt.
+        let Some(pending) = self.pending_data.as_mut() else {
+            return Err(SdxError::StreamInternal(
+                "pending stream data is missing".to_owned(),
+            ));
+        };
+        let result = tokio::select! {
+            biased;
+            data = &mut pending.receiver => Some(data),
+            () = self.run_state.cancelled() => None,
+        };
+        // A completed receiver cannot be polled again, and cancellation of
+        // the whole reconstruction must release its permit promptly.
+        if let Some(completed) = self.pending_data.take() {
+            drop(completed.permit);
+        }
+        match result {
+            Some(Ok(data)) => {
                 self.run_state
                     .report_bytes_written(u64::try_from(data.len()).unwrap_or(u64::MAX));
-                // The buffer permit is released only after the consumer has
-                // received these bytes.
-                drop(permit);
                 Ok(Some(data))
             }
-            Some(SequentialRetrievalItem::Finish) | None => {
+            Some(Err(_)) => {
+                self.run_state.check_error()?;
+                if self.run_state.is_cancelled() {
+                    self.finished = true;
+                    return Ok(None);
+                }
+                Err(SdxError::StreamInternal(
+                    "data sender was dropped before sending data".to_owned(),
+                ))
+            }
+            None => {
                 self.finished = true;
                 self.run_state.check_error()?;
                 Ok(None)
@@ -2501,6 +2522,7 @@ impl DownloadStream {
         self.cancel_reconstruction();
         drop(self.start_signal.take());
         self.receiver.close();
+        drop(self.pending_data.take());
         self.finished = true;
     }
 
@@ -3527,6 +3549,131 @@ mod tests {
         assert!(block.data.get().is_none());
     }
 
+    fn queued_download_stream(
+        receiver: UnboundedReceiver<SequentialRetrievalItem>,
+        run_state: Arc<RunState>,
+    ) -> DownloadStream {
+        DownloadStream {
+            receiver,
+            pending_data: None,
+            finished: false,
+            run_state,
+            start_signal: None,
+            #[cfg(not(target_family = "wasm"))]
+            runtime: test_runtime(),
+        }
+    }
+
+    #[tokio::test]
+    async fn timed_out_next_preserves_queued_and_active_data() {
+        let state = RunState::new(CancellationToken::new());
+        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
+        let (tx, rx) = unbounded_channel();
+        let mut stream = queued_download_stream(rx, state);
+        let deadline = std::time::Duration::from_millis(1);
+        // No item has been queued: cancelling the queue wait loses nothing.
+        assert!(tokio::time::timeout(deadline, stream.next()).await.is_err());
+        let (data_tx, data_rx) = oneshot::channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: Some(semaphore.acquire_many(1).await.unwrap()),
+        })
+        .unwrap();
+        tx.send(SequentialRetrievalItem::Finish).unwrap();
+        // The item is dequeued but its bytes have not arrived. Repeated
+        // consumer timeouts must retain both the item and its buffer permit.
+        for _ in 0..2 {
+            assert!(tokio::time::timeout(deadline, stream.next()).await.is_err());
+            assert_eq!(semaphore.available_permits(), 0);
+            assert!(!data_tx.is_closed());
+        }
+        let expected = Bytes::from_static(b"preserved download chunk");
+        data_tx.send(expected.clone()).unwrap();
+        assert_eq!(stream.next().await.unwrap(), Some(expected));
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(stream.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn timed_out_next_preserves_background_error() {
+        let state = RunState::new(CancellationToken::new());
+        let (tx, rx) = unbounded_channel();
+        let (data_tx, data_rx) = oneshot::channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: None,
+        })
+        .unwrap();
+        tx.send(SequentialRetrievalItem::Finish).unwrap();
+        let mut stream = queued_download_stream(rx, state.clone());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                .await
+                .is_err()
+        );
+        // A queued Finish cannot bypass the still-pending term while the
+        // producer has not yet published its failure.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                .await
+                .is_err()
+        );
+        state.set_error(SdxError::StreamInternal(
+            "delayed producer error".to_owned(),
+        ));
+        drop(data_tx);
+        assert!(
+            matches!(stream.next().await, Err(SdxError::StreamInternal(message))
+            if message == "delayed producer error")
+        );
+        assert!(stream.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_stream_releases_timed_out_pending_data() {
+        let state = RunState::new(CancellationToken::new());
+        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
+        let (tx, rx) = unbounded_channel();
+        let (data_tx, data_rx) = oneshot::channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: Some(semaphore.acquire_many(1).await.unwrap()),
+        })
+        .unwrap();
+        let mut stream = queued_download_stream(rx, state);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                .await
+                .is_err()
+        );
+        stream.cancel();
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(data_tx.is_closed());
+        assert!(stream.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_releases_timed_out_pending_data() {
+        let state = RunState::new(CancellationToken::new());
+        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
+        let (tx, rx) = unbounded_channel();
+        let (data_tx, data_rx) = oneshot::channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: Some(semaphore.acquire_many(1).await.unwrap()),
+        })
+        .unwrap();
+        let mut stream = queued_download_stream(rx, state);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                .await
+                .is_err()
+        );
+        drop(stream);
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(data_tx.is_closed());
+    }
+
     #[tokio::test]
     async fn cancelled_stream_with_closed_data_sender_finishes_cleanly() {
         let state = RunState::new(CancellationToken::new());
@@ -3545,6 +3692,7 @@ mod tests {
         drop(data_tx);
         let mut stream = DownloadStream {
             receiver: rx,
+            pending_data: None,
             finished: false,
             run_state: state,
             start_signal: None,
