@@ -194,7 +194,9 @@ impl TransferClient {
     /// is the absolute transfer URL advertised in the reconstruction plan
     /// (`fetch_info`/`xorbs`). Accepts a single-range 206 (with
     /// `Content-Range`) or, defensively, a `multipart/byteranges` body. A
-    /// plain 200 is treated as the full xorb starting at offset 0.
+    /// plain 200 is treated as the full xorb starting at offset 0. Multipart
+    /// ranges must be contiguous and non-overlapping so their coordinates can
+    /// be represented by a single `served_range`; empty bodies are rejected.
     ///
     /// # Errors
     ///
@@ -222,14 +224,33 @@ impl TransferClient {
         if content_type.starts_with("multipart/byteranges") {
             let body = response.bytes().await?;
             let parts = parse_multipart_byteranges(&content_type, &body)?;
+            let first = parts.first().ok_or_else(|| {
+                TransferError::MalformedMultipart(
+                    "multipart response contains no ranges".to_owned(),
+                )
+            })?;
+            let start = first.range.start;
+            let mut end = first.range.end;
             let mut data = Vec::new();
-            for part in parts {
+            for (index, part) in parts.into_iter().enumerate() {
+                if part.range.is_empty()
+                    || part.range.len() != u64::try_from(part.data.len()).unwrap_or(u64::MAX)
+                {
+                    return Err(TransferError::MalformedMultipart(
+                        "multipart range length disagrees with its body".to_owned(),
+                    ));
+                }
+                if index != 0 && end.checked_add(1) != Some(part.range.start) {
+                    return Err(TransferError::MalformedMultipart(
+                        "multipart ranges must be contiguous and non-overlapping".to_owned(),
+                    ));
+                }
+                end = part.range.end;
                 data.extend_from_slice(&part.data);
             }
-            let length = u64::try_from(data.len()).unwrap_or(u64::MAX);
             return Ok(RangedXorb {
                 data,
-                served_range: ByteRange::new(0, length),
+                served_range: ByteRange::new(start, end),
             });
         }
 
@@ -249,8 +270,16 @@ impl TransferClient {
         };
         let body = response.bytes().await?;
         let data = body.to_vec();
-        let served_range = partial_range
-            .unwrap_or_else(|| ByteRange::new(0, u64::try_from(data.len()).unwrap_or(u64::MAX)));
+        let length = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        let full_body_end = length.checked_sub(1).ok_or_else(|| {
+            TransferError::InvalidResponse("xorb range response contains no bytes".to_owned())
+        })?;
+        let served_range = partial_range.unwrap_or_else(|| ByteRange::new(0, full_body_end));
+        if served_range.len() != length {
+            return Err(TransferError::InvalidResponse(
+                "Content-Range length disagrees with response body".to_owned(),
+            ));
+        }
         Ok(RangedXorb { data, served_range })
     }
 
@@ -614,6 +643,11 @@ fn parse_content_range(value: &str) -> Result<ByteRange, TransferError> {
     let end = end.parse::<u64>().map_err(|error| {
         TransferError::InvalidResponse(format!("invalid Content-Range header {value}: {error}"))
     })?;
+    if end < start {
+        return Err(TransferError::InvalidResponse(format!(
+            "inverted Content-Range header: {value}"
+        )));
+    }
     Ok(ByteRange::new(start, end))
 }
 
@@ -744,6 +778,104 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[tokio::test]
+    async fn fetch_xorb_range_preserves_full_body_inclusive_endpoints() {
+        let server = MockServer::start().await;
+        for body in [b"A".as_slice(), b"BBBB".as_slice()] {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .mount(&server)
+                .await;
+            let ranged = TransferClient::new(reqwest::Client::new())
+                .fetch_xorb_range(&server.uri(), "token", super::ByteRange::new(0, 3))
+                .await
+                .unwrap();
+            assert_eq!(
+                ranged.served_range,
+                super::ByteRange::new(0, body.len() as u64 - 1)
+            );
+            assert_eq!(ranged.served_range.len(), ranged.data.len() as u64);
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_xorb_range_rejects_empty_and_inconsistent_responses() {
+        let server = MockServer::start().await;
+        let responses = [
+            ResponseTemplate::new(200).set_body_bytes(Vec::<u8>::new()),
+            ResponseTemplate::new(206)
+                .insert_header("Content-Range", "bytes 10-13/20")
+                .set_body_bytes(b"BB"),
+            ResponseTemplate::new(206)
+                .insert_header("Content-Range", "bytes 13-10/20")
+                .set_body_bytes(b"BBBB"),
+        ];
+        for response in responses {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            assert!(matches!(
+                TransferClient::new(reqwest::Client::new())
+                    .fetch_xorb_range(&server.uri(), "token", super::ByteRange::new(10, 13))
+                    .await,
+                Err(crate::TransferError::InvalidResponse(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_xorb_range_preserves_contiguous_multipart_coordinates() {
+        let server = MockServer::start().await;
+        for body in [
+            "--b\r\nContent-Range: bytes 10-13/20\r\n\r\nBBBB\r\n--b--\r\n",
+            "--b\r\nContent-Range: bytes 12-13/20\r\n\r\nBB\r\n--b\r\nContent-Range: bytes 10-11/20\r\n\r\nBB\r\n--b--\r\n",
+        ] {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(206)
+                        .set_body_raw(body, "multipart/byteranges; boundary=b"),
+                )
+                .mount(&server)
+                .await;
+            let ranged = TransferClient::new(reqwest::Client::new())
+                .fetch_xorb_range(&server.uri(), "token", super::ByteRange::new(10, 13))
+                .await
+                .unwrap();
+            assert_eq!(ranged.served_range, super::ByteRange::new(10, 13));
+            assert_eq!(ranged.data, b"BBBB");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_xorb_range_rejects_unrepresentable_multipart_responses() {
+        let server = MockServer::start().await;
+        for body in [
+            "--b--\r\n",
+            "--b\r\nContent-Range: bytes 10-13/20\r\n\r\nBB\r\n--b--\r\n",
+            "--b\r\nContent-Range: bytes 10-11/20\r\n\r\nBB\r\n--b\r\nContent-Range: bytes 13-14/20\r\n\r\nBB\r\n--b--\r\n",
+            "--b\r\nContent-Range: bytes 10-11/20\r\n\r\nBB\r\n--b\r\nContent-Range: bytes 11-12/20\r\n\r\nBB\r\n--b--\r\n",
+        ] {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(206)
+                        .set_body_raw(body, "multipart/byteranges; boundary=b"),
+                )
+                .mount(&server)
+                .await;
+            assert!(matches!(
+                TransferClient::new(reqwest::Client::new())
+                    .fetch_xorb_range(&server.uri(), "token", super::ByteRange::new(10, 13))
+                    .await,
+                Err(crate::TransferError::MalformedMultipart(_))
+            ));
+        }
+    }
 
     #[test]
     fn parse_multipart_single_part() {

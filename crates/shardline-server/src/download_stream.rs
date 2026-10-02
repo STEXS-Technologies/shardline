@@ -1645,6 +1645,39 @@ mod tests {
     // ── xorb-backed file record tests ────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xorb_range_rejects_corruption_outside_requested_bytes() {
+        let chunks = vec![(vec![1; 1024], 0), (vec![2; 1024], 1024)];
+        let packed = crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+        crate::upload_ingest::xorb_packer::store_xorb(
+            &object_store,
+            &packed.xorb_hash_hex,
+            &packed.serialized,
+        )
+        .await
+        .unwrap();
+        let key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
+        let path = object_store.local_path_for_key(&key).unwrap();
+        let mut corrupt = packed.serialized.clone();
+        // Damage the second chunk, outside the one-byte serialized range.
+        let offset = usize::try_from(packed.chunk_entries[1].packed_offset).unwrap();
+        corrupt[offset] ^= 1;
+        std::fs::write(path, &corrupt).unwrap();
+        let result = super::validated_xorb_byte_range_stream(
+            &object_store,
+            &key,
+            &packed.xorb_hash_hex,
+            corrupt.len() as u64,
+            ByteRange::new(0, 0).unwrap(),
+        );
+        assert!(
+            result.is_err(),
+            "full xorb validation must precede delivery"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn xorb_backed_file_record_reads_correctly() {
         use shardline_index::{FileChunkRecord, FileRecord};
 

@@ -648,8 +648,12 @@ pub async fn run_database_migration(
     })
 }
 
-async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), SqlxError> {
-    raw_sql(&format!(
+async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
+    // IF NOT EXISTS does not serialize concurrent first-time CREATEs in
+    // Postgres. Protect bootstrap itself, including status/verify commands,
+    // before callers acquire their longer-lived migration guard.
+    let mut transaction = acquire_migration_lock(pool).await?;
+    query(&format!(
         "CREATE TABLE IF NOT EXISTS {MIGRATION_HISTORY_TABLE} (
             version TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -657,8 +661,9 @@ async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), SqlxError> 
             applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )"
     ))
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
 
     Ok(())
 }
@@ -2539,8 +2544,9 @@ mod tests {
         DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand,
         DatabaseMigrationError, DatabaseMigrationOptions, DatabaseMigrationReport,
         DatabaseMigrationStatusEntry, acquire_migration_lock, bundled_database_migrations,
-        lock_authoritative_operation, migration_by_version, migration_checksum,
-        migration_fault_injection, repair_reliability_operation, run_database_migration,
+        ensure_migration_history_table, lock_authoritative_operation, migration_by_version,
+        migration_checksum, migration_fault_injection, repair_reliability_operation,
+        run_database_migration,
     };
 
     async fn run_test_migration_command(
@@ -2822,6 +2828,83 @@ mod tests {
             .expect("migration lock task should complete")
             .unwrap();
         drop(second);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn migration_history_bootstrap_serializes_before_first_create() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let admin = PgPool::connect(&database_url).await.unwrap();
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("migration_bootstrap_{suffix}");
+        query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let search_path = schema.clone();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(10)
+            .after_connect(move |connection, _| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    query("SELECT set_config('search_path', $1, false)")
+                        .bind(search_path)
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let held_lock = acquire_migration_lock(&pool).await.unwrap();
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            waiters.push(tokio::spawn(async move {
+                ensure_migration_history_table(&pool).await
+            }));
+        }
+        // Initialization must wait before even attempting its first CREATE.
+        let waiter = waiters.first_mut().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), waiter)
+                .await
+                .is_err()
+        );
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(format!("{schema}.shardline_schema_migrations"))
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert!(
+            !exists,
+            "bootstrap created the table before obtaining its lock"
+        );
+        held_lock.rollback().await.unwrap();
+        for waiter in waiters {
+            tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .expect("bootstrap should complete once the lock is released")
+                .unwrap()
+                .unwrap();
+        }
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(format!("{schema}.shardline_schema_migrations"))
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert!(exists);
+        pool.close().await;
+        query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -271,6 +271,43 @@ impl S3ObjectStore {
         stream_payload_for_range(result, expected_range)
     }
 
+    /// Copies a byte range into a file with one streaming GET.
+    ///
+    /// Uses the same runtime bridge as other synchronous storage operations.
+    /// The response is consumed one transport frame at a time, without collecting
+    /// the object in memory. Callers must discard the destination on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the GET or file write fails, or the response does
+    /// not contain exactly the requested number of bytes.
+    pub fn copy_range_to_file(
+        &self,
+        key: &ObjectKey,
+        range: ByteRange,
+        output: &mut File,
+    ) -> Result<(), S3ObjectStoreError> {
+        let expected = range.len().ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
+        self.block_on_result(async {
+            let mut stream = self.stream_range(key, range).await?;
+            let mut written = 0_u64;
+            while let Some(bytes) = stream.next().await {
+                let bytes = bytes?;
+                let length = u64::try_from(bytes.len())
+                    .map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?;
+                written = written
+                    .checked_add(length)
+                    .filter(|total| *total <= expected)
+                    .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
+                std::io::Write::write_all(output, &bytes)?;
+            }
+            if written != expected {
+                return Err(S3ObjectStoreError::RangeOutOfBounds);
+            }
+            Ok(())
+        })
+    }
+
     pub(crate) fn metadata_from_external(
         &self,
         metadata: &object_store::ObjectMeta,
