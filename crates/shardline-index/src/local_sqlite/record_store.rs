@@ -11,9 +11,188 @@ use crate::{
     FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope,
 };
 
+// Bound aggregate record bytes; one record may intrinsically exceed this budget.
+const RECORD_BATCH_BYTES: usize = 1024 * 1024;
+
+struct RecordScan {
+    connection: super::index_store::ReadConnection,
+    kind: RecordKind,
+    after: Option<String>,
+}
+
+impl RecordScan {
+    fn new(
+        store: &LocalRecordStore,
+        kind: RecordKind,
+        reservation: Option<super::index_store::CloseReservation>,
+    ) -> Result<Self, LocalIndexStoreError> {
+        let connection =
+            super::index_store::ReadConnection::new(store.open_connection()?, reservation);
+        if let Err(error) = connection.get()?.execute_batch("BEGIN DEFERRED") {
+            connection.close();
+            return Err(error.into());
+        }
+        Ok(Self {
+            connection,
+            kind,
+            after: None,
+        })
+    }
+
+    fn abort(self) {
+        self.connection.close();
+    }
+
+    fn finish(self) -> Result<(), LocalIndexStoreError> {
+        let result = self
+            .connection
+            .get()?
+            .execute_batch("COMMIT")
+            .map_err(LocalIndexStoreError::from);
+        self.connection.close();
+        result
+    }
+
+    fn next_batch(
+        &mut self,
+        locators_only: bool,
+    ) -> Result<
+        Vec<Result<crate::StoredRecord<LocalRecordLocator>, LocalIndexStoreError>>,
+        LocalIndexStoreError,
+    > {
+        let predicate = if self.after.is_some() {
+            " AND record_key > ?2"
+        } else {
+            ""
+        };
+        let columns = if locators_only {
+            "record_key, record_kind, scope_key, file_id, content_hash"
+        } else {
+            "record_key, record_kind, scope_key, file_id, content_hash, record, updated_at_unix_seconds"
+        };
+        let sql = format!(
+            "SELECT {columns} FROM shardline_file_records WHERE record_kind = ?1{predicate} ORDER BY record_key LIMIT {}",
+            super::index_store::INVENTORY_BATCH_SIZE
+        );
+        let mut statement = self.connection.get()?.prepare(&sql)?;
+        let mut parameters = vec![self.kind.as_str().to_owned()];
+        parameters.extend(self.after.clone());
+        let mut rows = statement.query(rusqlite::params_from_iter(parameters.iter()))?;
+        let mut batch = Vec::with_capacity(super::index_store::INVENTORY_BATCH_SIZE);
+        let mut batch_bytes = 0usize;
+        while let Some(row) = rows.next()? {
+            self.after = Some(row.get("record_key")?);
+            let locator = super::helpers::local_record_locator_from_row(row)?;
+            let entry = if locators_only {
+                Ok(crate::StoredRecord {
+                    locator,
+                    bytes: Vec::new(),
+                    modified_since_epoch: Duration::ZERO,
+                })
+            } else {
+                // Keep errors in row order: the former traversal read/visited
+                // earlier valid records before a later byte/timestamp error.
+                (|| {
+                    let bytes = super::helpers::read_sqlite_record_bytes(row.get_ref("record")?)?;
+                    let modified_since_epoch =
+                        Duration::from_secs(i64_to_u64(row.get("updated_at_unix_seconds")?)?);
+                    Ok(crate::StoredRecord {
+                        locator,
+                        bytes,
+                        modified_since_epoch,
+                    })
+                })()
+            };
+            batch_bytes =
+                batch_bytes.saturating_add(entry.as_ref().map_or(0, |record| record.bytes.len()));
+            batch.push(entry);
+            if !locators_only && batch_bytes >= RECORD_BATCH_BYTES {
+                break;
+            }
+        }
+        Ok(batch)
+    }
+}
+
+async fn visit_records<Visitor, VisitorError>(
+    store: LocalRecordStore,
+    kind: RecordKind,
+    mut visitor: Visitor,
+) -> Result<(), VisitorError>
+where
+    Visitor: FnMut(crate::StoredRecord<LocalRecordLocator>) -> Result<(), VisitorError>,
+    LocalIndexStoreError: Into<VisitorError>,
+    VisitorError: Send,
+{
+    let reservation = super::index_store::reserve_async_cursor().map_err(Into::into)?;
+    let mut scan =
+        tokio::task::spawn_blocking(move || RecordScan::new(&store, kind, Some(reservation)))
+            .await
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
+            .map_err(Into::into)?
+            .map_err(Into::into)?;
+    for locators_only in [true, false] {
+        scan.after = None;
+        loop {
+            let (next, batch) =
+                tokio::task::spawn_blocking(move || match scan.next_batch(locators_only) {
+                    Ok(batch) => Ok((scan, batch)),
+                    Err(error) => {
+                        scan.abort();
+                        Err(error)
+                    }
+                })
+                .await
+                .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
+                .map_err(Into::into)?
+                .map_err(Into::into)?;
+            scan = next;
+            if batch.is_empty() {
+                break;
+            }
+            if !locators_only {
+                for entry in batch {
+                    let result = entry.map_err(Into::into).and_then(&mut visitor);
+                    if let Err(error) = result {
+                        tokio::task::spawn_blocking(move || scan.abort())
+                            .await
+                            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
+                            .map_err(Into::into)?;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+    tokio::task::spawn_blocking(move || scan.finish())
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
+        .map_err(Into::into)?
+        .map_err(Into::into)
+}
+
+/// SQLite async record traversal shares a 64-cursor budget with index visitors,
+/// including cursors being closed after cancellation. Exhaustion returns
+/// `Io(WouldBlock)` immediately rather than blocking a nested visitor.
 impl RecordTraversal for LocalRecordStore {
     type Error = LocalIndexStoreError;
     type Locator = LocalRecordLocator;
+
+    fn visit_latest_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(crate::StoredRecord<Self::Locator>) -> Result<(), VisitorError>
+            + Send
+            + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        let store = self.clone();
+        Box::pin(async move { visit_records(store, RecordKind::Latest, visitor).await })
+    }
 
     fn list_latest_record_locators(
         &self,
@@ -39,6 +218,22 @@ impl RecordTraversal for LocalRecordStore {
             .await
             .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
+    }
+
+    fn visit_version_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(crate::StoredRecord<Self::Locator>) -> Result<(), VisitorError>
+            + Send
+            + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        let store = self.clone();
+        Box::pin(async move { visit_records(store, RecordKind::Version, visitor).await })
     }
 
     fn list_version_record_locators(
@@ -514,5 +709,137 @@ mod tests {
         let store = make_store();
         let result = RecordMutation::prune_empty_latest_records(&store).await;
         assert!(result.is_ok());
+    }
+    #[test]
+    fn streaming_records_current_thread_order_snapshot_and_error_cleanup() {
+        let store = make_store();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for i in 0..super::super::index_store::INVENTORY_BATCH_SIZE + 1 {
+                let mut record = sample_record();
+                record.file_id = format!("stream-{i:04}.bin");
+                store.commit_file_version_metadata(&record).await.unwrap();
+            }
+            let expected = RecordTraversal::list_latest_record_locators(&store).await.unwrap();
+            let mut actual = Vec::new();
+            RecordTraversal::visit_latest_records(&store, |entry| {
+                if actual.is_empty() {
+                    let writer = store.clone();
+                    let handle = tokio::runtime::Handle::current();
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let mut record = sample_record();
+                        record.file_id = "zz-added.bin".into();
+                        sender.send(handle.block_on(writer.commit_file_version_metadata(&record))).unwrap();
+                    });
+                    receiver.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                }
+                let decoded: FileRecord = serde_json::from_slice(&entry.bytes).unwrap();
+                assert_eq!(decoded.file_id, entry.locator.file_id);
+                actual.push(entry.locator);
+                Ok::<_, LocalIndexStoreError>(())
+            }).await.unwrap();
+            assert_eq!(actual, expected);
+            let expected = RecordTraversal::list_version_record_locators(&store).await.unwrap();
+            let mut actual = Vec::new();
+            RecordTraversal::visit_version_records(&store, |entry| { actual.push(entry.locator); Ok::<_, LocalIndexStoreError>(()) }).await.unwrap();
+            assert_eq!(actual, expected);
+            let mut calls = 0;
+            let error = RecordTraversal::visit_latest_records(&store, |_| { calls += 1; Err::<(), _>(LocalIndexStoreError::InvalidRecordKind) }).await.unwrap_err();
+            assert!(matches!(error, LocalIndexStoreError::InvalidRecordKind));
+            assert_eq!(calls, 1);
+            assert_eq!(store.open_connection().unwrap().query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let mut signal = Some(sender);
+            let mut future = RecordTraversal::visit_latest_records(&store, |_| {
+                if let Some(sender) = signal.take() { sender.send(()).unwrap(); }
+                Ok::<_, LocalIndexStoreError>(())
+            });
+            tokio::select! { result = &mut future => panic!("visitor ended before cancellation: {result:?}"), result = receiver => result.unwrap() }
+            drop(future);
+            RecordTraversal::list_latest_record_locators(&store).await.unwrap();
+            assert_eq!(store.open_connection().unwrap().query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn streaming_records_byte_budget_preserves_large_and_following_record() {
+        let store = make_store();
+        let mut first = sample_record();
+        first.file_id = "a-large.bin".into();
+        let mut second = sample_record();
+        second.file_id = "b-small.bin".into();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime
+            .block_on(store.commit_file_version_metadata(&first))
+            .unwrap();
+        runtime
+            .block_on(store.commit_file_version_metadata(&second))
+            .unwrap();
+        let mut large = serde_json::to_vec(&first).unwrap();
+        large.extend(std::iter::repeat_n(b' ', RECORD_BATCH_BYTES + 33));
+        store.open_connection().unwrap().execute("UPDATE shardline_file_records SET record = ?1 WHERE record_kind = 'latest' AND file_id = ?2", params![large, first.file_id]).unwrap();
+        let mut scan = RecordScan::new(&store, RecordKind::Latest, None).unwrap();
+        let first_batch = scan.next_batch(false).unwrap();
+        assert_eq!(first_batch.len(), 1);
+        assert_eq!(first_batch[0].as_ref().unwrap().bytes, large);
+        let second_batch = scan.next_batch(false).unwrap();
+        assert_eq!(second_batch.len(), 1);
+        assert_eq!(
+            second_batch[0].as_ref().unwrap().locator.file_id,
+            second.file_id
+        );
+        assert!(scan.next_batch(false).unwrap().is_empty());
+        drop(scan);
+        runtime.block_on(async {
+            let mut rows = Vec::new();
+            RecordTraversal::visit_latest_records(&store, |row| {
+                rows.push(row);
+                Ok::<_, LocalIndexStoreError>(())
+            })
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].bytes, large);
+            assert_eq!(
+                serde_json::from_slice::<FileRecord>(&rows[1].bytes).unwrap(),
+                second
+            );
+        });
+    }
+    #[test]
+    fn streaming_records_locator_prevalidation_and_ordered_timestamp_error() {
+        let store = make_store();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for i in 0..super::super::index_store::INVENTORY_BATCH_SIZE + 1 {
+                let mut record = sample_record(); record.file_id = format!("ordered-{i:04}.bin");
+                store.commit_file_version_metadata(&record).await.unwrap();
+            }
+            let connection = store.open_connection().unwrap();
+            let last = connection.query_row("SELECT record_key FROM shardline_file_records WHERE record_kind = 'latest' ORDER BY record_key DESC LIMIT 1", [], |row| row.get::<_, String>(0)).unwrap();
+            connection.execute_batch("PRAGMA ignore_check_constraints = ON").unwrap();
+            connection.execute("UPDATE shardline_file_records SET updated_at_unix_seconds = -1 WHERE record_key = ?1", [&last]).unwrap();
+            let mut calls = 0;
+            let error = RecordTraversal::visit_latest_records(&store, |_| { calls += 1; Ok::<_, LocalIndexStoreError>(()) }).await.unwrap_err();
+            assert!(matches!(error, LocalIndexStoreError::IntegerOutOfRange(_)));
+            assert_eq!(calls, super::super::index_store::INVENTORY_BATCH_SIZE);
+            connection.execute("UPDATE shardline_file_records SET file_id = CAST(file_id AS BLOB) WHERE record_key = ?1", [&last]).unwrap();
+            calls = 0;
+            assert!(RecordTraversal::visit_latest_records(&store, |_| { calls += 1; Ok::<_, LocalIndexStoreError>(()) }).await.is_err());
+            assert_eq!(calls, 0);
+        });
     }
 }

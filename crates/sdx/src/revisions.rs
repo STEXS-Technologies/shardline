@@ -17,6 +17,12 @@ use crate::{
     tree::MetadataClient,
 };
 
+// Server names are <=512 UTF-8 bytes without controls. Quotes/backslashes
+// expand at most 2x; timestamps are u64. This client requests default 1000-row
+// pages, plus one bounded nextCursor and the outer JSON envelope.
+const REVISION_RESPONSE_LIMIT: usize = 1152;
+const REVISION_PAGE_RESPONSE_LIMIT: usize = 1_153_152;
+
 /// A revision record (`{name,createdAt,updatedAt}`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revision {
@@ -29,6 +35,7 @@ pub struct Revision {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct RevisionJson {
     name: String,
@@ -37,6 +44,7 @@ struct RevisionJson {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct RevisionsResponse {
     revisions: Vec<RevisionJson>,
@@ -45,6 +53,7 @@ struct RevisionsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct DeleteRevisionResponse {}
 
@@ -69,7 +78,14 @@ impl MetadataClient {
                 .unwrap_or_default();
             let url = crate::tree::build_url(&self.api_base, &route, &query);
             let body = self
-                .send(&retry, token.token.clone(), Method::GET, url, None)
+                .send(
+                    &retry,
+                    token.token.clone(),
+                    Method::GET,
+                    url,
+                    None,
+                    REVISION_PAGE_RESPONSE_LIMIT,
+                )
                 .await?;
             let response: RevisionsResponse = serde_json::from_slice(&body)
                 .map_err(|error| crate::tree::metadata_parse("list_revisions", &error))?;
@@ -98,7 +114,14 @@ impl MetadataClient {
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
         match self
-            .send(&retry, token.token, Method::POST, url, None)
+            .send(
+                &retry,
+                token.token,
+                Method::POST,
+                url,
+                None,
+                REVISION_RESPONSE_LIMIT,
+            )
             .await
         {
             Ok(body) => {
@@ -125,7 +148,14 @@ impl MetadataClient {
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
         let body = self
-            .send(&retry, token.token, Method::DELETE, url, None)
+            .send(
+                &retry,
+                token.token,
+                Method::DELETE,
+                url,
+                None,
+                REVISION_RESPONSE_LIMIT,
+            )
             .await?;
         // Idempotent: the server returns 200 even when `deleted: false`.
         let _: DeleteRevisionResponse = serde_json::from_slice(&body)
@@ -172,6 +202,32 @@ impl XetClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn revision_response_envelopes_cover_maximum_names_and_default_page() {
+        // Names permit quotes and backslashes (controls are rejected), both
+        // serialized as two bytes. Cursor is the raw last revision name.
+        let name = "\"\\".repeat(256);
+        let record = super::RevisionJson {
+            name: name.clone(),
+            created_at: u64::MAX,
+            updated_at: u64::MAX,
+        };
+        assert!(serde_json::to_vec(&record).unwrap().len() <= super::REVISION_RESPONSE_LIMIT);
+        let delete = serde_json::json!({ "name": &name, "deleted": false });
+        assert!(serde_json::to_vec(&delete).unwrap().len() <= super::REVISION_RESPONSE_LIMIT);
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Page<'wire> {
+            revisions: Vec<&'wire super::RevisionJson>,
+            next_cursor: Option<&'wire str>,
+        }
+        let page = Page {
+            revisions: vec![&record; 1000],
+            next_cursor: Some(&name),
+        };
+        assert!(serde_json::to_vec(&page).unwrap().len() <= super::REVISION_PAGE_RESPONSE_LIMIT);
+    }
+
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

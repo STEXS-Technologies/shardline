@@ -132,7 +132,7 @@ pub(crate) fn load_verified_event_json(
 /// replay remains available through [`load_verified_event_json`] for fsck and
 /// repair; current-state reads use this bounded boundary.
 pub(crate) fn load_latest_verified_event_json(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     operation_kind: OperationKind,
     operation_id: &str,
 ) -> Result<Option<Value>, LocalIndexStoreError> {
@@ -209,7 +209,7 @@ pub(crate) fn load_latest_verified_event_json(
 }
 
 pub(crate) fn load_latest_verified_event_json_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     operation_kind: OperationKind,
     operation_ids: &[String],
 ) -> Result<HashMap<String, Value>, LocalIndexStoreError> {
@@ -229,7 +229,7 @@ pub(crate) fn load_latest_verified_event_json_batch(
 }
 
 fn load_latest_verified_event_json_chunk(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     operation_kind: OperationKind,
     operation_ids: &[String],
 ) -> Result<HashMap<String, Value>, LocalIndexStoreError> {
@@ -682,7 +682,7 @@ pub(crate) fn quarantine_snapshot(
 }
 
 pub(crate) fn load_quarantine_evidence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     object_key: &str,
 ) -> Result<QuarantineEvidenceLog, LocalIndexStoreError> {
     let rows = load_latest_verified_event_json(
@@ -699,7 +699,7 @@ pub(crate) fn load_quarantine_evidence(
 }
 
 pub(crate) fn load_quarantine_evidence_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     object_keys: &[String],
 ) -> Result<HashMap<String, QuarantineEvidenceLog>, LocalIndexStoreError> {
     let heads = load_latest_verified_event_json_batch(
@@ -743,7 +743,7 @@ pub(crate) fn retention_snapshot(
 }
 
 pub(crate) fn load_retention_evidence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     object_key: &str,
 ) -> Result<RetentionEvidenceLog, LocalIndexStoreError> {
     let rows = load_latest_verified_event_json(
@@ -760,7 +760,7 @@ pub(crate) fn load_retention_evidence(
 }
 
 pub(crate) fn load_retention_evidence_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     object_keys: &[String],
 ) -> Result<HashMap<String, RetentionEvidenceLog>, LocalIndexStoreError> {
     let heads = load_latest_verified_event_json_batch(
@@ -803,7 +803,7 @@ pub(crate) fn webhook_snapshot(
 }
 
 pub(crate) fn load_webhook_evidence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     delivery: &WebhookDelivery,
 ) -> Result<WebhookDeliveryEvidenceLog, LocalIndexStoreError> {
     let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
@@ -823,7 +823,7 @@ pub(crate) fn load_webhook_evidence(
 }
 
 pub(crate) fn load_webhook_evidence_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     deliveries: &[WebhookDelivery],
 ) -> Result<HashMap<String, WebhookDeliveryEvidenceLog>, LocalIndexStoreError> {
     let operation_ids = deliveries
@@ -1116,7 +1116,7 @@ pub(crate) fn provider_evidence_operation_id(snapshot: &ProviderLifecycleSnapsho
 }
 
 pub(crate) fn load_provider_evidence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     snapshot: &ProviderLifecycleSnapshot,
 ) -> Result<ProviderEvidenceLog, LocalIndexStoreError> {
     let operation_id = provider_evidence_operation_id(snapshot);
@@ -1131,7 +1131,7 @@ pub(crate) fn load_provider_evidence(
 }
 
 pub(crate) fn load_provider_evidence_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     snapshots: &[ProviderLifecycleSnapshot],
 ) -> Result<HashMap<String, ProviderEvidenceLog>, LocalIndexStoreError> {
     let operation_ids = snapshots

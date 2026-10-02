@@ -80,9 +80,23 @@ pub struct RegisterResult {
     pub created: bool,
 }
 
+// Server metadata_routes accepts <=4096-byte paths without controls or
+// backslashes. Quotes need at most two JSON bytes; derived directory markers
+// get one additional byte. Fixed fields include a 64-hex ID and two u64s.
+const PATH_RESPONSE_LIMIT: usize = 8_450;
+
+fn tree_page_response_limit(limit: Option<usize>) -> usize {
+    // The server defaults to 1000 and rejects page sizes above 10,000.
+    let entries = limit.unwrap_or(1000).min(10_000);
+    entries
+        .saturating_mul(PATH_RESPONSE_LIMIT)
+        .saturating_add(8_450)
+}
+
 // ── wire response shapes (camelCase) ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct ResolveResponse {
     path: String,
@@ -92,6 +106,7 @@ struct ResolveResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct ListEntry {
     path: String,
@@ -102,6 +117,7 @@ struct ListEntry {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct ListResponse {
     entries: Vec<ListEntry>,
@@ -109,6 +125,7 @@ struct ListResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct RegisterResponse {
     path: String,
@@ -119,6 +136,7 @@ struct RegisterResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct DeletePathResponse {
     deleted: u64,
@@ -221,6 +239,7 @@ impl MetadataClient {
         method: Method,
         url: String,
         body: Option<serde_json::Value>,
+        response_limit: usize,
     ) -> Result<Vec<u8>, SdxError> {
         let transfer = self.transfer.clone();
         let bytes = retry
@@ -231,7 +250,7 @@ impl MetadataClient {
                 let body = body.clone();
                 async move {
                     let (_status, body) = transfer
-                        .request_raw(&method, &url, &tok, body.as_ref())
+                        .request_raw(&method, &url, &tok, body.as_ref(), response_limit)
                         .await?;
                     Ok(body)
                 }
@@ -246,7 +265,14 @@ impl MetadataClient {
         let route = self.repo_route(XET_TREE_ROUTE);
         let url = build_url(&self.api_base, &route, &[("path", path)]);
         let body = self
-            .send(&retry, token.token, Method::GET, url, None)
+            .send(
+                &retry,
+                token.token,
+                Method::GET,
+                url,
+                None,
+                PATH_RESPONSE_LIMIT,
+            )
             .await?;
         let response: ResolveResponse = serde_json::from_slice(&body)
             .map_err(|error| metadata_parse("resolve_path", &error))?;
@@ -276,7 +302,14 @@ impl MetadataClient {
         }
         let url = build_url(&self.api_base, &route, &query);
         let body = self
-            .send(&retry, token.token, Method::GET, url, None)
+            .send(
+                &retry,
+                token.token,
+                Method::GET,
+                url,
+                None,
+                tree_page_response_limit(limit),
+            )
             .await?;
         let response: ListResponse =
             serde_json::from_slice(&body).map_err(|error| metadata_parse("list_dir", &error))?;
@@ -316,6 +349,7 @@ impl MetadataClient {
                 Method::PUT,
                 url,
                 Some(serde_json::json!({ "fileId": file_id })),
+                PATH_RESPONSE_LIMIT,
             )
             .await?;
         let response: RegisterResponse = serde_json::from_slice(&body)
@@ -342,7 +376,14 @@ impl MetadataClient {
             url.push_str("?recursive=true");
         }
         let body = self
-            .send(&retry, token.token, Method::DELETE, url, None)
+            .send(
+                &retry,
+                token.token,
+                Method::DELETE,
+                url,
+                None,
+                PATH_RESPONSE_LIMIT,
+            )
             .await?;
         let response: DeletePathResponse =
             serde_json::from_slice(&body).map_err(|error| metadata_parse("delete_path", &error))?;
@@ -566,6 +607,63 @@ pub(crate) fn metadata_parse(context: &str, error: &serde_json::Error) -> SdxErr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_response_envelopes_cover_maximum_legal_paths_and_pages() {
+        let path = "\"".repeat(4096);
+        let entry = super::ListEntry {
+            path: path.clone(),
+            is_dir: false,
+            file_id: Some("a".repeat(64)),
+            size: Some(u64::MAX),
+            updated_at: Some(u64::MAX),
+        };
+        let resolve = super::ResolveResponse {
+            path: path.clone(),
+            file_id: "a".repeat(64),
+            size: u64::MAX,
+            updated_at: u64::MAX,
+        };
+        let register = super::RegisterResponse {
+            path: path.clone(),
+            file_id: "a".repeat(64),
+            size: u64::MAX,
+            updated_at: u64::MAX,
+            created: false,
+        };
+        assert!(serde_json::to_vec(&resolve).unwrap().len() <= super::PATH_RESPONSE_LIMIT);
+        assert!(serde_json::to_vec(&register).unwrap().len() <= super::PATH_RESPONSE_LIMIT);
+        let delete = serde_json::json!({ "path": &path, "deleted": u64::MAX, "recursive": false });
+        assert!(serde_json::to_vec(&delete).unwrap().len() <= super::PATH_RESPONSE_LIMIT);
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Page<'wire> {
+            entries: Vec<&'wire super::ListEntry>,
+            next_cursor: Option<&'wire str>,
+        }
+        struct Count(usize);
+        impl std::io::Write for Count {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_add(bytes.len())
+                    .ok_or_else(|| std::io::Error::other("byte counter overflow"))?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for limit in [None, Some(1), Some(10_000)] {
+            let page = Page {
+                entries: vec![&entry; limit.unwrap_or(1000)],
+                next_cursor: Some(&path),
+            };
+            let mut count = Count(0);
+            serde_json::to_writer(&mut count, &page).unwrap();
+            assert!(count.0 <= super::tree_page_response_limit(limit));
+        }
+    }
+
     use std::collections::HashSet;
 
     use serde_json::json;

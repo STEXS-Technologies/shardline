@@ -266,6 +266,12 @@ pub trait ReconstructionStore {
     /// Returns the adapter error when the inventory lookup fails.
     fn list_reconstruction_file_ids(&self) -> Result<Vec<FileId>, Self::Error>;
 
+    visit_items!(
+        visit_reconstruction_file_ids,
+        list_reconstruction_file_ids,
+        FileId
+    );
+
     /// Deletes one persisted file reconstruction.
     ///
     /// # Errors
@@ -633,6 +639,12 @@ pub trait AsyncIndexStore {
 
     /// Lists every persisted file-reconstruction identifier.
     fn list_reconstruction_file_ids(&self) -> IndexStoreFuture<'_, Vec<FileId>, Self::Error>;
+
+    visit_items_async!(
+        visit_reconstruction_file_ids,
+        list_reconstruction_file_ids,
+        FileId
+    );
 
     /// Deletes one persisted file reconstruction.
     fn delete_reconstruction<'operation>(

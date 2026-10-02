@@ -3205,6 +3205,54 @@ async fn s3_delete_objects_entity_encoded_key_is_decoded_and_deleted() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_objects_numeric_references_delete_exact_keys_once() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    for encoded in ["a&#38;b", "a&#x26;b"] {
+        seed_object(&app, "a&b").await;
+        let response = app
+            .clone()
+            .oneshot(delete_objects_request(
+                format!("/{BUCKET}?delete="),
+                format!("<Delete><Object><Key>{encoded}</Key></Object></Delete>"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            String::from_utf8(body_bytes(response).await)
+                .unwrap()
+                .contains("<Deleted><Key>a&amp;b</Key></Deleted>")
+        );
+        assert_eq!(object_status(&app, "a&b").await, StatusCode::NOT_FOUND);
+    }
+    seed_object(&app, "a&b").await;
+    seed_object(&app, "a%26%2338%3Bb").await;
+    let response = app
+        .clone()
+        .oneshot(delete_objects_request(
+            format!("/{BUCKET}?delete="),
+            "<Delete><Object><Key>a&amp;#38;b</Key></Object></Delete>".to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        object_status(&app, "a%26%2338%3Bb").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(object_status(&app, "a&b").await, StatusCode::OK);
+    for invalid in ["&#0;", "&#xD800;", "&#x110000;"] {
+        let response = app.clone().oneshot(delete_objects_request(
+            format!("/{BUCKET}?delete="),
+            format!("<Delete><Object><Key>a&amp;b</Key></Object><Object><Key>{invalid}</Key></Object></Delete>"),
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(object_status(&app, "a&b").await, StatusCode::OK);
+    }
+}
+
 // =========================================================================
 // ListBuckets (GET /)
 // =========================================================================
