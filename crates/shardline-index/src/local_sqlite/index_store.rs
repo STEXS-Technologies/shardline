@@ -32,6 +32,585 @@ use crate::{
     xet_hash_hex_string,
 };
 
+// Active and cancelled async cursors share a bounded close budget. Admission is
+// nonwaiting: nested visitors receive WouldBlock at capacity rather than wait
+// for the enclosing callback's cursor. A permit survives until SQLite closes.
+const ASYNC_CURSOR_LIMIT: usize = 64;
+
+struct ClosePool {
+    sender: std::sync::mpsc::SyncSender<CloseJob>,
+    admission: std::sync::Arc<tokio::sync::Semaphore>,
+    faulted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub(crate) struct CloseReservation {
+    pool: std::sync::Arc<ClosePool>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct CloseJob {
+    // Declaration order also preserves close-before-permit-release on unwind.
+    _connection: rusqlite::Connection,
+    _reservation: CloseReservation,
+    #[cfg(test)]
+    before_close: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl CloseJob {
+    fn close(self) {
+        #[cfg(test)]
+        let mut job = self;
+        #[cfg(not(test))]
+        let job = self;
+        #[cfg(test)]
+        if let Some(hook) = job.before_close.take() {
+            hook();
+        }
+        drop(job);
+    }
+}
+
+impl ClosePool {
+    fn new_with_spawn<Spawn>(capacity: usize, spawn: Spawn) -> std::io::Result<Self>
+    where
+        Spawn: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<CloseJob>(capacity);
+        let faulted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_faulted = faulted.clone();
+        spawn(Box::new(move || {
+            // The static pool retains a sender. No user callback is executed
+            // here; an unexpected per-job panic faults admission, but does not
+            // abandon the remaining already admitted close jobs.
+            while let Ok(job) = receiver.recv() {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    job.close();
+                }));
+                if result.is_err() {
+                    worker_faulted.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }))?;
+        Ok(Self {
+            sender,
+            admission: std::sync::Arc::new(tokio::sync::Semaphore::new(capacity)),
+            faulted,
+        })
+    }
+
+    fn reserve(self: &std::sync::Arc<Self>) -> Result<CloseReservation, LocalIndexStoreError> {
+        if self.faulted.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "SQLite cursor close worker faulted",
+            )
+            .into());
+        }
+        let permit = self.admission.clone().try_acquire_owned().map_err(|admission_error| std::io::Error::new(std::io::ErrorKind::WouldBlock, format!("SQLite traversal capacity reached (64 active or closing cursors); try again after a traversal closes: {admission_error}")))?;
+        Ok(CloseReservation {
+            pool: self.clone(),
+            _permit: permit,
+        })
+    }
+
+    fn enqueue(&self, job: CloseJob) {
+        // Every job retains a reserved permit. With this job still outside
+        // the queue, at most capacity-1 jobs can be queued, so Full is excluded.
+        if let Err(error) = self.sender.try_send(job) {
+            // Exceptional internal-fault-only fallback: never leak a SQLite
+            // handle or create unbounded rescue jobs. This synchronous close
+            // can block its caller, and all future admission is rejected.
+            self.faulted
+                .store(true, std::sync::atomic::Ordering::Release);
+            let fallback = match error {
+                std::sync::mpsc::TrySendError::Full(payload)
+                | std::sync::mpsc::TrySendError::Disconnected(payload) => payload,
+            };
+            fallback.close();
+        }
+    }
+}
+
+pub(crate) fn reserve_async_cursor() -> Result<CloseReservation, LocalIndexStoreError> {
+    static POOL: std::sync::OnceLock<Result<std::sync::Arc<ClosePool>, std::io::Error>> =
+        std::sync::OnceLock::new();
+    let pool = POOL
+        .get_or_init(|| {
+            ClosePool::new_with_spawn(ASYNC_CURSOR_LIMIT, |worker| {
+                std::thread::Builder::new()
+                    .name("shardline-sqlite-close".into())
+                    .spawn(worker)
+                    .map(drop)
+            })
+            .map(std::sync::Arc::new)
+        })
+        .as_ref()
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("could not start SQLite cursor close worker: {error}"),
+            )
+        })?;
+    pool.reserve()
+}
+
+pub(crate) struct ReadConnection {
+    connection: Option<rusqlite::Connection>,
+    reservation: Option<CloseReservation>,
+}
+
+impl ReadConnection {
+    pub(crate) const fn new(
+        connection: rusqlite::Connection,
+        reservation: Option<CloseReservation>,
+    ) -> Self {
+        Self {
+            connection: Some(connection),
+            reservation,
+        }
+    }
+
+    pub(crate) fn get(&self) -> Result<&rusqlite::Connection, LocalIndexStoreError> {
+        self.connection.as_ref().ok_or_else(|| {
+            LocalIndexStoreError::BlockingTask("SQLite read cursor already closed".into())
+        })
+    }
+
+    // This method is called only by synchronous APIs or a blocking task. Close
+    // before releasing admission, including any last-WAL checkpoint work.
+    pub(crate) fn close(mut self) {
+        drop(self.connection.take());
+        drop(self.reservation.take());
+    }
+}
+
+impl Drop for ReadConnection {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            if let Some(reservation) = self.reservation.take() {
+                let pool = reservation.pool.clone();
+                pool.enqueue(CloseJob {
+                    _connection: connection,
+                    _reservation: reservation,
+                    #[cfg(test)]
+                    before_close: None,
+                });
+            } else {
+                drop(connection);
+            }
+        }
+    }
+}
+
+// A visitor retains one deferred read snapshot, but never retains an entire
+// inventory. Decode and evidence passes finish before any visitor side effect.
+pub(crate) const INVENTORY_BATCH_SIZE: usize = 256;
+
+pub(crate) trait InventoryEntry: Sized + Send + 'static {
+    const TABLE: &'static str;
+    const COLUMNS: &'static str;
+    const KEYS: &'static [&'static str];
+    const HAS_EVIDENCE: bool = false;
+    const PREVALIDATE_SNAPSHOTS: bool = false;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> = None;
+    fn operation_ids(_batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        Ok(Vec::new())
+    }
+    fn verify_raw_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        if let Some(kind) = Self::OPERATION_KIND {
+            drop(super::helpers::load_latest_verified_event_json_batch(
+                connection,
+                kind,
+                &Self::operation_ids(batch)?,
+            )?);
+        }
+        Ok(())
+    }
+    fn verify_typed_heads(
+        _connection: &rusqlite::Connection,
+        _batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        Ok(())
+    }
+
+    fn validate_snapshots(_batch: &[Self]) -> Result<(), LocalIndexStoreError> {
+        Ok(())
+    }
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError>;
+    fn verify_batch(
+        _connection: &rusqlite::Connection,
+        _batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        Ok(())
+    }
+}
+
+pub(crate) struct InventoryScan<Entry> {
+    connection: ReadConnection,
+    after: Option<Vec<String>>,
+    entry: std::marker::PhantomData<Entry>,
+}
+
+impl<Entry: InventoryEntry> InventoryScan<Entry> {
+    pub(crate) fn new(store: &LocalIndexStore) -> Result<Self, LocalIndexStoreError> {
+        Self::open(store, None)
+    }
+
+    pub(crate) fn open(
+        store: &LocalIndexStore,
+        reservation: Option<CloseReservation>,
+    ) -> Result<Self, LocalIndexStoreError> {
+        let connection = ReadConnection::new(store.open_connection()?, reservation);
+        if let Err(error) = connection.get()?.execute_batch("BEGIN DEFERRED") {
+            connection.close();
+            return Err(error.into());
+        }
+        Ok(Self {
+            connection,
+            after: None,
+            entry: std::marker::PhantomData,
+        })
+    }
+
+    pub(crate) fn rewind(&mut self) {
+        self.after = None;
+    }
+
+    pub(crate) fn next_batch(&mut self, phase: u8) -> Result<Vec<Entry>, LocalIndexStoreError> {
+        let keys = Entry::KEYS.join(", ");
+        let predicate = if self.after.is_some() {
+            let placeholders = (1..=Entry::KEYS.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" WHERE ({keys}) > ({placeholders})")
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "SELECT {} FROM {}{} ORDER BY {} LIMIT {}",
+            Entry::COLUMNS,
+            Entry::TABLE,
+            predicate,
+            keys,
+            INVENTORY_BATCH_SIZE
+        );
+        let (batch, last_key) = {
+            let mut statement = self.connection.get()?.prepare(&sql)?;
+            let mut rows =
+                statement.query(rusqlite::params_from_iter(self.after.iter().flatten()))?;
+            let mut batch = Vec::with_capacity(INVENTORY_BATCH_SIZE);
+            let mut last_key = None;
+            while let Some(row) = rows.next()? {
+                batch.push(Entry::from_row(row)?);
+                last_key = Some(
+                    Entry::KEYS
+                        .iter()
+                        .map(|key| row.get::<_, String>(*key))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            (batch, last_key)
+        };
+        if phase == 1 {
+            Entry::validate_snapshots(&batch)?;
+        }
+        if phase == 2 {
+            Entry::verify_raw_heads(self.connection.get()?, &batch)?;
+        }
+        if phase == 3 {
+            Entry::verify_typed_heads(self.connection.get()?, &batch)?;
+        }
+        if phase == 4 {
+            Entry::verify_batch(self.connection.get()?, &batch)?;
+        }
+        if let Some(key) = last_key {
+            self.after = Some(key);
+        }
+        Ok(batch)
+    }
+
+    pub(crate) fn finish(self) -> Result<(), LocalIndexStoreError> {
+        let result = self
+            .connection
+            .get()?
+            .execute_batch("COMMIT")
+            .map_err(LocalIndexStoreError::from);
+        self.connection.close();
+        result
+    }
+
+    pub(crate) fn abort(self) {
+        self.connection.close();
+    }
+}
+
+fn visit_inventory<Entry, Visitor, VisitorError>(
+    store: &LocalIndexStore,
+    mut visitor: Visitor,
+) -> Result<(), VisitorError>
+where
+    Entry: InventoryEntry,
+    Visitor: FnMut(Entry) -> Result<(), VisitorError>,
+    LocalIndexStoreError: Into<VisitorError>,
+{
+    let mut scan = InventoryScan::<Entry>::new(store).map_err(Into::into)?;
+    for phase in 0..6 {
+        if (phase == 1 && !Entry::PREVALIDATE_SNAPSHOTS)
+            || ((2..=4).contains(&phase) && !Entry::HAS_EVIDENCE)
+        {
+            continue;
+        }
+        scan.rewind();
+        loop {
+            let batch = scan.next_batch(phase).map_err(Into::into)?;
+            if batch.is_empty() {
+                break;
+            }
+            if phase == 5 {
+                for entry in batch {
+                    visitor(entry)?;
+                }
+            }
+        }
+    }
+    scan.finish().map_err(Into::into)
+}
+
+impl InventoryEntry for FileId {
+    const TABLE: &'static str = "shardline_file_reconstructions";
+    const COLUMNS: &'static str = "file_id";
+    const KEYS: &'static [&'static str] = &["file_id"];
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(Self::new(parse_xet_hash_hex(&row.get::<_, String>(0)?)?))
+    }
+}
+
+impl InventoryEntry for DedupeShardMapping {
+    const TABLE: &'static str = "shardline_dedupe_shards";
+    const COLUMNS: &'static str = "chunk_hash, shard_object_key";
+    const KEYS: &'static [&'static str] = &["chunk_hash"];
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::dedupe_shard_mapping_from_row(row)?)
+    }
+}
+
+impl InventoryEntry for QuarantineCandidate {
+    const TABLE: &'static str = "shardline_quarantine_candidates";
+    const COLUMNS: &'static str = "object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds";
+    const KEYS: &'static [&'static str] = &["object_key"];
+    const HAS_EVIDENCE: bool = true;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> =
+        Some(shardline_reliability::OperationKind::GarbageCollection);
+    fn operation_ids(batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        Ok(batch
+            .iter()
+            .map(|entry| entry.object_key().as_str().to_owned())
+            .collect())
+    }
+    fn verify_typed_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        drop(load_quarantine_evidence_batch(
+            connection,
+            &Self::operation_ids(batch)?,
+        )?);
+        Ok(())
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::quarantine_candidate_from_row(row)?)
+    }
+    fn verify_batch(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let keys = batch
+            .iter()
+            .map(|entry| entry.object_key().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let evidence = load_quarantine_evidence_batch(connection, &keys)?;
+        for entry in batch {
+            let snapshot =
+                super::helpers::quarantine_snapshot(entry, QuarantineLifecycleState::Active)?;
+            let stored = evidence.get(entry.object_key().as_str()).ok_or(
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ),
+            )?;
+            verify_snapshot_evidence(stored, &snapshot)?;
+        }
+        Ok(())
+    }
+}
+
+impl InventoryEntry for RetentionHold {
+    const TABLE: &'static str = "shardline_retention_holds";
+    const COLUMNS: &'static str =
+        "object_key, reason, held_at_unix_seconds, release_after_unix_seconds";
+    const KEYS: &'static [&'static str] = &["object_key"];
+    const HAS_EVIDENCE: bool = true;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> =
+        Some(shardline_reliability::OperationKind::RetentionHold);
+    fn operation_ids(batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        Ok(batch
+            .iter()
+            .map(|entry| entry.object_key().as_str().to_owned())
+            .collect())
+    }
+    fn verify_typed_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        drop(load_retention_evidence_batch(
+            connection,
+            &Self::operation_ids(batch)?,
+        )?);
+        Ok(())
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::retention_hold_from_row(row)?)
+    }
+    fn verify_batch(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let keys = batch
+            .iter()
+            .map(|entry| entry.object_key().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let evidence = load_retention_evidence_batch(connection, &keys)?;
+        for entry in batch {
+            let snapshot = retention_snapshot(entry, RetentionHoldLifecycleState::Active)?;
+            let stored = evidence.get(entry.object_key().as_str()).ok_or(
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ),
+            )?;
+            verify_snapshot_evidence(stored, &snapshot)?;
+        }
+        Ok(())
+    }
+}
+
+impl InventoryEntry for WebhookDelivery {
+    const TABLE: &'static str = "shardline_webhook_deliveries";
+    const COLUMNS: &'static str = "provider, owner, repo, delivery_id, processed_at_unix_seconds";
+    const KEYS: &'static [&'static str] = &["provider", "owner", "repo", "delivery_id"];
+    const HAS_EVIDENCE: bool = true;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> =
+        Some(shardline_reliability::OperationKind::WebhookDelivery);
+    fn operation_ids(batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        batch
+            .iter()
+            .map(|entry| {
+                Ok(
+                    webhook_snapshot(entry, WebhookDeliveryLifecycleState::Processed)?
+                        .evidence_operation()?
+                        .operation_id,
+                )
+            })
+            .collect()
+    }
+    fn verify_typed_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        drop(load_webhook_evidence_batch(connection, batch)?);
+        Ok(())
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::webhook_delivery_from_row(row)?)
+    }
+    fn verify_batch(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let evidence = load_webhook_evidence_batch(connection, batch)?;
+        for entry in batch {
+            let snapshot = webhook_snapshot(entry, WebhookDeliveryLifecycleState::Processed)?;
+            let id = snapshot.evidence_operation()?.operation_id;
+            let stored = evidence.get(&id).ok_or(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ))?;
+            verify_snapshot_evidence(stored, &snapshot)?;
+        }
+        Ok(())
+    }
+}
+
+impl InventoryEntry for ProviderRepositoryState {
+    const TABLE: &'static str = "shardline_provider_repository_states";
+    const COLUMNS: &'static str = "provider, owner, repo, last_access_changed_at_unix_seconds, last_revision_pushed_at_unix_seconds, last_pushed_revision, last_cache_invalidated_at_unix_seconds, last_authorization_rechecked_at_unix_seconds, last_drift_checked_at_unix_seconds";
+    const KEYS: &'static [&'static str] = &["provider", "owner", "repo"];
+    const HAS_EVIDENCE: bool = true;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> =
+        Some(shardline_reliability::OperationKind::ProviderEvent);
+    fn operation_ids(batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        batch
+            .iter()
+            .map(|entry| {
+                Ok(super::helpers::provider_evidence_operation_id(
+                    &snapshot_from_state(entry)?,
+                ))
+            })
+            .collect()
+    }
+    fn verify_typed_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let snapshots = batch
+            .iter()
+            .map(snapshot_from_state)
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(load_provider_evidence_batch(connection, &snapshots)?);
+        Ok(())
+    }
+
+    const PREVALIDATE_SNAPSHOTS: bool = true;
+    fn validate_snapshots(batch: &[Self]) -> Result<(), LocalIndexStoreError> {
+        for state in batch {
+            snapshot_from_state(state)?;
+        }
+        Ok(())
+    }
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::provider_repository_state_from_row(row)?)
+    }
+    fn verify_batch(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let snapshots = batch
+            .iter()
+            .map(snapshot_from_state)
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = load_provider_evidence_batch(connection, &snapshots)?;
+        for snapshot in snapshots {
+            let id = super::helpers::provider_evidence_operation_id(&snapshot);
+            let stored = evidence.get(&id).ok_or(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ))?;
+            if stored.events().is_empty() {
+                verify_provider_lifecycle_events(
+                    ProviderEvidenceLog::baseline(snapshot.clone())?.events(),
+                    &snapshot,
+                )?;
+            } else {
+                stored.verify_for(&snapshot)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 fn verify_sqlite_intent_evidence(
     transaction: &Transaction<'_>,
     intent: &UploadIntent,
@@ -91,6 +670,17 @@ impl ReconstructionStore for LocalIndexStore {
             file_ids.push(FileId::new(hash));
         }
         Ok(file_ids)
+    }
+
+    fn visit_reconstruction_file_ids<Visitor, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<(), VisitorError>
+    where
+        Self::Error: Into<VisitorError>,
+        Visitor: FnMut(FileId) -> Result<(), VisitorError>,
+    {
+        visit_inventory::<FileId, _, _>(self, visitor)
     }
 
     fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error> {
@@ -182,16 +772,13 @@ impl DedupeStore for LocalIndexStore {
 
     fn visit_dedupe_shard_mappings<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(DedupeShardMapping) -> Result<(), VisitorError>,
     {
-        for mapping in DedupeStore::list_dedupe_shard_mappings(self).map_err(Into::into)? {
-            visitor(mapping)?;
-        }
-        Ok(())
+        visit_inventory::<DedupeShardMapping, _, _>(self, visitor)
     }
 
     fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error> {
@@ -306,16 +893,13 @@ impl LifecycleStore for LocalIndexStore {
 
     fn visit_quarantine_candidates<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError>,
     {
-        for candidate in LifecycleStore::list_quarantine_candidates(self).map_err(Into::into)? {
-            visitor(candidate)?;
-        }
-        Ok(())
+        visit_inventory::<QuarantineCandidate, _, _>(self, visitor)
     }
 
     fn upsert_quarantine_candidate(
@@ -558,16 +1142,13 @@ impl LifecycleStore for LocalIndexStore {
 
     fn visit_retention_holds<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(RetentionHold) -> Result<(), VisitorError>,
     {
-        for hold in LifecycleStore::list_retention_holds(self).map_err(Into::into)? {
-            visitor(hold)?;
-        }
-        Ok(())
+        visit_inventory::<RetentionHold, _, _>(self, visitor)
     }
 
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
@@ -817,16 +1398,13 @@ impl LifecycleStore for LocalIndexStore {
 
     fn visit_webhook_deliveries<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(WebhookDelivery) -> Result<(), VisitorError>,
     {
-        for delivery in LifecycleStore::list_webhook_deliveries(self).map_err(Into::into)? {
-            visitor(delivery)?;
-        }
-        Ok(())
+        visit_inventory::<WebhookDelivery, _, _>(self, visitor)
     }
 
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
@@ -1096,16 +1674,13 @@ impl LifecycleStore for LocalIndexStore {
 
     fn visit_provider_repository_states<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(ProviderRepositoryState) -> Result<(), VisitorError>,
     {
-        for state in LifecycleStore::list_provider_repository_states(self).map_err(Into::into)? {
-            visitor(state)?;
-        }
-        Ok(())
+        visit_inventory::<ProviderRepositoryState, _, _>(self, visitor)
     }
 
     fn upsert_provider_repository_state(
@@ -3326,5 +3901,342 @@ mod tests {
             )
             .unwrap();
         assert_eq!((count, minimum, maximum), (2, 0, 1));
+    }
+    #[test]
+    fn streaming_inventory_orders_all_types_across_batches() {
+        let store = make_store();
+        for i in 0..INVENTORY_BATCH_SIZE + 5 {
+            let key = ObjectKey::parse(&format!("inventory/{i:04}")).unwrap();
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&u64::try_from(i).unwrap().to_be_bytes());
+            let hash = ShardlineHash::from_bytes(hash);
+            store
+                .upsert_dedupe_shard_mapping(&DedupeShardMapping::new(hash, key.clone()))
+                .unwrap();
+            store
+                .insert_reconstruction(&FileId::new(hash), &FileReconstruction::new(vec![]))
+                .unwrap();
+            LifecycleStore::upsert_quarantine_candidate(
+                &store,
+                &QuarantineCandidate::new(key.clone(), 10, 1, 2).unwrap(),
+            )
+            .unwrap();
+            LifecycleStore::upsert_retention_hold(
+                &store,
+                &RetentionHold::new(key, "keep".into(), 1, None).unwrap(),
+            )
+            .unwrap();
+            LifecycleStore::record_webhook_delivery(
+                &store,
+                &WebhookDelivery::new(
+                    RepositoryProvider::GitHub,
+                    "owner".into(),
+                    format!("repo/{i:04}"),
+                    format!("delivery:{i:04}"),
+                    1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            LifecycleStore::upsert_provider_repository_state(
+                &store,
+                &ProviderRepositoryState::new(
+                    RepositoryProvider::GitHub,
+                    "owner".into(),
+                    format!("repo-{i:04}"),
+                    Some(1),
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        macro_rules! same_inventory {
+            ($trait:ident, $visit:ident, $list:ident) => {{
+                let expected = $trait::$list(&store).unwrap();
+                let mut actual = Vec::new();
+                $trait::$visit(&store, |row| {
+                    actual.push(row);
+                    Ok::<_, LocalIndexStoreError>(())
+                })
+                .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(actual.len(), INVENTORY_BATCH_SIZE + 5);
+            }};
+        }
+        same_inventory!(
+            DedupeStore,
+            visit_dedupe_shard_mappings,
+            list_dedupe_shard_mappings
+        );
+        same_inventory!(
+            ReconstructionStore,
+            visit_reconstruction_file_ids,
+            list_reconstruction_file_ids
+        );
+        same_inventory!(
+            LifecycleStore,
+            visit_quarantine_candidates,
+            list_quarantine_candidates
+        );
+        same_inventory!(LifecycleStore, visit_retention_holds, list_retention_holds);
+        same_inventory!(
+            LifecycleStore,
+            visit_webhook_deliveries,
+            list_webhook_deliveries
+        );
+        same_inventory!(
+            LifecycleStore,
+            visit_provider_repository_states,
+            list_provider_repository_states
+        );
+    }
+
+    #[test]
+    fn streaming_inventory_late_corruption_prevalidates_and_decode_precedes_evidence() {
+        let store = make_store();
+        for i in 0..INVENTORY_BATCH_SIZE + 1 {
+            LifecycleStore::upsert_retention_hold(
+                &store,
+                &RetentionHold::new(
+                    ObjectKey::parse(&format!("inventory/{i:04}")).unwrap(),
+                    "keep".into(),
+                    1,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let connection = store.open_connection().unwrap();
+        connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = '{}' WHERE operation_kind = 'RetentionHold' AND operation_id = ?1", [format!("inventory/{INVENTORY_BATCH_SIZE:04}")]).unwrap();
+        let mut calls = 0;
+        let error = LifecycleStore::visit_retention_holds(&store, |_| {
+            calls += 1;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .unwrap_err();
+        assert!(matches!(error, LocalIndexStoreError::Reliability(_)));
+        assert_eq!(calls, 0);
+        // Malformed materialized bytes in the last batch must win over an
+        // earlier bad evidence head, as the old eager decode did.
+        connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = '{}' WHERE operation_kind = 'RetentionHold' AND operation_id = 'inventory/0000'", []).unwrap();
+        let triggers = {
+            let mut statement = connection.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'shardline_retention_holds'").unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for trigger in triggers {
+            connection
+                .execute_batch(&format!(
+                    "DROP TRIGGER \"{}\"",
+                    trigger.replace('"', "\"\"")
+                ))
+                .unwrap();
+        }
+        connection.execute("UPDATE shardline_retention_holds SET reason = CAST(reason AS BLOB) WHERE object_key = ?1", [format!("inventory/{INVENTORY_BATCH_SIZE:04}")]).unwrap();
+        let error = LifecycleStore::visit_retention_holds(&store, |_| {
+            calls += 1;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .unwrap_err();
+        assert!(matches!(error, LocalIndexStoreError::Sqlite(_)));
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn streaming_inventory_cursor_order_and_late_invalid_id() {
+        let store = make_store();
+        let connection = store.open_connection().unwrap();
+        for i in 0..INVENTORY_BATCH_SIZE + 1 {
+            let key = format!("{i:064x}");
+            connection
+                .execute(
+                    "INSERT INTO shardline_file_reconstructions(file_id, terms, updated_at_unix_seconds) VALUES (?1, '[]', 0)",
+                    [&key],
+                )
+                .unwrap();
+        }
+        let expected = ReconstructionStore::list_reconstruction_file_ids(&store).unwrap();
+        let mut actual = Vec::new();
+        ReconstructionStore::visit_reconstruction_file_ids(&store, |id| {
+            actual.push(id);
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .unwrap();
+        assert_eq!(actual, expected);
+        connection.execute("INSERT INTO shardline_file_reconstructions(file_id, terms, updated_at_unix_seconds) VALUES ('zz-invalid', '[]', 0)", []).unwrap();
+        let mut calls = 0;
+        assert!(
+            ReconstructionStore::visit_reconstruction_file_ids(&store, |_| {
+                calls += 1;
+                Ok::<_, LocalIndexStoreError>(())
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 0);
+    }
+    #[test]
+    fn streaming_inventory_all_heads_precede_early_snapshot_mismatch() {
+        let store = make_store();
+        for i in 0..INVENTORY_BATCH_SIZE + 1 {
+            LifecycleStore::upsert_retention_hold(
+                &store,
+                &RetentionHold::new(
+                    ObjectKey::parse(&format!("priority/{i:04}")).unwrap(),
+                    "keep".into(),
+                    1,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let connection = store.open_connection().unwrap();
+        let triggers = {
+            let mut statement = connection.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'shardline_retention_holds'").unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for trigger in triggers {
+            connection
+                .execute_batch(&format!(
+                    "DROP TRIGGER \"{}\"",
+                    trigger.replace('"', "\"\"")
+                ))
+                .unwrap();
+        }
+        connection.execute("UPDATE shardline_retention_holds SET reason = 'wrong-snapshot' WHERE object_key = 'priority/0000'", []).unwrap();
+        assert!(
+            LifecycleStore::retention_hold(&store, &ObjectKey::parse("priority/0000").unwrap())
+                .is_err()
+        );
+        connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = '{}' WHERE operation_kind = 'RetentionHold' AND operation_id = ?1", [format!("priority/{INVENTORY_BATCH_SIZE:04}")]).unwrap();
+        let old = LifecycleStore::list_retention_holds(&store).unwrap_err();
+        let mut calls = 0;
+        let new = LifecycleStore::visit_retention_holds(&store, |_| {
+            calls += 1;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .unwrap_err();
+        assert!(matches!(
+            old,
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Serialize(
+                _
+            ))
+        ));
+        assert!(matches!(
+            new,
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Serialize(
+                _
+            ))
+        ));
+        assert_eq!(calls, 0);
+    }
+    #[test]
+    fn async_close_budget_retains_all64_permits_and_never_waits_for_nested_admission() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let pool = std::sync::Arc::new(
+            ClosePool::new_with_spawn(ASYNC_CURSOR_LIMIT, move |worker| {
+                std::thread::Builder::new()
+                    .spawn(move || {
+                        gate.recv().unwrap();
+                        worker();
+                    })
+                    .map(drop)
+            })
+            .unwrap(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // Each already completed task result owns a managed connection.
+            // Dropping those results on the executor only posts reserved jobs.
+            let mut completed = Vec::new();
+            for _ in 0..ASYNC_CURSOR_LIMIT {
+                let reservation = pool.reserve().unwrap();
+                completed.push(tokio::task::spawn_blocking(move || ReadConnection::new(rusqlite::Connection::open_in_memory().unwrap(), Some(reservation))).await.unwrap());
+            }
+            drop(completed);
+            assert_eq!(pool.admission.available_permits(), 0);
+            let start = std::time::Instant::now();
+            assert!(matches!(pool.reserve(), Err(LocalIndexStoreError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock));
+            assert!(start.elapsed() < std::time::Duration::from_secs(1));
+            // Timer progresses while the close worker cannot run any job.
+            tokio::time::timeout(std::time::Duration::from_secs(1), tokio::time::sleep(std::time::Duration::from_millis(5))).await.unwrap();
+            assert_eq!(pool.admission.available_permits(), 0);
+            release.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while pool.admission.available_permits() != ASYNC_CURSOR_LIMIT { tokio::time::sleep(std::time::Duration::from_millis(1)).await; }
+            }).await.unwrap();
+            assert!(pool.reserve().is_ok());
+        });
+    }
+
+    #[test]
+    fn async_close_worker_spawn_failure_is_typed_and_faulted_worker_drains_admitted_jobs() {
+        let error = ClosePool::new_with_spawn(2, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test worker spawn failure",
+            ))
+        })
+        .err()
+        .unwrap();
+        assert!(
+            matches!(LocalIndexStoreError::from(error), LocalIndexStoreError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        let pool = std::sync::Arc::new(
+            ClosePool::new_with_spawn(2, |worker| {
+                std::thread::Builder::new().spawn(worker).map(drop)
+            })
+            .unwrap(),
+        );
+        let first = pool.reserve().unwrap();
+        let second = pool.reserve().unwrap();
+        pool.enqueue(CloseJob {
+            _connection: rusqlite::Connection::open_in_memory().unwrap(),
+            _reservation: first,
+            before_close: Some(Box::new(|| panic!("test close worker fault"))),
+        });
+        pool.enqueue(CloseJob {
+            _connection: rusqlite::Connection::open_in_memory().unwrap(),
+            _reservation: second,
+            before_close: None,
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.admission.available_permits() != 2 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            matches!(pool.reserve(), Err(LocalIndexStoreError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+        // A disconnected queue fails closed without creating rescue workers.
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        drop(receiver);
+        let broken = std::sync::Arc::new(ClosePool {
+            sender,
+            admission: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            faulted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let reservation = broken.reserve().unwrap();
+        drop(ReadConnection::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+            Some(reservation),
+        ));
+        assert_eq!(broken.admission.available_permits(), 1);
+        assert!(
+            matches!(broken.reserve(), Err(LocalIndexStoreError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe)
+        );
     }
 }
