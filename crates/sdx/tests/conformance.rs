@@ -32,6 +32,51 @@
 
 mod support;
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_file_rejects_symlink_destination_without_changing_target() {
+    let mock = HfMock::start().await;
+    let client = client_for(&mock).await;
+    let file_id = upload_no_register(&client, b"replacement".to_vec())
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("valuable");
+    let dest = dir.path().join("download");
+    std::fs::write(&target, b"original").unwrap();
+    std::os::unix::fs::symlink(&target, &dest).unwrap();
+    assert!(
+        client
+            .download_session()
+            .download_file(&file_id, &dest)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"original");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_range_replaces_only_destination_of_hard_link() {
+    let mock = HfMock::start().await;
+    let client = client_for(&mock).await;
+    let file_id = upload_no_register(&client, b"replacement".to_vec())
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("valuable");
+    let dest = dir.path().join("download");
+    std::fs::write(&target, b"original").unwrap();
+    std::fs::hard_link(&target, &dest).unwrap();
+    client
+        .download_session()
+        .download_range(&file_id, 0..=2, &dest)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), b"rep");
+    assert_eq!(std::fs::read(&target).unwrap(), b"original");
+}
+
 use std::path::PathBuf;
 
 use support::hf_mock::HfMock;
