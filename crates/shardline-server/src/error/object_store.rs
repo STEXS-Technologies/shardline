@@ -19,6 +19,9 @@ pub enum ObjectStoreError {
     /// Stored object metadata disagreed with the expected transfer length.
     #[error("stored object length did not match indexed metadata")]
     StoredLengthMismatch,
+    /// Persisted content-addressed bytes disagreed with their indexed digest.
+    #[error("stored object hash did not match indexed metadata")]
+    StoredHashMismatch,
     /// Storage migration found a content-addressed source object under the wrong key.
     #[error(
         "storage migration source object hash mismatch for key {key}: expected {expected_hash}, observed {observed_hash}"

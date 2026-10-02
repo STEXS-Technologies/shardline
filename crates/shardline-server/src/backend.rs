@@ -96,6 +96,10 @@ pub(crate) struct S3ObjectReadSnapshot {
     /// listing-index row (e.g. the row-absent GET fallback): there is then no
     /// row metadata to pair.
     pub user_metadata: Vec<(String, String)>,
+    /// Validator paired with the same row/version, absent for legacy fallback.
+    pub etag: Option<String>,
+    /// Last-Modified paired with the same row/version.
+    pub updated_at_unix_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1425,6 +1429,8 @@ impl ServerBackend {
                 total_bytes: entry.size_bytes,
                 record_content_hash: Some(entry.content_hash),
                 user_metadata: entry.user_metadata,
+                etag: Some(entry.etag),
+                updated_at_unix_seconds: Some(entry.updated_at_unix_seconds),
             });
         }
         // Raw direct-object probe: unlike `object_length`, this does NOT fall
@@ -1439,6 +1445,8 @@ impl ServerBackend {
                 total_bytes: length,
                 record_content_hash: None,
                 user_metadata: Vec::new(),
+                etag: None,
+                updated_at_unix_seconds: None,
             }),
             Err(ServerError::NotFound) => {
                 let file_id = protocol_object_file_id(object_key);
@@ -1447,6 +1455,8 @@ impl ServerBackend {
                     total_bytes: record.total_bytes,
                     record_content_hash: Some(record.content_hash),
                     user_metadata: Vec::new(),
+                    etag: None,
+                    updated_at_unix_seconds: None,
                 })
             }
             Err(error) => Err(error),
@@ -1940,6 +1950,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::ObjectStore(
             ObjectStoreError::MissingS3Config
             | ObjectStoreError::StoredLengthMismatch
+            | ObjectStoreError::StoredHashMismatch
             | ObjectStoreError::MigrationSourceHashMismatch { .. },
         )
         | ServerError::Index(_)

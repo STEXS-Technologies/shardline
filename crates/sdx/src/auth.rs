@@ -276,10 +276,22 @@ impl Auth {
             Scope::Write => XET_WRITE_TOKEN_ROUTE,
         };
         route
-            .replace("{provider}", &self.repository.provider)
-            .replace("{owner}", &self.repository.owner)
-            .replace("{repo}", &self.repository.repo)
-            .replace("{rev}", &self.repository.revision)
+            .replace(
+                "{provider}",
+                &crate::tree::encode_path_segment(&self.repository.provider),
+            )
+            .replace(
+                "{owner}",
+                &crate::tree::encode_path_segment(&self.repository.owner),
+            )
+            .replace(
+                "{repo}",
+                &crate::tree::encode_path_segment(&self.repository.repo),
+            )
+            .replace(
+                "{rev}",
+                &crate::tree::encode_path_segment(&self.repository.revision),
+            )
     }
 
     fn resolve_credential(

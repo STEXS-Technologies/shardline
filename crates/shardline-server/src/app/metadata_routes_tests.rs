@@ -1461,3 +1461,5 @@ async fn create_revision_rejects_beyond_per_repo_cap() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK, "slot freed by delete");
 }
+
+mod percent_paths;

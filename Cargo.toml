@@ -30,6 +30,7 @@ axum = "0.8.8"
 base64 = "0.22"
 blake3 = "1.8.3"
 bytes = "1.10.1"
+httpdate = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = "4.5.60"
 clap_complete = "4.5.59"

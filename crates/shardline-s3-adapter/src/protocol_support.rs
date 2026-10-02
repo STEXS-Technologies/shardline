@@ -214,9 +214,17 @@ pub fn parse_s3_range(header: Option<&str>, total: u64) -> Result<ByteRange, S3E
 pub enum EntityTagSet {
     /// `*` — matches any existing representation.
     Any,
-    /// One or more quoted entity tags (weak `W/` prefixes are stripped per
-    /// RFC 9110 weak comparison).
-    Tags(Vec<String>),
+    /// Parsed strong or weak entity tags.
+    Tags(Vec<EntityTag>),
+}
+
+/// An entity tag with its comparison strength preserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityTag {
+    /// Opaque validator value without quotes.
+    pub value: String,
+    /// Weak validators cannot satisfy If-Match.
+    pub weak: bool,
 }
 
 /// A malformed S3 conditional-header (`If-Match` / `If-None-Match`) or
@@ -227,41 +235,52 @@ pub struct InvalidS3HeaderValue;
 impl EntityTagSet {
     /// Parses an `If-Match` / `If-None-Match` header value.
     ///
-    /// The value is a comma-separated list of quoted entity tags, or the
-    /// single `*`. A `W/` weak prefix is stripped (conditional requests use
-    /// weak comparison; the stored ETag is the opaque content hash).
+    /// Commas within quoted opaque tags are data, not list separators.
+    /// Weak markers are preserved for the condition's comparison mode.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidS3HeaderValue`] when the header is empty, an item is
-    /// unquoted or empty, or `*` appears alongside concrete tags (which RFC
-    /// 9110 forbids).
+    /// Rejects malformed tags and wildcard/list mixtures. Empty list members
+    /// are ignored as required by RFC 9110's recipient list parsing rule.
     pub fn parse(header: &str) -> Result<Self, InvalidS3HeaderValue> {
-        match header.trim() {
-            "" => Err(InvalidS3HeaderValue),
-            "*" => Ok(Self::Any),
-            value => {
-                let mut tags = Vec::new();
-                for item in value.split(',') {
-                    let item = item.trim();
-                    let item = item.strip_prefix("W/").unwrap_or(item);
-                    let Some(inner) = item.strip_prefix('"') else {
-                        return Err(InvalidS3HeaderValue);
-                    };
-                    let Some(inner) = inner.strip_suffix('"') else {
-                        return Err(InvalidS3HeaderValue);
-                    };
-                    if inner.is_empty() {
-                        return Err(InvalidS3HeaderValue);
-                    }
-                    tags.push(inner.to_owned());
-                }
-                if tags.is_empty() {
-                    return Err(InvalidS3HeaderValue);
-                }
-                Ok(Self::Tags(tags))
+        let mut remaining = header.trim_matches([' ', '\t']);
+        if remaining == "*" {
+            return Ok(Self::Any);
+        }
+        let mut tags = Vec::new();
+        while !remaining.is_empty() {
+            if let Some(rest) = remaining.strip_prefix(',') {
+                remaining = rest.trim_start_matches([' ', '\t']);
+                continue;
+            }
+            let weak = remaining.starts_with("W/");
+            if weak {
+                remaining = remaining.strip_prefix("W/").ok_or(InvalidS3HeaderValue)?;
+            }
+            remaining = remaining.strip_prefix('"').ok_or(InvalidS3HeaderValue)?;
+            let (value, rest) = remaining.split_once('"').ok_or(InvalidS3HeaderValue)?;
+            if !value
+                .bytes()
+                .all(|byte| byte == 0x21 || (0x23..=0x7e).contains(&byte) || byte >= 0x80)
+            {
+                return Err(InvalidS3HeaderValue);
+            }
+            tags.push(EntityTag {
+                value: value.to_owned(),
+                weak,
+            });
+            remaining = rest.trim_start_matches([' ', '\t']);
+            if !remaining.is_empty() {
+                remaining = remaining
+                    .strip_prefix(',')
+                    .ok_or(InvalidS3HeaderValue)?
+                    .trim_start_matches([' ', '\t']);
             }
         }
+        if tags.is_empty() {
+            return Err(InvalidS3HeaderValue);
+        }
+        Ok(Self::Tags(tags))
     }
 }
 
@@ -289,14 +308,13 @@ impl ConditionalHeader {
         match self {
             Self::IfMatch(tags) => match tags {
                 EntityTagSet::Any => stored_etag.is_some(),
-                EntityTagSet::Tags(tags) => {
-                    stored_etag.is_some_and(|etag| tags.iter().any(|tag| tag == etag))
-                }
+                EntityTagSet::Tags(tags) => stored_etag
+                    .is_some_and(|etag| tags.iter().any(|tag| !tag.weak && tag.value == etag)),
             },
             Self::IfNoneMatch(tags) => match tags {
                 EntityTagSet::Any => stored_etag.is_none(),
                 EntityTagSet::Tags(tags) => {
-                    stored_etag.is_none_or(|etag| !tags.iter().any(|tag| tag == etag))
+                    stored_etag.is_none_or(|etag| !tags.iter().any(|tag| tag.value == etag))
                 }
             },
         }
@@ -306,26 +324,32 @@ impl ConditionalHeader {
 /// Reads the S3 conditional headers (`If-Match` / `If-None-Match`) from a
 /// request's header map.
 ///
-/// Per RFC 9110 precedence, `If-Match` wins over `If-None-Match` when both are
-/// present, so only the stronger condition is returned.
-#[must_use]
-pub fn read_conditional_headers(headers: &HeaderMap) -> Option<ConditionalHeader> {
-    if let Some(value) = headers.get(IF_MATCH).and_then(header_value_str) {
-        return EntityTagSet::parse(value)
-            .ok()
-            .map(ConditionalHeader::IfMatch);
+/// Evaluates If-Match before If-None-Match; both conditions apply. Repeated
+/// field lines are combined as a single HTTP list, including wildcard checks.
+///
+/// # Errors
+///
+/// Returns an error for any present malformed field instead of silently
+/// converting a conditional mutation into an unconditional mutation.
+pub fn read_conditional_headers(
+    headers: &HeaderMap,
+) -> Result<Vec<ConditionalHeader>, InvalidS3HeaderValue> {
+    let mut conditions = Vec::new();
+    for (name, is_match) in [(IF_MATCH, true), (IF_NONE_MATCH, false)] {
+        let mut values = Vec::new();
+        for value in headers.get_all(name) {
+            values.push(value.to_str().map_err(|_error| InvalidS3HeaderValue)?);
+        }
+        if !values.is_empty() {
+            let tags = EntityTagSet::parse(&values.join(","))?;
+            conditions.push(if is_match {
+                ConditionalHeader::IfMatch(tags)
+            } else {
+                ConditionalHeader::IfNoneMatch(tags)
+            });
+        }
     }
-    headers
-        .get(IF_NONE_MATCH)
-        .and_then(header_value_str)
-        .and_then(|value| EntityTagSet::parse(value).ok())
-        .map(ConditionalHeader::IfNoneMatch)
-}
-
-/// Borrows a header value as a string when it is valid ASCII (HTTP headers are
-/// latin-1; a non-ASCII value is treated as absent).
-fn header_value_str(value: &axum::http::HeaderValue) -> Option<&str> {
-    value.to_str().ok()
+    Ok(conditions)
 }
 
 /// A parsed `x-amz-copy-source` value.
@@ -619,39 +643,57 @@ mod tests {
         assert_eq!(error.code, "InvalidRange");
     }
 
+    fn strong(value: &str) -> EntityTag {
+        EntityTag {
+            value: value.to_owned(),
+            weak: false,
+        }
+    }
+
     // ── conditional headers ────────────────────────────────────────────────
 
     #[test]
     fn entity_tag_set_parses_single_and_multi_tag_lists() {
         assert_eq!(
             EntityTagSet::parse("\"abc123\"").unwrap(),
-            EntityTagSet::Tags(vec!["abc123".to_owned()])
+            EntityTagSet::Tags(vec![strong("abc123")])
         );
         assert_eq!(
             EntityTagSet::parse("\"a\", \"b\",\"c\"").unwrap(),
-            EntityTagSet::Tags(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
+            EntityTagSet::Tags(vec![strong("a"), strong("b"), strong("c")])
         );
     }
 
     #[test]
-    fn entity_tag_set_strips_weak_prefix_and_star() {
+    fn entity_tag_set_preserves_weak_prefix_and_star() {
         assert_eq!(
             EntityTagSet::parse("W/\"abc123\"").unwrap(),
-            EntityTagSet::Tags(vec!["abc123".to_owned()])
+            EntityTagSet::Tags(vec![EntityTag {
+                value: "abc123".to_owned(),
+                weak: true
+            }])
         );
         assert_eq!(EntityTagSet::parse(" * ").unwrap(), EntityTagSet::Any);
     }
 
     #[test]
     fn entity_tag_set_rejects_malformed_values() {
-        for value in ["", "abc", "\"\"", "abc,", "*,\"a\"", "\"a\",*"] {
+        for value in [
+            "",
+            "abc",
+            "abc,",
+            "*,\"a\"",
+            "\"a\",*",
+            "\"a\" garbage",
+            "\"a b\"",
+        ] {
             assert!(EntityTagSet::parse(value).is_err(), "value {value:?}");
         }
     }
 
     #[test]
     fn conditional_if_match_satisfied_only_when_stored_etag_matches() {
-        let match_tag = ConditionalHeader::IfMatch(EntityTagSet::Tags(vec!["hash-a".to_owned()]));
+        let match_tag = ConditionalHeader::IfMatch(EntityTagSet::Tags(vec![strong("hash-a")]));
         assert!(match_tag.satisfied(Some("hash-a")));
         assert!(!match_tag.satisfied(Some("hash-b")));
         assert!(!match_tag.satisfied(None), "missing object fails If-Match");
@@ -667,7 +709,7 @@ mod tests {
     #[test]
     fn conditional_if_none_match_satisfied_on_missing_or_non_matching() {
         let none_match_tag =
-            ConditionalHeader::IfNoneMatch(EntityTagSet::Tags(vec!["hash-a".to_owned()]));
+            ConditionalHeader::IfNoneMatch(EntityTagSet::Tags(vec![strong("hash-a")]));
         assert!(none_match_tag.satisfied(Some("hash-b")));
         assert!(!none_match_tag.satisfied(Some("hash-a")));
         assert!(
@@ -684,26 +726,41 @@ mod tests {
     }
 
     #[test]
-    fn read_conditional_headers_prefers_if_match_over_if_none_match() {
+    fn read_conditional_headers_preserves_both_and_repeated_fields() {
         let mut headers = HeaderMap::new();
-        headers.insert(IF_MATCH, "\"abc\"".parse().unwrap());
+        headers.append(IF_MATCH, "\"other\"".parse().unwrap());
+        headers.append(IF_MATCH, "\"abc\"".parse().unwrap());
         headers.insert(IF_NONE_MATCH, "*".parse().unwrap());
-        assert_eq!(
-            read_conditional_headers(&headers),
-            Some(ConditionalHeader::IfMatch(EntityTagSet::Tags(vec![
-                "abc".to_owned()
-            ])))
+        let conditions = read_conditional_headers(&headers).unwrap();
+        assert_eq!(conditions.len(), 2);
+        assert!(conditions[0].satisfied(Some("abc")));
+        assert!(!conditions[1].satisfied(Some("abc")));
+        headers.append(IF_MATCH, "*".parse().unwrap());
+        assert!(read_conditional_headers(&headers).is_err());
+        headers.insert(IF_MATCH, "garbage".parse().unwrap());
+        assert!(read_conditional_headers(&headers).is_err());
+        assert!(
+            read_conditional_headers(&HeaderMap::new())
+                .unwrap()
+                .is_empty()
         );
+    }
 
+    #[test]
+    fn entity_tags_use_strong_match_and_weak_none_match() {
+        let tags = EntityTagSet::parse("W/\"abc\"").unwrap();
+        assert!(!ConditionalHeader::IfMatch(tags.clone()).satisfied(Some("abc")));
+        assert!(!ConditionalHeader::IfNoneMatch(tags).satisfied(Some("abc")));
+        assert_eq!(
+            EntityTagSet::parse(", \"a,b\",, \"\",").unwrap(),
+            EntityTagSet::Tags(vec![strong("a,b"), strong("")])
+        );
         let mut headers = HeaderMap::new();
-        headers.insert(IF_NONE_MATCH, "*".parse().unwrap());
-        assert_eq!(
-            read_conditional_headers(&headers),
-            Some(ConditionalHeader::IfNoneMatch(EntityTagSet::Any))
+        headers.insert(
+            IF_MATCH,
+            axum::http::HeaderValue::from_bytes(b"\"\xff\"").unwrap(),
         );
-
-        let headers = HeaderMap::new();
-        assert_eq!(read_conditional_headers(&headers), None);
+        assert!(read_conditional_headers(&headers).is_err());
     }
 
     // ── x-amz-copy-source ──────────────────────────────────────────────────

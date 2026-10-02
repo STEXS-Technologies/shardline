@@ -44,7 +44,8 @@ use shardline_s3_adapter::{
     CompleteMultipartUploadResult, InitiateMultipartUploadResult, PartQuotaLimits, S3Error,
     S3SessionError, acquire_session_part_lock_for_root, create_session, delete_session_locked,
     lock_session_parts, lock_upload_sessions, new_upload_id, parse_complete_multipart_parts,
-    part_file_path, read_session_locked, store_part_locked, validate_part_quota_for_session_locked,
+    part_file_path, read_conditional_headers, read_session_locked, store_part_locked,
+    validate_part_quota_for_session_locked,
 };
 use shardline_storage::ObjectKey;
 use tokio::io::AsyncWriteExt;
@@ -54,7 +55,8 @@ use crate::{
     app::AppState,
     metrics,
     object_store::{
-        materialize_object_to_file, s3_resumable_parts_reader, stage_reader_content_addressed_s3,
+        local_s3_resumable_parts_reader, materialize_object_to_file, s3_resumable_parts_reader,
+        stage_reader_content_addressed_s3,
     },
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
@@ -553,10 +555,15 @@ pub(super) async fn s3_complete_multipart_upload(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
     upload_id: &str,
+    headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    // Parse all supplied safeguards before advancing any session or writing data.
+    read_conditional_headers(headers)
+        .map_err(|_error| S3Error::invalid_argument("Invalid conditional entity-tag header"))?;
     if durable_sessions_enabled(state) {
-        return durable_s3_complete_multipart_upload(state, context, upload_id, body).await;
+        return durable_s3_complete_multipart_upload(state, context, upload_id, headers, body)
+            .await;
     }
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
@@ -630,25 +637,19 @@ pub(super) async fn s3_complete_multipart_upload(
     }
     let parts_reader = RequestBodyReader::from_reader_chain(part_files, chunk_size);
 
-    // Serialize concurrent overwrites of the target object key.
-    let object_lock =
-        acquire_object_upload_lock_for_root(state.config.root_dir(), context.object_key.as_str());
-    let _object_guard = object_lock.lock().await;
-
-    // Atomic overwrite (same as PutObject): stream the new record FIRST (a
-    // failure commits nothing and the old object stays readable), then swap
-    // the index row and drop any stale direct object. The MD5 tee computes the
-    // S3 ETag (hex MD5 of the assembled object) as the parts stream.
+    // Reuse PutObject's lock, conditional recheck, compare-and-swap and
+    // conditional-loser cleanup before consuming the multipart session.
     let hasher = Arc::new(Mutex::new(Md5::new()));
     let parts_reader = parts_reader.with_md5_tee(hasher.clone());
-    let start = Instant::now();
-    let uploaded = state
-        .backend
-        .put_s3_object_stream(&context.object_key, parts_reader)
-        .await?;
-    let elapsed = start.elapsed().as_secs_f64();
-    metrics::record_upload("s3", uploaded.total_bytes, elapsed, true);
-    let etag = object::md5_hasher_hex(&hasher);
+    let (_uploaded, etag) = object::s3_upload_object_body(
+        state,
+        context,
+        parts_reader,
+        user_metadata,
+        hasher,
+        Some(headers),
+    )
+    .await?;
 
     // The ingest is done; release the per-session lock (never await the
     // global lock while holding it) and consume the session under the global
@@ -662,26 +663,6 @@ pub(super) async fn s3_complete_multipart_upload(
     // The session is consumed by the completion; a failed cleanup is swept at
     // startup or on the next session creation.
     let _ignored = delete_session_locked(root, upload_id).await;
-
-    let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
-        .map_err(|_error| S3Error::internal())?;
-    state
-        .backend
-        .upsert_s3_object(&S3ObjectEntry {
-            scope_namespace: context.scope_namespace.clone(),
-            object_key: context.key.clone(),
-            file_id: uploaded.file_id,
-            size_bytes: uploaded.total_bytes,
-            content_hash: uploaded.content_hash.clone(),
-            etag: etag.clone(),
-            user_metadata,
-            updated_at_unix_seconds: now,
-        })
-        .await?;
-    let _stale_direct = state
-        .backend
-        .delete_direct_object_if_present(&context.object_key)
-        .await?;
 
     let xml = CompleteMultipartUploadResult {
         bucket: context.bucket.clone(),
@@ -701,6 +682,7 @@ async fn durable_s3_complete_multipart_upload(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
     upload_id: &str,
+    headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
     // Validate the opaque upload identity before claiming completion.  A
@@ -788,7 +770,7 @@ async fn durable_s3_complete_multipart_upload(
             }
             let chunk_size = state.config.chunk_size().get();
             (
-                RequestBodyReader::from_reader_chain(files, chunk_size)
+                local_s3_resumable_parts_reader(files, &parts, chunk_size)?
                     .with_md5_tee(hasher.clone()),
                 Some(temporary),
             )
@@ -806,6 +788,19 @@ async fn durable_s3_complete_multipart_upload(
                 &ResourceLockKey::s3_object(&context.scope_namespace, &context.key),
             )
             .await?;
+        let conditions = read_conditional_headers(headers)
+            .map_err(|_error| S3Error::invalid_argument("Invalid conditional entity-tag header"))?;
+        let condition = if conditions.is_empty() {
+            S3PublishCondition::Unconditional
+        } else {
+            let existing = object::s3_object_entry(state, context).await?;
+            object::check_precondition(
+                existing.as_ref().map(|entry| entry.etag.as_str()),
+                headers,
+                &context.key,
+            )?;
+            S3PublishCondition::IfUnchanged(existing)
+        };
         let start = Instant::now();
         let prepared = state
             .backend
@@ -836,11 +831,22 @@ async fn durable_s3_complete_multipart_upload(
                 &mut resource_guard,
                 &prepared,
                 &entry,
-                &S3PublishCondition::Unconditional,
+                &condition,
                 Some(&session.completion_fence()),
             )
             .await?;
         if !published {
+            let still_owned = state
+                .backend
+                .resumable_session_by_id(upload_id)
+                .await?
+                .is_some_and(|current| {
+                    current.state() == ResumableSessionState::Completing
+                        && current.fence_epoch() == session.fence_epoch()
+                });
+            if still_owned && !conditions.is_empty() {
+                return Err(S3Error::precondition_failed());
+            }
             return Err(S3Error::no_such_upload());
         }
         let _stale_direct = state

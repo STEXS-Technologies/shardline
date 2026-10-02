@@ -178,10 +178,10 @@ impl XetUrl {
         format!(
             "xet://{}/{}/{}/{}/{}",
             self.authority(),
-            self.provider,
-            self.owner,
-            self.repo,
-            self.revision
+            crate::tree::encode_path_segment(&self.provider),
+            crate::tree::encode_path_segment(&self.owner),
+            crate::tree::encode_path_segment(&self.repo),
+            crate::tree::encode_path_segment(&self.revision)
         )
     }
 
@@ -210,14 +210,14 @@ impl XetUrl {
         let mut out = format!(
             "xet://{}/{}/{}/{}/{}",
             self.authority(),
-            self.provider,
-            self.owner,
-            self.repo,
-            self.revision
+            crate::tree::encode_path_segment(&self.provider),
+            crate::tree::encode_path_segment(&self.owner),
+            crate::tree::encode_path_segment(&self.repo),
+            crate::tree::encode_path_segment(&self.revision)
         );
         if !self.path.is_empty() {
             out.push('/');
-            out.push_str(&self.path);
+            out.push_str(&crate::tree::encode_path_segments(&self.path));
         }
         out
     }
@@ -258,6 +258,22 @@ mod tests {
             repo: "assets".to_owned(),
             revision: "main".to_owned(),
         }
+    }
+
+    #[test]
+    fn display_and_endpoint_url_preserve_encoded_identity_and_path() {
+        let parsed = XetUrl::parse(
+            "xet://h/github/team/assets/release%20candidate%2F%25%23%3F/path%20with%23%3F%25",
+        )
+        .unwrap();
+        let roundtrip = XetUrl::parse(&parsed.display()).unwrap();
+        assert_eq!(roundtrip.repository_id(), parsed.repository_id());
+        assert_eq!(roundtrip.path, parsed.path);
+        let endpoint = XetUrl::parse(&parsed.endpoint_url()).unwrap();
+        assert_eq!(endpoint.repository_id(), parsed.repository_id());
+        assert!(endpoint.path.is_empty());
+        let replaced = parsed.with_path("new path/#file?.txt");
+        assert_eq!(XetUrl::parse(&replaced.raw).unwrap().path, replaced.path);
     }
 
     #[test]

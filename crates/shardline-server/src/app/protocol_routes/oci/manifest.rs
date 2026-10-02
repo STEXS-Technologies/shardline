@@ -4,9 +4,9 @@ use axum::{
     body::Body,
     http::{
         HeaderMap, StatusCode, Uri,
-        header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE},
+        header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, VARY},
     },
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -58,12 +58,22 @@ pub(crate) async fn oci_get_manifest(
             tracing::warn!(error = %e, "invalid media type utf-8");
             ServerError::InvalidManifestReference
         })?;
-    ensure_manifest_representation_is_acceptable(headers, &media_type)?;
+    if let Err(error) = ensure_manifest_representation_is_acceptable(headers, &media_type) {
+        if matches!(error, ServerError::NotAcceptable) {
+            let mut response = error.into_response();
+            response
+                .headers_mut()
+                .append(VARY, axum::http::HeaderValue::from_static("Accept"));
+            return Ok(response);
+        }
+        return Err(error);
+    }
     if head_only {
         return Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_LENGTH, total_length.to_string())
             .header(CONTENT_TYPE, media_type)
+            .header(VARY, "Accept")
             .header("Docker-Content-Digest", format!("sha256:{digest_hex}"))
             .body(Body::empty())
             .map_err(|e| {
@@ -72,7 +82,7 @@ pub(crate) async fn oci_get_manifest(
             });
     }
 
-    direct_object_response_from_snapshot(
+    let mut response = direct_object_response_from_snapshot(
         state,
         headers,
         &manifest_key,
@@ -81,7 +91,11 @@ pub(crate) async fn oci_get_manifest(
         "oci",
         snapshot,
     )
-    .await
+    .await?;
+    response
+        .headers_mut()
+        .append(VARY, axum::http::HeaderValue::from_static("Accept"));
+    Ok(response)
 }
 
 #[tracing::instrument(skip(state, headers, uri, body, repo), fields(repository = %repo.repository(), reference))]
@@ -409,45 +423,183 @@ fn normalize_media_type(value: &str) -> &str {
     value.split(';').next().map_or(value, str::trim)
 }
 
+// Delimiters inside quoted parameter values are data, not list separators.
+fn split_media_field(value: &str, delimiter: char) -> Vec<&str> {
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if quoted && ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+        } else if !quoted && ch == delimiter {
+            parts.push(value.get(start..index).unwrap_or_default().trim());
+            start = index.saturating_add(ch.len_utf8());
+        }
+    }
+    parts.push(value.get(start..).unwrap_or_default().trim());
+    parts
+}
+
+fn media_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+fn media_parameter_value(value: &str) -> Option<String> {
+    if media_token(value) {
+        return Some(value.to_owned());
+    }
+    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
+    let mut decoded = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        let ch = if ch == '\\' {
+            chars.next()?
+        } else {
+            if ch == '"' {
+                return None;
+            }
+            ch
+        };
+        if ch.is_control() && ch != '\t' {
+            return None;
+        }
+        decoded.push(ch);
+    }
+    Some(decoded)
+}
+
+struct ManifestMediaRange<'input> {
+    kind: &'input str,
+    subtype: &'input str,
+    parameters: Vec<(String, String)>,
+    quality: u16,
+}
+
+fn parse_manifest_media_range(field: &str, accept: bool) -> Option<ManifestMediaRange<'_>> {
+    let parts = split_media_field(field, ';');
+    let (kind, subtype) = parts.first()?.split_once('/')?;
+    if !media_token(kind)
+        || !media_token(subtype)
+        || (kind == "*" && subtype != "*")
+        || (!accept && (kind == "*" || subtype == "*"))
+    {
+        return None;
+    }
+    let mut range = ManifestMediaRange {
+        kind,
+        subtype,
+        parameters: Vec::new(),
+        quality: 1000,
+    };
+    let mut quality_seen = false;
+    for part in parts.iter().skip(1).filter(|part| !part.is_empty()) {
+        let (name, value) = part.split_once('=')?;
+        let name = name.trim();
+        let value = value.trim();
+        if !media_token(name) {
+            return None;
+        }
+        if accept && name.eq_ignore_ascii_case("q") {
+            if quality_seen {
+                return None;
+            }
+            quality_seen = true;
+            let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+            if fraction.len() > 3 || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            range.quality = match whole {
+                "0" => fraction
+                    .parse::<u16>()
+                    .unwrap_or(0)
+                    .checked_mul(match fraction.len() {
+                        0 => 1000,
+                        1 => 100,
+                        2 => 10,
+                        _ => 1,
+                    })?,
+                "1" if fraction.bytes().all(|b| b == b'0') => 1000,
+                _ => return None,
+            };
+        } else {
+            // RFC 9110 permits tolerating q before other media parameters.
+            let name = name.to_ascii_lowercase();
+            if range
+                .parameters
+                .iter()
+                .any(|(existing, _)| *existing == name)
+            {
+                return None;
+            }
+            range.parameters.push((name, media_parameter_value(value)?));
+        }
+    }
+    Some(range)
+}
+
 fn ensure_manifest_representation_is_acceptable(
     headers: &HeaderMap,
     media_type: &str,
 ) -> Result<(), ServerError> {
-    let normalized_media_type = normalize_media_type(media_type);
-    let Some((stored_type, stored_subtype)) = normalized_media_type.split_once('/') else {
-        return Err(ServerError::InvalidManifestReference);
-    };
+    let stored = parse_manifest_media_range(media_type, false)
+        .ok_or(ServerError::InvalidManifestReference)?;
     let accepted = headers.get_all(ACCEPT);
-    let mut accepted_iter = accepted.iter().peekable();
-    if accepted_iter.peek().is_none() {
+    if accepted.iter().next().is_none() {
         return Ok(());
     }
-
-    for value in accepted_iter {
-        let value = value.to_str().map_err(|e| {
-            tracing::warn!(error = %e, "invalid accept header utf-8");
-            ServerError::NotAcceptable
-        })?;
-        for candidate in value.split(',') {
-            let candidate = normalize_media_type(candidate);
-            if candidate.is_empty() {
-                continue;
-            }
-            if candidate == "*/*" || candidate == normalized_media_type {
-                return Ok(());
-            }
-            let Some((accepted_type, accepted_subtype)) = candidate.split_once('/') else {
+    let mut best: Option<((u8, usize), u16)> = None;
+    for header_value in accepted {
+        let header_text = header_value
+            .to_str()
+            .map_err(|_error| ServerError::NotAcceptable)?;
+        for candidate in split_media_field(header_text, ',') {
+            let Some(range) = parse_manifest_media_range(candidate, true) else {
                 continue;
             };
-            if (accepted_type == "*" || accepted_type == stored_type)
-                && (accepted_subtype == "*" || accepted_subtype == stored_subtype)
+            if !(range.kind == "*" || range.kind.eq_ignore_ascii_case(stored.kind))
+                || !(range.subtype == "*" || range.subtype.eq_ignore_ascii_case(stored.subtype))
+                || !range.parameters.iter().all(|(name, value)| {
+                    stored.parameters.iter().any(|(stored_name, stored_value)| {
+                        name == stored_name
+                            && (value == stored_value
+                                || (name == "charset" && value.eq_ignore_ascii_case(stored_value)))
+                    })
+                })
             {
-                return Ok(());
+                continue;
+            }
+            let specificity = (
+                if range.kind == "*" {
+                    0
+                } else if range.subtype == "*" {
+                    1
+                } else {
+                    2
+                },
+                range.parameters.len(),
+            );
+            // Most specific matching range determines quality, independent of order.
+            // For duplicate equally specific entries, prefer the highest quality.
+            if best.is_none_or(|(previous, quality)| {
+                specificity > previous || (specificity == previous && range.quality > quality)
+            }) {
+                best = Some((specificity, range.quality));
             }
         }
     }
-
-    Err(ServerError::NotAcceptable)
+    if best.is_some_and(|(_, quality)| quality > 0) {
+        Ok(())
+    } else {
+        Err(ServerError::NotAcceptable)
+    }
 }
 
 #[cfg(test)]
@@ -457,6 +609,174 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn accept_quality_specificity_and_parameters() {
+        let cases = [
+            ("application/json;q=0", "application/json", false),
+            ("*/*;q=0", "application/json", false),
+            ("application/json;q=0, */*;q=1", "application/json", false),
+            ("*/*;q=1, application/json;q=0", "application/json", false),
+            ("application/*;q=0, */*", "application/json", false),
+            (
+                "application/json;q=0.001, application/*;q=0",
+                "application/json",
+                true,
+            ),
+            ("APPLICATION/JSON;Q=0.5", "application/json", true),
+            ("*/json", "application/json", false),
+            ("application/json;profile=v2", "application/json", false),
+            (
+                "application/json;profile=v2",
+                "application/json;profile=v1",
+                false,
+            ),
+            (
+                "application/json;profile=v2;q=0, application/json",
+                "application/json;profile=v2",
+                false,
+            ),
+            (
+                "application/json;profile=v2;q=0, application/json",
+                "application/json;profile=v1",
+                true,
+            ),
+            (
+                "application/json;PROFILE=\"v2\"",
+                "application/json;profile=v2",
+                true,
+            ),
+            (
+                "application/json;profile=V2",
+                "application/json;profile=v2",
+                false,
+            ),
+            (
+                "application/json;charset=UTF-8",
+                "application/json;charset=utf-8",
+                true,
+            ),
+            (
+                "application/json;profile=\"a,b;c\"",
+                "application/json;profile=\"a,b;c\"",
+                true,
+            ),
+            (
+                "application/json;profile=\"a,b;c\"",
+                "application/json;profile=a",
+                false,
+            ),
+            ("application/json;q=0.", "application/json", false),
+            ("application/json;q=0.000", "application/json", false),
+            ("application/json;q=1.000", "application/json", true),
+            (
+                "application/json;q=0.5;profile=v2",
+                "application/json;profile=v2",
+                true,
+            ),
+            (
+                r#"application/json;profile="a\"b""#,
+                r#"application/json;profile="a\"b""#,
+                true,
+            ),
+            (
+                r#"application/json;profile="unterminated"#,
+                "application/json",
+                false,
+            ),
+            ("application/json/foo", "application/json", false),
+            ("application/json;q=1.001", "application/json", false),
+            ("application/json;q=0.0001", "application/json", false),
+            ("application/json;q=NaN", "application/json", false),
+            ("application/json;q=\"0.5\"", "application/json", false),
+            ("application/json;q=0;q=1", "application/json", false),
+        ];
+        for (accept, stored, expected) in cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_str(accept).unwrap());
+            assert_eq!(
+                ensure_manifest_representation_is_acceptable(&headers, stored).is_ok(),
+                expected,
+                "Accept: {accept}; stored: {stored}"
+            );
+        }
+        let mut headers = HeaderMap::new();
+        headers.append(ACCEPT, HeaderValue::from_static("*/*"));
+        headers.append(ACCEPT, HeaderValue::from_static("application/json;q=0"));
+        assert!(matches!(
+            ensure_manifest_representation_is_acceptable(&headers, "application/json"),
+            Err(ServerError::NotAcceptable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn manifest_get_and_head_honor_accept_exclusions() {
+        use super::super::test_helpers::{build_oci_test_state, oci_test_router};
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+        let context = build_oci_test_state().await;
+        let app = oci_test_router(&context.state);
+        let manifest =
+            json!({"schemaVersion": 2, "mediaType": OCI_IMAGE_INDEX_MEDIA_TYPE, "manifests": []})
+                .to_string();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/v2/accept/test/manifests/latest")
+                    .header(CONTENT_TYPE, OCI_IMAGE_INDEX_MEDIA_TYPE)
+                    .body(Body::from(manifest))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        for method in [Method::GET, Method::HEAD] {
+            for (accept, expected) in [
+                (
+                    format!("{OCI_IMAGE_INDEX_MEDIA_TYPE};q=0, */*"),
+                    StatusCode::NOT_ACCEPTABLE,
+                ),
+                (
+                    format!("*/*, {OCI_IMAGE_INDEX_MEDIA_TYPE};q=0"),
+                    StatusCode::NOT_ACCEPTABLE,
+                ),
+                (
+                    format!("{OCI_IMAGE_INDEX_MEDIA_TYPE};profile=unsupported"),
+                    StatusCode::NOT_ACCEPTABLE,
+                ),
+                (
+                    format!(
+                        "{};Q=0.001",
+                        OCI_IMAGE_INDEX_MEDIA_TYPE.to_ascii_uppercase()
+                    ),
+                    StatusCode::OK,
+                ),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method.clone())
+                            .uri("/v2/accept/test/manifests/latest")
+                            .header(ACCEPT, accept)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected, "{method}");
+                assert!(
+                    response
+                        .headers()
+                        .get_all(VARY)
+                        .iter()
+                        .any(|value| value == "Accept")
+                );
+            }
+        }
+    }
 
     // ── normalize_media_type ──
 

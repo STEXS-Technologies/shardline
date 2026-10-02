@@ -191,10 +191,13 @@ impl MetadataClient {
     /// Substitutes `{provider}/{owner}/{repo}/{rev}` into a route template.
     pub(crate) fn repo_route(&self, template: &str) -> String {
         template
-            .replace("{provider}", &self.repository.provider)
-            .replace("{owner}", &self.repository.owner)
-            .replace("{repo}", &self.repository.repo)
-            .replace("{rev}", &self.repository.revision)
+            .replace(
+                "{provider}",
+                &encode_path_segment(&self.repository.provider),
+            )
+            .replace("{owner}", &encode_path_segment(&self.repository.owner))
+            .replace("{repo}", &encode_path_segment(&self.repository.repo))
+            .replace("{rev}", &encode_path_segment(&self.repository.revision))
     }
 
     /// Substitutes only the repo-scope placeholders (`{provider}/{owner}/{repo}`),
@@ -202,9 +205,12 @@ impl MetadataClient {
     /// create/delete routes, whose revision is not the client's default).
     pub(crate) fn repo_route_scope(&self, template: &str) -> String {
         template
-            .replace("{provider}", &self.repository.provider)
-            .replace("{owner}", &self.repository.owner)
-            .replace("{repo}", &self.repository.repo)
+            .replace(
+                "{provider}",
+                &encode_path_segment(&self.repository.provider),
+            )
+            .replace("{owner}", &encode_path_segment(&self.repository.owner))
+            .replace("{repo}", &encode_path_segment(&self.repository.repo))
     }
 
     /// Issues a request through the retry context and returns the raw body.
@@ -295,6 +301,7 @@ impl MetadataClient {
         remote: &str,
         file_id: &str,
     ) -> Result<RegisterResult, SdxError> {
+        validate_mutation_path(remote)?;
         let retry = self.write_retry();
         let token = self.tokens.write_token().await?;
         let route = self.repo_route(XET_PATH_ROUTE);
@@ -325,6 +332,7 @@ impl MetadataClient {
     }
 
     async fn delete_path(&self, remote: &str, recursive: bool) -> Result<u64, SdxError> {
+        validate_mutation_path(remote)?;
         let retry = self.write_retry();
         let token = self.tokens.write_token().await?;
         let route = self.repo_route(XET_PATH_ROUTE);
@@ -388,12 +396,13 @@ impl XetClient {
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when a page request fails.
+    /// Returns [`SdxError`] when a page request fails or a cursor is empty or repeats.
     pub async fn list_dir_all(&self, prefix: &str) -> Result<Vec<DirEntry>, SdxError> {
         let client = MetadataClient::from_download(self.download_inner());
         let mut all = Vec::new();
         let mut seen = HashSet::new();
         let mut cursor: Option<String> = None;
+        let mut cursors = HashSet::new();
         loop {
             let page = client.list_paged(prefix, None, cursor.as_deref()).await?;
             for entry in page.entries {
@@ -401,9 +410,9 @@ impl XetClient {
                     all.push(entry);
                 }
             }
-            match page.next_cursor {
-                Some(next) if next != cursor.as_deref().unwrap_or_default() => cursor = Some(next),
-                _ => break,
+            cursor = checked_next_cursor("list_dir_all", page.next_cursor, &mut cursors)?;
+            if cursor.is_none() {
+                break;
             }
         }
         Ok(all)
@@ -509,13 +518,46 @@ const PATH_SEGMENT_PCHAR: &percent_encoding::AsciiSet = &percent_encoding::NON_A
     .remove(b':')
     .remove(b'@');
 
+pub(crate) fn encode_path_segment(segment: &str) -> String {
+    percent_encoding::utf8_percent_encode(segment, PATH_SEGMENT_PCHAR).to_string()
+}
+
 pub(crate) fn encode_path_segments(path: &str) -> String {
     path.split('/')
-        .map(|segment| {
-            percent_encoding::utf8_percent_encode(segment, PATH_SEGMENT_PCHAR).to_string()
-        })
+        .map(encode_path_segment)
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// HTTP URL parsers remove literal dot segments before the server can reject
+/// them. Never let a malformed mutation path target a different registered key.
+fn validate_mutation_path(remote: &str) -> Result<(), SdxError> {
+    if remote
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(SdxError::Metadata(
+            "path mutation: dot segments are not allowed".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Only an absent cursor denotes exhaustion. Reject malformed/repeated cursors
+/// rather than returning a partial listing or looping forever on a cycle.
+pub(crate) fn checked_next_cursor(
+    context: &str,
+    next: Option<String>,
+    seen: &mut HashSet<String>,
+) -> Result<Option<String>, SdxError> {
+    if let Some(cursor) = &next
+        && (cursor.is_empty() || !seen.insert(cursor.clone()))
+    {
+        return Err(SdxError::Metadata(format!(
+            "{context}: empty or repeated pagination cursor"
+        )));
+    }
+    Ok(next)
 }
 
 pub(crate) fn metadata_parse(context: &str, error: &serde_json::Error) -> SdxError {
@@ -595,6 +637,125 @@ mod tests {
     fn encode_path_segments_preserves_separators() {
         assert_eq!(encode_path_segments("data/model.pt"), "data/model.pt");
         assert_eq!(encode_path_segments("a b/c.txt"), "a%20b/c.txt");
+    }
+
+    #[tokio::test]
+    async fn mutation_dot_segments_never_reach_another_remote_path() {
+        let server = MockServer::start().await;
+        mock_write_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"/api/github/team/assets/path/main/.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"deleted": 1})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"/api/github/team/assets/path/main/.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "path": "victim", "fileId": "0".repeat(64), "size": 0,
+                "updatedAt": 1, "created": false,
+            })))
+            .mount(&server)
+            .await;
+        let client = build_client(&server).await;
+        for remote in ["directory/../victim", "directory/./victim", ".", ".."] {
+            assert!(matches!(
+                client.delete_path(remote, false).await,
+                Err(crate::SdxError::Metadata(_))
+            ));
+            assert!(matches!(
+                client.register_path(remote, &"0".repeat(64)).await,
+                Err(crate::SdxError::Metadata(_))
+            ));
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn encoded_endpoint_identity_survives_builder_auth_and_metadata_routes() {
+        let server = MockServer::start().await;
+        let revision = "release candidate+/%#?版本";
+        let repository = RepositoryId {
+            provider: "github".to_owned(),
+            owner: "team".to_owned(),
+            repo: "assets".to_owned(),
+            revision: revision.to_owned(),
+        };
+        for endpoint in ["xet-read-token", "tree"] {
+            let expected_revision = revision.to_owned();
+            let response = if endpoint == "tree" {
+                json!({"entries": [], "nextCursor": null})
+            } else {
+                json!({"casUrl": server.uri(), "exp": 4_000_000_000u64, "accessToken": READ_TOKEN})
+            };
+            Mock::given(method("GET"))
+                .and(move |request: &wiremock::Request| {
+                    request
+                        .url
+                        .path()
+                        .strip_prefix(&format!("/api/github/team/assets/{endpoint}/"))
+                        .is_some_and(|segment| {
+                            !segment.contains('/')
+                                && percent_encoding::percent_decode_str(segment)
+                                    .decode_utf8()
+                                    .is_ok_and(|decoded| decoded == expected_revision)
+                        })
+                })
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let auth = Auth::new(&server.uri(), repository)
+            .unwrap()
+            .with_api_key(BOOTSTRAP_KEY.to_owned());
+        let endpoint = crate::XetUrl::parse(&format!(
+            "xet://127.0.0.1:{}/github/team/assets/release%20candidate+%2F%25%23%3F%E7%89%88%E6%9C%AC",
+            server.address().port()
+        )).unwrap();
+        let client = XetClientBuilder::new()
+            .endpoint(endpoint.endpoint_url())
+            .auth(auth)
+            .build()
+            .unwrap();
+        assert!(client.list_dir_all("").await.unwrap().is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn pagination_rejects_empty_repeated_and_cyclic_cursors() {
+        for returned_cursors in [vec![""], vec!["a", "a"], vec!["a", "b", "a"]] {
+            let server = MockServer::start().await;
+            mock_read_token(&server).await;
+            for (index, next) in returned_cursors.iter().enumerate() {
+                let expected = index.checked_sub(1).map(|i| returned_cursors[i].to_owned());
+                Mock::given(method("GET"))
+                    .and(path("/api/github/team/assets/tree/main"))
+                    .and(move |request: &wiremock::Request| {
+                        request
+                            .url
+                            .query_pairs()
+                            .find(|(key, _)| key == "cursor")
+                            .map(|(_, value)| value.into_owned())
+                            == expected
+                    })
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "entries": [], "nextCursor": next
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let client = build_client(&server).await;
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), client.list_dir_all(""))
+                    .await
+                    .expect("malformed pagination must terminate");
+            assert!(
+                matches!(result, Err(crate::SdxError::Metadata(_))),
+                "{result:?}"
+            );
+            server.verify().await;
+        }
     }
 
     /// A path segment is NOT a query string: axum's `Path` percent-decodes and
