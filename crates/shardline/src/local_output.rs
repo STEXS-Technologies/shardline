@@ -88,35 +88,9 @@ const fn run_before_local_write_hook(_path: &Path) {}
 /// output path is symlinked or otherwise non-regular, or the parent directory changes before
 /// the final commit completes.
 pub fn write_output_bytes(path: &Path, bytes: &[u8], create_parent: bool) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut writer = AtomicOutputFile::create(path, create_parent)?;
-        writer.write_all(bytes)?;
-        writer.commit()
-    }
-
-    #[cfg(not(unix))]
-    {
-        if create_parent {
-            ensure_parent_directory(path)?;
-        }
-        // Reject if the output path is a symlink to prevent write-through-symlink attacks
-        if path.exists() || path.symlink_metadata().is_ok() {
-            let meta = path.symlink_metadata().map_err(|e| {
-                io::Error::new(e.kind(), format!("failed to stat output path: {e}"))
-            })?;
-            if meta.file_type().is_symlink() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "output path {} is a symlink; refusing to follow",
-                        path.display()
-                    ),
-                ));
-            }
-        }
-        fs::write(path, bytes)
-    }
+    let mut writer = AtomicOutputFile::create(path, create_parent)?;
+    writer.write_all(bytes)?;
+    writer.commit()
 }
 
 pub(crate) fn remove_output_file_if_present(path: &Path) -> io::Result<bool> {
@@ -157,6 +131,53 @@ fn ensure_parent_directory(path: &Path) -> io::Result<()> {
         return Ok(());
     }
     fs::create_dir_all(parent)
+}
+
+#[cfg(not(unix))]
+pub(crate) struct AtomicOutputFile {
+    temporary: tempfile::NamedTempFile,
+    final_path: PathBuf,
+}
+
+#[cfg(not(unix))]
+impl AtomicOutputFile {
+    pub(crate) fn create(path: &Path, create_parent: bool) -> io::Result<Self> {
+        if create_parent {
+            ensure_parent_directory(path)?;
+        }
+        ensure_existing_target_is_regular_or_missing(path)?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        Ok(Self {
+            temporary,
+            final_path: path.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn commit(mut self) -> io::Result<()> {
+        self.temporary.flush()?;
+        self.temporary.as_file().sync_all()?;
+        run_before_local_write_hook(&self.final_path);
+        ensure_existing_target_is_regular_or_missing(&self.final_path)?;
+        self.temporary
+            .persist(&self.final_path)
+            .map_err(|error| error.error)?;
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+impl Write for AtomicOutputFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.temporary.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.temporary.flush()
+    }
 }
 
 #[cfg(unix)]
@@ -296,7 +317,6 @@ fn open_new_file(path: &Path) -> io::Result<File> {
     open_new_file_shared(path, anchored_path_options().file_mode)
 }
 
-#[cfg(unix)]
 fn ensure_existing_target_is_regular_or_missing(path: &Path) -> io::Result<()> {
     match symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(()),
@@ -646,5 +666,18 @@ mod tests {
         }
 
         super::print_error_chain(&NoSourceError);
+    }
+    #[test]
+    fn uncommitted_stream_preserves_previous_output_and_cleans_temporary_file() {
+        use std::io::Write;
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("output.json");
+        std::fs::write(&output, b"previous").unwrap();
+        {
+            let mut writer = super::AtomicOutputFile::create(&output, false).unwrap();
+            writer.write_all(b"incomplete new output").unwrap();
+        }
+        assert_eq!(std::fs::read(output).unwrap(), b"previous");
+        assert_eq!(std::fs::read_dir(sandbox.path()).unwrap().count(), 1);
     }
 }
