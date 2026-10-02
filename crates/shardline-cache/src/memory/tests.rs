@@ -2200,3 +2200,73 @@ fn memory_entry_age_expiration_preserves_zero_and_exact_boundary() {
         Duration::from_secs(60)
     ));
 }
+
+#[test]
+fn memory_replacement_admission_counts_net_bytes_and_refreshes_fifo() {
+    // Exercise the production admission policy with a tiny payload budget.
+    let now = tokio::time::Instant::now();
+    let first = ReconstructionCacheKey::latest("first", None);
+    let second = ReconstructionCacheKey::latest("second", None);
+    let third = ReconstructionCacheKey::latest("third", None);
+    for replacement in [b"a".as_slice(), b"bbbb".as_slice()] {
+        for replace_first in [false, true] {
+            let mut inner = super::inner::CacheInner::new();
+            inner.store(&first, b"1111", now, 2, 8);
+            inner.store(&second, b"2222", now, 2, 8);
+            let target = if replace_first { &first } else { &second };
+            let unrelated = if replace_first { &second } else { &first };
+            inner.store(target, replacement, now, 2, 8);
+            assert_eq!(inner.entries.len(), 2);
+            assert_eq!(inner.eviction_order.len(), 2);
+            assert_eq!(inner.total_bytes, 4 + replacement.len());
+            assert_eq!(
+                inner.entries.get(target).unwrap().payload.as_slice(),
+                replacement
+            );
+            assert!(inner.entries.contains_key(unrelated));
+            // Replacement is fresh; real count pressure evicts the unrelated older entry.
+            inner.store(&third, b"3", now, 2, 8);
+            assert!(!inner.entries.contains_key(unrelated));
+            assert!(inner.entries.contains_key(target));
+            assert!(inner.entries.contains_key(&third));
+            assert_eq!(inner.total_bytes, replacement.len() + 1);
+        }
+    }
+}
+
+#[test]
+fn memory_replacement_growing_payload_evicts_only_under_real_byte_pressure() {
+    let now = tokio::time::Instant::now();
+    let first = ReconstructionCacheKey::latest("first", None);
+    let second = ReconstructionCacheKey::latest("second", None);
+    let mut inner = super::inner::CacheInner::new();
+    inner.store(&first, b"1111", now, 2, 8);
+    inner.store(&second, b"22", now, 2, 8);
+    inner.store(&second, b"4444", now, 2, 8);
+    assert!(inner.entries.contains_key(&first));
+    assert_eq!(inner.total_bytes, 8);
+    inner.store(&second, b"55555", now, 2, 8);
+    assert!(!inner.entries.contains_key(&first));
+    assert_eq!(inner.total_bytes, 5);
+    assert_eq!(inner.entries.len(), 1);
+    assert_eq!(inner.eviction_order.len(), 1);
+}
+
+#[test]
+fn memory_oversized_replacement_invalidates_old_value_without_other_eviction() {
+    let now = tokio::time::Instant::now();
+    let first = ReconstructionCacheKey::latest("first", None);
+    let second = ReconstructionCacheKey::latest("second", None);
+    let mut inner = super::inner::CacheInner::new();
+    inner.store(&first, b"1111", now, 2, 8);
+    inner.store(&second, b"2222", now, 2, 8);
+    inner.store(&second, b"oversized", now, 2, 8);
+    assert!(!inner.entries.contains_key(&second));
+    assert!(inner.entries.contains_key(&first));
+    assert_eq!(inner.total_bytes, 4);
+    assert_eq!(inner.entries.len(), 1);
+    assert_eq!(inner.eviction_order.len(), 1);
+    inner.store(&second, b"new", now, 2, 8);
+    assert_eq!(inner.total_bytes, 7);
+    assert_eq!(inner.entries.len(), 2);
+}

@@ -14,7 +14,7 @@ use crate::{
     ReconstructionCacheKey,
 };
 
-use super::inner::{CacheInner, LoadingEntry, MemoryEntry};
+use super::inner::{CacheInner, LoadingEntry};
 
 /// TOTAL time a waiter tolerates a loading latch that never stores a value
 /// before declaring its loader orphaned and releasing the latch.
@@ -491,27 +491,13 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
         Box::pin(async move {
             let now = Instant::now();
             let mut inner = self.inner.write().await;
-            if payload.len() <= MAX_MEMORY_CACHE_BYTES {
-                while (!inner.entries.contains_key(key)
-                    && inner.entries.len() >= self.max_entries.get())
-                    || inner.total_bytes.saturating_add(payload.len()) > MAX_MEMORY_CACHE_BYTES
-                {
-                    if inner.entries.is_empty() {
-                        break;
-                    }
-                    inner.evict_oldest();
-                }
-                let seq = inner.next_seq;
-                inner.next_seq = inner.next_seq.saturating_add(1);
-                inner.insert(
-                    key,
-                    MemoryEntry {
-                        payload: Arc::new(payload.to_vec()),
-                        inserted_at: now,
-                        seq,
-                    },
-                );
-            }
+            inner.store(
+                key,
+                payload,
+                now,
+                self.max_entries.get(),
+                MAX_MEMORY_CACHE_BYTES,
+            );
             let released = {
                 let mut loading = self
                     .loading

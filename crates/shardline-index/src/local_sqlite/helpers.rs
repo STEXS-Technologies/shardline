@@ -213,6 +213,26 @@ pub(crate) fn load_latest_verified_event_json_batch(
     operation_kind: OperationKind,
     operation_ids: &[String],
 ) -> Result<HashMap<String, Value>, LocalIndexStoreError> {
+    // Keep each query below SQLite's traditional 999-variable ceiling (one
+    // additional parameter identifies the operation kind). All chunks share
+    // the caller's transaction and run the same evidence verification.
+    const IDS_PER_QUERY: usize = 900;
+    let mut heads = HashMap::with_capacity(operation_ids.len());
+    for ids in operation_ids.chunks(IDS_PER_QUERY) {
+        heads.extend(load_latest_verified_event_json_chunk(
+            transaction,
+            operation_kind,
+            ids,
+        )?);
+    }
+    Ok(heads)
+}
+
+fn load_latest_verified_event_json_chunk(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_ids: &[String],
+) -> Result<HashMap<String, Value>, LocalIndexStoreError> {
     if operation_ids.is_empty() {
         return Ok(HashMap::new());
     }

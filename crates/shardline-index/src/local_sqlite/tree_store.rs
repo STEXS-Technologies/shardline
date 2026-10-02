@@ -177,11 +177,21 @@ fn scan_tree_sql(
     if !prefix.is_empty() {
         write!(
             sql,
-            " AND (path = ?{index} OR substr(path, 1, length(?{index}) + 1) = ?{index} || '/')"
+            " AND path >= ?{index} AND (path = ?{index} OR substr(path, 1, length(?{index}) + 1) = ?{index} || '/')"
         )
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
         args.push(Value::Text(prefix.to_owned()));
         index = index.saturating_add(1);
+        // Bound the binary primary-key scan before applying the segment-aware
+        // predicate. Without this range a tiny late-prefix page scans every
+        // unrelated earlier path in the revision. The literal predicate still
+        // excludes adjacent names and treats SQL wildcard characters literally.
+        if let Some(upper) = crate::hub::prefix_successor(prefix) {
+            write!(sql, " AND path < ?{index}")
+                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
+            args.push(Value::Text(upper));
+            index = index.saturating_add(1);
+        }
     }
     if let Some(cursor) = cursor {
         write!(sql, " AND path > ?{index}")
@@ -1370,5 +1380,94 @@ mod tests {
                 RepoKey::new("gitlab", "team", "assets"),
             ]
         );
+    }
+    #[tokio::test]
+    async fn scan_tree_binary_prefix_bounds_preserve_public_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+        let namespace = key("main");
+        let mut paths = vec![
+            "aaa",
+            "aaa/early",
+            "literal%",
+            "literal%/child",
+            "literal_/child",
+            "literal_neighbor",
+            "ζ",
+            "ζ/child",
+            "ζ/last",
+            "ζ-other",
+            "\u{d7ff}",
+            "\u{d7ff}/child",
+            "\u{e000}/neighbor",
+            "\u{10ffff}",
+            "\u{10ffff}/child",
+            "\u{10ffff}\u{10ffff}/child",
+        ];
+        paths.sort_unstable();
+        for path in &paths {
+            store
+                .upsert_tree_entry(&entry("main", path, &file_id(1), 1, 1))
+                .await
+                .unwrap();
+        }
+        for mut scoped in [
+            entry("feature", "outside/revision", &file_id(2), 1, 1),
+            entry("main", "outside/provider", &file_id(2), 1, 1),
+            entry("main", "outside/owner", &file_id(2), 1, 1),
+            entry("main", "outside/repo", &file_id(2), 1, 1),
+        ] {
+            if scoped.path.ends_with("provider") {
+                scoped.provider = "other".to_owned();
+            }
+            if scoped.path.ends_with("owner") {
+                scoped.owner = "other".to_owned();
+            }
+            if scoped.path.ends_with("repo") {
+                scoped.repo = "other".to_owned();
+            }
+            store.upsert_tree_entry(&scoped).await.unwrap();
+        }
+        for prefix in [
+            "",
+            "aaa",
+            "literal%",
+            "literal_",
+            "ζ",
+            "\u{d7ff}",
+            "\u{10ffff}",
+            "\u{10ffff}\u{10ffff}",
+            "missing",
+        ] {
+            for cursor in [None, Some("literal%"), Some("ζ/child"), Some("\u{10ffff}")] {
+                for limit in [0, 1, 2, 100] {
+                    let expected = paths
+                        .iter()
+                        .copied()
+                        .filter(|path| {
+                            prefix.is_empty()
+                                || *path == prefix
+                                || path
+                                    .strip_prefix(prefix)
+                                    .is_some_and(|rest| rest.starts_with('/'))
+                        })
+                        .filter(|path| cursor.is_none_or(|after| *path > after))
+                        .take(limit)
+                        .collect::<Vec<_>>();
+                    let actual = store
+                        .scan_tree(&namespace, prefix, cursor, limit)
+                        .await
+                        .unwrap();
+                    let actual_paths = actual
+                        .iter()
+                        .map(|row| row.path.as_str())
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        actual_paths, expected,
+                        "prefix={prefix:?} cursor={cursor:?} limit={limit}"
+                    );
+                }
+            }
+        }
     }
 }
