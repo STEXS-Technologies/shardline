@@ -16,6 +16,15 @@ pub enum ServerConfigError {
         capacity: usize,
         maximum: usize,
     },
+    /// An enabled durable upload session's expiry cannot be represented.
+    #[error(
+        "{name} value {seconds} seconds exceeds the durable timestamp maximum TTL {maximum} seconds at the current clock"
+    )]
+    SessionTtlOutOfRange {
+        name: &'static str,
+        seconds: u64,
+        maximum: u64,
+    },
     /// The bind address could not be parsed.
     #[error("invalid bind address")]
     BindAddress(#[from] AddrParseError),
