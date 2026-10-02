@@ -102,6 +102,10 @@ pub fn authorize_s3(
     required_scope: TokenScope,
 ) -> Result<Option<VerifiedAuthContext>, S3Error> {
     if let Some(auth) = &state.auth {
+        // Preserve ambiguity before the SigV4 bridge creates a singleton Bearer map.
+        if headers.get_all(AUTHORIZATION).iter().nth(1).is_some() {
+            return Err(S3Error::access_denied());
+        }
         let access_key = extract_access_key(headers).ok_or_else(S3Error::access_denied)?;
         let mut bearer_headers = HeaderMap::new();
         bearer_headers.insert(
