@@ -1295,6 +1295,70 @@ async fn s3_multipart_roundtrip_assembles_parts_and_ranges() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_postgres_invalid_completion_keeps_parts_writable() {
+    for case in ["malformed", "missing", "too-small"] {
+        let Some((mut state, _tmp)) = build_postgres_test_state().await else {
+            return;
+        };
+        let inner = Arc::get_mut(&mut state).unwrap();
+        inner.config = inner
+            .config
+            .clone()
+            .with_s3_min_part_bytes(NonZeroU64::new(4).unwrap())
+            .unwrap();
+        let app = s3_router(state.clone());
+        let upload_id = create_upload_id(&app).await;
+        assert_eq!(
+            upload_part(&app, &upload_id, 1, b"a").await.status(),
+            StatusCode::OK
+        );
+        if case == "too-small" {
+            assert_eq!(
+                upload_part(&app, &upload_id, 2, b"tail").await.status(),
+                StatusCode::OK
+            );
+        }
+        let body = match case {
+            "malformed" => "<invalid".to_owned(),
+            "missing" => complete_body(&upload_id, &[1, 2]),
+            _ => complete_body(&upload_id, &[1, 2]),
+        };
+        let rejected = complete_upload(&app, &upload_id, body).await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "{case}");
+        let session = state
+            .backend
+            .resumable_session_by_id(&upload_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.state(),
+            shardline_index::ResumableSessionState::Active,
+            "{case}"
+        );
+        assert_eq!(
+            upload_part(&app, &upload_id, 1, b"fixed").await.status(),
+            StatusCode::OK,
+            "{case}"
+        );
+        if case == "missing" {
+            assert_eq!(
+                upload_part(&app, &upload_id, 2, b"tail").await.status(),
+                StatusCode::OK
+            );
+        }
+        let parts: &[u32] = if case == "malformed" { &[1] } else { &[1, 2] };
+        assert_eq!(
+            complete_upload(&app, &upload_id, complete_body(&upload_id, parts))
+                .await
+                .status(),
+            StatusCode::OK,
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_multipart_survives_without_shared_session_files() {
     let Some((state, tmp)) = build_postgres_test_state().await else {
         return;
