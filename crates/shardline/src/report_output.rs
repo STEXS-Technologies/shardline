@@ -250,6 +250,10 @@ pub fn print_storage_migration_summary(report: &StorageMigrationReport) {
 }
 
 pub fn print_local_gc_summary(report: &LocalGcReport) {
+    println!(
+        "retention_deferred_clock: {}",
+        report.retention_deferred_clock
+    );
     println!("scanned_records: {}", report.scanned_records);
     println!("referenced_chunks: {}", report.referenced_chunks);
     println!("orphan_chunks: {}", report.orphan_chunks);

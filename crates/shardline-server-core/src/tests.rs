@@ -517,6 +517,103 @@ fn materialize_object_to_tempfile_rejects_length_mismatch() {
     ));
 }
 
+/// Serves exactly one GET. Asserting the complete requested range makes this
+/// fixture reject a regression to sequential per-MiB GETs.
+fn materialization_s3_fixture(
+    body: Vec<u8>,
+    declared_length: usize,
+    response_start: usize,
+) -> (ServerObjectStore, std::thread::JoinHandle<()>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let response_end = declared_length.checked_sub(1).expect("nonempty fixture");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut connection, _) = listener.accept().unwrap();
+        connection
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(connection.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with("GET /assets/aa/materialize "));
+        let mut requested_range = None;
+        loop {
+            line.clear();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("range:") {
+                requested_range = Some(value.trim().to_owned());
+            }
+        }
+        assert_eq!(requested_range, Some(format!("bytes=0-{response_end}")));
+        write!(
+            connection,
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: {declared_length}\r\nContent-Range: bytes {response_start}-{response_end}/{declared_length}\r\nETag: \"fixture\"\r\nLast-Modified: Wed, 01 Oct 2025 00:00:00 GMT\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        // Mismatched range clients can reject the headers and close early.
+        if response_start == 0 {
+            for bytes in body.chunks(64 * 1024) {
+                connection.write_all(bytes).unwrap();
+            }
+        }
+    });
+    let config = S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
+        .with_endpoint(Some(format!("http://{address}")))
+        .with_allow_http(true)
+        .with_credentials(
+            Some(shardline_protocol::SecretString::from_secret("fixture")),
+            Some(shardline_protocol::SecretString::from_secret("fixture")),
+            None,
+        );
+    (ServerObjectStore::s3(config).unwrap(), server)
+}
+
+#[test]
+fn materialize_s3_uses_one_get_for_multiple_mebibytes() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let body: Vec<u8> = (0..(2 * 1024 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let (store, server) = materialization_s3_fixture(body.clone(), body.len(), 0);
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let result = store.materialize_object_to_tempfile(&key, body.len() as u64);
+    server.join().unwrap();
+    let mut file = result.unwrap();
+    file.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
+    let mut recovered = Vec::new();
+    file.as_file_mut().read_to_end(&mut recovered).unwrap();
+    assert_eq!(recovered, body);
+}
+
+#[test]
+fn materialize_s3_rejects_truncated_response() {
+    let (store, server) = materialization_s3_fixture(b"short".to_vec(), 100, 0);
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let result = store.materialize_object_to_tempfile(&key, 100);
+    server.join().unwrap();
+    assert!(
+        result.is_err(),
+        "truncated bytes must not reach xorb validation"
+    );
+}
+
+#[test]
+fn materialize_s3_rejects_wrong_response_range() {
+    let (store, server) = materialization_s3_fixture(vec![0; 100], 100, 1);
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let result = store.materialize_object_to_tempfile(&key, 100);
+    server.join().unwrap();
+    assert!(result.is_err(), "a different range must not be accepted");
+}
+
 // ── copy_if_absent ────────────────────────────────────────────────
 
 #[test]

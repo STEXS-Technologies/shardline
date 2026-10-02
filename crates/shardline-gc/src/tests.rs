@@ -2358,6 +2358,7 @@ async fn run_forward_clock_two_run_scenario(include_untracked_orphan: bool) {
     // Run 1: the guard fired → mark deferred → no new candidates stamped with
     // the jumped clock; sweep skipped → nothing deleted; fired run's `now` is
     // never written as the anchor.
+    assert!(run1.report.retention_deferred_clock);
     assert_eq!(run1.report.deleted_chunks, 0, "run 1 must not delete");
     assert_eq!(
         run1.report.new_quarantine_candidates, 0,
@@ -2382,6 +2383,7 @@ async fn run_forward_clock_two_run_scenario(include_untracked_orphan: bool) {
     // Run 2: the guard must STILL be armed — the jumped clock never entered
     // the creation-timestamp reference, so candidate A is preserved instead of
     // being deleted ~6 days before its real retention elapsed.
+    assert!(run2.report.retention_deferred_clock);
     assert_eq!(run2.report.deleted_chunks, 0, "run 2 must not delete");
     assert_eq!(run2.report.new_quarantine_candidates, 0);
     assert_eq!(run2.report.active_quarantine_candidates, 1);
@@ -2410,6 +2412,7 @@ async fn run_forward_clock_two_run_scenario(include_untracked_orphan: bool) {
         .unwrap();
     set_gc_now_unix_seconds_override(None);
 
+    assert!(!run3.report.retention_deferred_clock);
     assert_eq!(run3.report.deleted_chunks, 0, "A is not yet expired");
     assert!(
         object_store.contains(&key_a).unwrap(),

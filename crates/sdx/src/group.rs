@@ -932,6 +932,7 @@ mod tests {
     /// 416 fallback, and a 206 xorb range response (optionally delayed).
     async fn mocks(server: &MockServer, delay: Option<Duration>) {
         let payload = serialize_payload(&[&[7u8; 64], &[9u8; 64]]);
+        let end = payload.len().checked_sub(1).expect("nonempty xorb fixture");
         Mock::given(method("GET"))
             .and(path(format!("/v2/reconstructions/{FILE_ID}")))
             .and(header("authorization", format!("Bearer {READ_TOKEN}")))
@@ -946,7 +947,7 @@ mod tests {
                     XORB_HASH: [{
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                         "ranges": [
-                            {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                            {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": end}}
                         ]
                     }]
                 }),
@@ -960,7 +961,7 @@ mod tests {
             .mount(server)
             .await;
         let mut template = ResponseTemplate::new(206)
-            .insert_header("Content-Range", format!("bytes 0-200/{}", payload.len()))
+            .insert_header("Content-Range", format!("bytes 0-{end}/{}", payload.len()))
             .set_body_raw(payload, "application/octet-stream");
         if let Some(delay) = delay {
             template = template.set_delay(delay);
@@ -968,7 +969,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/transfer/xorb/default/{XORB_HASH}")))
             .and(header("authorization", format!("Bearer {READ_TOKEN}")))
-            .and(header("range", "bytes=0-200"))
+            .and(header("range", format!("bytes=0-{end}")))
             .respond_with(template)
             .mount(server)
             .await;

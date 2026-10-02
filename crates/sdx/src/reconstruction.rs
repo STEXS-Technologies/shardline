@@ -639,14 +639,14 @@ mod tests {
                     XORB_HASH: [{
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                         "ranges": [
-                            {"chunks": {"start": 0, "end": 3}, "bytes": {"start": 0, "end": 200}}
+                            {"chunks": {"start": 0, "end": 3}, "bytes": {"start": 0, "end": payload.len() - 1}}
                         ]
                     }]
                 }),
             )))
             .mount(&server)
             .await;
-        xorb_range_mock(&server, XORB_HASH, 0, 200, payload).await;
+        xorb_range_mock(&server, XORB_HASH, 0, (payload.len() - 1) as u64, payload).await;
 
         let transfer = transfer_client();
         let file = super::reconstruct(&transfer, None, &server.uri(), "read-token", FILE_ID, None)
@@ -688,13 +688,13 @@ mod tests {
                     XORB_HASH: [{
                         "range": {"start": 0, "end": 1},
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
-                        "url_range": {"start": 0, "end": 100}
+                        "url_range": {"start": 0, "end": payload.len() - 1}
                     }]
                 }
             })))
             .mount(&server)
             .await;
-        xorb_range_mock(&server, XORB_HASH, 0, 100, payload).await;
+        xorb_range_mock(&server, XORB_HASH, 0, (payload.len() - 1) as u64, payload).await;
 
         let transfer = transfer_client();
         let file = super::reconstruct(&transfer, None, &server.uri(), "read-token", FILE_ID, None)
@@ -721,14 +721,14 @@ mod tests {
                     XORB_HASH: [{
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                         "ranges": [
-                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                         ]
                     }]
                 }),
             )))
             .mount(&server)
             .await;
-        xorb_range_mock(&server, XORB_HASH, 0, 100, payload).await;
+        xorb_range_mock(&server, XORB_HASH, 0, (payload.len() - 1) as u64, payload).await;
 
         let transfer = transfer_client();
         let range = super::ByteRange::new(16, 63);
@@ -762,14 +762,14 @@ mod tests {
                     XORB_HASH: [{
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                         "ranges": [
-                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                         ]
                     }]
                 }),
             )))
             .mount(&server)
             .await;
-        xorb_range_mock(&server, XORB_HASH, 0, 100, payload).await;
+        xorb_range_mock(&server, XORB_HASH, 0, (payload.len() - 1) as u64, payload).await;
 
         let transfer = transfer_client();
         let error = super::reconstruct(&transfer, None, &server.uri(), "read-token", FILE_ID, None)
@@ -819,7 +819,7 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 40}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
@@ -833,7 +833,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(&server)
             .await;
-        xorb_range_mock(&server, XORB_HASH, 0, 40, payload).await;
+        xorb_range_mock(&server, XORB_HASH, 0, (payload.len() - 1) as u64, payload).await;
 
         let transfer = transfer_client();
         let file = super::reconstruct(&transfer, None, &server.uri(), "read-token", FILE_ID, None)
@@ -886,14 +886,21 @@ mod tests {
                     XORB_HASH: [{
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                         "ranges": [
-                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                         ]
                     }]
                 }),
             )))
             .mount(&server)
             .await;
-        xorb_range_mock(&server, XORB_HASH, 0, 100, payload.clone()).await;
+        xorb_range_mock(
+            &server,
+            XORB_HASH,
+            0,
+            (payload.len() - 1) as u64,
+            payload.clone(),
+        )
+        .await;
 
         let retry = RetryContext {
             policy: RetryPolicy::new()

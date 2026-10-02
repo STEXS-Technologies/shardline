@@ -16,8 +16,10 @@ use shardline_storage::ObjectStore as _;
 
 use crate::{
     GcError, LocalGcOptions,
-    quarantine::{read_last_gc_clock_anchor, read_newest_stored_creation_timestamp},
-    runner::{gc_now_unix_seconds, retention_clock_is_skewed_forward},
+    quarantine::{
+        gc_boot_observation, read_gc_clock_anchor, read_newest_stored_creation_timestamp,
+    },
+    runner::{gc_now_unix_seconds, retention_clock_is_skewed_with_elapsed},
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -101,11 +103,12 @@ where
     let now = gc_now_unix_seconds();
     let newest_stored_creation_timestamp =
         read_newest_stored_creation_timestamp(index_store).await?;
-    let last_gc_clock_anchor = read_last_gc_clock_anchor(object_store)?;
-    if retention_clock_is_skewed_forward(
+    let last_gc_clock_anchor = read_gc_clock_anchor(object_store)?;
+    if retention_clock_is_skewed_with_elapsed(
         now,
         newest_stored_creation_timestamp,
-        last_gc_clock_anchor,
+        last_gc_clock_anchor.as_ref(),
+        gc_boot_observation().as_ref(),
     ) {
         tracing::warn!(
             "skipping OCI tombstone reclamation: GC wall clock jumped forward relative to stored lifecycle timestamps"
