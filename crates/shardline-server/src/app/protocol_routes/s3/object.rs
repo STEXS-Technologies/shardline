@@ -110,7 +110,7 @@ fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) 
 }
 
 /// Resolves the S3 listing-index row for an object (`None` when absent).
-async fn s3_object_entry(
+pub(super) async fn s3_object_entry(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
 ) -> Result<Option<S3ObjectEntry>, S3Error> {
@@ -328,6 +328,7 @@ async fn s3_copy_object(
         Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&source.key)),
         Err(error) => return Err(S3Error::from(error)),
     };
+    check_copy_source_preconditions(headers, &snapshot)?;
     if snapshot.total_bytes > max_bytes_u64 {
         return Err(S3Error {
             code: "EntityTooLarge",
@@ -389,6 +390,91 @@ async fn s3_copy_object(
         .into_response())
 }
 
+/// Source validators are checked against the exact snapshot whose bytes
+/// will be copied, so concurrent source publication cannot tear the check.
+fn check_copy_source_preconditions(
+    headers: &HeaderMap,
+    snapshot: &crate::backend::S3ObjectReadSnapshot,
+) -> Result<(), S3Error> {
+    let mut source_headers = HeaderMap::new();
+    for (source_name, target_name) in [
+        ("x-amz-copy-source-if-match", axum::http::header::IF_MATCH),
+        (
+            "x-amz-copy-source-if-none-match",
+            axum::http::header::IF_NONE_MATCH,
+        ),
+    ] {
+        for value in headers.get_all(source_name) {
+            source_headers.append(target_name.clone(), value.clone());
+        }
+    }
+    let conditions = read_conditional_headers(&source_headers)
+        .map_err(|_error| S3Error::invalid_argument("Invalid copy-source entity-tag header"))?;
+    for condition in conditions {
+        // Snapshot resolution already proved source existence. A legacy
+        // source without an ETag cannot satisfy concrete tag predicates.
+        let satisfied = match &condition {
+            shardline_s3_adapter::ConditionalHeader::IfMatch(
+                shardline_s3_adapter::EntityTagSet::Any,
+            ) => true,
+            shardline_s3_adapter::ConditionalHeader::IfNoneMatch(
+                shardline_s3_adapter::EntityTagSet::Any,
+            ) => false,
+            shardline_s3_adapter::ConditionalHeader::IfMatch(_)
+            | shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_) => snapshot
+                .etag
+                .as_deref()
+                .is_some_and(|etag| condition.satisfied(Some(etag))),
+        };
+        if !satisfied {
+            return Err(S3Error::precondition_failed());
+        }
+    }
+    for (name, tag_header, unmodified) in [
+        (
+            "x-amz-copy-source-if-unmodified-since",
+            axum::http::header::IF_MATCH,
+            true,
+        ),
+        (
+            "x-amz-copy-source-if-modified-since",
+            axum::http::header::IF_NONE_MATCH,
+            false,
+        ),
+    ] {
+        let mut values = headers.get_all(name).iter();
+        let Some(value) = values.next() else {
+            continue;
+        };
+        if values.next().is_some() {
+            return Err(S3Error::invalid_argument(
+                "Repeated copy-source date header",
+            ));
+        }
+        let date = value
+            .to_str()
+            .ok()
+            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .ok_or_else(|| S3Error::invalid_argument("Invalid copy-source date header"))?;
+        // S3 tag validators take precedence over their corresponding dates.
+        if source_headers.contains_key(tag_header) {
+            continue;
+        }
+        let since = date
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .ok_or_else(|| S3Error::invalid_argument("Invalid copy-source date header"))?;
+        let Some(modified) = snapshot.updated_at_unix_seconds else {
+            return Err(S3Error::precondition_failed());
+        };
+        if (unmodified && modified > since) || (!unmodified && modified <= since) {
+            return Err(S3Error::precondition_failed());
+        }
+    }
+    Ok(())
+}
+
 /// Evaluates the `If-Match` / `If-None-Match` headers against the object's
 /// CURRENT state, before a write mutates anything.
 ///
@@ -411,17 +497,14 @@ async fn check_put_precondition(
 /// Evaluates the S3 conditional headers against a stored ETag.
 ///
 /// `stored_etag: None` means the object does not exist.
-fn check_precondition(
+pub(super) fn check_precondition(
     stored_etag: Option<&str>,
     headers: &HeaderMap,
     key: &str,
 ) -> Result<(), S3Error> {
-    let Some(condition) = read_conditional_headers(headers) else {
+    let Some(condition) = failing_condition(stored_etag, headers)? else {
         return Ok(());
     };
-    if condition.satisfied(stored_etag) {
-        return Ok(());
-    }
     if matches!(
         condition,
         shardline_s3_adapter::ConditionalHeader::IfMatch(_)
@@ -430,6 +513,41 @@ fn check_precondition(
         return Err(S3Error::no_such_key(key));
     }
     Err(S3Error::precondition_failed())
+}
+
+fn failing_condition(
+    stored_etag: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Option<shardline_s3_adapter::ConditionalHeader>, S3Error> {
+    let conditions = read_conditional_headers(headers)
+        .map_err(|_error| S3Error::invalid_argument("Invalid conditional entity-tag header"))?;
+    Ok(conditions
+        .into_iter()
+        .find(|condition| !condition.satisfied(stored_etag)))
+}
+
+/// GET/HEAD use 304 for failed If-None-Match, with no XML or content body.
+fn check_read_precondition(
+    stored_etag: Option<&str>,
+    headers: &HeaderMap,
+    key: &str,
+) -> Result<Option<Response>, S3Error> {
+    match failing_condition(stored_etag, headers)? {
+        Some(shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_)) => {
+            let mut response = StatusCode::NOT_MODIFIED.into_response();
+            if let Some(etag) =
+                stored_etag.and_then(|etag| HeaderValue::from_str(&etag_header(etag)).ok())
+            {
+                response.headers_mut().insert(ETAG, etag);
+            }
+            Ok(Some(response))
+        }
+        Some(_) => {
+            check_precondition(stored_etag, headers, key)?;
+            Ok(None)
+        }
+        None => Ok(None),
+    }
 }
 
 /// Wraps a byte stream with a hard total-byte ceiling (defense-in-depth for
@@ -500,7 +618,7 @@ fn bounded_byte_stream(
 /// while the latest alias still points at it (see
 /// `delete_file_reference_if_latest`). The process-local lock remains a useful
 /// single-node optimization, but correctness comes from the database CAS.
-async fn s3_upload_object_body(
+pub(super) async fn s3_upload_object_body(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
     body: RequestBodyReader,
@@ -530,8 +648,18 @@ async fn s3_upload_object_body(
     // Capture the exact metadata row that satisfied the condition. The later
     // compare-and-swap rejects the write if any replica changes that row while
     // this request streams its body.
-    let conditional_headers =
-        precondition.filter(|headers| read_conditional_headers(headers).is_some());
+    let conditional_headers = match precondition {
+        Some(headers)
+            if !read_conditional_headers(headers)
+                .map_err(|_error| {
+                    S3Error::invalid_argument("Invalid conditional entity-tag header")
+                })?
+                .is_empty() =>
+        {
+            Some(headers)
+        }
+        _ => None,
+    };
     let expected_entry = if let Some(headers) = conditional_headers {
         let existing = s3_object_entry(state, context).await?;
         check_precondition(
@@ -695,11 +823,13 @@ pub(crate) async fn s3_get_object(
     let entry = s3_object_entry(&state, &context).await?;
     // Conditional requests (If-Match / If-None-Match) evaluate against the
     // stored S3 ETag (listing-index row) before any bytes are served.
-    check_precondition(
+    if let Some(response) = check_read_precondition(
         entry.as_ref().map(|entry| entry.etag.as_str()),
         &headers,
         &context.key,
-    )?;
+    )? {
+        return Ok(response);
+    }
 
     // Resolve the object's length and record version from the SAME row whose
     // ETag / metadata are served below: the stream is pinned to the row's
@@ -725,7 +855,25 @@ pub(crate) async fn s3_get_object(
             (snapshot.total_bytes, snapshot.record_content_hash)
         }
     };
-    let range_header = headers.get(RANGE).and_then(|value| value.to_str().ok());
+    // If-Range is a single strong validator. Without an exact match (or an
+    // available date validator), return the entire pinned representation.
+    let if_range_values = headers.get_all(axum::http::header::IF_RANGE);
+    let mut if_range_values = if_range_values.iter();
+    let range_allowed = match if_range_values.next() {
+        None => true,
+        Some(value) if if_range_values.next().is_none() => entry.as_ref().is_some_and(|row| {
+            value
+                .to_str()
+                .ok()
+                .is_some_and(|value| value.trim_matches([' ', '\t']) == etag_header(&row.etag))
+        }),
+        Some(_) => false,
+    };
+    let range_header = if range_allowed {
+        headers.get(RANGE).and_then(|value| value.to_str().ok())
+    } else {
+        None
+    };
     let range = match range_header {
         Some(header) => {
             // An explicit range on an empty object is unsatisfiable.
@@ -814,11 +962,13 @@ pub(crate) async fn s3_head_object(
     let entry = s3_object_entry(&state, &context).await?;
     // Conditional requests evaluate against the stored S3 ETag before the
     // headers are served.
-    check_precondition(
+    if let Some(response) = check_read_precondition(
         entry.as_ref().map(|entry| entry.etag.as_str()),
         &headers,
         &context.key,
-    )?;
+    )? {
+        return Ok(response);
+    }
 
     let size = match &entry {
         Some(row) => row.size_bytes,
@@ -960,7 +1110,10 @@ pub(crate) async fn s3_post_object(
         .iter()
         .find(|resource| matches!(resource, S3SubResource::UploadId(_)))
     {
-        return multipart::s3_complete_multipart_upload(&state, &context, upload_id, body).await;
+        return multipart::s3_complete_multipart_upload(
+            &state, &context, upload_id, &headers, body,
+        )
+        .await;
     }
     Err(S3Error::not_implemented())
 }
@@ -973,4 +1126,32 @@ pub(crate) async fn s3_post_object(
 fn last_modified_from_entry(entry: Option<&S3ObjectEntry>) -> String {
     let updated_at = entry.map(|row| row.updated_at_unix_seconds).unwrap_or(0);
     format_http_date(updated_at)
+}
+
+#[cfg(test)]
+mod conditional_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    #[test]
+    fn unknown_copy_source_validators_preserve_existence_wildcards() {
+        let snapshot = crate::backend::S3ObjectReadSnapshot {
+            total_bytes: 1,
+            record_content_hash: None,
+            user_metadata: Vec::new(),
+            etag: None,
+            updated_at_unix_seconds: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amz-copy-source-if-match", "*".parse().unwrap());
+        assert!(check_copy_source_preconditions(&headers, &snapshot).is_ok());
+        headers.clear();
+        headers.insert("x-amz-copy-source-if-none-match", "*".parse().unwrap());
+        assert!(check_copy_source_preconditions(&headers, &snapshot).is_err());
+        headers.clear();
+        headers.insert(
+            "x-amz-copy-source-if-none-match",
+            "\"unknown\"".parse().unwrap(),
+        );
+        assert!(check_copy_source_preconditions(&headers, &snapshot).is_err());
+    }
 }

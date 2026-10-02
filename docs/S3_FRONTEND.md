@@ -82,7 +82,9 @@ access-key and Bearer auth forms.
 | `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
-| Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete; `412 PreconditionFailed` on mismatch (`404 NoSuchKey` when `If-Match` targets a missing object) |
+| Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
+| Copy source conditions | CopyObject evaluates `x-amz-copy-source-if-match` / `if-none-match` and `if-modified-since` / `if-unmodified-since` against validators from the same pinned source version. Tag conditions take precedence over corresponding date conditions. Legacy sources lacking validators fail closed for concrete conditions; wildcard conditions still use known source existence. |
+| Conditional ranges | GetObject honors one matching strong `If-Range` ETag; stale, weak, malformed, repeated or date validators return the entire representation (`200`). Date validators are conservatively ignored because the route does not have a strong date validator. |
 | `ListBuckets` | service-level `GET /`; lists the caller's single `{owner}.{name}` bucket |
 
 ### Planned (near-term follow-up)

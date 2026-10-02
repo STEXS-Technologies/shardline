@@ -3452,7 +3452,7 @@ async fn s3_put_if_match_on_missing_returns_404() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_head_if_none_match_star_on_existing_returns_412() {
+async fn s3_head_if_none_match_star_on_existing_returns_304() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
     seed_object(&app, "cond.txt").await;
@@ -3467,7 +3467,7 @@ async fn s3_head_if_none_match_star_on_existing_returns_412() {
         ))
         .await
         .unwrap();
-    assert_eq!(head.status(), StatusCode::PRECONDITION_FAILED);
+    assert_eq!(head.status(), StatusCode::NOT_MODIFIED);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3610,4 +3610,644 @@ async fn s3_copy_object_cross_bucket_returns_access_denied() {
     assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
     // Nothing was written to the destination.
     assert_eq!(object_status(&app, "dst.txt").await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_mutations_preserve_all_conditional_safeguards() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "cond.txt").await;
+    seed_object(&app, "source.txt").await;
+    let etag = get_etag(&app, "cond.txt").await;
+    for method in ["PUT", "DELETE", "COPY"] {
+        for (if_match, if_none_match, status) in [
+            ("garbage".to_owned(), None, StatusCode::BAD_REQUEST),
+            (etag.clone(), Some("*"), StatusCode::PRECONDITION_FAILED),
+            (format!("W/{etag}"), None, StatusCode::PRECONDITION_FAILED),
+            (etag.clone(), Some("garbage"), StatusCode::BAD_REQUEST),
+        ] {
+            let mut builder = Request::builder()
+                .method(if method == "COPY" { "PUT" } else { method })
+                .uri(format!("/{BUCKET}/cond.txt"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::IF_MATCH, if_match);
+            if let Some(value) = if_none_match {
+                builder = builder.header(header::IF_NONE_MATCH, value);
+            }
+            if method == "COPY" {
+                builder = builder.header("x-amz-copy-source", format!("/{BUCKET}/source.txt"));
+            }
+            let response = app
+                .clone()
+                .oneshot(builder.body(Body::from("must-not-land")).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{method}");
+            assert_eq!(
+                body_bytes(get_etag_request(&app, "cond.txt").await).await,
+                b"seed-content".to_vec(),
+                "{method} must leave the original object intact"
+            );
+        }
+    }
+    let mut request = conditional_put_request(
+        format!("/{BUCKET}/cond.txt"),
+        b"must-not-land".to_vec(),
+        Some(("if-none-match", "\"unrelated\"")),
+    );
+    request
+        .headers_mut()
+        .append(header::IF_NONE_MATCH, etag.parse().unwrap());
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+    assert_eq!(
+        body_bytes(get_etag_request(&app, "cond.txt").await).await,
+        b"seed-content".to_vec()
+    );
+
+    // Repeated valid list fields retain all tags; the second field can match.
+    let mut request = conditional_put_request(
+        format!("/{BUCKET}/cond.txt"),
+        b"replacement".to_vec(),
+        Some(("if-match", "\"unrelated\"")),
+    );
+    request
+        .headers_mut()
+        .append(header::IF_MATCH, etag.parse().unwrap());
+    request
+        .headers_mut()
+        .insert(header::IF_NONE_MATCH, "\"unrelated\"".parse().unwrap());
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        body_bytes(get_etag_request(&app, "cond.txt").await).await,
+        b"replacement".to_vec()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_read_conditions_and_if_range_preserve_representation() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "cond.txt").await;
+    let etag = get_etag(&app, "cond.txt").await;
+    for method in ["GET", "HEAD"] {
+        let response = app
+            .clone()
+            .oneshot(conditional_request(
+                method,
+                format!("/{BUCKET}/cond.txt"),
+                &sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                Some(("if-none-match", &format!("W/{etag}"))),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers().get(header::ETAG).unwrap(), etag.as_str());
+        assert!(body_bytes(response).await.is_empty());
+    }
+    for (validator, status, bytes) in [
+        (etag.clone(), StatusCode::PARTIAL_CONTENT, b"seed".to_vec()),
+        (
+            "\"stale\"".to_owned(),
+            StatusCode::OK,
+            b"seed-content".to_vec(),
+        ),
+        (
+            format!("W/{etag}"),
+            StatusCode::OK,
+            b"seed-content".to_vec(),
+        ),
+        (
+            "Wed, 21 Oct 2015 07:28:00 GMT".to_owned(),
+            StatusCode::OK,
+            b"seed-content".to_vec(),
+        ),
+    ] {
+        let mut request = conditional_request(
+            "GET",
+            format!("/{BUCKET}/cond.txt"),
+            &sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+            None,
+        );
+        request
+            .headers_mut()
+            .insert(header::RANGE, "bytes=0-3".parse().unwrap());
+        request
+            .headers_mut()
+            .insert(header::IF_RANGE, validator.parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(body_bytes(response).await, bytes);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_postgres_corrupt_durable_part_preserves_old_object_and_allows_verified_retry() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    crate::apply_database_migrations(&pool).await.unwrap();
+    let (state, tmp) = build_postgres_test_state()
+        .await
+        .expect("live Postgres state");
+    let app = s3_router(state.clone());
+    let uri = format!("/{BUCKET}/{KEY}");
+    assert_eq!(
+        app.clone()
+            .oneshot(put_request(uri.clone(), b"old-visible".to_vec()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let upload_id = create_upload_id(&app).await;
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, b"original").await.status(),
+        StatusCode::OK
+    );
+    let (_, parts) = state
+        .backend
+        .resumable_session_snapshot(&upload_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parts.len(), 1);
+    let staged = tmp.path().join("objects").join(parts[0].staging_key());
+    tokio::fs::write(&staged, b"tampered").await.unwrap();
+    let response = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let session = state
+        .backend
+        .resumable_session_by_id(&upload_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        session.state(),
+        shardline_index::ResumableSessionState::Active
+    );
+    let get = |uri: String| {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header(
+                header::AUTHORIZATION,
+                sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+            )
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(get(uri.clone())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_bytes(response).await, b"old-visible");
+    // Restoring authoritative staging bytes allows the original fenced session
+    // to complete; corrupted bytes are never substituted into a new object.
+    tokio::fs::write(&staged, b"original").await.unwrap();
+    assert_eq!(
+        complete_upload(&app, &upload_id, complete_body(&upload_id, &[1]))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let response = app.oneshot(get(uri)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_bytes(response).await, b"original");
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_copy_source_conditions_validate_pinned_source() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "destination.txt").await;
+    let response = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/source.txt"),
+            b"source-version".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let source_etag = get_etag(&app, "source.txt").await;
+    for (condition, value, status) in [
+        (
+            "x-amz-copy-source-if-match",
+            "\"stale\"".to_owned(),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            "x-amz-copy-source-if-match",
+            format!("W/{source_etag}"),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            "x-amz-copy-source-if-none-match",
+            source_etag.clone(),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            "x-amz-copy-source-if-none-match",
+            "*".to_owned(),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            "x-amz-copy-source-if-match",
+            "garbage".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "x-amz-copy-source-if-unmodified-since",
+            "Mon, 01 Jan 1990 00:00:00 GMT".to_owned(),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            "x-amz-copy-source-if-modified-since",
+            "Thu, 01 Jan 2099 00:00:00 GMT".to_owned(),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            "x-amz-copy-source-if-modified-since",
+            "garbage".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let request = Request::builder()
+            .method("PUT")
+            .uri(format!("/{BUCKET}/destination.txt"))
+            .header(
+                header::AUTHORIZATION,
+                sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+            )
+            .header("x-amz-copy-source", format!("/{BUCKET}/source.txt"))
+            .header(condition, value)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status, "{condition}");
+        assert_eq!(
+            body_bytes(get_etag_request(&app, "destination.txt").await).await,
+            b"seed-content".to_vec()
+        );
+    }
+    for headers in [
+        vec![
+            ("x-amz-copy-source-if-match", source_etag.as_str()),
+            (
+                "x-amz-copy-source-if-unmodified-since",
+                "Mon, 01 Jan 1990 00:00:00 GMT",
+            ),
+        ],
+        vec![(
+            "x-amz-copy-source-if-modified-since",
+            "Mon, 01 Jan 1990 00:00:00 GMT",
+        )],
+        vec![(
+            "x-amz-copy-source-if-unmodified-since",
+            "Thu, 01 Jan 2099 00:00:00 GMT",
+        )],
+        vec![("x-amz-copy-source-if-match", "*")],
+    ] {
+        let mut request = Request::builder()
+            .method("PUT")
+            .uri(format!("/{BUCKET}/destination.txt"))
+            .header(
+                header::AUTHORIZATION,
+                sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+            )
+            .header("x-amz-copy-source", format!("/{BUCKET}/source.txt"));
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_bytes(get_etag_request(&app, "destination.txt").await).await,
+            b"source-version".to_vec()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_copy_source_if_match_never_copies_another_source_version() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let content_a = b"source-version-A".to_vec();
+    let initial = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/source.txt"),
+            content_a.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(initial.status(), StatusCode::OK);
+    let etag_a = get_etag(&app, "source.txt").await;
+    let writer_app = app.clone();
+    let writer = tokio::spawn(async move {
+        for index in 0..80 {
+            let content = if index % 2 == 0 {
+                b"source-version-B".to_vec()
+            } else {
+                b"source-version-A".to_vec()
+            };
+            let response = writer_app
+                .clone()
+                .oneshot(put_request(format!("/{BUCKET}/source.txt"), content))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            tokio::task::yield_now().await;
+        }
+    });
+    for _ in 0..80 {
+        let request = Request::builder()
+            .method("PUT")
+            .uri(format!("/{BUCKET}/destination.txt"))
+            .header(
+                header::AUTHORIZATION,
+                sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+            )
+            .header("x-amz-copy-source", format!("/{BUCKET}/source.txt"))
+            .header("x-amz-copy-source-if-match", &etag_a)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        match response.status() {
+            StatusCode::OK => {
+                assert_eq!(
+                    body_bytes(get_etag_request(&app, "destination.txt").await).await,
+                    content_a,
+                    "successful copy must use the version that satisfied If-Match"
+                );
+            }
+            status => assert_eq!(status, StatusCode::PRECONDITION_FAILED),
+        }
+    }
+    writer.await.unwrap();
+    // Deterministic success after the final source publication of version A.
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/{BUCKET}/destination.txt"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header("x-amz-copy-source", format!("/{BUCKET}/source.txt"))
+        .header("x-amz-copy-source-if-match", &etag_a)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        body_bytes(get_etag_request(&app, "destination.txt").await).await,
+        content_a
+    );
+}
+
+async fn assert_multipart_completion_honors_conditions(state: Arc<AppState>) {
+    let app = s3_router(state.clone());
+    let uri = format!("/{BUCKET}/{KEY}");
+    for case in 0..4 {
+        let seed = app
+            .clone()
+            .oneshot(put_request(uri.clone(), b"old-visible".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(seed.status(), StatusCode::OK);
+        let etag = seed
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let upload_id = create_upload_id(&app).await;
+        assert_eq!(
+            upload_part(&app, &upload_id, 1, b"new-visible")
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        let expected = match case {
+            0 => {
+                headers.insert(header::IF_MATCH, "\"stale\"".parse().unwrap());
+                StatusCode::PRECONDITION_FAILED
+            }
+            1 => {
+                headers.insert(header::IF_NONE_MATCH, "*".parse().unwrap());
+                StatusCode::PRECONDITION_FAILED
+            }
+            2 => {
+                headers.insert(header::IF_MATCH, "unquoted".parse().unwrap());
+                StatusCode::BAD_REQUEST
+            }
+            _ => {
+                headers.insert(header::IF_MATCH, etag.parse().unwrap());
+                headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+                StatusCode::PRECONDITION_FAILED
+            }
+        };
+        let complete = |headers: axum::http::HeaderMap| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/{KEY}?uploadId={upload_id}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::from(complete_body(&upload_id, &[1])))
+                .unwrap();
+            request.headers_mut().extend(headers);
+            request
+        };
+        let response = app.clone().oneshot(complete(headers)).await.unwrap();
+        assert_eq!(
+            response.status(),
+            expected,
+            "conditional completion case {case}"
+        );
+        let get = || {
+            Request::builder()
+                .method("GET")
+                .uri(uri.clone())
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            body_bytes(app.clone().oneshot(get()).await.unwrap()).await,
+            b"old-visible"
+        );
+        if state.backend.supports_fenced_s3_publication() {
+            let session = state
+                .backend
+                .resumable_session_by_id(&upload_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                session.state(),
+                shardline_index::ResumableSessionState::Active
+            );
+        }
+        let mut retry = axum::http::HeaderMap::new();
+        retry.insert(header::IF_MATCH, etag.parse().unwrap());
+        assert_eq!(
+            app.clone().oneshot(complete(retry)).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            body_bytes(app.clone().oneshot(get()).await.unwrap()).await,
+            b"new-visible"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_local_multipart_completion_honors_conditional_headers_and_retry() {
+    let (state, _tmp) = build_test_state().await;
+    assert_multipart_completion_honors_conditions(state).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_postgres_multipart_completion_honors_conditional_headers_and_retry() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    crate::apply_database_migrations(&pool).await.unwrap();
+    let (state, _tmp) = build_postgres_test_state()
+        .await
+        .expect("live Postgres state");
+    assert_multipart_completion_honors_conditions(state).await;
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_postgres_multipart_completion_conditional_race_has_one_winner() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    crate::apply_database_migrations(&pool).await.unwrap();
+    let tmp = TempDir::new().unwrap();
+    let shared = crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
+    let state_a = build_postgres_state(&database_url, &tmp.path().join("node-a"), shared.clone())
+        .await
+        .unwrap();
+    let state_b = build_postgres_state(&database_url, &tmp.path().join("node-b"), shared)
+        .await
+        .unwrap();
+    let app_a = s3_router(state_a.clone());
+    let app_b = s3_router(state_b);
+    let delete = Request::builder()
+        .method("DELETE")
+        .uri(format!("/{BUCKET}/{KEY}"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app_a.clone().oneshot(delete).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    let first = create_upload_id(&app_a).await;
+    let second = create_upload_id(&app_b).await;
+    assert_eq!(
+        upload_part(&app_a, &first, 1, b"first-winner")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload_part(&app_b, &second, 1, b"second-winner")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let complete = |id: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/{BUCKET}/{KEY}?uploadId={id}"))
+            .header(
+                header::AUTHORIZATION,
+                sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+            )
+            .header(header::IF_NONE_MATCH, "*")
+            .body(Body::from(complete_body(id, &[1])))
+            .unwrap()
+    };
+    let (first_response, second_response) = tokio::join!(
+        app_a.clone().oneshot(complete(&first)),
+        app_b.oneshot(complete(&second)),
+    );
+    let first_status = first_response.unwrap().status();
+    let second_status = second_response.unwrap().status();
+    assert!(matches!(
+        (first_status, second_status),
+        (StatusCode::OK, StatusCode::PRECONDITION_FAILED)
+            | (StatusCode::PRECONDITION_FAILED, StatusCode::OK)
+    ));
+    let loser = if first_status == StatusCode::OK {
+        &second
+    } else {
+        &first
+    };
+    let session = state_a
+        .backend
+        .resumable_session_by_id(loser)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        session.state(),
+        shardline_index::ResumableSessionState::Active
+    );
+    let get = Request::builder()
+        .method("GET")
+        .uri(format!("/{BUCKET}/{KEY}"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let expected = if first_status == StatusCode::OK {
+        b"first-winner".as_slice()
+    } else {
+        b"second-winner".as_slice()
+    };
+    assert_eq!(
+        body_bytes(app_a.oneshot(get).await.unwrap()).await,
+        expected
+    );
+    pool.close().await;
 }
