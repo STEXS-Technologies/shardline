@@ -814,6 +814,27 @@ impl ServerBackend {
         }
     }
 
+    pub(crate) async fn scan_s3_objects_from(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        start: Option<shardline_index::S3ObjectScanStart<'_>>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .scan_s3_objects_from(scope_namespace, prefix, start, limit)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .scan_s3_objects_from(scope_namespace, prefix, start, limit)
+                    .await
+            }
+        }
+    }
+
     /// Resolves exactly one S3 object listing row by its full raw key (no
     /// prefix matching), for the S3 frontend's conditional-object semantics.
     ///

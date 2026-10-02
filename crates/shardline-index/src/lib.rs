@@ -122,7 +122,9 @@ pub use resumable_session::{
     ResumableSessionState,
 };
 pub use resumable_snapshot::resumable_state_digest;
-pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore, S3PublishCondition};
+pub use s3_objects::{
+    S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, S3PublishCondition, s3_prefix_successor,
+};
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,
