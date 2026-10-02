@@ -74,6 +74,40 @@ impl CacheInner {
         }
     }
 
+    pub(super) fn store(
+        &mut self,
+        key: &ReconstructionCacheKey,
+        payload: &[u8],
+        now: Instant,
+        max_entries: usize,
+        max_bytes: usize,
+    ) {
+        // Replacement admission counts only retained payloads. Also invalidate
+        // the previous value when the replacement cannot fit in the cache.
+        self.remove(key);
+        if payload.len() > max_bytes {
+            return;
+        }
+        while self.entries.len() >= max_entries
+            || self.total_bytes.saturating_add(payload.len()) > max_bytes
+        {
+            if self.entries.is_empty() {
+                break;
+            }
+            self.evict_oldest();
+        }
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        self.insert(
+            key,
+            MemoryEntry {
+                payload: Arc::new(payload.to_vec()),
+                inserted_at: now,
+                seq,
+            },
+        );
+    }
+
     pub(super) fn insert(&mut self, key: &ReconstructionCacheKey, entry: MemoryEntry) {
         let inserted_at = entry.inserted_at;
         let seq = entry.seq;

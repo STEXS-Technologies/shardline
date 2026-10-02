@@ -1746,3 +1746,123 @@ fn blocked_local_bootstrap_does_not_block_other_roots() {
     assert_eq!(progress.unwrap(), Ok(()));
     assert_eq!(blocked_result, Ok(()));
 }
+
+#[tokio::test]
+async fn upload_intent_length_bounds_preserve_identity_and_evidence() {
+    use crate::{UploadIntent, UploadIntentStore};
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    for length in [0, i64::MAX as u64] {
+        let intent = UploadIntent::new(
+            format!("valid-{length}"),
+            "objects/valid".to_owned(),
+            "hash".to_owned(),
+            length,
+        );
+        store.create_intent(&intent).await.unwrap();
+        store.create_intent(&intent).await.unwrap();
+        let persisted = store
+            .intent_by_id(intent.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.object_length(), length);
+        assert_eq!(
+            store
+                .reliability_events(intent.intent_id())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let existing_id = format!("valid-{}", i64::MAX);
+    let before = store.intent_by_id(&existing_id).await.unwrap().unwrap();
+    let evidence_before = store.reliability_events(&existing_id).await.unwrap();
+    for length in [i64::MAX as u64 + 1, u64::MAX] {
+        for intent_id in ["fresh-oversized", existing_id.as_str()] {
+            let intent = UploadIntent::new(
+                intent_id.to_owned(),
+                "objects/valid".to_owned(),
+                "hash".to_owned(),
+                length,
+            );
+            assert!(matches!(
+                store.create_intent(&intent).await,
+                Err(LocalIndexStoreError::IntegerOutOfRange(_))
+            ));
+        }
+        assert!(
+            store
+                .intent_by_id("fresh-oversized")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .reliability_events("fresh-oversized")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let after = store.intent_by_id(&existing_id).await.unwrap().unwrap();
+        assert!(before.has_same_identity(&after));
+        assert_eq!(after.state(), before.state());
+        assert_eq!(after.created_at(), before.created_at());
+        assert_eq!(after.updated_at(), before.updated_at());
+        assert_eq!(
+            store.reliability_events(&existing_id).await.unwrap(),
+            evidence_before
+        );
+    }
+}
+
+#[tokio::test]
+async fn upload_intent_evidence_batch_spans_chunks_and_rejects_late_corruption() {
+    use crate::{UploadIntent, UploadIntentState, UploadIntentStore};
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let mut operation_ids = Vec::with_capacity(901);
+    for index in 0..901 {
+        let intent_id = format!("chunk-intent-{index:04}");
+        let intent = UploadIntent::new(
+            intent_id.clone(),
+            "objects/chunk".to_owned(),
+            "hash".to_owned(),
+            1,
+        );
+        store.create_intent(&intent).await.unwrap();
+        operation_ids.push(intent_id);
+    }
+    assert_eq!(
+        store
+            .intents_by_state(UploadIntentState::Created)
+            .await
+            .unwrap()
+            .len(),
+        901
+    );
+    let mut connection = open_sqlite_connection(directory.path()).unwrap();
+    {
+        let transaction = connection.transaction().unwrap();
+        let heads = super::helpers::load_latest_verified_event_json_batch(
+            &transaction,
+            shardline_reliability::OperationKind::Upload,
+            &operation_ids,
+        )
+        .unwrap();
+        assert_eq!(heads.len(), 901);
+        assert!(operation_ids.iter().all(|id| heads.contains_key(id)));
+    }
+    // The first 900 heads remain valid. Failure must come from verifying the
+    // head in the second query, rather than accepting the successful prefix.
+    connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_kind = 'Upload' AND operation_id = ?1", [operation_ids.last().unwrap()]).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let result = super::helpers::load_latest_verified_event_json_batch(
+        &transaction,
+        shardline_reliability::OperationKind::Upload,
+        &operation_ids,
+    );
+    assert!(matches!(result, Err(LocalIndexStoreError::Reliability(_))));
+}
