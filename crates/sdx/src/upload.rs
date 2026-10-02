@@ -45,11 +45,12 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use bytes::Bytes;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use xet_core_structures::merklehash::{MerkleHash, file_hash};
 
 use crate::auth::TokenService;
@@ -118,13 +119,17 @@ pub struct UploadStreamHandle {
 
 struct UploadStreamHandleInner {
     session: UploadSession,
-    pipeline: Mutex<Option<FileUploadPipeline>>,
+    // Operations serialize asynchronously; synchronous abort only touches
+    // the short-lived state lock, never a guard held across network work.
+    operation: Mutex<()>,
+    pipeline: StdMutex<Option<FileUploadPipeline>>,
+    cancellation: CancellationToken,
     result: Arc<OnceLock<UploadFileInfo>>,
     task_id: u64,
     started: AtomicBool,
     finished: AtomicBool,
     aborted: AtomicBool,
-    error: Mutex<Option<String>>,
+    error: StdMutex<Option<String>>,
 }
 
 /// Once an operation consumes pipeline state, cancellation is terminal.
@@ -138,6 +143,7 @@ impl Drop for UploadOperationGuard<'_> {
         if !self.completed {
             self.inner.aborted.store(true, Ordering::Relaxed);
             self.inner.finished.store(true, Ordering::Relaxed);
+            self.inner.cancellation.cancel();
         }
     }
 }
@@ -161,8 +167,20 @@ impl UploadStreamHandle {
         let _operation = self.inner.session.inner.lifecycle.read().await;
         self.inner.session.check_not_finalized().await?;
         let data = data.into();
-        let mut guard = self.inner.pipeline.lock().await;
-        let Some(mut pipeline) = guard.take() else {
+        let _stream_operation = tokio::select! {
+            biased;
+            () = self.inner.cancellation.cancelled() => {
+                return Err(SdxError::UploadSession("stream aborted".to_owned()));
+            }
+            operation = self.inner.operation.lock() => operation,
+        };
+        let pipeline = self
+            .inner
+            .pipeline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(mut pipeline) = pipeline else {
             return Err(SdxError::UploadSession(
                 "stream already finished or aborted".to_owned(),
             ));
@@ -172,17 +190,37 @@ impl UploadStreamHandle {
             completed: false,
         };
         self.inner.started.store(true, Ordering::Relaxed);
-        let result = pipeline.add_data(data).await;
+        let mut result = tokio::select! {
+            biased;
+            () = self.inner.cancellation.cancelled() => {
+                Err(SdxError::UploadSession("stream aborted".to_owned()))
+            }
+            result = pipeline.add_data(data) => result,
+        };
+        if result.is_ok() {
+            let mut state = self
+                .inner
+                .pipeline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.inner.aborted.load(Ordering::Relaxed) {
+                result = Err(SdxError::UploadSession("stream aborted".to_owned()));
+            } else {
+                // Abort takes this same state lock, so it either prevents
+                // restoration or removes the restored pipeline itself.
+                *state = Some(pipeline);
+            }
+        }
         if let Err(error) = &result {
             // Chunking consumes the entire block before asynchronous chunk
             // processing. After a failure, the unprocessed chunks cannot be
             // replayed, so this pipeline must never publish a partial file.
-            *self.inner.error.lock().await = Some(error.to_string());
+            *self
+                .inner
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
             self.inner.finished.store(true, Ordering::Relaxed);
-        } else {
-            // Restore only after the whole block has been processed. Dropping
-            // a cancelled write also drops its partially advanced pipeline.
-            *guard = Some(pipeline);
         }
         cancellation.completed = true;
         result
@@ -213,7 +251,19 @@ impl UploadStreamHandle {
     pub async fn finish(&self) -> Result<UploadFileInfo, SdxError> {
         let _operation = self.inner.session.inner.lifecycle.read().await;
         self.inner.session.check_not_finalized().await?;
-        let pipeline = self.inner.pipeline.lock().await.take();
+        let _stream_operation = tokio::select! {
+            biased;
+            () = self.inner.cancellation.cancelled() => {
+                return Err(SdxError::UploadSession("stream aborted".to_owned()));
+            }
+            operation = self.inner.operation.lock() => operation,
+        };
+        let pipeline = self
+            .inner
+            .pipeline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
         let Some(pipeline) = pipeline else {
             return Err(SdxError::UploadSession(
                 "stream already finished or aborted".to_owned(),
@@ -226,13 +276,23 @@ impl UploadStreamHandle {
             inner: &self.inner,
             completed: false,
         };
-        let result = pipeline.finish().await;
+        let result = tokio::select! {
+            biased;
+            () = self.inner.cancellation.cancelled() => {
+                Err(SdxError::UploadSession("stream aborted".to_owned()))
+            }
+            result = pipeline.finish() => result,
+        };
         match &result {
             Ok(info) => {
                 let _result = self.inner.result.set(info.clone());
             }
             Err(error) => {
-                *self.inner.error.lock().await = Some(error.to_string());
+                *self
+                    .inner
+                    .error
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
             }
         }
         self.inner.finished.store(true, Ordering::Relaxed);
@@ -246,16 +306,29 @@ impl UploadStreamHandle {
         self.inner.result.get().cloned()
     }
 
-    /// Cancels this upload: drops the pipeline so subsequent
-    /// [`write`](Self::write)/[`finish`](Self::finish) fail.
+    /// Cancels this upload and any in-flight write or finish. Safe to call
+    /// inside an async runtime; subsequent writes and finishes fail.
     pub fn abort(&self) {
         self.inner.aborted.store(true, Ordering::Relaxed);
-        *self.inner.pipeline.blocking_lock() = None;
+        self.inner.finished.store(true, Ordering::Relaxed);
+        self.inner.cancellation.cancel();
+        let pipeline = self
+            .inner
+            .pipeline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        drop(pipeline);
     }
 
     /// Returns the status flags for group status probes.
     pub(crate) fn status_flags(&self) -> UploadStatusFlags {
-        let error = self.inner.error.blocking_lock().clone();
+        let error = self
+            .inner
+            .error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         UploadStatusFlags {
             started: self.inner.started.load(Ordering::Relaxed),
             finished: self.inner.finished.load(Ordering::Relaxed),
@@ -911,13 +984,15 @@ impl UploadSession {
         UploadStreamHandle {
             inner: Arc::new(UploadStreamHandleInner {
                 session: self.clone(),
-                pipeline: Mutex::new(Some(FileUploadPipeline::new(self.clone()))),
+                operation: Mutex::new(()),
+                pipeline: StdMutex::new(Some(FileUploadPipeline::new(self.clone()))),
+                cancellation: CancellationToken::new(),
                 result: Arc::new(OnceLock::new()),
                 task_id: id,
                 started: AtomicBool::new(false),
                 finished: AtomicBool::new(false),
                 aborted: AtomicBool::new(false),
-                error: Mutex::new(None),
+                error: StdMutex::new(None),
             }),
         }
     }
@@ -1444,6 +1519,85 @@ mod tests {
         assert_eq!(report.shard_posts, 0);
     }
 
+    async fn abort_during_network_work(finishing: bool) {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(ResponseTemplate::new(404).set_delay(std::time::Duration::from_secs(5)))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let session = client.upload_session().unwrap();
+        let handle = session.upload_stream_handle();
+        if finishing {
+            // This tail is below the chunk size and first queries dedup on finish.
+            handle
+                .write(Bytes::from_static(b"pending tail"))
+                .await
+                .unwrap();
+        }
+        let active_handle = handle.clone();
+        let active = tokio::spawn(async move {
+            if finishing {
+                active_handle.finish().await.map(|_| ())
+            } else {
+                active_handle.write(Bytes::from(vec![0x5a; 4096])).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|request| {
+                        request
+                            .url
+                            .path()
+                            .starts_with("/v1/chunks/default-merkledb/")
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active upload reached delayed network request");
+        let queued_handle = handle.clone();
+        let queued = tokio::spawn(async move {
+            queued_handle
+                .write(Bytes::from_static(b"queued data"))
+                .await
+        });
+        tokio::task::yield_now().await;
+        handle.abort();
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            assert!(active.await.unwrap().is_err());
+            assert!(queued.await.unwrap().is_err());
+        })
+        .await
+        .expect("abort stops active and queued operations without waiting for network");
+        assert!(handle.inner.pipeline.lock().unwrap().is_none());
+        assert!(handle.try_finish().is_none());
+        assert!(handle.finish().await.is_err());
+        assert!(handle.write(Bytes::from_static(b"retry")).await.is_err());
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
+    }
+
+    #[tokio::test]
+    async fn abort_stops_active_and_queued_push_writes_without_publication() {
+        abort_during_network_work(false).await;
+    }
+
+    #[tokio::test]
+    async fn abort_stops_active_push_finish_without_publication() {
+        abort_during_network_work(true).await;
+    }
+
     #[tokio::test]
     async fn failed_push_write_cannot_publish_partial_file() {
         let (server, client) = mock_client().await;
@@ -1464,7 +1618,7 @@ mod tests {
         assert!(handle.finish().await.is_err());
         assert!(handle.write(Bytes::from_static(b"retry")).await.is_err());
         assert!(handle.try_finish().is_none());
-        assert!(handle.inner.error.lock().await.is_some());
+        assert!(handle.inner.error.lock().unwrap().is_some());
         let report = session.finalize().await.unwrap();
         assert!(report.files.is_empty());
         assert_eq!(report.shard_posts, 0);

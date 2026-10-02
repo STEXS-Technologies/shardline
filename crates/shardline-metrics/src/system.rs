@@ -49,7 +49,7 @@ impl SystemMetrics {
     pub fn new(registry: &Registry) -> Self {
         let active_connections = must_gauge(
             "shardline_active_connections",
-            "Current active HTTP connections",
+            "Current active HTTP handler requests (through response headers)",
         );
         let server_uptime = must_gauge(
             "shardline_server_uptime_seconds",
