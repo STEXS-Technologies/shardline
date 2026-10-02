@@ -23,6 +23,9 @@ pub enum ReconstructionCacheError {
     /// The Redis operation timeout was zero.
     #[error("reconstruction cache redis operation timeout must be greater than zero")]
     InvalidRedisOperationTimeout,
+    /// The Redis TTL cannot be represented as a signed millisecond expiration.
+    #[error("reconstruction cache redis TTL exceeds the supported expiration range")]
+    InvalidRedisTtl,
     /// Numeric conversion exceeded supported bounds.
     #[error("reconstruction cache numeric conversion exceeded supported bounds")]
     NumericConversion(#[from] TryFromIntError),

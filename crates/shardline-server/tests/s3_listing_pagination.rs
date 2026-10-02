@@ -50,6 +50,61 @@ impl ListingClient {
         xml
     }
 
+    async fn check_zero_limits(&self) {
+        let token = base64::engine::general_purpose::STANDARD.encode("a/one");
+        for v2 in [false, true] {
+            for extra in [
+                Vec::new(),
+                vec![("delimiter", "/")],
+                vec![("prefix", "a/")],
+                vec![("prefix", "absent/")],
+                vec![("delimiter", "/"), ("prefix", "a")],
+                vec![("marker", "a/one")],
+                vec![("start-after", "a/one")],
+                vec![("continuation-token", token.as_str())],
+            ] {
+                let mut params = vec![("max-keys", "0")];
+                if v2 {
+                    params.push(("list-type", "2"));
+                }
+                params.extend(extra);
+                let xml = self.list(&params).await;
+                assert!(entries(&xml).is_empty(), "zero limit: {xml}");
+                assert!(
+                    xml.contains("<IsTruncated>false</IsTruncated>"),
+                    "zero limit: {xml}"
+                );
+                assert!(
+                    tags(&xml, "NextContinuationToken").is_empty(),
+                    "zero limit: {xml}"
+                );
+                assert!(tags(&xml, "NextMarker").is_empty(), "zero limit: {xml}");
+            }
+        }
+        // The zero fast path still requires valid arguments and authorization.
+        let invalid = self
+            .client
+            .get(&self.bucket)
+            .bearer_auth(&self.token)
+            .query(&[
+                ("list-type", "2"),
+                ("max-keys", "0"),
+                ("continuation-token", "!!!"),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), 400);
+        let unauthorized = self
+            .client
+            .get(&self.bucket)
+            .query(&[("list-type", "2"), ("max-keys", "0")])
+            .send()
+            .await
+            .unwrap();
+        assert!(unauthorized.status() == 401 || unauthorized.status() == 403);
+    }
+
     async fn walk(&self, v2: bool, prefix: &str, delimiter: Option<&str>) -> Vec<String> {
         let mut seen = Vec::new();
         let mut cursor = None::<String>;
@@ -162,6 +217,7 @@ async fn check_listing(database_url: Option<&str>) {
         "create bucket: {}",
         created_bucket.text().await.unwrap()
     );
+    listing.check_zero_limits().await;
     let keys = [
         "a-",
         "a/one",
@@ -193,6 +249,7 @@ async fn check_listing(database_url: Option<&str>) {
             response.text().await.unwrap()
         );
     }
+    listing.check_zero_limits().await;
     for v2 in [false, true] {
         assert_eq!(
             listing.walk(v2, "", Some("/")).await,
@@ -240,7 +297,7 @@ async fn check_listing(database_url: Option<&str>) {
             entries(&listing.list(&unicode_params).await).is_empty(),
             "Unicode commonprefix sorts before the explicit cursor"
         );
-        for bad in ["0", "invalid", "-1", "184467440737095516160"] {
+        for bad in ["invalid", "-1", "184467440737095516160"] {
             let mut invalid_params = vec![("max-keys", bad)];
             if v2 {
                 invalid_params.push(("list-type", "2"));

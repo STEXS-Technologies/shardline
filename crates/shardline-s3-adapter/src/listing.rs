@@ -137,7 +137,7 @@ pub struct ListObjectsV1Params {
 /// # Errors
 ///
 /// Returns [`S3Error::invalid_argument`] when `max-keys` is not a valid
-/// positive integer or the `delimiter` is more than one character.
+/// nonnegative integer or the `delimiter` is more than one character.
 pub fn parse_list_objects_v1_params(
     query: &[(String, String)],
 ) -> Result<ListObjectsV1Params, S3Error> {
@@ -155,11 +155,6 @@ pub fn parse_list_objects_v1_params(
                 let parsed = value
                     .parse::<usize>()
                     .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?;
-                if parsed == 0 {
-                    return Err(S3Error::invalid_argument(
-                        "max-keys must be greater than zero",
-                    ));
-                }
                 params.max_keys = parsed.min(MAX_LIST_KEYS);
             }
             Some(ListParam::Marker) => params.marker = Some(value.clone()),
@@ -190,12 +185,12 @@ pub struct ListPage {
 /// Only the typed listing parameters (`prefix`, `delimiter`, `max-keys`,
 /// `continuation-token`, `start-after`) are read; everything else (including
 /// the `list-type=2` sub-resource and client extras such as `fetch-owner`) is
-/// ignored. `max-keys` must be a positive integer and is capped at
+/// ignored. `max-keys` must be a nonnegative integer and is capped at
 /// [`MAX_LIST_KEYS`].
 ///
 /// # Errors
 ///
-/// Returns [`S3Error::invalid_argument`] when `max-keys` is missing/zero/non-
+/// Returns [`S3Error::invalid_argument`] when `max-keys` is empty/non-
 /// numeric, the delimiter is more than one character, or
 /// `continuation-token` is not a valid base64 cursor.
 pub fn parse_list_objects_v2_params(
@@ -216,11 +211,6 @@ pub fn parse_list_objects_v2_params(
                 let parsed = value
                     .parse::<usize>()
                     .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?;
-                if parsed == 0 {
-                    return Err(S3Error::invalid_argument(
-                        "max-keys must be greater than zero",
-                    ));
-                }
                 params.max_keys = parsed.min(MAX_LIST_KEYS);
             }
             Some(ListParam::ContinuationToken) => {
@@ -258,6 +248,16 @@ pub fn group_page(
     delimiter: Option<char>,
     max_keys: usize,
 ) -> ListPage {
+    // A zero result budget is an empty terminal page, even when matching
+    // objects exist. Do not emit truncation without a usable next cursor.
+    if max_keys == 0 {
+        return ListPage {
+            contents: Vec::new(),
+            common_prefixes: Vec::new(),
+            next_cursor: None,
+            is_truncated: false,
+        };
+    }
     let fetched_len = entries.len();
     let mut contents = Vec::new();
     let mut common_prefixes = Vec::new();
@@ -670,12 +670,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_params_rejects_zero_max_keys() {
-        let result = parse_list_objects_v2_params(&query(&[("max-keys", "0")]));
-        assert!(result.is_err());
-        let error = result.unwrap_err();
-        assert_eq!(error.code, "InvalidArgument");
-        assert_eq!(error.status, 400);
+    fn parse_params_accept_zero_max_keys_for_both_versions() {
+        let zero = query(&[("max-keys", "0")]);
+        assert_eq!(parse_list_objects_v1_params(&zero).unwrap().max_keys, 0);
+        assert_eq!(parse_list_objects_v2_params(&zero).unwrap().max_keys, 0);
+    }
+
+    #[test]
+    fn zero_budget_grouping_is_empty_and_terminal() {
+        for delimiter in [None, Some('/')] {
+            for entries in [Vec::new(), vec![entry("plain"), entry("dir/child")]] {
+                let page = group_page(entries, "", delimiter, 0);
+                assert!(page.contents.is_empty());
+                assert!(page.common_prefixes.is_empty());
+                assert!(!page.is_truncated);
+                assert!(page.next_cursor.is_none());
+            }
+        }
     }
 
     #[test]
@@ -719,7 +730,7 @@ mod tests {
         assert_eq!(params.delimiter, Some(Delimiter('/')));
         assert_eq!(params.max_keys, 12);
         assert_eq!(params.marker.as_deref(), Some("dir/old"));
-        assert!(parse_list_objects_v1_params(&query(&[("max-keys", "0")])).is_err());
+        assert!(parse_list_objects_v1_params(&query(&[("max-keys", "-1")])).is_err());
         assert!(parse_list_objects_v1_params(&query(&[("max-keys", "bad")])).is_err());
         assert!(parse_list_objects_v1_params(&query(&[("delimiter", "//")])).is_err());
     }
