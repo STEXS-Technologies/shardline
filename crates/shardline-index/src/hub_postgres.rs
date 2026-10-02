@@ -9,9 +9,9 @@ use shardline_protocol::SecretString;
 use crate::{
     hub::{
         EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
-        HubRepo, HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage,
-        HubTreePageEntry, HubTreePageOptions, HubWebhook, canonical_ref_name,
-        hub_tree_requires_recovery,
+        HubRefPublicationMode, HubRefUpdateOutcome, HubRepo, HubRepoSearchOptions, HubRepoType,
+        HubRevision, HubStore, HubTreePage, HubTreePageEntry, HubTreePageOptions, HubWebhook,
+        canonical_ref_name, hub_tree_requires_recovery,
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
@@ -486,13 +486,42 @@ impl HubStore for PostgresIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error> {
-        match self.publish_hub_revision(repo_id, parent_sha, new_sha, ref_name, message, false)? {
+        match self.publish_hub_revision(
+            repo_id,
+            parent_sha,
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::Upsert,
+        )? {
             HubRefCreateOutcome::Created(revision) => Ok(revision),
             HubRefCreateOutcome::AlreadyExists | HubRefCreateOutcome::Unsupported => {
                 Err(PostgresMetadataStoreError::RecordNotFound)
             }
         }
     }
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        match self.publish_hub_revision(
+            repo_id,
+            Some(expected_sha),
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::UpdateOnly,
+        )? {
+            HubRefCreateOutcome::Created(revision) => Ok(HubRefUpdateOutcome::Updated(revision)),
+            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
+            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
+        }
+    }
+
     fn create_revision_if_absent(
         &self,
         repo_id: &str,
@@ -501,7 +530,14 @@ impl HubStore for PostgresIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRefCreateOutcome, Self::Error> {
-        self.publish_hub_revision(repo_id, parent_sha, new_sha, ref_name, message, true)
+        self.publish_hub_revision(
+            repo_id,
+            parent_sha,
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::CreateOnly,
+        )
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
@@ -563,6 +599,17 @@ impl HubStore for PostgresIndexStore {
 
         block_on_async(async {
             let mut tx = pool.begin().await?;
+            // Match publication's repository lock so deletion cannot interleave
+            // between an updater's expected-head check and ref publication.
+            let locked_repo: Option<String> = sqlx::query_scalar(
+                "SELECT repo_id FROM shardline_hub_repos WHERE repo_id = $1 FOR UPDATE",
+            )
+            .bind(&repo_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if locked_repo.is_none() {
+                return Err(PostgresMetadataStoreError::RecordNotFound);
+            }
             let result = sqlx::query(
                 "DELETE FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = $2 AND sha = $3",
             )
@@ -1147,7 +1194,7 @@ impl PostgresIndexStore {
         new_sha: &str,
         ref_name: &str,
         message: &str,
-        require_absent: bool,
+        mode: HubRefPublicationMode,
     ) -> Result<HubRefCreateOutcome, PostgresMetadataStoreError> {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
@@ -1181,7 +1228,14 @@ impl PostgresIndexStore {
             .fetch_optional(&mut *tx)
             .await?;
 
-            if require_absent && current_ref.is_some() {
+            if matches!(mode, HubRefPublicationMode::CreateOnly) && current_ref.is_some() {
+                return Ok(HubRefCreateOutcome::AlreadyExists);
+            }
+
+            // Strict updates never reinterpret a deleted ref as branch creation.
+            if matches!(mode, HubRefPublicationMode::UpdateOnly)
+                && (parent_sha.is_none() || current_ref.as_deref() != parent_sha.as_deref())
+            {
                 return Ok(HubRefCreateOutcome::AlreadyExists);
             }
 
@@ -1859,5 +1913,96 @@ mod tests {
         assert_eq!(retrieved.len(), 1);
 
         boxed.delete_repo("pg-boxed").expect("cleanup boxed repo");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_strict_updates_reject_missing_refs_and_deletion_takes_repository_lock() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_store(pool.clone());
+        let repo = "pg-strict-delete-lock";
+        cleanup_repo(&store, repo).await;
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        store
+            .create_revision(repo, Some(EMPTY_HUB_REVISION), "old", "selected", "old")
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SELECT repo_id FROM shardline_hub_repos WHERE repo_id=$1 FOR UPDATE")
+            .bind(repo)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let deleter = store.clone();
+        let delete =
+            tokio::task::spawn_blocking(move || deleter.delete_ref(repo, "selected", "old"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            ).bind(holder).fetch_one(&pool).await.unwrap();
+            if blocked {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "deletion did not wait on repository lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(!delete.is_finished());
+        tx.commit().await.unwrap();
+        delete.await.unwrap().unwrap();
+        let revisions = store.list_revisions(repo).unwrap().len();
+        let events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_reliability_events WHERE operation_id LIKE $1",
+        )
+        .bind(format!("{}:{repo}%", repo.len()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "old", "new", "selected", "restore")
+                .unwrap(),
+            HubRefUpdateOutcome::Conflict
+        ));
+        assert_eq!(store.list_revisions(repo).unwrap().len(), revisions);
+        assert!(
+            !store
+                .list_refs(repo)
+                .unwrap()
+                .iter()
+                .any(|r| r.ref_name == "selected")
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM shardline_reliability_events WHERE operation_id LIKE $1"
+            )
+            .bind(format!("{}:{repo}%", repo.len()))
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            events
+        );
+        store
+            .create_revision(repo, Some("old"), "moved", "selected", "intentional branch")
+            .unwrap();
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "old", "stale", "selected", "stale")
+                .unwrap(),
+            HubRefUpdateOutcome::Conflict
+        ));
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "moved", "new", "refs/heads/selected", "update")
+                .unwrap(),
+            HubRefUpdateOutcome::Updated(_)
+        ));
+        cleanup_repo(&store, repo).await;
     }
 }

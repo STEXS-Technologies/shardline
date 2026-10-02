@@ -130,20 +130,90 @@ restore the most recent backup before anything else.
 
 **Recovery**
 
-1. Restore the metadata database from the database backup. For SQLite, place the
-   restored file at `.shardline/data/metadata.sqlite3` in the state root. For Postgres,
-   restore the database, then verify the schema matches the running binary:
+1. Stop every process that can open the affected database: API and transfer
+   processes, Hub processes, CLI maintenance commands, and scheduled jobs. Keep
+   them stopped throughout the restore and verification. A crashed process may
+   leave committed SQLite state in `-wal`; replacing only the main file can replay
+   that old state over the backup, even when `PRAGMA integrity_check` returns `ok`.
+2. For SQLite, restore a standalone native SQLite backup, created with the backup
+   procedure in [Scenario E](#scenario-e-cross-node-recovery). Use the
+   configured state root rather than assuming the current directory: index and
+   record metadata are at `<root>/metadata.sqlite3`; local Hub metadata are at
+   `<root>/hub/metadata.sqlite3`. Restore each affected database from its own backup.
+   For the default project layout, `<root>` is `.shardline/data`.
+
+   Run the following as the deployment's service account, with a new incident
+   directory for each database. It checks the backup before archiving the failed
+   main database and its `-wal`/`-shm` companions together, then creates the restored
+   main file exclusively. Keep the incident files for recovery or forensic review;
+   do not delete the WAL by itself or copy it alongside the restored backup.
+
+   ```bash
+   mkdir -p /srv/assets/reports
+   python3 - /backups/metadata.sqlite3 \
+     /srv/assets/.shardline/data/metadata.sqlite3 \
+     /srv/assets/reports/metadata-incident-20261003 <<'PYRESTORE'
+   from contextlib import closing
+   import os
+   import shutil
+   import sqlite3
+   import sys
+   from pathlib import Path
+
+   backup, destination, incident = map(Path, sys.argv[1:])
+   if not backup.is_file() or backup.resolve() == destination.resolve():
+       raise SystemExit("use a separate, existing standalone SQLite backup")
+   if destination.is_symlink() or not destination.parent.is_dir():
+       raise SystemExit("destination must have a real, existing parent directory")
+   if any(Path(str(backup) + suffix).exists() for suffix in ("-wal", "-shm")):
+       raise SystemExit("backup must be a standalone native snapshot without companions")
+   with closing(sqlite3.connect(backup.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)) as source:
+       if source.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+           raise SystemExit("backup failed integrity_check")
+   incident.mkdir()  # Refuse reuse of an incident directory.
+   for suffix in ("", "-wal", "-shm"):
+       failed = Path(str(destination) + suffix)
+       if failed.exists() or failed.is_symlink():
+           shutil.move(str(failed), incident / failed.name)
+   with backup.open("rb") as source:
+       descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+       with os.fdopen(descriptor, "wb") as restored:
+           shutil.copyfileobj(source, restored)
+           restored.flush()
+           os.fsync(restored.fileno())
+   with closing(sqlite3.connect(destination.resolve().as_uri() + "?mode=ro", uri=True)) as restored:
+       if restored.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+           raise SystemExit("restored database failed integrity_check; keep processes stopped")
+   print("SQLite backup restored; keep processes stopped until application checks pass")
+   PYRESTORE
+   ```
+
+   Require a successful exit. If it fails after archiving begins, keep all users
+   stopped and retain both the incident directory and any partial destination;
+   do not restart or rerun over them. For Hub, use the Hub backup and change the
+   destination to `<root>/hub/metadata.sqlite3` and choose a separate incident
+   directory. Confirm the restored file is owned by the service account and is
+   readable by every intended process; adapt permissions to the deployment's
+   shared-service-group policy when necessary.
+
+   For Postgres, restore the database while its Shardline users remain stopped and
+   set the Postgres URL if it is not already in the deployment configuration:
 
    ```bash
    export SHARDLINE_INDEX_POSTGRES_URL='postgres://shardline:replace-me@postgres:5432/shardline'
+   ```
 
+   For either backend, verify the schema using the normal deployment configuration
+   (keep the Postgres URL unset for a local SQLite deployment):
+
+   ```bash
    shardline db migrate status
    shardline db migrate up
    ```
 
    See [Database Migrations](DATABASE_MIGRATIONS.md) for the fail-closed behavior when
    versions or checksums do not match.
-2. Rebuild derived latest-file state from the restored immutable version records:
+3. Rebuild derived latest-file state from the restored immutable version records:
 
    ```bash
    shardline index rebuild
@@ -152,14 +222,19 @@ restore the most recent backup before anything else.
    `index rebuild` exits `0` when completed without non-fatal issues, `1` when invalid
    version records were found, and `2` on operational failure (see
    [Index Rebuild](INDEX_REBUILD.md)).
-3. Reconcile lifecycle metadata that may reference the restored object graph:
+4. Reconcile lifecycle metadata that may reference the restored object graph:
 
    ```bash
    shardline fsck
    shardline repair lifecycle
    ```
 
-4. Run GC in dry-run mode before re-enabling any mark-and-sweep schedule.
+5. Run GC in dry-run mode before re-enabling any mark-and-sweep schedule. Compare
+   metadata counts with the backup manifest and read representative restored files
+   and Hub repository refs/trees through the normal application paths. A successful
+   SQLite integrity check alone does not establish the intended restore point.
+6. Restart API, transfer, and Hub processes only after these checks pass, then
+   restore traffic and scheduled maintenance.
 
 **Verification**
 
@@ -263,8 +338,9 @@ This is a crash-recovery case, not a data-loss case. The durable boundaries are 
   cannot silently corrupt an existing object (see
   [Storage Migration](STORAGE_MIGRATION.md#safety-model)).
 - durable version records already committed before the crash survive.
-- WAL or pending metadata from the interrupted upload is simply absent; the object
-  bytes for that upload may be present without any committed metadata.
+- committed SQLite WAL transactions are recovered when the database reopens;
+  uncommitted metadata is discarded. Object bytes from the interrupted upload may
+  be present without any committed metadata.
 
 The upload is retried by the client. Any object written but never referenced by
 committed metadata is an orphan that GC will collect after the retention window.
@@ -395,6 +471,12 @@ not move.
                raise RuntimeError("restored SQLite database failed integrity_check")
    PY
    ```
+
+   When local Hub metadata is in use, repeat the same snapshot command for
+   `/srv/old-node/.shardline/data/hub/metadata.sqlite3`, using
+   `/srv/assets/.shardline/data/hub/metadata.sqlite3` as the destination. Create the
+   destination `hub` directory first, and keep all writers stopped for both
+   snapshots. Preserve the service account's ownership and access permissions.
 
    Require a successful exit before continuing. For Postgres, restore a native
    consistent backup or point the new deployment at the same Postgres, then verify

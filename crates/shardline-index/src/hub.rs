@@ -168,6 +168,23 @@ pub enum HubRefCreateOutcome {
     Unsupported,
 }
 
+/// Outcome of atomic publication to an existing ref at its exact expected head.
+#[derive(Debug, Clone)]
+pub enum HubRefUpdateOutcome {
+    Updated(HubRevision),
+    /// The ref is absent or no longer points to the expected revision.
+    Conflict,
+    /// The custom store has not implemented strict atomic ref updates.
+    Unsupported,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HubRefPublicationMode {
+    Upsert,
+    CreateOnly,
+    UpdateOnly,
+}
+
 /// A Hub file entry within a commit tree.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -374,8 +391,9 @@ pub trait HubStore: Send + Sync {
     /// Reusing an existing repository revision changes only the target ref;
     /// its original parent, message, timestamp and history record stay intact.
     ///
-    /// If `parent_sha` is provided, implements optimistic concurrency: returns
-    /// `Err` if the current HEAD does not match.
+    /// If `parent_sha` is provided, an existing ref must match it. A missing
+    /// ref may be created from an existing historical parent revision. Use
+    /// `update_revision_if_current` when ref absence must also be a conflict.
     ///
     /// # Errors
     ///
@@ -389,6 +407,25 @@ pub trait HubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error>;
+    /// Atomically updates an existing ref only when its current SHA equals `expected_sha`.
+    ///
+    /// Missing and moved refs are conflicts. Custom stores must override this
+    /// method; the compatibility default fails closed without any writes.
+    ///
+    /// # Errors
+    /// Returns an error on storage or reliability failure.
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        let _ = (repo_id, expected_sha, new_sha, ref_name, message);
+        Ok(HubRefUpdateOutcome::Unsupported)
+    }
+
     /// Atomically creates a missing ref, without modifying existing bindings.
     ///
     /// Custom stores must override this method to support create-only Git pushes.
@@ -648,6 +685,14 @@ trait ErasedHubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>>;
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>>;
     fn create_revision_if_absent(
         &self,
         repo_id: &str,
@@ -799,6 +844,17 @@ impl<T: HubStore> ErasedHubStore for T {
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(self, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::update_revision_if_current(self, repo_id, expected_sha, new_sha, ref_name, message)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
     fn create_revision_if_absent(
@@ -1083,6 +1139,22 @@ impl BoxedHubStore {
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         self.inner
             .create_revision(repo_id, parent_sha, new_sha, ref_name, message)
+    }
+
+    /// Atomically updates an existing ref at exactly `expected_sha`.
+    ///
+    /// # Errors
+    /// Returns an error on storage or reliability failure.
+    pub fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .update_revision_if_current(repo_id, expected_sha, new_sha, ref_name, message)
     }
 
     /// Atomically publishes a revision only when its target ref is absent.
@@ -1371,6 +1443,17 @@ where
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(Into::into)
+    }
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::update_revision_if_current(&self.0, repo_id, expected_sha, new_sha, ref_name, message)
             .map_err(Into::into)
     }
     fn create_revision_if_absent(
@@ -2774,5 +2857,21 @@ mod tests {
             assert_eq!(page.entries.len(), 100_001);
             assert!(!page.has_more);
         }
+    }
+    #[test]
+    fn boxed_hub_store_strict_updates_default_to_unsupported_without_writes() {
+        let store = BoxedHubStore::from_store(MemoryHubStore::new());
+        store
+            .create_repo(HubRepoType::Model, "strict/repo", true)
+            .unwrap();
+        let before = store.list_refs("strict/repo").unwrap();
+        assert!(matches!(
+            store
+                .update_revision_if_current("strict/repo", "old", "new", "feature", "update")
+                .unwrap(),
+            HubRefUpdateOutcome::Unsupported
+        ));
+        assert_eq!(store.list_refs("strict/repo").unwrap(), before);
+        assert!(store.list_revisions("strict/repo").unwrap().is_empty());
     }
 }
