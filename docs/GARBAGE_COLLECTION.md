@@ -328,6 +328,14 @@ run. Library integrations should use `shardline_server::set_retention_hold` and
 hold mutations. The barrier coordinates metadata with object storage; it does
 not make their operations one storage transaction.
 
+For `hold set`, a relative `--ttl-seconds` starts after acquiring the GC
+barrier. Metadata lock waits can still consume its duration. If a positive TTL
+expires before the write is acknowledged, the command returns an expiration
+error and leaves the expired row for normal cleanup; it does not retry or delete
+a potentially newer hold. A zero TTL intentionally creates an immediately
+expired hold. The library's `set_retention_hold` keeps the caller's absolute
+expiration unchanged.
+
 New quarantine candidates default to a retention window of `86400` seconds.
 That default applies only when a run includes `--mark`.
 

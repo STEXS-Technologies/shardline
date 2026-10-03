@@ -54,9 +54,9 @@ schema change, apply it before the process rollout with `shardline db migrate up
 by the previous version's processes for the duration of the rollout. Evidence-bound
 writes are intentionally gated until all writers are upgraded.
 
-The PostgreSQL index migrations `20261002010000`, `20261002020000`, and
-`20261002030000` use ordinary transactional index builds and block writes on their
-indexed tables. When any is pending, drain writers across the deployment and apply
+The PostgreSQL index migrations `20261002010000`, `20261002020000`,
+`20261002030000`, and `20261003000000` use ordinary transactional index builds and
+block writes on their indexed tables. When any is pending, drain writers across the deployment and apply
 the migrations in the [index-build maintenance
 window](DATABASE_MIGRATIONS.md#postgresql-index-builds-during-patch-upgrades) before
 rolling either role class. The process rollout order alone does not provide this

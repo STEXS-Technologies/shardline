@@ -11,7 +11,7 @@ use crate::{
         EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
         HubRefPublicationMode, HubRefUpdateOutcome, HubRepo, HubRepoSearchOptions, HubRepoType,
         HubRevision, HubStore, HubTreePage, HubTreePageEntry, HubTreePageOptions, HubWebhook,
-        canonical_ref_name, hub_tree_requires_recovery,
+        HubWebhookCreateOutcome, canonical_ref_name, hub_tree_requires_recovery,
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
@@ -1031,6 +1031,67 @@ impl HubStore for PostgresIndexStore {
         })
     }
 
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let url = url.to_owned();
+        let events = events.to_vec();
+        let secret = secret.map(SecretString::from_secret);
+        let query_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        block_on_async(async {
+            let mut tx = pool.begin().await?;
+            let repo_exists: Option<String> = sqlx::query_scalar(
+                "SELECT repo_id FROM shardline_hub_repos WHERE repo_id = $1 FOR UPDATE",
+            )
+            .bind(&repo_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if repo_exists.is_none() {
+                return Err(PostgresMetadataStoreError::RecordNotFound);
+            }
+            let duplicate: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM shardline_hub_webhooks WHERE repo_id = $1 AND url = $2)",
+            ).bind(&repo_id).bind(&url).fetch_one(&mut *tx).await?;
+            if duplicate {
+                return Ok(HubWebhookCreateOutcome::Duplicate);
+            }
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM (SELECT 1 FROM shardline_hub_webhooks WHERE repo_id = $1 LIMIT $2) AS bounded",
+            ).bind(&repo_id).bind(query_limit).fetch_one(&mut *tx).await?;
+            if i64_to_u64(count)? >= u64::try_from(limit).unwrap_or(u64::MAX) {
+                return Ok(HubWebhookCreateOutcome::LimitReached);
+            }
+            let row = sqlx::query(
+                "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
+                 VALUES (CONCAT('wh-', gen_random_uuid()::text), $1, $2, $3, $4, TRUE, EXTRACT(EPOCH FROM now())::bigint)
+                 RETURNING id, repo_id, url, events, secret, active, created_at_unix_seconds",
+            ).bind(&repo_id).bind(&url).bind(events.join(","))
+                .bind(secret.as_ref().map(SecretString::as_ref)).fetch_one(&mut *tx).await?;
+            let webhook = HubWebhook {
+                id: row.try_get("id")?,
+                repo_id: row.try_get("repo_id")?,
+                url: row.try_get("url")?,
+                events,
+                secret: row
+                    .try_get::<Option<String>, _>("secret")?
+                    .map(SecretString::new),
+                active: row.try_get("active")?,
+                created_at_unix_seconds: i64_to_u64(
+                    row.try_get::<i64, _>("created_at_unix_seconds")?,
+                )?,
+            };
+            tx.commit().await?;
+            Ok(HubWebhookCreateOutcome::Created(webhook))
+        })
+    }
+
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -2005,5 +2066,35 @@ mod tests {
             HubRefUpdateOutcome::Updated(_)
         ));
         cleanup_repo(&store, repo).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_atomic_webhook_registration_handles_boundary_and_concurrency() {
+        let Some(pool) = connect_postgres().await else {
+            assert!(
+                std::env::var_os("DATABASE_URL").is_none()
+                    && std::env::var_os("SHARDLINE_INDEX_POSTGRES_URL").is_none(),
+                "configured PostgreSQL fixture must connect and initialize"
+            );
+            return;
+        };
+        let store = make_store(pool);
+        for repo in [
+            "bounded/case",
+            "bounded/Case",
+            "bounded/cap",
+            "bounded/duplicate",
+        ] {
+            cleanup_repo(&store, repo).await;
+        }
+        crate::hub::assert_atomic_webhook_registration(&store);
+        eprintln!("PostgreSQL atomic webhook boundary and concurrency checks executed");
+        for repo in [
+            "bounded/case",
+            "bounded/Case",
+            "bounded/cap",
+            "bounded/duplicate",
+        ] {
+            cleanup_repo(&store, repo).await;
+        }
     }
 }

@@ -1151,6 +1151,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         object_key: &'operation ObjectKey,
     ) -> IndexStoreFuture<'operation, Option<RetentionHold>, Self::Error> {
         Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await?;
             let row = query(
                 "SELECT object_key,
                         reason,
@@ -1160,22 +1164,28 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                  WHERE object_key = $1",
             )
             .bind(object_key.as_str())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await?;
 
             let hold = row.as_ref().map(retention_hold_from_row).transpose()?;
             if let Some(hold) = hold.as_ref() {
                 let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
                 let evidence =
-                    load_postgres_retention_evidence(&self.pool, object_key.as_str()).await?;
+                    load_postgres_retention_evidence(&mut *transaction, object_key.as_str())
+                        .await?;
                 verify_snapshot_evidence(&evidence, &snapshot)?;
             }
+            transaction.commit().await?;
             Ok(hold)
         })
     }
 
     fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error> {
         Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await?;
             let rows = query(
                 "SELECT object_key,
                         reason,
@@ -1184,14 +1194,15 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                  FROM shardline_retention_holds
                  ORDER BY object_key",
             )
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *transaction)
             .await?;
 
             let holds = rows
                 .iter()
                 .map(retention_hold_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
-            verify_postgres_retention_evidence_batch(&self.pool, &holds, true).await?;
+            verify_postgres_retention_evidence_batch(&mut *transaction, &holds, true).await?;
+            transaction.commit().await?;
             Ok(holds)
         })
     }
@@ -1296,6 +1307,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
+            super::provider_mutation::lock_retention_hold(&mut transaction, object_key.as_str())
+                .await?;
             let row = query(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
                  FROM shardline_retention_holds WHERE object_key = $1
@@ -1336,6 +1349,11 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
+            super::provider_mutation::lock_retention_hold(
+                &mut transaction,
+                expected.object_key().as_str(),
+            )
+            .await?;
             let row = query(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
                  FROM shardline_retention_holds WHERE object_key = $1 FOR UPDATE",
@@ -5133,6 +5151,101 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(callbacks, 0);
+        pool.close().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_retention_upserts_serialize_absent_rows_and_reads_keep_evidence_snapshot() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let key = shardline_storage::ObjectKey::parse("retention/concurrency").unwrap();
+        let gate = Arc::new(tokio::sync::Barrier::new(8));
+        let mut jobs = Vec::new();
+        for id in 0..8 {
+            let store = store.clone();
+            let key = key.clone();
+            let gate = gate.clone();
+            jobs.push(tokio::spawn(async move {
+                let hold =
+                    crate::RetentionHold::new(key, format!("writer-{id}"), 10, None).unwrap();
+                gate.wait().await;
+                store.upsert_retention_hold(&hold).await
+            }));
+        }
+        for job in jobs {
+            job.await.unwrap().unwrap();
+        }
+        let stale = store.retention_hold(&key).await.unwrap().unwrap();
+        let writer = store.clone();
+        let writer_key = key.clone();
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let writer_gate = gate.clone();
+        let writing = tokio::spawn(async move {
+            writer_gate.wait().await;
+            for id in 0..200 {
+                let hold = crate::RetentionHold::new(
+                    writer_key.clone(),
+                    format!("update-{id}"),
+                    20,
+                    Some(100),
+                )
+                .unwrap();
+                writer.upsert_retention_hold(&hold).await.unwrap();
+            }
+        });
+        gate.wait().await;
+        for _ in 0..200 {
+            assert!(store.retention_hold(&key).await.unwrap().is_some());
+            assert_eq!(store.list_retention_holds().await.unwrap().len(), 1);
+        }
+        writing.await.unwrap();
+        let current = store.retention_hold(&key).await.unwrap().unwrap();
+        assert_eq!(current.reason(), "update-199");
+        assert!(
+            !store
+                .delete_retention_hold_if_matches(&stale)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.retention_hold(&key).await.unwrap(),
+            Some(current.clone())
+        );
+        sqlx::query("UPDATE shardline_retention_holds SET reason='tampered' WHERE object_key=$1")
+            .bind(key.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for result in [
+            store.retention_hold(&key).await.map(|_| ()),
+            store.list_retention_holds().await.map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(super::PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::StateMismatch
+                ))
+            ));
+        }
+        sqlx::query("UPDATE shardline_retention_holds SET reason=$2 WHERE object_key=$1")
+            .bind(key.as_str())
+            .bind(current.reason())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .delete_retention_hold_if_matches(&current)
+                .await
+                .unwrap()
+        );
+        let recreated =
+            crate::RetentionHold::new(key.clone(), "recreated".into(), 30, None).unwrap();
+        store.upsert_retention_hold(&recreated).await.unwrap();
+        assert_eq!(store.retention_hold(&key).await.unwrap(), Some(recreated));
+        assert!(store.delete_retention_hold(&key).await.unwrap());
+        assert!(store.retention_hold(&key).await.unwrap().is_none());
         pool.close().await;
     }
 }

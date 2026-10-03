@@ -8,7 +8,7 @@ use crate::{
         EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
         HubRefPublicationMode, HubRefUpdateOutcome, HubRepo, HubRepoSearchOptions, HubRepoType,
         HubRevision, HubStore, HubTreePage, HubTreePageEntry, HubTreePageOptions, HubWebhook,
-        canonical_ref_name, hub_tree_requires_recovery,
+        HubWebhookCreateOutcome, canonical_ref_name, hub_tree_requires_recovery,
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
@@ -768,6 +768,47 @@ impl HubStore for LocalIndexStore {
         })
     }
 
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Self::Error> {
+        let now = unix_now_seconds_lossy();
+        let query_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(self.root())?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let repo_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM shardline_hub_repos WHERE repo_id = ?1)",
+                params![repo_id],
+                |row| row.get(0),
+            )?;
+            if !repo_exists {
+                return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            }
+            let duplicate: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM shardline_hub_webhooks WHERE repo_id = ?1 AND url = ?2)",
+                params![repo_id, url], |row| row.get(0),
+            )?;
+            if duplicate {
+                return Ok(HubWebhookCreateOutcome::Duplicate);
+            }
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM (SELECT 1 FROM shardline_hub_webhooks WHERE repo_id = ?1 LIMIT ?2)",
+                params![repo_id, query_limit], |row| row.get(0),
+            )?;
+            if i64_to_u64(count)? >= u64::try_from(limit).unwrap_or(u64::MAX) {
+                return Ok(HubWebhookCreateOutcome::LimitReached);
+            }
+            let webhook = insert_hub_webhook(&tx, repo_id, url, events, secret, now)?;
+            tx.commit()?;
+            Ok(HubWebhookCreateOutcome::Created(webhook))
+        })
+    }
+
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -775,34 +816,7 @@ impl HubStore for LocalIndexStore {
         events: &[String],
         secret: Option<&str>,
     ) -> Result<HubWebhook, Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let now = unix_now_seconds_lossy();
-        let counter: u64 = {
-            let row: Option<i64> = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM shardline_hub_webhooks WHERE repo_id = ?1",
-                    params![repo_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            i64_to_u64(row.unwrap_or(0))?
-        };
-        let id = format!("wh-{}-{}", now, counter);
-        let events_str = events.join(",");
-        conn.execute(
-            "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
-            params![id, repo_id, url, events_str, secret, u64_to_i64(now)?],
-        )?;
-        Ok(HubWebhook {
-            id,
-            repo_id: repo_id.to_owned(),
-            url: url.to_owned(),
-            events: events.to_vec(),
-            secret: secret.map(SecretString::from_secret),
-            active: true,
-            created_at_unix_seconds: now,
-        })
+        self.create_webhook_at(repo_id, url, events, secret, unix_now_seconds_lossy())
     }
 
     fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error> {
@@ -899,7 +913,48 @@ fn escape_like(value: &str) -> String {
         .replace('%', "\\%")
 }
 
+fn insert_hub_webhook(
+    conn: &Connection,
+    repo_id: &str,
+    url: &str,
+    events: &[String],
+    secret: Option<&str>,
+    now: u64,
+) -> Result<HubWebhook, LocalIndexStoreError> {
+    let events_str = events.join(",");
+    // IDs share a global primary key. Generate independent opaque values in
+    // the insertion rather than deriving uniqueness from a repository's
+    // mutable row count or the wall clock.
+    let id: String = conn.query_row(
+            "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
+             VALUES ('wh-' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, 1, ?5)
+             RETURNING id",
+            params![repo_id, url, events_str, secret, u64_to_i64(now)?],
+            |row| row.get(0),
+        )?;
+    Ok(HubWebhook {
+        id,
+        repo_id: repo_id.to_owned(),
+        url: url.to_owned(),
+        events: events.to_vec(),
+        secret: secret.map(SecretString::from_secret),
+        active: true,
+        created_at_unix_seconds: now,
+    })
+}
+
 impl LocalIndexStore {
+    fn create_webhook_at(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        now: u64,
+    ) -> Result<HubWebhook, LocalIndexStoreError> {
+        let conn = open_hub_connection_rw(self.root())?;
+        insert_hub_webhook(&conn, repo_id, url, events, secret, now)
+    }
     fn publish_hub_revision(
         &self,
         repo_id: &str,
@@ -2649,5 +2704,150 @@ mod tests {
                 .iter()
                 .any(|r| r.ref_name == "selected" && r.sha == "new")
         );
+    }
+    #[test]
+    fn webhook_ids_are_unique_across_repositories_at_the_same_second() {
+        let (_temp, store) = make_store();
+        for repo in ["owner/first", "owner/second"] {
+            store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        }
+        let first = store
+            .create_webhook_at(
+                "owner/first",
+                "https://example.com/first",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        let second = store
+            .create_webhook_at(
+                "owner/second",
+                "https://example.com/second",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.created_at_unix_seconds, 123);
+        assert_eq!(second.created_at_unix_seconds, 123);
+        assert_eq!(store.list_webhooks("owner/first").unwrap().len(), 1);
+        assert_eq!(store.list_webhooks("owner/second").unwrap().len(), 1);
+        // A webhook ID from another repository cannot mutate this binding.
+        store.delete_webhook("owner/second", &first.id).unwrap();
+        assert_eq!(store.list_webhooks("owner/first").unwrap().len(), 1);
+        assert_eq!(store.list_webhooks("owner/second").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn webhook_ids_survive_delete_and_recreate_at_the_same_second() {
+        let (_temp, store) = make_store();
+        let repo = "owner/churn";
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        let first = store
+            .create_webhook_at(
+                repo,
+                "https://example.com/first",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        let second = store
+            .create_webhook_at(
+                repo,
+                "https://example.com/second",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        store.delete_webhook(repo, &first.id).unwrap();
+        let third = store
+            .create_webhook_at(
+                repo,
+                "https://example.com/third",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        assert_ne!(third.id, first.id);
+        assert_ne!(third.id, second.id);
+        store.delete_webhook(repo, &first.id).unwrap();
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn webhook_ids_are_unique_for_concurrent_creations_at_the_same_second() {
+        let (_temp, store) = make_store();
+        let repo = "owner/concurrent";
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        // Spawn every worker before joining: lazy iteration would wait on the
+        // first thread while the remaining barrier participants never start.
+        #[allow(clippy::needless_collect)]
+        let workers: Vec<_> = (0..8)
+            .map(|index| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.create_webhook_at(
+                        repo,
+                        &format!("https://example.com/{index}"),
+                        &["push".into()],
+                        None,
+                        123,
+                    )
+                })
+            })
+            .collect();
+        let ids: std::collections::BTreeSet<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap().unwrap().id)
+            .collect();
+        assert_eq!(ids.len(), 8);
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn webhook_creation_preserves_legacy_ids_and_timestamp_failure_is_typed() {
+        let (_temp, store) = make_store();
+        let repo = "owner/legacy";
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        let conn = open_hub_connection_rw(store.root()).unwrap();
+        conn.execute("INSERT INTO shardline_hub_webhooks (id,repo_id,url,events,active,created_at_unix_seconds) VALUES ('wh-123-0',?1,'https://example.com/legacy','push',1,123)",params![repo]).unwrap();
+        let new = store
+            .create_webhook_at(repo, "https://example.com/new", &["push".into()], None, 123)
+            .unwrap();
+        assert_ne!(new.id, "wh-123-0");
+        store
+            .update_webhook_secret(repo, "wh-123-0", Some("new-secret"))
+            .unwrap();
+        let hooks = store.list_webhooks(repo).unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert!(hooks.iter().any(|hook| hook.id == "wh-123-0"
+            && hook.secret.as_ref().map(SecretString::expose_secret) == Some("new-secret")));
+        assert!(
+            store
+                .create_webhook_at(
+                    repo,
+                    "https://example.com/invalid-time",
+                    &["push".into()],
+                    None,
+                    u64::MAX
+                )
+                .is_err()
+        );
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 2);
+        store.delete_webhook(repo, "wh-123-0").unwrap();
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 1);
+    }
+    #[test]
+    fn sqlite_atomic_webhook_registration_handles_boundary_and_concurrency() {
+        let (_temp, store) = make_store();
+        crate::hub::assert_atomic_webhook_registration(&store);
     }
 }

@@ -14,6 +14,13 @@ fn quoted_identifier(identifier: &str) -> String {
 static NEXT_SCHEMA: AtomicU64 = AtomicU64::new(1);
 static CLEANED_STALE_SCHEMAS: OnceCell<()> = OnceCell::const_new();
 
+// Never print connection strings or driver errors: malformed configuration can
+// contain credentials. A configured fixture must fail at its named setup stage.
+#[allow(clippy::panic)]
+fn fixture_stage<T, E>(result: Result<T, E>, stage: &str) -> T {
+    result.unwrap_or_else(|_| panic!("configured PostgreSQL test fixture failed: {stage}"))
+}
+
 /// Creates a private PostgreSQL schema for one integration-test caller.
 ///
 /// The production code intentionally lists and verifies all rows in a store.
@@ -23,9 +30,17 @@ static CLEANED_STALE_SCHEMAS: OnceCell<()> = OnceCell::const_new();
 /// concurrently without weakening production verification or using a process
 /// lock.
 pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
-    let database_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("SHARDLINE_INDEX_POSTGRES_URL"))
-        .ok()?;
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => {
+            match std::env::var("SHARDLINE_INDEX_POSTGRES_URL") {
+                Ok(value) => value,
+                Err(std::env::VarError::NotPresent) => return None,
+                Err(error) => fixture_stage(Err(error), "fallback connection configuration"),
+            }
+        }
+        Err(error) => fixture_stage(Err(error), "connection configuration"),
+    };
     let thread = std::thread::current();
     let test_name = thread.name().unwrap_or("unnamed-test");
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -38,59 +53,72 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
         nonce
     );
 
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .ok()?;
+    let admin_pool = fixture_stage(
+        PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await,
+        "administrator connection",
+    );
     let stale_schema_prefix = format!("shardline_test_{}_%", std::process::id());
     CLEANED_STALE_SCHEMAS
         .get_or_init(|| async {
-            let schema_names = query_scalar::<_, String>(
-                "SELECT nspname
+            let schema_names = fixture_stage(
+                query_scalar::<_, String>(
+                    "SELECT nspname
                  FROM pg_namespace
                  WHERE nspname LIKE $1",
-            )
-            .bind(&stale_schema_prefix)
-            .fetch_all(&admin_pool)
-            .await
-            .unwrap_or_default();
+                )
+                .bind(&stale_schema_prefix)
+                .fetch_all(&admin_pool)
+                .await,
+                "stale schema catalog",
+            );
             for schema_name in schema_names {
-                query(sqlx::AssertSqlSafe(format!(
-                    "DROP SCHEMA {} CASCADE",
-                    quoted_identifier(&schema_name)
-                )))
-                .execute(&admin_pool)
-                .await
-                .ok();
+                fixture_stage(
+                    query(sqlx::AssertSqlSafe(format!(
+                        "DROP SCHEMA {} CASCADE",
+                        quoted_identifier(&schema_name)
+                    )))
+                    .execute(&admin_pool)
+                    .await,
+                    "stale schema cleanup",
+                );
             }
         })
         .await;
     let schema = quoted_identifier(&schema);
-    query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&admin_pool)
-        .await
-        .ok()?;
-    let table_names = query_scalar::<_, String>(
-        "SELECT tablename
+    fixture_stage(
+        query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin_pool)
+            .await,
+        "isolated schema creation",
+    );
+    let table_names = fixture_stage(
+        query_scalar::<_, String>(
+            "SELECT tablename
          FROM pg_tables
          WHERE schemaname = 'public' AND tablename LIKE 'shardline_%'
          ORDER BY tablename",
-    )
-    .fetch_all(&admin_pool)
-    .await
-    .ok()?;
+        )
+        .fetch_all(&admin_pool)
+        .await,
+        "table catalog",
+    );
     for table_name in table_names {
         let table_name = quoted_identifier(&table_name);
-        query(sqlx::AssertSqlSafe(format!(
-            "CREATE TABLE {schema}.{table_name} (LIKE public.{table_name} INCLUDING ALL)"
-        )))
-        .execute(&admin_pool)
-        .await
-        .ok()?;
+        fixture_stage(
+            query(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE {schema}.{table_name} (LIKE public.{table_name} INCLUDING ALL)"
+            )))
+            .execute(&admin_pool)
+            .await,
+            "isolated table copy",
+        );
     }
-    let trigger_definitions = query_scalar::<_, String>(
-        "SELECT pg_get_triggerdef(trigger.oid)
+    let trigger_definitions = fixture_stage(
+        query_scalar::<_, String>(
+            "SELECT pg_get_triggerdef(trigger.oid)
          FROM pg_trigger AS trigger
          JOIN pg_class AS table_entry ON table_entry.oid = trigger.tgrelid
          JOIN pg_namespace AS namespace_entry
@@ -98,33 +126,38 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
          WHERE namespace_entry.nspname = 'public'
            AND table_entry.relname LIKE 'shardline_%'
            AND NOT trigger.tgisinternal",
-    )
-    .fetch_all(&admin_pool)
-    .await
-    .ok()?;
+        )
+        .fetch_all(&admin_pool)
+        .await,
+        "trigger catalog",
+    );
     for definition in trigger_definitions {
         let isolated_definition = definition.replace(" ON public.", &format!(" ON {schema}."));
         // This SQL comes from PostgreSQL pg_get_triggerdef, with a quoted schema substitution.
-        query(sqlx::AssertSqlSafe(isolated_definition))
-            .execute(&admin_pool)
-            .await
-            .ok()?;
+        fixture_stage(
+            query(sqlx::AssertSqlSafe(isolated_definition))
+                .execute(&admin_pool)
+                .await,
+            "isolated trigger copy",
+        );
     }
     admin_pool.close().await;
 
     let search_path = format!("SET search_path TO {schema}, public");
-    PgPoolOptions::new()
-        .max_connections(8)
-        .after_connect(move |connection, _metadata| {
-            let search_path = search_path.clone();
-            Box::pin(async move {
-                query(sqlx::AssertSqlSafe(search_path))
-                    .execute(connection)
-                    .await?;
-                Ok(())
+    Some(fixture_stage(
+        PgPoolOptions::new()
+            .max_connections(8)
+            .after_connect(move |connection, _metadata| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    query(sqlx::AssertSqlSafe(search_path))
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
             })
-        })
-        .connect(&database_url)
-        .await
-        .ok()
+            .connect(&database_url)
+            .await,
+        "isolated connection pool/search path",
+    ))
 }

@@ -159,6 +159,18 @@ pub fn canonical_ref_name(ref_name: &str) -> &str {
         .unwrap_or(ref_name)
 }
 
+/// Outcome of atomically registering a nonduplicate webhook within a repository ceiling.
+#[derive(Debug, Clone)]
+pub enum HubWebhookCreateOutcome {
+    Created(HubWebhook),
+    /// This exact URL is already registered for the repository.
+    Duplicate,
+    /// The repository already has at least the caller's maximum webhook count.
+    LimitReached,
+    /// The custom store has not implemented atomic bounded registration.
+    Unsupported,
+}
+
 /// Outcome of atomic create-only ref publication.
 #[derive(Debug, Clone)]
 pub enum HubRefCreateOutcome {
@@ -572,6 +584,27 @@ pub trait HubStore: Send + Sync {
         )))
     }
 
+    /// Atomically registers a URL once, provided the repository has fewer than `limit` webhooks.
+    ///
+    /// Duplicate URLs take priority over the count ceiling, including at zero.
+    /// Checks and insertion share a transaction with repository deletion. The
+    /// compatibility default returns Unsupported without reads or writes.
+    /// Unbounded `create_webhook` remains available for library callers.
+    ///
+    /// # Errors
+    /// Returns an error on storage failure or when the repository is missing.
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Self::Error> {
+        let _ = (repo_id, url, events, secret, limit);
+        Ok(HubWebhookCreateOutcome::Unsupported)
+    }
+
     /// Creates a webhook for a repository.
     ///
     /// # Errors
@@ -757,6 +790,14 @@ trait ErasedHubStore: Send + Sync {
         options: &HubTreePageOptions,
     ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>>;
 
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Box<dyn std::error::Error + Send + Sync>>;
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -988,6 +1029,17 @@ impl<T: HubStore> ErasedHubStore for T {
             })
     }
 
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_webhook_bounded(self, repo_id, url, events, secret, limit)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -1306,6 +1358,22 @@ impl BoxedHubStore {
         self.inner.get_tree_page(commit_sha, options)
     }
 
+    /// Atomically registers a nonduplicate webhook within `limit`.
+    ///
+    /// # Errors
+    /// Returns an error on storage failure or when the repository is missing.
+    pub fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .create_webhook_bounded(repo_id, url, events, secret, limit)
+    }
+
     /// Creates a webhook for a repository.
     ///
     /// # Errors
@@ -1582,6 +1650,16 @@ where
             })
     }
 
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_webhook_bounded(&self.0, repo_id, url, events, secret, limit).map_err(Into::into)
+    }
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -1627,6 +1705,208 @@ where
     ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
         T::webhooks_for_event(&self.0, repo_id, event).map_err(Into::into)
     }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+pub(crate) fn assert_atomic_webhook_registration<S>(store: &S)
+where
+    S: HubStore + Clone + 'static,
+    S::Error: std::fmt::Debug,
+{
+    use std::sync::{Arc, Barrier};
+    for repo in [
+        "bounded/case",
+        "bounded/Case",
+        "bounded/cap",
+        "bounded/duplicate",
+    ] {
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+    }
+    assert!(matches!(
+        store
+            .create_webhook_bounded("bounded/case", "https://example.com/zero", &[], None, 0)
+            .unwrap(),
+        HubWebhookCreateOutcome::LimitReached
+    ));
+    assert!(store.list_webhooks("bounded/case").unwrap().is_empty());
+    assert!(
+        store
+            .create_webhook_bounded(
+                "bounded/missing",
+                "https://example.com/missing",
+                &[],
+                None,
+                50
+            )
+            .is_err()
+    );
+    for repo in ["bounded/case", "bounded/Case"] {
+        assert!(matches!(
+            store
+                .create_webhook_bounded(
+                    repo,
+                    "https://example.com/shared",
+                    &["push".into()],
+                    Some("opaque-secret"),
+                    1
+                )
+                .unwrap(),
+            HubWebhookCreateOutcome::Created(_)
+        ));
+        // Duplicate wins over both a full ceiling and the zero ceiling.
+        assert!(matches!(
+            store
+                .create_webhook_bounded(repo, "https://example.com/shared", &[], None, 0)
+                .unwrap(),
+            HubWebhookCreateOutcome::Duplicate
+        ));
+        assert!(matches!(
+            store
+                .create_webhook_bounded(repo, "https://example.com/over", &[], None, 1)
+                .unwrap(),
+            HubWebhookCreateOutcome::LimitReached
+        ));
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 1);
+    }
+    let existing = store.list_webhooks("bounded/case").unwrap();
+    assert_eq!(
+        existing[0].secret.as_ref().map(SecretString::expose_secret),
+        Some("opaque-secret")
+    );
+    store
+        .delete_webhook("bounded/case", &existing[0].id)
+        .unwrap();
+    assert!(matches!(
+        store
+            .create_webhook_bounded(
+                "bounded/case",
+                "https://example.com/replacement",
+                &[],
+                None,
+                1
+            )
+            .unwrap(),
+        HubWebhookCreateOutcome::Created(_)
+    ));
+    assert_eq!(store.list_webhooks("bounded/Case").unwrap().len(), 1);
+    // Preserve the deliberately unbounded library API, including duplicate URLs.
+    store
+        .create_webhook("bounded/case", "https://example.com/replacement", &[], None)
+        .unwrap();
+    assert_eq!(store.list_webhooks("bounded/case").unwrap().len(), 2);
+    assert!(matches!(
+        store
+            .create_webhook_bounded(
+                "bounded/case",
+                "https://example.com/replacement",
+                &[],
+                None,
+                1
+            )
+            .unwrap(),
+        HubWebhookCreateOutcome::Duplicate
+    ));
+    assert!(matches!(
+        store
+            .create_webhook_bounded("bounded/case", "https://example.com/third", &[], None, 1)
+            .unwrap(),
+        HubWebhookCreateOutcome::LimitReached
+    ));
+    for index in 0..49 {
+        store
+            .create_webhook(
+                "bounded/cap",
+                &format!("https://example.com/seed/{index}"),
+                &[],
+                None,
+            )
+            .unwrap();
+    }
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for index in 0..2 {
+        let store = (*store).clone();
+        let barrier = barrier.clone();
+        let runtime = runtime.clone();
+        workers.push(std::thread::spawn(move || {
+            let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+            barrier.wait();
+            store
+                .create_webhook_bounded(
+                    "bounded/cap",
+                    &format!("https://example.com/race/{index}"),
+                    &[],
+                    None,
+                    50,
+                )
+                .unwrap()
+        }));
+    }
+    let outcomes: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, HubWebhookCreateOutcome::Created(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, HubWebhookCreateOutcome::LimitReached))
+            .count(),
+        1
+    );
+    assert_eq!(store.list_webhooks("bounded/cap").unwrap().len(), 50);
+    let duplicate_barrier = Arc::new(Barrier::new(8));
+    let mut duplicate_workers = Vec::new();
+    for _ in 0..8 {
+        let store = (*store).clone();
+        let duplicate_barrier = duplicate_barrier.clone();
+        let runtime = runtime.clone();
+        duplicate_workers.push(std::thread::spawn(move || {
+            let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+            duplicate_barrier.wait();
+            store
+                .create_webhook_bounded(
+                    "bounded/duplicate",
+                    "https://example.com/duplicate",
+                    &[],
+                    None,
+                    50,
+                )
+                .unwrap()
+        }));
+    }
+    let duplicate_outcomes: Vec<_> = duplicate_workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(
+        duplicate_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, HubWebhookCreateOutcome::Created(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        duplicate_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, HubWebhookCreateOutcome::Duplicate))
+            .count(),
+        7
+    );
+    assert_eq!(store.list_webhooks("bounded/duplicate").unwrap().len(), 1);
 }
 
 #[cfg(test)]
@@ -2873,5 +3153,47 @@ mod tests {
         ));
         assert_eq!(store.list_refs("strict/repo").unwrap(), before);
         assert!(store.list_revisions("strict/repo").unwrap().is_empty());
+    }
+    #[test]
+    fn boxed_webhook_bounded_default_is_unsupported_without_writes() {
+        let store = BoxedHubStore::from_store(MemoryHubStore::new());
+        store
+            .create_repo(HubRepoType::Model, "bounded/custom", true)
+            .unwrap();
+        assert!(matches!(
+            store
+                .create_webhook_bounded(
+                    "bounded/custom",
+                    "https://example.com/custom",
+                    &[],
+                    None,
+                    1
+                )
+                .unwrap(),
+            HubWebhookCreateOutcome::Unsupported
+        ));
+        assert!(store.list_webhooks("bounded/custom").unwrap().is_empty());
+    }
+    #[test]
+    fn boxed_webhook_bounded_default_does_not_dispatch_legacy_reads_or_writes() {
+        for store in [
+            BoxedHubStore::new(OptimizedTreePageStore),
+            BoxedHubStore::from_store(OptimizedTreePageStore),
+        ] {
+            // Both legacy methods on this fixture return errors. Reaching the
+            // Unsupported outcome proves neither method was dispatched.
+            assert!(matches!(
+                store
+                    .create_webhook_bounded(
+                        "bounded/custom",
+                        "https://example.com/custom",
+                        &[],
+                        None,
+                        1
+                    )
+                    .unwrap(),
+                HubWebhookCreateOutcome::Unsupported
+            ));
+        }
     }
 }

@@ -155,6 +155,18 @@ impl super::PostgresIndexStore {
             }
         }
 
+        // Acquire every retention lock in one global order before individual upserts.
+        let mut hold_keys = mutation
+            .retention_holds
+            .iter()
+            .map(|hold| hold.object_key().as_str())
+            .collect::<Vec<_>>();
+        hold_keys.sort_unstable();
+        hold_keys.dedup();
+        for key in hold_keys {
+            lock_retention_hold(&mut transaction, key).await?;
+        }
+
         let inserted = record_webhook_delivery(&mut transaction, &mutation.delivery).await?;
         if !inserted {
             transaction.rollback().await?;
@@ -297,10 +309,24 @@ pub(super) async fn record_webhook_delivery(
     Ok(true)
 }
 
+// Row locks do not protect an absent row. Serialize its metadata and evidence
+// under a domain-specific transaction lock before deciding whether to baseline.
+pub(super) async fn lock_retention_hold(
+    transaction: &mut Transaction<'_, Postgres>,
+    object_key: &str,
+) -> Result<(), PostgresMetadataStoreError> {
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("shardline:retention-hold:{object_key}"))
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 pub(super) async fn upsert_retention_hold(
     transaction: &mut Transaction<'_, Postgres>,
     hold: &RetentionHold,
 ) -> Result<(), PostgresMetadataStoreError> {
+    lock_retention_hold(transaction, hold.object_key().as_str()).await?;
     let previous_row = query(
         "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
          FROM shardline_retention_holds WHERE object_key = $1 FOR UPDATE",
@@ -1175,5 +1201,112 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean tampered provider state fixture");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pg_provider_hold_batches_use_global_order_and_rollback_all_holds() {
+        use crate::AsyncIndexStore;
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let mut jobs = Vec::new();
+        for id in 0..2 {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            jobs.push(tokio::spawn(async move {
+                let mut mutation = PostgresProviderMutation::new(delivery(
+                    "hold-batch",
+                    "ordered",
+                    &format!("writer-{id}"),
+                ));
+                let keys = if id == 0 {
+                    ["hold-batch/a", "hold-batch/b"]
+                } else {
+                    ["hold-batch/b", "hold-batch/a"]
+                };
+                for key in keys.into_iter().chain(std::iter::once(keys[0])) {
+                    mutation.upsert_retention_hold(
+                        RetentionHold::new(
+                            shardline_storage::ObjectKey::parse(key).expect("valid key"),
+                            format!("writer-{id}"),
+                            10,
+                            None,
+                        )
+                        .expect("valid hold"),
+                    );
+                }
+                let mut connection = pool.acquire().await.expect("connection");
+                barrier.wait().await;
+                crate::PostgresIndexStore::commit_provider_mutation_on_connection(
+                    &mut connection,
+                    &[],
+                    &mutation,
+                )
+                .await
+            }));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for job in jobs {
+                assert_eq!(
+                    job.await.expect("task").expect("ordered commit"),
+                    PostgresProviderMutationOutcome::Applied
+                );
+            }
+        })
+        .await
+        .expect("opposite input orders must not deadlock");
+        let store = crate::PostgresIndexStore::new(pool.clone());
+        let before = store.list_retention_holds().await.expect("valid holds");
+        assert_eq!(before.len(), 2);
+        let mut failure =
+            PostgresProviderMutation::new(delivery("hold-batch", "ordered", "rollback"));
+        failure.upsert_retention_hold(
+            RetentionHold::new(
+                before
+                    .first()
+                    .expect("first committed hold")
+                    .object_key()
+                    .clone(),
+                "should roll back".into(),
+                20,
+                None,
+            )
+            .expect("valid hold"),
+        );
+        failure.upsert_retention_hold(
+            RetentionHold::new(
+                shardline_storage::ObjectKey::parse("hold-batch/overflow").expect("key"),
+                "overflow".into(),
+                u64::MAX,
+                None,
+            )
+            .expect("domain-valid hold"),
+        );
+        let mut connection = pool.acquire().await.expect("connection");
+        let result = crate::PostgresIndexStore::commit_provider_mutation_on_connection(
+            &mut connection,
+            &[],
+            &failure,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
+        ));
+        drop(connection);
+        assert_eq!(
+            store
+                .list_retention_holds()
+                .await
+                .expect("rollback preserved evidence"),
+            before
+        );
+        let claims = store
+            .list_webhook_deliveries()
+            .await
+            .expect("rollback delivery claims");
+        assert_eq!(claims.len(), 2);
+        assert!(!claims.iter().any(|claim| claim.delivery_id() == "rollback"));
+        pool.close().await;
     }
 }
