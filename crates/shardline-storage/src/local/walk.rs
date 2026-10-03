@@ -83,6 +83,7 @@ pub fn read_dir_if_exists(directory: &Path) -> Result<Option<ReadDir>, LocalObje
     }
 }
 
+#[cfg(not(unix))]
 pub fn remove_empty_ancestors(path: &Path, root: &Path) -> Result<(), LocalObjectStoreError> {
     let mut current = path.parent();
     while let Some(directory) = current {

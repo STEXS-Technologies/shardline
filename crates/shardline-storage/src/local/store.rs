@@ -1,4 +1,6 @@
 use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
     fs::{self, File},
     io::{Error as IoError, ErrorKind, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -31,6 +33,29 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct LocalObjectStore {
     root: PathBuf,
+}
+
+// Only the bytewise key determines page membership and output ordering.
+struct FlatNamespaceCandidate(ObjectMetadata);
+
+impl PartialEq for FlatNamespaceCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.key() == other.0.key()
+    }
+}
+
+impl Eq for FlatNamespaceCandidate {}
+
+impl PartialOrd for FlatNamespaceCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FlatNamespaceCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.key().as_str().cmp(other.0.key().as_str())
+    }
 }
 
 impl LocalObjectStore {
@@ -193,7 +218,10 @@ impl LocalObjectStore {
         let Some(entries) = read_dir_if_exists(&directory)? else {
             return Ok(Vec::new());
         };
-        let mut children = Vec::new();
+        // Directory iteration is unordered, so examine all eligible children but
+        // retain only the smallest requested keys. Do not reserve `limit`: callers
+        // may request an arbitrarily large limit for a small namespace.
+        let mut children = BinaryHeap::<FlatNamespaceCandidate>::new();
         for entry in entries {
             let entry = entry.map_err(LocalObjectStoreError::Io)?;
             let file_type = entry.file_type().map_err(LocalObjectStoreError::Io)?;
@@ -217,11 +245,21 @@ impl LocalObjectStore {
             if let Some(modified) = modified_unix_nanos(&fs_metadata) {
                 metadata = metadata.with_modified(modified);
             }
-            children.push(metadata);
+            // Keep validation and mtime extraction above selection, including for
+            // zero-sized pages and entries beyond the returned page.
+            if children.len() < limit {
+                children.push(FlatNamespaceCandidate(metadata));
+            } else if let Some(mut largest) = children.peek_mut()
+                && metadata.key().as_str() < largest.0.key().as_str()
+            {
+                *largest = FlatNamespaceCandidate(metadata);
+            }
         }
-        children.sort_by(|left, right| left.key().as_str().cmp(right.key().as_str()));
-        children.truncate(limit);
-        Ok(children)
+        Ok(children
+            .into_sorted_vec()
+            .into_iter()
+            .map(|candidate| candidate.0)
+            .collect())
     }
 
     fn key_path(&self, key: &ObjectKey) -> PathBuf {
@@ -329,13 +367,21 @@ impl ObjectStore for LocalObjectStore {
     fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
         let path = self.key_path(key);
         metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
-        match fs::remove_file(&path) {
-            Ok(()) => {
-                walk::remove_empty_ancestors(&path, &self.root)?;
-                Ok(DeleteOutcome::Deleted)
+        #[cfg(unix)]
+        {
+            crate::local_fs::delete_object_durably(&self.root, &path)
+                .map_err(LocalObjectStoreError::Io)
+        }
+        #[cfg(not(unix))]
+        {
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    walk::remove_empty_ancestors(&path, &self.root)?;
+                    Ok(DeleteOutcome::Deleted)
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(DeleteOutcome::NotFound),
+                Err(error) => Err(LocalObjectStoreError::Io(error)),
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(DeleteOutcome::NotFound),
-            Err(error) => Err(LocalObjectStoreError::Io(error)),
         }
     }
 }
