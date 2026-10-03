@@ -48,6 +48,8 @@ spec:
             - config
             - check
           env:
+            - name: SHARDLINE_SERVER_ROLE
+              value: api
             - name: SHARDLINE_INDEX_POSTGRES_URL
               valueFrom:
                 secretKeyRef:

@@ -36,6 +36,38 @@ crates.io requirements (`^1.5.0`), the release **must** go out bottom-up
    cargo clippy -p sdx -p shardline-xet-adapter -p shardline-server
    ```
 
+## Patch validation
+
+Validate the final release diff before changing the version or publishing. For patches
+that affect storage, transfers, or recovery, run these gates sequentially so separate
+suites do not compete for the same Docker and host resources:
+
+```bash
+cargo make ci
+cargo make test-docker
+cargo make test-loom
+cargo nextest run -p sdx --tests --all-features
+cargo nextest run -p shardline-storage --test resource_pressure
+cargo make test-kubernetes
+```
+
+The Docker gate includes server integration tests and the separate `e2e` workspace.
+Keep its SQLite and SQLx dependencies compatible with the main workspace and commit
+its refreshed lockfile when those dependencies change. The Kubernetes gate creates
+and removes a disposable kind cluster and verifies persisted data after pod replacement.
+
+Record ignored tests and runtime skips alongside the results. A test that requires
+`DATABASE_URL`, live provider credentials, or an external client does not prove that
+integration merely by returning successfully without its fixture. Run the relevant
+fixture explicitly when it is part of the release scope, and verify that configured
+fixtures actually initialize.
+
+Review [Database Migrations](DATABASE_MIGRATIONS.md) and
+[Rolling Upgrade](ROLLING_UPGRADE.md) for the specific pending migrations and mixed-version
+constraints. Rehearse ordinary PostgreSQL index builds against a representative restored
+database and drain writers for the documented maintenance window before rollout.
+Keep local audit evidence out of release commits and the container build context.
+
 ## Publish order (bottom-up, dependencies first)
 
 Verified from the `cargo metadata` dependency graph at `v1.5.0`. Each crate must be
