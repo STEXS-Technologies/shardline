@@ -670,9 +670,16 @@ impl XetUploadCommit {
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when a xorb upload failed, the shard cannot be
-    /// built, or the shard POST fails. Calling twice fails.
+    /// Returns [`SdxError`] when the group is already aborted, a xorb upload
+    /// failed, the shard cannot be built, or the shard POST fails. Calling
+    /// twice fails. An abort after commit begins does not roll back a commit
+    /// already in progress.
     pub async fn commit(&self) -> Result<UploadReport, SdxError> {
+        if self.inner.aborted.load(Ordering::Relaxed) {
+            return Err(SdxError::UploadSession(
+                "upload group aborted; cannot commit".to_owned(),
+            ));
+        }
         self.inner.session.finalize().await
     }
 
@@ -913,6 +920,113 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upload_controls_are_safe_in_multithread_runtime() {
         upload_controls_inside_runtime().await;
+    }
+
+    async fn upload_client(server: &MockServer, shard_delay: Duration) -> crate::XetClient {
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/xet-write-token/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "casUrl": server.uri(), "exp": 4_000_000_000u64, "accessToken": "write-token",
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(r"/v1/xorbs/default/.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"was_inserted": true})))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/shards"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(shard_delay)
+                    .set_body_json(json!({"result": 1})),
+            )
+            .mount(server)
+            .await;
+        client(server).await
+    }
+
+    #[tokio::test]
+    async fn pre_aborted_upload_commit_withholds_completed_and_empty_files() {
+        for payload in [Vec::new(), b"ordinary payload".to_vec()] {
+            for aborted in [false, true] {
+                let server = MockServer::start().await;
+                let client = upload_client(&server, Duration::ZERO).await;
+                let group = client.new_upload_group().unwrap();
+                let handle = group.upload_stream().unwrap();
+                handle.write(payload.clone()).await.unwrap();
+                let info = handle.finish().await.unwrap();
+                if aborted {
+                    group.abort();
+                    assert!(
+                        matches!(group.commit().await, Err(SdxError::UploadSession(message)) if message == "upload group aborted; cannot commit")
+                    );
+                    assert_eq!(handle.status(), XetTaskState::Cancelled);
+                    assert!(group.upload_stream().is_err());
+                } else {
+                    let report = group.commit().await.unwrap();
+                    assert_eq!(report.files, vec![info]);
+                    assert_eq!(report.shard_posts, 1);
+                }
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|request| request.method.as_str() == "POST"
+                            && request.url.path() == "/v1/shards")
+                        .count(),
+                    usize::from(!aborted)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_aborted_empty_group_cannot_commit_healthy_empty_group_can() {
+        let server = MockServer::start().await;
+        let client = upload_client(&server, Duration::ZERO).await;
+        let healthy = client.new_upload_group().unwrap();
+        let report = healthy.commit().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
+        let aborted = client.new_upload_group().unwrap();
+        aborted.abort();
+        assert!(
+            matches!(aborted.commit().await, Err(SdxError::UploadSession(message)) if message == "upload group aborted; cannot commit")
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn abort_does_not_roll_back_an_upload_commit_already_posting() {
+        let server = MockServer::start().await;
+        let client = upload_client(&server, Duration::from_millis(100)).await;
+        let group = client.new_upload_group().unwrap();
+        let handle = group.upload_stream().unwrap();
+        let info = handle.finish().await.unwrap();
+        let committing_group = group.clone();
+        let committing = tokio::spawn(async move { committing_group.commit().await });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.url.path() == "/v1/shards")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        group.abort();
+        let report = committing.await.unwrap().unwrap();
+        assert_eq!(report.files, vec![info]);
+        assert_eq!(report.shard_posts, 1);
     }
 
     fn serialize_payload(chunks: &[&[u8]]) -> Vec<u8> {
