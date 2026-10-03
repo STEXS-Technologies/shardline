@@ -2,10 +2,23 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Inclusive byte range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ByteRange {
     start: u64,
     end_inclusive: u64,
+}
+
+impl<'de> Deserialize<'de> for ByteRange {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename = "ByteRange")]
+        struct Fields {
+            start: u64,
+            end_inclusive: u64,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(fields.start, fields.end_inclusive).map_err(serde::de::Error::custom)
+    }
 }
 
 impl ByteRange {
@@ -54,10 +67,23 @@ impl ByteRange {
 }
 
 /// End-exclusive chunk index range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ChunkRange {
     start: u32,
     end_exclusive: u32,
+}
+
+impl<'de> Deserialize<'de> for ChunkRange {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename = "ChunkRange")]
+        struct Fields {
+            start: u32,
+            end_exclusive: u32,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(fields.start, fields.end_exclusive).map_err(serde::de::Error::custom)
+    }
 }
 
 impl ChunkRange {
@@ -219,6 +245,41 @@ pub fn parse_http_byte_range(
 #[cfg(test)]
 mod tests {
     use super::{ByteRange, ChunkRange, HttpRangeParseError, RangeError, parse_http_byte_range};
+
+    #[test]
+    fn deserialized_ranges_enforce_constructor_invariants() {
+        for value in [
+            serde_json::json!({"start": 9, "end_inclusive": 3}),
+            serde_json::json!({"start": u64::MAX, "end_inclusive": 0}),
+        ] {
+            assert!(serde_json::from_value::<ByteRange>(value).is_err());
+        }
+        for value in [
+            serde_json::json!({"start": 9, "end_exclusive": 3}),
+            serde_json::json!({"start": 3, "end_exclusive": 3}),
+            serde_json::json!({"start": 0, "end_exclusive": 0}),
+        ] {
+            assert!(serde_json::from_value::<ChunkRange>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn deserialized_ranges_preserve_wire_format_and_boundary_values() {
+        for (start, end) in [(0, 0), (7, 12), (u64::MAX, u64::MAX), (0, u64::MAX)] {
+            let value = serde_json::json!({"start": start, "end_inclusive": end});
+            let expected = ByteRange::new(start, end).unwrap();
+            let decoded = serde_json::from_value::<ByteRange>(value.clone()).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+        for (start, end) in [(0, 1), (7, 12), (u32::MAX - 1, u32::MAX), (0, u32::MAX)] {
+            let value = serde_json::json!({"start": start, "end_exclusive": end});
+            let expected = ChunkRange::new(start, end).unwrap();
+            let decoded = serde_json::from_value::<ChunkRange>(value.clone()).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+    }
 
     #[test]
     fn byte_range_is_inclusive() {
