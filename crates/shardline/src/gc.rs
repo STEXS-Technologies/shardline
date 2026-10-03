@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{
     config::load_server_config,
-    local_output::{validate_deployment_output, write_output_bytes},
+    local_output::{validate_deployment_outputs, write_output_bytes},
 };
 
 /// Minimum retention window in seconds for GC quarantine entries.
@@ -77,12 +77,11 @@ pub async fn run_gc_diagnostics(
     orphan_inventory_path: Option<&Path>,
 ) -> Result<LocalGcDiagnostics, GcRuntimeError> {
     let config = load_server_config(root, None)?;
-    for output in [retention_report_path, orphan_inventory_path]
+    let outputs = [retention_report_path, orphan_inventory_path]
         .into_iter()
         .flatten()
-    {
-        validate_deployment_output(&config, output)?;
-    }
+        .collect::<Vec<_>>();
+    validate_deployment_outputs(&config, &outputs)?;
     let options = LocalGcOptions {
         mark,
         sweep,
@@ -377,6 +376,34 @@ mod tests {
         assert!(matches!(result, Err(super::GcRuntimeError::Io(_))));
         assert!(!report.parent().unwrap().exists());
         assert_eq!(std::fs::read(&database).unwrap(), database_bytes);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overlapping_exports_are_rejected_before_gc_or_output_creation() {
+        for (retention_name, orphan_name) in [
+            ("reports/shared.json", "reports/shared.json"),
+            ("reports/shared.json", "reports/../reports/shared.json"),
+            ("reports", "reports/orphans.json"),
+            ("reports/retention.json", "reports"),
+        ] {
+            let sandbox = tempfile::tempdir().unwrap();
+            let root = sandbox.path();
+            let retention = root.join(retention_name);
+            let orphan = root.join(orphan_name);
+            let result = super::run_gc_diagnostics(
+                Some(root),
+                true,
+                true,
+                3600,
+                Some(&retention),
+                Some(&orphan),
+            )
+            .await;
+            assert!(matches!(result, Err(super::GcRuntimeError::Io(error))
+                if error.kind() == std::io::ErrorKind::InvalidInput));
+            assert!(!root.join("metadata.sqlite3").exists());
+            assert!(!root.join("reports").exists());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
