@@ -9,6 +9,9 @@ crates.io requirements (`^1.5.0`), the release **must** go out bottom-up
 Publishing is triggered only by pushing a release tag. Manual runs of the Release
 workflow validate the build and never publish crates, images, or release assets.
 The tagged commit must be on `main`, and the tag must match the workspace version.
+The workflow uses the matching dated `CHANGELOG.md` section as the GitHub release
+notes and rejects missing or empty entries. Merge the release-preparation PR
+before creating and pushing its version tag.
 
 ## Prerequisites
 

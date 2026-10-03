@@ -4,7 +4,7 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.11.3] - 2026-10-03
 
 This patch hardens storage, recovery, protocol handling, and the SDK, while reducing
 memory growth and blocking work in large inventories and transfers.
