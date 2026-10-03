@@ -187,6 +187,87 @@ fn public_parse_replaces_and_clears_config_selection() {
     assert!(load_server_config(None, None).is_err());
 }
 
+#[test]
+fn db_migration_reads_selected_and_auto_detected_toml_without_server_bootstrap() {
+    let workspace = tempfile::tempdir().unwrap();
+    let selected = workspace.path().join("selected.toml");
+    // Migration configuration must not require a valid server auth provider.
+    fs::write(
+        &selected,
+        "[index]\npostgres_url = \"\"\n[auth]\nprovider = \"not-a-server-provider\"\n",
+    )
+    .unwrap();
+    let explicit = Command::new(shardline_binary())
+        .arg("--config")
+        .arg(&selected)
+        .args(["db", "migrate", "status"])
+        .env_clear()
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+    assert_eq!(explicit.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&explicit.stderr).contains("database URL must not be empty"));
+    fs::rename(selected, workspace.path().join("shardline.toml")).unwrap();
+    let detected = Command::new(shardline_binary())
+        .args(["db", "migrate", "status"])
+        .env_clear()
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+    assert_eq!(detected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&detected.stderr).contains("database URL must not be empty"));
+    assert!(!workspace.path().join(".shardline").exists());
+}
+
+#[test]
+fn db_migration_validates_toml_and_preserves_url_precedence_and_interpolation() {
+    let workspace = tempfile::tempdir().unwrap();
+    let config = workspace.path().join("selected.toml");
+    let run = |override_url: Option<&str>, environment_url: Option<&str>| {
+        let mut command = Command::new(shardline_binary());
+        command
+            .arg("--config")
+            .arg(&config)
+            .args(["db", "migrate", "status"])
+            .env_clear()
+            .env("MIGRATION_URL", "")
+            .current_dir(workspace.path());
+        if let Some(url) = override_url {
+            command.args(["--database-url", url]);
+        }
+        if let Some(url) = environment_url {
+            command.env("SHARDLINE_INDEX_POSTGRES_URL", url);
+        }
+        command.output().unwrap()
+    };
+    fs::write(&config, "[index]\npostgres_url = \"${MIGRATION_URL}\"\n").unwrap();
+    let interpolated = run(None, None);
+    assert_eq!(interpolated.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&interpolated.stderr).contains("database URL must not be empty")
+    );
+
+    // Invalid lower-priority URLs would fail parsing; selected empty values
+    // stop before any network I/O and establish each precedence boundary.
+    fs::write(&config, "[index]\npostgres_url = \"not-a-postgres-url\"\n").unwrap();
+    let environment = run(None, Some(""));
+    assert_eq!(environment.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&environment.stderr).contains("database URL must not be empty")
+    );
+    let override_selected = run(Some(""), Some("not-a-postgres-url"));
+    assert_eq!(override_selected.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&override_selected.stderr)
+            .contains("database URL must not be empty")
+    );
+
+    fs::write(&config, "[[[invalid TOML]]]").unwrap();
+    let malformed = run(Some(""), Some(""));
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("TOML parse error"));
+}
+
 fn shardline_binary() -> String {
     if let Ok(path) = var("CARGO_BIN_EXE_shardline") {
         return path;

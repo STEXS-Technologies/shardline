@@ -28,6 +28,16 @@ pub(crate) fn set_cli_config_override(path: Option<PathBuf>) {
         .unwrap_or_else(PoisonError::into_inner) = path;
 }
 
+pub(crate) fn selected_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = explicit {
+        return Some(path.to_path_buf());
+    }
+    CLI_CONFIG_OVERRIDE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
 /// Runtime failure while validating configuration.
 #[derive(Debug, Error)]
 pub enum ConfigRuntimeError {
@@ -69,16 +79,13 @@ pub fn load_server_config(
     root_override: Option<&Path>,
     config_override: Option<&Path>,
 ) -> Result<ServerConfig, ServerConfigError> {
-    let cli_config_override = CLI_CONFIG_OVERRIDE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
-    let config_override = config_override.or(cli_config_override.as_deref());
-    let config =
-        match load_toml_config(config_override).map_err(ServerConfigError::ConfigFileError)? {
-            Some(toml) => load_server_config_from_env_with_toml(&toml)?,
-            None => ServerConfig::from_env()?,
-        };
+    let config_path = selected_config_path(config_override);
+    let config = match load_toml_config(config_path.as_deref())
+        .map_err(ServerConfigError::ConfigFileError)?
+    {
+        Some(toml) => load_server_config_from_env_with_toml(&toml)?,
+        None => ServerConfig::from_env()?,
+    };
     let root_dir = resolve_root_dir(root_override, config.root_dir());
     ensure_directory_path_components_are_not_symlinked(&root_dir)
         .map_err(ServerConfigError::RootDir)?;
