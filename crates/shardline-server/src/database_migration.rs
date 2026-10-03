@@ -604,7 +604,28 @@ pub async fn run_database_migration(
         .max_connections(5)
         .connect(options.database_url())
         .await?;
-    ensure_migration_history_table(&pool).await?;
+    if matches!(
+        options.command(),
+        DatabaseMigrationCommand::Status | DatabaseMigrationCommand::Verify
+    ) {
+        let history_table = query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+            .bind(MIGRATION_HISTORY_TABLE)
+            .fetch_one(&pool)
+            .await?;
+        if history_table.is_none() {
+            if matches!(options.command(), DatabaseMigrationCommand::Verify) {
+                return Err(DatabaseMigrationError::MigrationHistoryTableMissing);
+            }
+            return Ok(database_migration_report(
+                options.command(),
+                0,
+                0,
+                migration_status_entries_from_history(&[]),
+            ));
+        }
+    } else {
+        ensure_migration_history_table(&pool).await?;
+    }
     let _migration_guard = match options.command() {
         DatabaseMigrationCommand::Up { .. }
         | DatabaseMigrationCommand::Down { .. }
@@ -656,26 +677,40 @@ pub async fn run_database_migration(
     }
 
     let migrations = migration_status_entries(&pool).await?;
+    Ok(database_migration_report(
+        options.command(),
+        applied_count,
+        reverted_count,
+        migrations,
+    ))
+}
+
+fn database_migration_report(
+    command: &DatabaseMigrationCommand,
+    applied_count: u64,
+    reverted_count: u64,
+    migrations: Vec<DatabaseMigrationStatusEntry>,
+) -> DatabaseMigrationReport {
     let applied_total_count =
         u64::try_from(migrations.iter().filter(|entry| entry.applied).count()).unwrap_or(u64::MAX);
     let pending_count =
         u64::try_from(migrations.iter().filter(|entry| !entry.applied).count()).unwrap_or(u64::MAX);
 
-    Ok(DatabaseMigrationReport {
+    DatabaseMigrationReport {
         backend: "postgres".to_owned(),
-        command: options.command().clone(),
+        command: command.clone(),
         applied_count,
         reverted_count,
         applied_total_count,
         pending_count,
         migrations,
-    })
+    }
 }
 
 async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
     // IF NOT EXISTS does not serialize concurrent first-time CREATEs in
-    // Postgres. Protect bootstrap itself, including status/verify commands,
-    // before callers acquire their longer-lived migration guard.
+    // Postgres. Protect bootstrap for mutating commands before callers acquire
+    // their longer-lived migration guard; read-only commands never bootstrap.
     let mut transaction = acquire_migration_lock(pool).await?;
     // The interpolated table name is a fixed application constant; data values stay bound.
     query(sqlx::AssertSqlSafe(format!(
@@ -2531,6 +2566,12 @@ async fn migration_status_entries(
     pool: &PgPool,
 ) -> Result<Vec<DatabaseMigrationStatusEntry>, DatabaseMigrationError> {
     let applied = load_applied_migrations(pool).await?;
+    Ok(migration_status_entries_from_history(&applied))
+}
+
+fn migration_status_entries_from_history(
+    applied: &[AppliedMigration],
+) -> Vec<DatabaseMigrationStatusEntry> {
     let mut statuses = Vec::with_capacity(SHARDLINE_MIGRATIONS.len());
     for migration in SHARDLINE_MIGRATIONS {
         let applied_entry = applied
@@ -2544,7 +2585,7 @@ async fn migration_status_entries(
         });
     }
 
-    Ok(statuses)
+    statuses
 }
 
 fn migration_by_version(version: &str) -> Option<&'static DatabaseMigration> {
@@ -3514,5 +3555,151 @@ mod tests {
         assert_eq!(report.backend, "postgres");
         assert_eq!(report.applied_count, 2);
         assert_eq!(report.pending_count, 7);
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_only_migration_commands_do_not_bootstrap_or_wait_for_writers() {
+        let Ok(base_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("shardline_readonly_{}_{suffix}", std::process::id());
+        let mut admin_url = url::Url::parse(&base_url).unwrap();
+        admin_url.set_path("postgres");
+        let admin = PgPool::connect(admin_url.as_str()).await.unwrap();
+        query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE {}",
+            quoted_identifier(&name)
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
+        let mut write_url = url::Url::parse(&base_url).unwrap();
+        write_url.set_path(&name);
+        let mut read_url = write_url.clone();
+        read_url
+            .query_pairs_mut()
+            .append_pair("options", "-c default_transaction_read_only=on");
+        let pool = PgPool::connect(write_url.as_str()).await.unwrap();
+
+        let held = acquire_migration_lock(&pool).await.unwrap();
+        let fresh = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_test_migration_command(read_url.as_str(), DatabaseMigrationCommand::Status),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(fresh.applied_total_count, 0);
+        assert_eq!(
+            fresh.pending_count,
+            u64::try_from(bundled_database_migrations().len()).unwrap()
+        );
+        assert!(
+            fresh
+                .migrations
+                .iter()
+                .all(|entry| !entry.applied && entry.applied_at_utc.is_none())
+        );
+        assert!(matches!(
+            run_test_migration_command(read_url.as_str(), DatabaseMigrationCommand::Verify).await,
+            Err(DatabaseMigrationError::MigrationHistoryTableMissing)
+        ));
+        let tables: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            tables, 0,
+            "read-only commands must not create history or application tables"
+        );
+        held.rollback().await.unwrap();
+
+        run_test_migration_command(
+            write_url.as_str(),
+            DatabaseMigrationCommand::Up { steps: None },
+        )
+        .await
+        .unwrap();
+        let delivery = shardline_index::WebhookDelivery::new(
+            shardline_protocol::RepositoryProvider::GitHub,
+            "readonly-owner".to_owned(),
+            "assets".to_owned(),
+            "readonly-delivery".to_owned(),
+            1_800_000_000,
+        )
+        .unwrap();
+        let store = shardline_index::PostgresIndexStore::new(pool.clone());
+        assert!(
+            shardline_index::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .unwrap()
+        );
+        let before: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT event_json::text, merkle_commit_json::text FROM shardline_reliability_events ORDER BY operation_kind,operation_id,sequence")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(before.len(), 1);
+        let held = acquire_migration_lock(&pool).await.unwrap();
+        for command in [
+            DatabaseMigrationCommand::Status,
+            DatabaseMigrationCommand::Verify,
+        ] {
+            let report = tokio::time::timeout(
+                Duration::from_secs(2),
+                run_test_migration_command(read_url.as_str(), command),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(report.pending_count, 0);
+            assert_eq!(report.applied_count, 0);
+            assert_eq!(report.reverted_count, 0);
+            assert_eq!(
+                report.applied_total_count,
+                u64::try_from(bundled_database_migrations().len()).unwrap()
+            );
+        }
+        held.rollback().await.unwrap();
+        let after: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT event_json::text, merkle_commit_json::text FROM shardline_reliability_events ORDER BY operation_kind,operation_id,sequence")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            before, after,
+            "verification must retain valid nonempty evidence"
+        );
+        let version = bundled_database_migrations().first().unwrap().version;
+        let checksum: String =
+            sqlx::query_scalar("SELECT checksum FROM shardline_schema_migrations WHERE version=$1")
+                .bind(version)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        query("UPDATE shardline_schema_migrations SET checksum=$1 WHERE version=$2")
+            .bind("b".repeat(64))
+            .bind(version)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            run_test_migration_command(read_url.as_str(), DatabaseMigrationCommand::Status).await,
+            Err(DatabaseMigrationError::ChecksumMismatch { .. })
+        ));
+        query("UPDATE shardline_schema_migrations SET checksum=$1 WHERE version=$2")
+            .bind(checksum)
+            .bind(version)
+            .execute(&pool)
+            .await
+            .unwrap();
+        drop(store);
+        pool.close().await;
+        query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {} WITH (FORCE)",
+            quoted_identifier(&name)
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
     }
 }
