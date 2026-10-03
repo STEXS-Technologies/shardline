@@ -1,7 +1,7 @@
 use std::{ffi::OsString, num::NonZeroUsize};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
-use dotenvy::{from_filename, from_read_override};
+use dotenvy::from_filename;
 use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_server::{
     DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
@@ -58,29 +58,9 @@ impl CliCommand {
         }
 
         // Preserve the explicit path for every configuration-consuming command.
-        // `load_server_config` consumes this internal marker before auto-detection.
-        // Clear a marker left by an earlier in-process parse before applying
-        // this invocation's optional override.
-        from_read_override(std::io::Cursor::new("SHARDLINE_CLI_CONFIG_FILE=\n")).map_err(
-            |error| {
-                CliParseError::validation(
-                    ErrorKind::InvalidValue,
-                    format!("failed to clear selected config file: {error}"),
-                )
-            },
-        )?;
-        if let Some(config_path) = &definition.config {
-            let encoded = format!("SHARDLINE_CLI_CONFIG_FILE={:?}\n", config_path);
-            from_read_override(std::io::Cursor::new(encoded)).map_err(|error| {
-                CliParseError::validation(
-                    ErrorKind::InvalidValue,
-                    format!(
-                        "failed to select config file {}: {error}",
-                        config_path.display()
-                    ),
-                )
-            })?;
-        }
+        // `load_server_config` consumes this native path before auto-detection.
+        // Replace or clear an override left by an earlier in-process parse.
+        crate::config::set_cli_config_override(definition.config.clone());
 
         // Load shardline.toml (--config or auto-detected) for direct
         // struct deserialization. The TOML values are applied via

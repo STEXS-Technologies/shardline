@@ -1,6 +1,7 @@
 use std::{
     env::{current_dir, var_os},
     path::{Path, PathBuf},
+    sync::{Mutex, PoisonError},
 };
 
 use shardline_server::{
@@ -16,6 +17,16 @@ use crate::{
 
 const LOCAL_STATE_DIR: &str = ".shardline";
 const LOCAL_DATA_DIR: &str = "data";
+
+// Keep the selected CLI path native. Environment-text encoders interpolate
+// dollar signs and cannot faithfully represent every valid filesystem path.
+static CLI_CONFIG_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub(crate) fn set_cli_config_override(path: Option<PathBuf>) {
+    *CLI_CONFIG_OVERRIDE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = path;
+}
 
 /// Runtime failure while validating configuration.
 #[derive(Debug, Error)]
@@ -58,9 +69,10 @@ pub fn load_server_config(
     root_override: Option<&Path>,
     config_override: Option<&Path>,
 ) -> Result<ServerConfig, ServerConfigError> {
-    let cli_config_override = var_os("SHARDLINE_CLI_CONFIG_FILE")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
+    let cli_config_override = CLI_CONFIG_OVERRIDE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     let config_override = config_override.or(cli_config_override.as_deref());
     let config =
         match load_toml_config(config_override).map_err(ServerConfigError::ConfigFileError)? {
