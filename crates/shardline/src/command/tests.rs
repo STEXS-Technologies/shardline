@@ -699,6 +699,60 @@ fn parse_db_migrate_rejects_zero_steps() {
 }
 
 #[test]
+fn parse_db_migrate_backfill_accepts_representable_batch_boundaries() {
+    let maximum = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+    for batch_size in [1, 256, maximum] {
+        let args = [
+            "shardline".to_owned(),
+            "db".to_owned(),
+            "migrate".to_owned(),
+            "backfill".to_owned(),
+            "--batch-size".to_owned(),
+            batch_size.to_string(),
+        ];
+        assert_eq!(
+            CliCommand::parse(args),
+            Ok(CliCommand::DbMigrate {
+                database_url: None,
+                command: DatabaseMigrationCommand::Backfill { batch_size },
+            })
+        );
+    }
+}
+
+#[test]
+fn parse_db_migrate_backfill_rejects_zero_batch_size() {
+    assert!(
+        CliCommand::parse([
+            "shardline",
+            "db",
+            "migrate",
+            "backfill",
+            "--batch-size",
+            "0",
+        ])
+        .is_err()
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn parse_db_migrate_backfill_rejects_batch_above_postgres_bigint() {
+    for batch_size in ["9223372036854775808", "18446744073709551615"] {
+        let error = CliCommand::parse([
+            "shardline",
+            "db",
+            "migrate",
+            "backfill",
+            "--batch-size",
+            batch_size,
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("PostgreSQL BIGINT range"));
+    }
+}
+
+#[test]
 fn parse_storage_migrate() {
     let args = vec![
         "shardline".to_owned(),
