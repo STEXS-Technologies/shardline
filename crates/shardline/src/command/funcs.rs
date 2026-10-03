@@ -3,6 +3,7 @@ use std::{ffi::OsString, num::NonZeroUsize};
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use dotenvy::from_filename;
 use shardline_protocol::{RepositoryProvider, TokenScope};
+use shardline_reliability::OperationKind;
 use shardline_server::{
     DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
 };
@@ -139,6 +140,12 @@ impl TryFrom<CliDefinition> for CliCommand {
                             return Err(CliParseError::validation(
                                 ErrorKind::InvalidValue,
                                 "db migrate repair requires a non-empty --operation-id",
+                            ));
+                        }
+                        if OperationKind::parse(&repair_args.operation_kind).is_none() {
+                            return Err(CliParseError::validation(
+                                ErrorKind::InvalidValue,
+                                "db migrate repair requires a supported --operation-kind (for example S3Object or ResumableSession, case-sensitive)",
                             ));
                         }
                         Ok(Self::DbMigrate {

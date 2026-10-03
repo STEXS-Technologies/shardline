@@ -601,6 +601,80 @@ fn parse_db_migrate_repair_requires_confirmation() {
 }
 
 #[test]
+fn parse_db_migrate_repair_rejects_noncanonical_operation_kinds() {
+    for kind in ["", "s3object", "NotAnOperation", "S3Object\n", "\u{1b}[2J"] {
+        let error = CliCommand::parse([
+            "shardline",
+            "db",
+            "migrate",
+            "repair",
+            "--operation-kind",
+            kind,
+            "--operation-id",
+            "owned-synthetic",
+            "--confirm",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("supported --operation-kind"));
+        assert!(!error.to_string().contains('\u{1b}'));
+    }
+    let unconfirmed = CliCommand::parse([
+        "shardline",
+        "db",
+        "migrate",
+        "repair",
+        "--operation-kind",
+        "NotAnOperation",
+        "--operation-id",
+        "owned-synthetic",
+    ])
+    .unwrap_err();
+    assert!(unconfirmed.to_string().contains("--confirm"));
+}
+
+#[test]
+fn parse_db_migrate_repair_accepts_every_canonical_kind_and_exact_identity() {
+    use shardline_reliability::OperationKind;
+    for kind in [
+        OperationKind::Upload,
+        OperationKind::ResumableSession,
+        OperationKind::MetadataCommit,
+        OperationKind::OciTag,
+        OperationKind::S3Object,
+        OperationKind::Visibility,
+        OperationKind::ProviderEvent,
+        OperationKind::Repair,
+        OperationKind::GarbageCollection,
+        OperationKind::RetentionHold,
+        OperationKind::WebhookDelivery,
+    ] {
+        let parsed = CliCommand::parse([
+            "shardline",
+            "db",
+            "migrate",
+            "repair",
+            "--operation-kind",
+            kind.as_str(),
+            "--operation-id",
+            " exact/identity with spaces ",
+            "--confirm",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed,
+            CliCommand::DbMigrate {
+                database_url: None,
+                command: DatabaseMigrationCommand::Repair {
+                    operation_kind: kind.as_str().to_owned(),
+                    operation_id: " exact/identity with spaces ".to_owned(),
+                },
+            }
+        );
+    }
+}
+
+#[test]
 fn parse_db_migrate_rejects_zero_steps() {
     let args = vec![
         "shardline".to_owned(),
