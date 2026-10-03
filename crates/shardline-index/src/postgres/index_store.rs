@@ -2094,6 +2094,11 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 }
                 let (stored_tenant, stored_repository) = upload_lifecycle_identity(&events);
                 if stored_tenant != tenant || stored_repository != repository {
+                    if stored_tenant != "shardline" || stored_repository != "default" {
+                        return Err(
+                            crate::UploadIntentConflictError::new(intent.intent_id()).into()
+                        );
+                    }
                     // Upload evidence predating repository-scoped identities was
                     // written with the compatibility `default` repository. The
                     // durable intent and its object identity are unchanged, so
@@ -4394,6 +4399,52 @@ mod tests {
         assert!(events.iter().all(|event| {
             event.operation.tenant == "tenant-pg" && event.operation.repository == "repo-pg"
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_duplicate_intent_rejects_nonlegacy_scope_rebind() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool);
+        let intent = UploadIntent::new(
+            "pg-nonlegacy-duplicate".into(),
+            "objects/scope".into(),
+            "a".repeat(64),
+            42,
+        );
+        store
+            .create_intent_scoped(&intent, "tenant-a", "repo-a")
+            .await
+            .unwrap();
+        store
+            .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+            .await
+            .unwrap();
+        let before = store.reliability_events(intent.intent_id()).await.unwrap();
+        store
+            .create_intent_scoped(&intent, "tenant-a", "repo-a")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .create_intent_scoped(&intent, "tenant-b", "repo-b")
+                .await,
+            Err(super::PostgresMetadataStoreError::UploadIntentConflict(_))
+        ));
+        assert_eq!(
+            store
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        assert_eq!(
+            store.reliability_events(intent.intent_id()).await.unwrap(),
+            before
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
