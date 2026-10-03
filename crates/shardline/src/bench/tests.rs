@@ -862,3 +862,34 @@ async fn ingest_bench_focused_concurrent_upload() {
     assert_eq!(report.average_sparse_update_upload_micros, 0);
     assert_eq!(report.total_concurrent_uploaded_bytes, 16384);
 }
+
+#[tokio::test]
+async fn invalid_benchmark_parameters_reject_before_creating_storage() {
+    let parent = tempfile::tempdir().unwrap();
+    let storage = parent.path().join("must-not-exist");
+    for (chunk_size_bytes, base_bytes) in
+        [(8, 256), (129, 256), (usize::MAX, 256), (128, usize::MAX)]
+    {
+        let config = BenchConfig {
+            deployment_target: BenchDeploymentTarget::IsolatedLocal,
+            scenario: BenchScenario::InitialUpload,
+            iterations: 1,
+            concurrency: 1,
+            upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+            chunk_size_bytes,
+            base_bytes,
+            mutated_bytes: 8,
+        };
+        assert!(run_bench(&storage, config).await.is_err());
+        assert!(!storage.exists());
+        assert!(run_ingest_bench(config).await.is_err());
+    }
+}
+
+#[test]
+fn asset_capacity_overflow_is_a_typed_error() {
+    assert!(matches!(
+        build_base_asset(usize::MAX),
+        Err(BenchRuntimeError::InvalidAllocationCapacity("base asset"))
+    ));
+}

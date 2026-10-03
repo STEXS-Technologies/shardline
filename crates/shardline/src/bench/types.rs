@@ -1,4 +1,5 @@
 use std::{
+    collections::TryReserveError,
     io::Error as IoError,
     num::{NonZeroUsize, TryFromIntError},
     path::PathBuf,
@@ -825,6 +826,99 @@ pub struct BenchConfig {
     pub mutated_bytes: usize,
 }
 
+impl BenchConfig {
+    /// Validates end-to-end benchmark parameters before allocating or creating storage.
+    ///
+    /// # Errors
+    /// Returns [`BenchRuntimeError`] for invalid CDC sizes, numeric parameters,
+    /// or allocation lengths that cannot be represented by a Rust vector.
+    pub fn validate_e2e(&self) -> Result<(), BenchRuntimeError> {
+        self.validate_common()?;
+        validate_allocation_capacity::<BenchIterationReport>(
+            usize::try_from(self.iterations)?,
+            "iteration reports",
+        )?;
+        validate_allocation_capacity::<ConcurrentUploadCase>(
+            usize::try_from(self.concurrency)?,
+            "concurrent upload cases",
+        )?;
+        let cross_repository_bytes = self
+            .chunk_size_bytes
+            .checked_mul(3)
+            .ok_or(BenchRuntimeError::CrossRepositoryAssetOverflow)?;
+        validate_allocation_capacity::<u8>(cross_repository_bytes, "cross-repository asset")
+    }
+
+    /// Validates ingest benchmark parameters before allocating asset buffers.
+    ///
+    /// # Errors
+    /// Returns [`BenchRuntimeError`] for unsupported scenarios, invalid numeric
+    /// parameters, or allocation lengths that cannot be represented by a vector.
+    pub fn validate_ingest(&self) -> Result<(), BenchRuntimeError> {
+        if !self.scenario.supports_ingest() {
+            return Err(BenchRuntimeError::UnsupportedScenarioForMode);
+        }
+        self.validate_common()?;
+        validate_allocation_capacity::<IngestBenchIterationReport>(
+            usize::try_from(self.iterations)?,
+            "ingest iteration reports",
+        )?;
+        validate_allocation_capacity::<ConcurrentUploadCase>(
+            usize::try_from(self.concurrency)?,
+            "concurrent upload cases",
+        )?;
+        validate_allocation_capacity::<ConcurrentIngestUploadCase>(
+            usize::try_from(self.concurrency)?,
+            "concurrent ingest cases",
+        )
+    }
+
+    fn validate_common(&self) -> Result<(), BenchRuntimeError> {
+        if self.iterations == 0 {
+            return Err(BenchRuntimeError::ZeroIterations);
+        }
+        if self.concurrency == 0 {
+            return Err(BenchRuntimeError::ZeroConcurrency);
+        }
+        if self.upload_max_in_flight_chunks == 0 {
+            return Err(BenchRuntimeError::ZeroUploadMaxInFlightChunks);
+        }
+        let chunk_size =
+            NonZeroUsize::new(self.chunk_size_bytes).ok_or(BenchRuntimeError::ZeroChunkSize)?;
+        shardline_server::validate_chunk_size(chunk_size)?;
+        if self.mutated_bytes == 0 {
+            return Err(BenchRuntimeError::ZeroMutatedBytes);
+        }
+        if self.mutated_bytes > self.base_bytes {
+            return Err(BenchRuntimeError::MutatedBytesExceedBaseBytes);
+        }
+        validate_allocation_capacity::<u8>(self.base_bytes, "base asset")
+    }
+}
+
+pub(crate) fn validate_allocation_capacity<T>(
+    length: usize,
+    name: &'static str,
+) -> Result<(), BenchRuntimeError> {
+    let bytes = length
+        .checked_mul(std::mem::size_of::<T>())
+        .filter(|bytes| *bytes <= isize::MAX as usize);
+    if bytes.is_none() {
+        return Err(BenchRuntimeError::InvalidAllocationCapacity(name));
+    }
+    Ok(())
+}
+
+pub(crate) fn try_vec_with_capacity<T>(
+    length: usize,
+    name: &'static str,
+) -> Result<Vec<T>, BenchRuntimeError> {
+    validate_allocation_capacity::<T>(length, name)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(length)?;
+    Ok(values)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ConcurrentUploadCase {
     pub(crate) file_id: String,
@@ -878,6 +972,12 @@ pub(crate) enum BenchBackendSetup {
 /// Benchmark runtime failure.
 #[derive(Debug, Error)]
 pub enum BenchRuntimeError {
+    /// A benchmark vector length exceeds its representable allocation layout.
+    #[error("benchmark {0} exceeds the supported allocation capacity")]
+    InvalidAllocationCapacity(&'static str),
+    /// Reserving a benchmark buffer failed.
+    #[error("benchmark buffer allocation failed: {0}")]
+    Allocation(#[from] TryReserveError),
     /// The benchmark chunk size must be positive.
     #[error("benchmark chunk size must be greater than zero")]
     ZeroChunkSize,

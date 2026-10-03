@@ -319,6 +319,24 @@ impl TryFrom<CliDefinition> for CliCommand {
                     ));
                 }
 
+                let config = crate::bench::BenchConfig {
+                    deployment_target: args.deployment_target,
+                    scenario: args.scenario,
+                    iterations: args.iterations,
+                    concurrency: args.concurrency,
+                    upload_max_in_flight_chunks: args.upload_max_in_flight_chunks,
+                    chunk_size_bytes: args.chunk_size_bytes,
+                    base_bytes: args.base_bytes,
+                    mutated_bytes: args.mutated_bytes,
+                };
+                match args.mode {
+                    BenchMode::EndToEnd => config.validate_e2e(),
+                    BenchMode::Ingest => config.validate_ingest(),
+                }
+                .map_err(|error| {
+                    CliParseError::validation(ErrorKind::InvalidValue, error.to_string())
+                })?;
+
                 Ok(Self::Bench {
                     mode: args.mode,
                     deployment_target: args.deployment_target,
