@@ -168,7 +168,7 @@ where
         match classify_retention_hold_repair_action(
             hold.release_after_unix_seconds(),
             hold.held_at_unix_seconds(),
-            object_store.metadata(hold.object_key())?.is_some(),
+            true, // Hold validity is independent of current object existence.
             now_unix_seconds,
         ) {
             RetentionHoldRepairAction::Keep => {
