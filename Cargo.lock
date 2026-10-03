@@ -3697,6 +3697,7 @@ dependencies = [
  "shardline-index",
  "shardline-protocol",
  "shardline-protocol-adapters",
+ "shardline-reliability",
  "shardline-server",
  "shardline-server-core",
  "shardline-storage",
