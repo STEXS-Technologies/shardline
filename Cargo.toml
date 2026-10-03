@@ -7,6 +7,7 @@ members = ["crates/*"]
 # - cfg-if, core-foundation, rand: two versions each.
 # - reqwest: 0.12 workspace and 0.13 via xet-client 1.5.2.
 # - getrandom: 0.2, 0.3, 0.4 via incompatible third-party dependency constraints.
+# - syn: 2 and 3; async-trait uses syn 3 while other derive macros use syn 2.
 
 [workspace.package]
 version = "1.11.2"
@@ -21,7 +22,7 @@ aes-gcm = "0.10"
 arrow-array = "57.3.0"
 arrow-json = "57.3.0"
 arrow-schema = "57.3.0"
-async-trait = "0.1"
+async-trait = "0.1.92"
 dotenvy = "0.15"
 toml = "0.8"
 axum = "0.8.8"

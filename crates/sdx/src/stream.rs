@@ -501,7 +501,7 @@ impl Drop for BufferPermit {
 /// Adds up to `n`, clamped at `max_value`; returns the amount actually added.
 fn attempt_add(counter: &AtomicU64, n: u64, max_value: u64) -> u64 {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             if current >= max_value {
                 None
             } else {
@@ -520,7 +520,7 @@ fn attempt_add(counter: &AtomicU64, n: u64, max_value: u64) -> u64 {
 /// subtracted.
 fn attempt_sub(counter: &AtomicU64, n: u64, min_value: u64) -> u64 {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             if current <= min_value {
                 None
             } else {
