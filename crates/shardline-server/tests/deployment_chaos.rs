@@ -2244,14 +2244,15 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
     let fast_environment = [
         ("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str()),
         ("LD_PRELOAD", faketime_library),
-        ("FAKETIME", "+120s"),
+        // libfaketime offsets use seconds by default; an `s` suffix is invalid.
+        ("FAKETIME", "+120"),
         ("FAKETIME_DONT_FAKE_MONOTONIC", "1"),
         ("FAKETIME_NO_CACHE", "1"),
     ];
     let slow_environment = [
         ("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str()),
         ("LD_PRELOAD", faketime_library),
-        ("FAKETIME", "-120s"),
+        ("FAKETIME", "-120"),
         ("FAKETIME_DONT_FAKE_MONOTONIC", "1"),
         ("FAKETIME_NO_CACHE", "1"),
     ];

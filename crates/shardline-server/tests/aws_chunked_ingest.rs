@@ -207,6 +207,9 @@ async fn run_ingest(database_url: Option<&str>) {
     let split_response = client
         .put(&object)
         .bearer_auth(&token)
+        // The server may reject before consuming this oversized stream. Do not
+        // reuse its connection for the independent persisted-state assertion.
+        .header(reqwest::header::CONNECTION, "close")
         .header("content-encoding", "aws-chunked")
         .header("x-amz-decoded-content-length", "3")
         .body(reqwest::Body::wrap_stream(futures_util::stream::iter(
