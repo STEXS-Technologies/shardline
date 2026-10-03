@@ -5,7 +5,7 @@ use std::{
     io::{Error as IoError, Read},
     ops::Range,
     path::Path,
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,7 +20,7 @@ use shardline_protocol::{ByteRange, ShardlineHash};
 use tokio::{
     fs::File as TokioFile,
     io::AsyncReadExt,
-    runtime::{Builder, Handle, Runtime},
+    runtime::{Builder, Handle, Runtime, RuntimeFlavor},
     task::block_in_place,
 };
 
@@ -39,7 +39,7 @@ use super::{
 #[derive(Clone)]
 pub struct S3ObjectStore {
     pub(crate) inner: AmazonS3,
-    pub(crate) runtime: Option<Arc<Runtime>>,
+    pub(crate) runtime: Arc<Runtime>,
     pub(crate) key_prefix: Option<String>,
 }
 
@@ -85,10 +85,7 @@ impl fmt::Debug for S3ObjectStore {
         formatter
             .debug_struct("S3ObjectStore")
             .field("inner", &"***")
-            .field(
-                "runtime",
-                &self.runtime.as_ref().map(|_runtime| "configured"),
-            )
+            .field("runtime", &"shared")
             .field("key_prefix", &self.key_prefix)
             .finish()
     }
@@ -111,18 +108,30 @@ impl S3ObjectStore {
         super::credentials::validate_s3_config(&config)?;
         let inner = super::client::build_amazon_s3_client(&config)?;
 
-        let runtime = if Handle::try_current().is_ok() {
-            None
+        // Process-wide ownership keeps the bridge independent of the runtime in
+        // which an adapter was constructed and avoids dropping a Tokio runtime
+        // while inside another runtime. Worker threads are shared across stores.
+        static SYNC_RUNTIME: Mutex<Option<Arc<Runtime>>> = Mutex::new(None);
+        let mut shared = SYNC_RUNTIME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime = if let Some(runtime) = shared.as_ref() {
+            Arc::clone(runtime)
         } else {
-            Some(Arc::new(
+            // Retain only successful initialization. Temporary resource pressure
+            // must not make every later adapter construction fail permanently.
+            let runtime = Arc::new(
                 Builder::new_multi_thread()
                     .worker_threads(2)
                     .thread_name("shardline-s3-object-store")
                     .enable_all()
                     .build()
                     .map_err(S3ObjectStoreError::Runtime)?,
-            ))
+            );
+            *shared = Some(Arc::clone(&runtime));
+            runtime
         };
+        drop(shared);
         Ok(Self {
             inner,
             runtime,
@@ -130,41 +139,40 @@ impl S3ObjectStore {
         })
     }
 
-    fn block_on<T>(
+    fn block_on<T: Send>(
         &self,
-        future: impl Future<Output = Result<T, ExternalObjectStoreError>>,
+        future: impl Future<Output = Result<T, ExternalObjectStoreError>> + Send,
     ) -> Result<T, S3ObjectStoreError> {
-        if let Ok(handle) = Handle::try_current() {
-            return block_in_place(|| handle.block_on(future))
-                .map_err(S3ObjectStoreError::External);
-        }
-
-        let runtime = self
-            .runtime
-            .as_ref()
-            .ok_or(S3ObjectStoreError::RuntimeUnavailable)?;
-        runtime
-            .block_on(future)
-            .map_err(S3ObjectStoreError::External)
+        self.block_on_result(async { future.await.map_err(S3ObjectStoreError::External) })
     }
 
-    fn block_on_result<T, FutureError>(
+    fn block_on_result<T: Send, FutureError: Send>(
         &self,
-        future: impl Future<Output = Result<T, FutureError>>,
+        future: impl Future<Output = Result<T, FutureError>> + Send,
     ) -> Result<T, FutureError>
     where
         S3ObjectStoreError: Into<FutureError>,
     {
         if let Ok(handle) = Handle::try_current() {
-            return block_in_place(|| handle.block_on(future));
+            if handle.runtime_flavor() == RuntimeFlavor::MultiThread {
+                return block_in_place(|| self.runtime.block_on(future));
+            }
+            // A current-thread runtime cannot block_in_place or drive nested
+            // block_on. A scoped thread can borrow the operation's inputs while
+            // the independent shared runtime continues driving transport I/O.
+            return std::thread::scope(|scope| {
+                let worker = std::thread::Builder::new()
+                    .name("shardline-s3-sync-bridge".to_owned())
+                    .spawn_scoped(scope, || self.runtime.block_on(future))
+                    .map_err(S3ObjectStoreError::Runtime)
+                    .map_err(Into::into)?;
+                worker.join().map_err(|_panic| {
+                    S3ObjectStoreError::Runtime(IoError::other("synchronous S3 worker panicked"))
+                        .into()
+                })?
+            });
         }
-
-        let runtime = self
-            .runtime
-            .as_ref()
-            .ok_or(S3ObjectStoreError::RuntimeUnavailable)
-            .map_err(Into::into)?;
-        runtime.block_on(future)
+        self.runtime.block_on(future)
     }
 
     pub(crate) fn location_for_key(
@@ -897,8 +905,23 @@ impl ObjectStore for S3ObjectStore {
         Visitor: FnMut(ObjectMetadata) -> Result<(), VisitorError>,
     {
         let location = self.location_for_prefix(prefix).map_err(Into::into)?;
-        self.block_on_result(async {
-            let mut listed = self.inner.list(Some(&location));
+        let mut listed = self.inner.list(Some(&location));
+        if Handle::try_current()
+            .is_ok_and(|handle| handle.runtime_flavor() != RuntimeFlavor::MultiThread)
+        {
+            while let Some(entry) = self.block_on(listed.try_next()).map_err(Into::into)? {
+                let metadata = self.metadata_from_external(&entry).map_err(Into::into)?;
+                // Keep callbacks on the caller's thread: the synchronous visitor
+                // contract permits non-Send state and errors.
+                if !is_temp_upload_key(metadata.key().as_str()) {
+                    visitor(metadata)?;
+                }
+            }
+            return Ok(());
+        }
+        // Outside a runtime and in multi-thread runtimes, drive the whole scan
+        // once on the caller's thread instead of entering an executor per item.
+        let operation = async {
             while let Some(entry) = listed
                 .try_next()
                 .await
@@ -906,15 +929,17 @@ impl ObjectStore for S3ObjectStore {
                 .map_err(Into::into)?
             {
                 let metadata = self.metadata_from_external(&entry).map_err(Into::into)?;
-                // Skip temp upload artifacts.
-                if is_temp_upload_key(metadata.key().as_str()) {
-                    continue;
+                if !is_temp_upload_key(metadata.key().as_str()) {
+                    visitor(metadata)?;
                 }
-                visitor(metadata)?;
             }
-
             Ok(())
-        })
+        };
+        if Handle::try_current().is_ok() {
+            block_in_place(|| self.runtime.block_on(operation))
+        } else {
+            self.runtime.block_on(operation)
+        }
     }
 
     fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
