@@ -22,25 +22,61 @@ use super::{
 // Hold the registry only while finding the root's coordinator. SQLite I/O and
 // cold bootstrap must never block connections for an unrelated database.
 type LocalDatabaseInitialization = Arc<Mutex<bool>>;
-static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<HashMap<PathBuf, LocalDatabaseInitialization>>> =
+// Bound coordinators for historical roots, while retaining every coordinator
+// currently owned by an initializing or waiting caller. New-root churn prunes
+// in batches; warm lookups never scan the registry.
+const MAX_CACHED_LOCAL_DATABASES: usize = 1024;
+const LOCAL_DATABASE_CACHE_PRUNE_TARGET: usize = MAX_CACHED_LOCAL_DATABASES / 2;
+
+#[derive(Default)]
+struct LocalDatabaseInitializationCache {
+    databases: HashMap<PathBuf, LocalDatabaseInitialization>,
+}
+
+impl LocalDatabaseInitializationCache {
+    fn get_or_insert(&mut self, path: &Path) -> LocalDatabaseInitialization {
+        if let Some(initialization) = self.databases.get(path) {
+            return Arc::clone(initialization);
+        }
+        if self.databases.len() >= MAX_CACHED_LOCAL_DATABASES {
+            let mut retained_idle = 0_usize;
+            // Only the registry owns an idle coordinator. Never evict active
+            // or waiting callers, even when their count exceeds the cache cap.
+            // This scan costs O(active + cached roots) on threshold insertions;
+            // batches amortize scans across ordinary inactive-root churn.
+            self.databases.retain(|_, initialization| {
+                if Arc::strong_count(initialization) > 1 {
+                    return true;
+                }
+                if retained_idle < LOCAL_DATABASE_CACHE_PRUNE_TARGET {
+                    retained_idle = retained_idle.saturating_add(1);
+                    return true;
+                }
+                false
+            });
+        }
+        let initialization = Arc::new(Mutex::new(false));
+        self.databases
+            .insert(path.to_owned(), Arc::clone(&initialization));
+        initialization
+    }
+}
+
+static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<LocalDatabaseInitializationCache>> =
     OnceLock::new();
 
 pub(super) fn database_initialization(
     path: &Path,
 ) -> Result<LocalDatabaseInitialization, LocalIndexStoreError> {
     let mut databases = INITIALIZED_LOCAL_DATABASES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(LocalDatabaseInitializationCache::default()))
         .lock()
         .map_err(|error| {
             LocalIndexStoreError::Io(std::io::Error::other(format!(
                 "local metadata initialization registry poisoned: {error}"
             )))
         })?;
-    Ok(Arc::clone(
-        databases
-            .entry(path.to_owned())
-            .or_insert_with(|| Arc::new(Mutex::new(false))),
-    ))
+    Ok(databases.get_or_insert(path))
 }
 
 /// Local SQLite implementation of [`IndexStore`](crate::IndexStore).
@@ -560,3 +596,86 @@ impl LocalRecordStore {
 }
 
 pub(crate) use crate::record_kind::RecordKind;
+
+#[cfg(test)]
+mod initialization_cache_tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+
+    fn inactive_count(cache: &LocalDatabaseInitializationCache) -> usize {
+        cache
+            .databases
+            .values()
+            .filter(|entry| Arc::strong_count(entry) == 1)
+            .count()
+    }
+
+    #[test]
+    fn inactive_root_churn_is_bounded_and_evicted_roots_reinitialize() {
+        let mut cache = LocalDatabaseInitializationCache::default();
+        let first_path = PathBuf::from("first");
+        let first = cache.get_or_insert(&first_path);
+        *first.lock().expect("coordinator") = true;
+        drop(first);
+        for root in 0..10_000 {
+            drop(cache.get_or_insert(&PathBuf::from(format!("root-{root}"))));
+            assert!(inactive_count(&cache) <= MAX_CACHED_LOCAL_DATABASES);
+        }
+        // Pick a root actually evicted by arbitrary HashMap batch pruning.
+        let evicted = (0..10_000)
+            .map(|root| PathBuf::from(format!("root-{root}")))
+            .find(|path| !cache.databases.contains_key(path))
+            .expect("evicted root");
+        let reopened = cache.get_or_insert(&evicted);
+        assert!(!*reopened.lock().expect("fresh coordinator"));
+        *reopened.lock().expect("initialized coordinator") = true;
+        assert!(Arc::ptr_eq(&reopened, &cache.get_or_insert(&evicted)));
+        assert!(
+            *cache
+                .get_or_insert(&evicted)
+                .lock()
+                .expect("warm coordinator")
+        );
+    }
+
+    #[test]
+    fn mixed_active_and_idle_roots_preserve_live_identity_and_initialization() {
+        let mut cache = LocalDatabaseInitializationCache::default();
+        let pinned_path = PathBuf::from("pinned");
+        let pinned = cache.get_or_insert(&pinned_path);
+        let guard = pinned.lock().expect("initializing coordinator");
+        for root in 0..5000 {
+            drop(cache.get_or_insert(&PathBuf::from(format!("idle-{root}"))));
+            assert!(inactive_count(&cache) <= MAX_CACHED_LOCAL_DATABASES);
+            assert!(Arc::ptr_eq(&pinned, &cache.get_or_insert(&pinned_path)));
+        }
+        drop(guard);
+        *pinned.lock().expect("initialized coordinator") = true;
+        assert!(
+            *cache
+                .get_or_insert(&pinned_path)
+                .lock()
+                .expect("same coordinator")
+        );
+    }
+
+    #[test]
+    fn all_live_roots_can_exceed_cap_then_idle_entries_are_pruned() {
+        let mut cache = LocalDatabaseInitializationCache::default();
+        let paths = (0..MAX_CACHED_LOCAL_DATABASES + 100)
+            .map(|root| PathBuf::from(format!("active-{root}")))
+            .collect::<Vec<_>>();
+        let pinned = paths
+            .iter()
+            .map(|path| cache.get_or_insert(path))
+            .collect::<Vec<_>>();
+        assert_eq!(cache.databases.len(), paths.len());
+        for (path, coordinator) in paths.iter().zip(&pinned) {
+            assert!(Arc::ptr_eq(coordinator, &cache.get_or_insert(path)));
+        }
+        drop(pinned);
+        drop(cache.get_or_insert(Path::new("trigger-prune")));
+        assert!(inactive_count(&cache) <= MAX_CACHED_LOCAL_DATABASES);
+        assert_eq!(cache.databases.len(), LOCAL_DATABASE_CACHE_PRUNE_TARGET + 1);
+    }
+}
