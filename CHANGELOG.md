@@ -11,6 +11,22 @@ memory growth and blocking work in large inventories and transfers.
 
 ### Changed
 
+- Publish release artifacts only on a release-tag push; manual workflow runs
+  perform validation without publishing.
+- Hold the exclusive maintenance barrier throughout index rebuild so uploads
+  cannot invalidate its version snapshot or derived-state repairs.
+- Accept OCI repository names containing protocol operation words without
+  changing repository identity, and keep every Git sideband packet within its
+  wire-size limit. String pkt-line encoding rejects non-UTF-8 input.
+- Bound OIDC discovery and JWKS JSON to 1 MiB, reject unsuccessful HTTP responses
+  and redirects, and keep signing-key refresh alive until the last provider owner
+  is dropped.
+- Enforce JWK purpose, algorithm, and EC curve constraints when selecting JWT
+  verification keys, including mixed-purpose keys sharing a key ID.
+- Support synchronous S3 operations inside current-thread Tokio runtimes and
+  after moving an adapter out of its construction runtime.
+- Bound SDK config and token files to 1 MiB and remove a full-payload temporary
+  copy from cache serialization.
 - Apply pending database migrations explicitly before rollout.
   PostgreSQL index builds require a controlled write maintenance window; drain writers
   rather than relying on process rollout order.
