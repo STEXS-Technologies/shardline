@@ -815,19 +815,42 @@ impl SyncWriterThread {
         }
     }
 
-    /// Runs the non-vectorized writer loop: `write_all` per term, then `flush`.
+    /// Writes each term completely while checking cancellation between writes.
     fn run(mut self, mut writer: impl Write) -> Result<(), SdxError> {
         while let Some((data, permit)) = self.next_write(true)? {
-            let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-            writer.write_all(&data).map_err(SdxError::Io)?;
-            self.bytes_written.fetch_add(len, Ordering::Relaxed);
+            let mut remaining = data.as_ref();
+            while !remaining.is_empty() {
+                self.run_state.check_background_error()?;
+                if self.run_state.is_cancelled() {
+                    return Ok(());
+                }
+                let written = match writer.write(remaining) {
+                    Ok(0) => return Err(SdxError::Io(std::io::ErrorKind::WriteZero.into())),
+                    Ok(written) => written,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(SdxError::Io(error)),
+                };
+                remaining = remaining.get(written..).ok_or_else(|| {
+                    SdxError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "writer returned an invalid byte count",
+                    ))
+                })?;
+                self.bytes_written.fetch_add(
+                    u64::try_from(written).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+            }
             // The buffer permit is released only after the data is written.
             drop(permit);
             if self.finished {
                 break;
             }
         }
-        writer.flush().map_err(SdxError::Io)?;
+        self.run_state.check_background_error()?;
+        if !self.run_state.is_cancelled() {
+            writer.flush().map_err(SdxError::Io)?;
+        }
         Ok(())
     }
 
@@ -837,6 +860,10 @@ impl SyncWriterThread {
     fn run_vectorized(mut self, mut writer: impl Write) -> Result<(), SdxError> {
         let mut pending_writes: VecDeque<PendingWrite> = VecDeque::new();
         while !self.finished || !pending_writes.is_empty() {
+            self.run_state.check_background_error()?;
+            if self.run_state.is_cancelled() {
+                return Ok(());
+            }
             if pending_writes.is_empty() {
                 let Some(write) = self.next_write(true)? else {
                     break;
@@ -851,6 +878,10 @@ impl SyncWriterThread {
                 .take(WRITEV_MAX_SLICE)
                 .map(|(data, _)| IoSlice::new(data))
                 .collect();
+            self.run_state.check_background_error()?;
+            if self.run_state.is_cancelled() {
+                return Ok(());
+            }
             let written = match writer.write_vectored(&io_slices) {
                 Ok(0) if !io_slices.is_empty() => {
                     return Err(SdxError::StreamInternal(
@@ -882,7 +913,10 @@ impl SyncWriterThread {
                 }
             }
         }
-        writer.flush().map_err(SdxError::Io)?;
+        self.run_state.check_background_error()?;
+        if !self.run_state.is_cancelled() {
+            writer.flush().map_err(SdxError::Io)?;
+        }
         Ok(())
     }
 }
@@ -995,7 +1029,6 @@ impl DataWriter for SequentialWriter {
                 "writer has already finished".to_owned(),
             ));
         }
-        self.finished = true;
         if self.sender.send(SequentialRetrievalItem::Finish).is_err() {
             self.run_state.check_background_error()?;
             return Err(SdxError::StreamInternal(
@@ -1018,11 +1051,13 @@ impl DataWriter for SequentialWriter {
                         "bytes written mismatch: expected {expected_bytes} bytes, wrote {actual_bytes} bytes"
                     )));
                 }
+                self.finished = true;
                 Ok(actual_bytes)
             }
             None => {
                 // Streaming mode: no background writer thread; the consumer
                 // (DownloadStream) reads items directly from the channel.
+                self.finished = true;
                 Ok(expected_bytes)
             }
         }
@@ -3349,6 +3384,151 @@ mod tests {
             }
         }
         assert_eq!(&out, b"Hello World");
+    }
+
+    struct CooperativeSink {
+        always_interrupted: bool,
+        interrupt_once: bool,
+        permanent_error: bool,
+        flush_error: bool,
+        gate: Option<std::sync::mpsc::Receiver<()>>,
+        started: Option<oneshot::Sender<()>>,
+        dropped: Option<oneshot::Sender<()>>,
+        written: Arc<AtomicU64>,
+    }
+
+    impl Write for CooperativeSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                let _sent = started.send(());
+            }
+            if let Some(gate) = self.gate.take() {
+                gate.recv().map_err(std::io::Error::other)?;
+            }
+            if self.always_interrupted || std::mem::take(&mut self.interrupt_once) {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            if self.permanent_error {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "owned sink failure",
+                ));
+            }
+            let count = bytes.len().min(3);
+            self.written
+                .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.flush_error {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "owned flush failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for CooperativeSink {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _sent = dropped.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cooperative_writer_cancelled_finish_stops_retries_and_releases_permits() {
+        for vectorized in [false, true] {
+            for gated in [false, true] {
+                let state = RunState::new(CancellationToken::new());
+                let semaphore = Arc::new(BufferSemaphore::new(64, 64, 64));
+                let written = Arc::new(AtomicU64::new(0));
+                let (started_tx, started_rx) = oneshot::channel();
+                let (dropped_tx, dropped_rx) = oneshot::channel();
+                let (release_tx, gate_rx) = std::sync::mpsc::channel();
+                let sink = CooperativeSink {
+                    always_interrupted: !gated,
+                    interrupt_once: false,
+                    permanent_error: false,
+                    flush_error: false,
+                    gate: gated.then_some(gate_rx),
+                    started: Some(started_tx),
+                    dropped: Some(dropped_tx),
+                    written: written.clone(),
+                };
+                let mut writer = SequentialWriter::new(sink, vectorized, state.clone());
+                writer
+                    .set_next_term_data_source(
+                        0..64,
+                        Some(semaphore.acquire_many(64).await.unwrap()),
+                        immediate_future(Bytes::from(vec![7u8; 64])),
+                    )
+                    .await
+                    .unwrap();
+                let finishing = tokio::spawn(writer.finish());
+                tokio::time::timeout(Duration::from_secs(5), started_rx)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(semaphore.available_permits(), 0);
+                finishing.abort();
+                assert!(finishing.await.unwrap_err().is_cancelled());
+                assert!(state.is_cancelled());
+                if gated {
+                    release_tx.send(()).unwrap();
+                }
+                tokio::time::timeout(Duration::from_secs(5), dropped_rx)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(written.load(Ordering::Relaxed), if gated { 3 } else { 0 });
+                assert_eq!(semaphore.available_permits(), 64);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cooperative_writer_preserves_short_writes_interrupted_and_typed_errors() {
+        for vectorized in [false, true] {
+            for (permanent_error, flush_error) in [(false, false), (true, false), (false, true)] {
+                let state = RunState::new(CancellationToken::new());
+                let written = Arc::new(AtomicU64::new(0));
+                let sink = CooperativeSink {
+                    always_interrupted: false,
+                    interrupt_once: true,
+                    permanent_error,
+                    flush_error,
+                    gate: None,
+                    started: None,
+                    dropped: None,
+                    written: written.clone(),
+                };
+                let mut writer = SequentialWriter::new(sink, vectorized, state.clone());
+                writer
+                    .set_next_term_data_source(
+                        0..64,
+                        None,
+                        immediate_future(Bytes::from(vec![7u8; 64])),
+                    )
+                    .await
+                    .unwrap();
+                let result = writer.finish().await;
+                if permanent_error || flush_error {
+                    assert!(result.is_err());
+                    assert!(
+                        matches!(state.check_error(), Err(SdxError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe && error.to_string() == if permanent_error { "owned sink failure" } else { "owned flush failure" })
+                    );
+                } else {
+                    assert_eq!(result.unwrap(), 64);
+                    assert_eq!(written.load(Ordering::Relaxed), 64);
+                    assert!(!state.is_cancelled());
+                }
+            }
+        }
     }
 
     #[tokio::test]
