@@ -1,6 +1,6 @@
 //! Command handlers for the `sdx` file-management CLI lane.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use sdx::client::XetClientBuilder;
@@ -13,6 +13,17 @@ use super::error::XetError;
 use super::resolve::{
     Session, resolve_auth, resolve_remote, session_for, session_for_repo, session_for_revision,
 };
+
+fn write_line(writer: &mut impl Write, message: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    writeln!(writer, "{message}")?;
+    writer.flush()
+}
+
+// Acquire the stdout lock only for this synchronous emission, never across await.
+fn output_line(message: std::fmt::Arguments<'_>) -> Result<(), XetError> {
+    write_line(&mut std::io::stdout().lock(), message)?;
+    Ok(())
+}
 
 /// Memory bound for streaming downloads (cat) and downloads.
 const DOWNLOAD_BUFFER_CAP: u64 = 256 * 1024 * 1024;
@@ -95,7 +106,7 @@ pub(crate) async fn ls(
     if args.branches {
         let revisions = session.client.list_revisions().await?;
         for revision in revisions {
-            println!("{}", revision.name);
+            output_line(format_args!("{}", revision.name))?;
         }
         return Ok(());
     }
@@ -105,9 +116,9 @@ pub(crate) async fn ls(
             let size = entry
                 .size
                 .map_or_else(|| "-".to_owned(), |size| size.to_string());
-            println!("{size:>12} {}", entry.path);
+            output_line(format_args!("{size:>12} {}", entry.path))?;
         } else {
-            println!("{}", entry.path);
+            output_line(format_args!("{}", entry.path))?;
         }
     }
     Ok(())
@@ -128,7 +139,7 @@ pub(crate) async fn rm(
         .client
         .delete_path(&session.url.path, args.recursive)
         .await?;
-    println!("deleted {deleted} path(s)");
+    output_line(format_args!("deleted {deleted} path(s)"))?;
     Ok(())
 }
 
@@ -165,14 +176,14 @@ pub(crate) async fn info(
     let url = &session.url;
     if url.path.is_empty() || url.path.ends_with('/') {
         let entries = session.client.list_dir_all(&url.path).await?;
-        println!(
+        output_line(format_args!(
             "path: {}",
             if url.path.is_empty() {
                 "/"
             } else {
                 url.path.as_str()
             }
-        );
+        ))?;
         let files = entries.iter().filter(|entry| !entry.is_dir).count();
         let total = entries
             .iter()
@@ -180,14 +191,14 @@ pub(crate) async fn info(
             .fold(0_u64, |acc, entry| {
                 acc.saturating_add(entry.size.unwrap_or(0))
             });
-        println!("files: {files}");
-        println!("total_bytes: {total}");
+        output_line(format_args!("files: {files}"))?;
+        output_line(format_args!("total_bytes: {total}"))?;
     } else {
         let entry = session.client.resolve_path(&url.path).await?;
-        println!("path: {}", entry.path);
-        println!("file_id: {}", entry.file_id);
-        println!("size: {}", entry.size);
-        println!("updated_at: {}", entry.updated_at);
+        output_line(format_args!("path: {}", entry.path))?;
+        output_line(format_args!("file_id: {}", entry.file_id))?;
+        output_line(format_args!("size: {}", entry.size))?;
+        output_line(format_args!("updated_at: {}", entry.updated_at))?;
     }
     Ok(())
 }
@@ -208,18 +219,18 @@ pub(crate) async fn branch(
         // revision being created.
         let scoped = session_for_revision(&args.url, name, global, config)?;
         let revision = scoped.client.create_revision(name).await?;
-        println!("created revision {}", revision.name);
+        output_line(format_args!("created revision {}", revision.name))?;
         return Ok(());
     }
     if let Some(name) = &args.delete {
         let scoped = session_for_revision(&args.url, name, global, config)?;
         scoped.client.delete_revision(name).await?;
-        println!("deleted revision {name}");
+        output_line(format_args!("deleted revision {name}"))?;
         return Ok(());
     }
     let revisions = session.client.list_revisions().await?;
     for revision in revisions {
-        println!("{}", revision.name);
+        output_line(format_args!("{}", revision.name))?;
     }
     Ok(())
 }
@@ -299,22 +310,22 @@ async fn upload_one(
 ) -> Result<(), XetError> {
     if transfer.no_register {
         let info = upload_no_register(client, path).await?;
-        println!(
+        output_line(format_args!(
             "{} -> {} ({} bytes, {} chunks) [not registered]",
             path.display(),
             remote,
             info.total_bytes,
             info.chunk_count
-        );
+        ))?;
     } else {
         let info = client.upload_file(path, remote).await?;
-        println!(
+        output_line(format_args!(
             "{} -> {} ({} bytes, {} chunks)",
             path.display(),
             remote,
             info.total_bytes,
             info.chunk_count
-        );
+        ))?;
     }
     Ok(())
 }
@@ -460,7 +471,12 @@ async fn download_one(client: &XetClient, file_id: &str, local: &Path) -> Result
             .persist(local)
             .map_err(|error| XetError::Io(error.error))?;
     }
-    println!("{} <- {} ({} bytes)", local.display(), file_id, n);
+    output_line(format_args!(
+        "{} <- {} ({} bytes)",
+        local.display(),
+        file_id,
+        n
+    ))?;
     Ok(())
 }
 
@@ -667,5 +683,73 @@ mod tests {
         );
         assert_eq!(std::fs::read(&dest).unwrap(), b"valuable original");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    struct OutputWriter {
+        bytes: Vec<u8>,
+        failure: Option<std::io::ErrorKind>,
+        flush_failure: bool,
+        flushed: bool,
+    }
+
+    impl Write for OutputWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(kind) = self.failure {
+                return Err(std::io::Error::from(kind));
+            }
+            let count = bytes.len().min(2);
+            let bytes = bytes
+                .get(..count)
+                .ok_or_else(|| std::io::Error::other("invalid output fixture range"))?;
+            self.bytes.extend_from_slice(bytes);
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushed = true;
+            if self.flush_failure {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn command_lines_preserve_short_write_text_and_surface_io_failures() {
+        let mut writer = OutputWriter {
+            bytes: Vec::new(),
+            failure: None,
+            flush_failure: false,
+            flushed: false,
+        };
+        write_line(
+            &mut writer,
+            format_args!("{size:>12} {}", "remote/file", size = 100),
+        )
+        .unwrap();
+        assert_eq!(writer.bytes, b"         100 remote/file\n");
+        assert!(writer.flushed);
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::StorageFull,
+        ] {
+            writer.failure = Some(kind);
+            let error = write_line(&mut writer, format_args!("deleted {} path(s)", 1)).unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert!(matches!(XetError::from(error), XetError::Io(error) if error.kind() == kind));
+        }
+        writer.failure = None;
+        writer.flush_failure = true;
+        assert_eq!(
+            write_line(&mut writer, format_args!("files: {}", 1))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
     }
 }

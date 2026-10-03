@@ -7,34 +7,11 @@ use shardline_server::{
 };
 
 pub fn print_config_check_summary(report: &ConfigCheckReport) {
-    println!("status: {}", report.status);
-    println!("server_role: {}", report.server_role);
-    println!("server_frontends: {}", report.server_frontends.join(","));
-    println!("metadata_backend: {}", report.metadata_backend);
-    println!("object_backend: {}", report.object_backend);
-    println!("cache_backend: {}", report.cache_backend);
-    println!("auth_enabled: {}", report.auth_enabled);
-    println!(
-        "provider_tokens_enabled: {}",
-        report.provider_tokens_enabled
-    );
+    let _output_result = write_config_check_summary(&mut io::stdout().lock(), report);
 }
 
 pub fn print_database_migration_summary(report: &DatabaseMigrationReport) {
-    println!("backend: {}", report.backend);
-    println!("applied_count: {}", report.applied_count);
-    println!("reverted_count: {}", report.reverted_count);
-    println!("applied_total_count: {}", report.applied_total_count);
-    println!("pending_count: {}", report.pending_count);
-    for migration in &report.migrations {
-        println!(
-            "migration: version={} name={} applied={} applied_at_utc={}",
-            migration.version,
-            migration.name,
-            migration.applied,
-            migration.applied_at_utc.as_deref().unwrap_or("-")
-        );
-    }
+    let _output_result = write_database_migration_summary(&mut io::stdout().lock(), report);
 }
 
 // Compatibility printers retain their unit-returning APIs. The CLI uses the
@@ -64,56 +41,12 @@ pub fn print_index_rebuild_issues(report: &LocalIndexRebuildReport) {
 }
 
 pub fn print_lifecycle_repair_summary(report: &LifecycleRepairReport) {
-    print_lifecycle_repair_summary_prefixed(report, "");
+    let _output_result = write_lifecycle_repair_summary(&mut io::stdout().lock(), report);
 }
 
 pub fn print_lifecycle_repair_summary_prefixed(report: &LifecycleRepairReport, prefix: &str) {
-    let sep = if prefix.is_empty() { "" } else { "." };
-    println!("{prefix}{sep}scanned_records: {}", report.scanned_records);
-    println!(
-        "{prefix}{sep}referenced_objects: {}",
-        report.referenced_objects
-    );
-    println!(
-        "{prefix}{sep}scanned_quarantine_candidates: {}",
-        report.scanned_quarantine_candidates
-    );
-    println!(
-        "{prefix}{sep}removed_missing_quarantine_candidates: {}",
-        report.removed_missing_quarantine_candidates
-    );
-    println!(
-        "{prefix}{sep}removed_reachable_quarantine_candidates: {}",
-        report.removed_reachable_quarantine_candidates
-    );
-    println!(
-        "{prefix}{sep}removed_held_quarantine_candidates: {}",
-        report.removed_held_quarantine_candidates
-    );
-    println!(
-        "{prefix}{sep}scanned_retention_holds: {}",
-        report.scanned_retention_holds
-    );
-    println!(
-        "{prefix}{sep}removed_expired_retention_holds: {}",
-        report.removed_expired_retention_holds
-    );
-    println!(
-        "{prefix}{sep}removed_missing_retention_holds: {}",
-        report.removed_missing_retention_holds
-    );
-    println!(
-        "{prefix}{sep}scanned_webhook_deliveries: {}",
-        report.scanned_webhook_deliveries
-    );
-    println!(
-        "{prefix}{sep}removed_stale_webhook_deliveries: {}",
-        report.removed_stale_webhook_deliveries
-    );
-    println!(
-        "{prefix}{sep}removed_future_webhook_deliveries: {}",
-        report.removed_future_webhook_deliveries
-    );
+    let _output_result =
+        write_lifecycle_repair_summary_prefixed(&mut io::stdout().lock(), report, prefix);
 }
 
 pub fn print_lifecycle_repair_cli_summary(
@@ -121,9 +54,12 @@ pub fn print_lifecycle_repair_cli_summary(
     root: &Path,
     webhook_retention_seconds: u64,
 ) {
-    println!("root: {}", root.display());
-    println!("webhook_retention_seconds: {webhook_retention_seconds}");
-    print_lifecycle_repair_summary(report);
+    let _output_result = write_lifecycle_repair_cli_summary(
+        &mut io::stdout().lock(),
+        report,
+        root,
+        webhook_retention_seconds,
+    );
 }
 
 pub fn print_backup_manifest_summary(report: &BackupManifestReport) {
@@ -140,80 +76,11 @@ pub fn print_backup_manifest_cli_summary(
 }
 
 pub fn print_storage_migration_summary(report: &StorageMigrationReport) {
-    println!("source_backend: {}", report.source_backend);
-    println!("destination_backend: {}", report.destination_backend);
-    println!("prefix: {}", report.prefix);
-    println!("dry_run: {}", report.dry_run);
-    println!("scanned_objects: {}", report.scanned_objects);
-    println!("scanned_bytes: {}", report.scanned_bytes);
-    println!("inserted_objects: {}", report.inserted_objects);
-    println!(
-        "already_present_objects: {}",
-        report.already_present_objects
-    );
-    println!("copied_bytes: {}", report.copied_bytes);
+    let _output_result = write_storage_migration_summary(&mut io::stdout().lock(), report);
 }
 
 pub fn print_local_gc_summary(report: &LocalGcReport) {
-    println!(
-        "retention_deferred_clock: {}",
-        report.retention_deferred_clock
-    );
-    println!("scanned_records: {}", report.scanned_records);
-    println!("referenced_chunks: {}", report.referenced_chunks);
-    println!("orphan_chunks: {}", report.orphan_chunks);
-    println!("orphan_chunk_bytes: {}", report.orphan_chunk_bytes);
-    println!(
-        "active_quarantine_candidates: {}",
-        report.active_quarantine_candidates
-    );
-    println!(
-        "new_quarantine_candidates: {}",
-        report.new_quarantine_candidates
-    );
-    println!(
-        "retained_quarantine_candidates: {}",
-        report.retained_quarantine_candidates
-    );
-    println!(
-        "released_quarantine_candidates: {}",
-        report.released_quarantine_candidates
-    );
-    println!("deleted_chunks: {}", report.deleted_chunks);
-    println!("deleted_bytes: {}", report.deleted_bytes);
-    println!(
-        "pruned_revisions_over_cap: {}",
-        report.pruned_revisions_over_cap
-    );
-    println!("scanned_oci_tombstones: {}", report.scanned_oci_tombstones);
-    println!(
-        "eligible_oci_tombstones: {}",
-        report.eligible_oci_tombstones
-    );
-    println!(
-        "reclaimed_oci_tombstones: {}",
-        report.reclaimed_oci_tombstones
-    );
-    println!(
-        "scanned_resumable_staging_objects: {}",
-        report.scanned_resumable_staging_objects
-    );
-    println!(
-        "protected_resumable_staging_objects: {}",
-        report.protected_resumable_staging_objects
-    );
-    println!(
-        "reclaimed_resumable_staging_objects: {}",
-        report.reclaimed_resumable_staging_objects
-    );
-    println!(
-        "reclaimed_resumable_staging_bytes: {}",
-        report.reclaimed_resumable_staging_bytes
-    );
-    println!(
-        "reclaimed_resumable_sessions: {}",
-        report.reclaimed_resumable_sessions
-    );
+    let _output_result = write_local_gc_summary(&mut io::stdout().lock(), report);
 }
 
 pub fn print_local_gc_cli_summary(
@@ -225,22 +92,20 @@ pub fn print_local_gc_cli_summary(
     retention_report: Option<&Path>,
     orphan_inventory: Option<&Path>,
 ) {
-    println!("mode: {}", mode);
-    println!("root: {}", root.display());
-    if mark {
-        println!("retention_seconds: {}", retention_seconds);
-    }
-    if let Some(path) = retention_report {
-        println!("retention_report: {}", path.display());
-    }
-    if let Some(path) = orphan_inventory {
-        println!("orphan_inventory: {}", path.display());
-    }
-    print_local_gc_summary(report);
+    let _output_result = write_local_gc_cli_summary(
+        &mut io::stdout().lock(),
+        report,
+        mode,
+        root,
+        retention_seconds,
+        mark,
+        retention_report,
+        orphan_inventory,
+    );
 }
 
 pub(crate) fn write_fsck_summary(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     report: &LocalFsckReport,
 ) -> io::Result<()> {
     writeln!(writer, "latest_records: {}", report.latest_records)?;
@@ -276,7 +141,7 @@ pub(crate) fn write_fsck_summary(
 }
 
 pub(crate) fn write_fsck_cli_summary(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     report: &LocalFsckReport,
     root: &Path,
 ) -> io::Result<()> {
@@ -285,7 +150,7 @@ pub(crate) fn write_fsck_cli_summary(
 }
 
 pub(crate) fn write_fsck_issues(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     report: &LocalFsckReport,
 ) -> io::Result<()> {
     for issue in &report.issues {
@@ -302,7 +167,7 @@ pub(crate) fn write_fsck_issues(
 }
 
 pub(crate) fn write_index_rebuild_summary(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     report: &LocalIndexRebuildReport,
 ) -> io::Result<()> {
     writeln!(
@@ -373,7 +238,7 @@ pub(crate) fn write_index_rebuild_summary(
 }
 
 pub(crate) fn write_index_rebuild_cli_summary(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     report: &LocalIndexRebuildReport,
     root: &Path,
 ) -> io::Result<()> {
@@ -382,7 +247,7 @@ pub(crate) fn write_index_rebuild_cli_summary(
 }
 
 pub(crate) fn write_index_rebuild_issues(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     report: &LocalIndexRebuildReport,
 ) -> io::Result<()> {
     for issue in &report.issues {
@@ -399,7 +264,7 @@ pub(crate) fn write_index_rebuild_issues(
 }
 
 pub(crate) fn write_backup_manifest_summary(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     report: &BackupManifestReport,
 ) -> io::Result<()> {
     writeln!(writer, "manifest_version: {}", report.manifest_version)?;
@@ -436,7 +301,7 @@ pub(crate) fn write_backup_manifest_summary(
 }
 
 pub(crate) fn write_backup_manifest_cli_summary(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     report: &BackupManifestReport,
     root: &Path,
     output: &Path,
@@ -444,6 +309,283 @@ pub(crate) fn write_backup_manifest_cli_summary(
     writeln!(writer, "root: {}", root.display())?;
     writeln!(writer, "output: {}", output.display())?;
     write_backup_manifest_summary(writer, report)
+}
+
+pub(crate) fn write_config_check_summary(
+    writer: &mut (impl Write + ?Sized),
+    report: &ConfigCheckReport,
+) -> io::Result<()> {
+    writeln!(writer, "status: {}", report.status)?;
+    writeln!(writer, "server_role: {}", report.server_role)?;
+    writeln!(
+        writer,
+        "server_frontends: {}",
+        report.server_frontends.join(",")
+    )?;
+    writeln!(writer, "metadata_backend: {}", report.metadata_backend)?;
+    writeln!(writer, "object_backend: {}", report.object_backend)?;
+    writeln!(writer, "cache_backend: {}", report.cache_backend)?;
+    writeln!(writer, "auth_enabled: {}", report.auth_enabled)?;
+    writeln!(
+        writer,
+        "provider_tokens_enabled: {}",
+        report.provider_tokens_enabled
+    )?;
+
+    writer.flush()
+}
+
+pub(crate) fn write_database_migration_summary(
+    writer: &mut (impl Write + ?Sized),
+    report: &DatabaseMigrationReport,
+) -> io::Result<()> {
+    writeln!(writer, "backend: {}", report.backend)?;
+    writeln!(writer, "applied_count: {}", report.applied_count)?;
+    writeln!(writer, "reverted_count: {}", report.reverted_count)?;
+    writeln!(
+        writer,
+        "applied_total_count: {}",
+        report.applied_total_count
+    )?;
+    writeln!(writer, "pending_count: {}", report.pending_count)?;
+    for migration in &report.migrations {
+        writeln!(
+            writer,
+            "migration: version={} name={} applied={} applied_at_utc={}",
+            migration.version,
+            migration.name,
+            migration.applied,
+            migration.applied_at_utc.as_deref().unwrap_or("-")
+        )?;
+    }
+
+    writer.flush()
+}
+
+pub(crate) fn write_lifecycle_repair_summary(
+    writer: &mut (impl Write + ?Sized),
+    report: &LifecycleRepairReport,
+) -> io::Result<()> {
+    write_lifecycle_repair_summary_prefixed(writer, report, "")
+}
+
+pub(crate) fn write_lifecycle_repair_summary_prefixed(
+    writer: &mut (impl Write + ?Sized),
+    report: &LifecycleRepairReport,
+    prefix: &str,
+) -> io::Result<()> {
+    let sep = if prefix.is_empty() { "" } else { "." };
+    writeln!(
+        writer,
+        "{prefix}{sep}scanned_records: {}",
+        report.scanned_records
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}referenced_objects: {}",
+        report.referenced_objects
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}scanned_quarantine_candidates: {}",
+        report.scanned_quarantine_candidates
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}removed_missing_quarantine_candidates: {}",
+        report.removed_missing_quarantine_candidates
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}removed_reachable_quarantine_candidates: {}",
+        report.removed_reachable_quarantine_candidates
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}removed_held_quarantine_candidates: {}",
+        report.removed_held_quarantine_candidates
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}scanned_retention_holds: {}",
+        report.scanned_retention_holds
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}removed_expired_retention_holds: {}",
+        report.removed_expired_retention_holds
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}removed_missing_retention_holds: {}",
+        report.removed_missing_retention_holds
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}scanned_webhook_deliveries: {}",
+        report.scanned_webhook_deliveries
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}removed_stale_webhook_deliveries: {}",
+        report.removed_stale_webhook_deliveries
+    )?;
+    writeln!(
+        writer,
+        "{prefix}{sep}removed_future_webhook_deliveries: {}",
+        report.removed_future_webhook_deliveries
+    )?;
+
+    writer.flush()
+}
+
+pub(crate) fn write_lifecycle_repair_cli_summary(
+    writer: &mut (impl Write + ?Sized),
+    report: &LifecycleRepairReport,
+    root: &Path,
+    webhook_retention_seconds: u64,
+) -> io::Result<()> {
+    writeln!(writer, "root: {}", root.display())?;
+    writeln!(
+        writer,
+        "webhook_retention_seconds: {webhook_retention_seconds}"
+    )?;
+    write_lifecycle_repair_summary(writer, report)
+}
+
+pub(crate) fn write_storage_migration_summary(
+    writer: &mut (impl Write + ?Sized),
+    report: &StorageMigrationReport,
+) -> io::Result<()> {
+    writeln!(writer, "source_backend: {}", report.source_backend)?;
+    writeln!(
+        writer,
+        "destination_backend: {}",
+        report.destination_backend
+    )?;
+    writeln!(writer, "prefix: {}", report.prefix)?;
+    writeln!(writer, "dry_run: {}", report.dry_run)?;
+    writeln!(writer, "scanned_objects: {}", report.scanned_objects)?;
+    writeln!(writer, "scanned_bytes: {}", report.scanned_bytes)?;
+    writeln!(writer, "inserted_objects: {}", report.inserted_objects)?;
+    writeln!(
+        writer,
+        "already_present_objects: {}",
+        report.already_present_objects
+    )?;
+    writeln!(writer, "copied_bytes: {}", report.copied_bytes)?;
+
+    writer.flush()
+}
+
+pub(crate) fn write_local_gc_summary(
+    writer: &mut (impl Write + ?Sized),
+    report: &LocalGcReport,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "retention_deferred_clock: {}",
+        report.retention_deferred_clock
+    )?;
+    writeln!(writer, "scanned_records: {}", report.scanned_records)?;
+    writeln!(writer, "referenced_chunks: {}", report.referenced_chunks)?;
+    writeln!(writer, "orphan_chunks: {}", report.orphan_chunks)?;
+    writeln!(writer, "orphan_chunk_bytes: {}", report.orphan_chunk_bytes)?;
+    writeln!(
+        writer,
+        "active_quarantine_candidates: {}",
+        report.active_quarantine_candidates
+    )?;
+    writeln!(
+        writer,
+        "new_quarantine_candidates: {}",
+        report.new_quarantine_candidates
+    )?;
+    writeln!(
+        writer,
+        "retained_quarantine_candidates: {}",
+        report.retained_quarantine_candidates
+    )?;
+    writeln!(
+        writer,
+        "released_quarantine_candidates: {}",
+        report.released_quarantine_candidates
+    )?;
+    writeln!(writer, "deleted_chunks: {}", report.deleted_chunks)?;
+    writeln!(writer, "deleted_bytes: {}", report.deleted_bytes)?;
+    writeln!(
+        writer,
+        "pruned_revisions_over_cap: {}",
+        report.pruned_revisions_over_cap
+    )?;
+    writeln!(
+        writer,
+        "scanned_oci_tombstones: {}",
+        report.scanned_oci_tombstones
+    )?;
+    writeln!(
+        writer,
+        "eligible_oci_tombstones: {}",
+        report.eligible_oci_tombstones
+    )?;
+    writeln!(
+        writer,
+        "reclaimed_oci_tombstones: {}",
+        report.reclaimed_oci_tombstones
+    )?;
+    writeln!(
+        writer,
+        "scanned_resumable_staging_objects: {}",
+        report.scanned_resumable_staging_objects
+    )?;
+    writeln!(
+        writer,
+        "protected_resumable_staging_objects: {}",
+        report.protected_resumable_staging_objects
+    )?;
+    writeln!(
+        writer,
+        "reclaimed_resumable_staging_objects: {}",
+        report.reclaimed_resumable_staging_objects
+    )?;
+    writeln!(
+        writer,
+        "reclaimed_resumable_staging_bytes: {}",
+        report.reclaimed_resumable_staging_bytes
+    )?;
+    writeln!(
+        writer,
+        "reclaimed_resumable_sessions: {}",
+        report.reclaimed_resumable_sessions
+    )?;
+
+    writer.flush()
+}
+
+// Preserve the legacy summary argument set while adding the fallible writer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_local_gc_cli_summary(
+    writer: &mut (impl Write + ?Sized),
+    report: &LocalGcReport,
+    mode: &str,
+    root: &Path,
+    retention_seconds: u64,
+    mark: bool,
+    retention_report: Option<&Path>,
+    orphan_inventory: Option<&Path>,
+) -> io::Result<()> {
+    writeln!(writer, "mode: {}", mode)?;
+    writeln!(writer, "root: {}", root.display())?;
+    if mark {
+        writeln!(writer, "retention_seconds: {}", retention_seconds)?;
+    }
+    if let Some(path) = retention_report {
+        writeln!(writer, "retention_report: {}", path.display())?;
+    }
+    if let Some(path) = orphan_inventory {
+        writeln!(writer, "orphan_inventory: {}", path.display())?;
+    }
+    write_local_gc_summary(writer, report)
 }
 
 #[cfg(test)]
@@ -971,5 +1113,94 @@ mod tests {
         assert!(text.starts_with("root: /root\noutput: /manifest.json\nmanifest_version: 1\n"));
         assert!(text.contains("object_count: 0\n"));
         assert!(text.ends_with("provider_repository_states: 0\n"));
+    }
+    #[test]
+    fn remaining_summary_writers_propagate_write_and_flush_errors() {
+        let config = ConfigCheckReport {
+            status: "ok".to_owned(),
+            server_role: "all".to_owned(),
+            server_frontends: vec!["xet".to_owned()],
+            metadata_backend: "local".to_owned(),
+            object_backend: "local".to_owned(),
+            cache_backend: "memory".to_owned(),
+            auth_enabled: true,
+            provider_tokens_enabled: false,
+        };
+        let database = DatabaseMigrationReport {
+            backend: "postgres".to_owned(),
+            command: DatabaseMigrationCommand::Status,
+            applied_count: 0,
+            reverted_count: 0,
+            applied_total_count: 1,
+            pending_count: 0,
+            migrations: vec![DatabaseMigrationStatusEntry {
+                version: "v1".to_owned(),
+                name: "migration".to_owned(),
+                applied: true,
+                applied_at_utc: None,
+            }],
+        };
+        let storage = StorageMigrationReport {
+            source_backend: "local".to_owned(),
+            destination_backend: "local".to_owned(),
+            prefix: String::new(),
+            dry_run: true,
+            scanned_objects: 0,
+            scanned_bytes: 0,
+            inserted_objects: 0,
+            already_present_objects: 0,
+            copied_bytes: 0,
+        };
+        for fail_write in [true, false] {
+            let mut writer = FailingReportWriter {
+                fail_write,
+                written: Vec::new(),
+            };
+            assert_eq!(
+                write_config_check_summary(&mut writer, &config)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(
+                write_database_migration_summary(&mut writer, &database)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(
+                write_storage_migration_summary(&mut writer, &storage)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(
+                write_lifecycle_repair_cli_summary(
+                    &mut writer,
+                    &empty_lifecycle_repair_report(),
+                    Path::new("/root"),
+                    3600
+                )
+                .unwrap_err()
+                .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(
+                write_local_gc_cli_summary(
+                    &mut writer,
+                    &empty_gc_report(),
+                    "dry-run",
+                    Path::new("/root"),
+                    3600,
+                    false,
+                    None,
+                    None
+                )
+                .unwrap_err()
+                .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(writer.written.is_empty(), fail_write);
+        }
     }
 }

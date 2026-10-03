@@ -24,115 +24,179 @@ pub struct RepairReport {
 
 impl RepairReport {
     pub fn print_summary(&self) {
-        println!(
+        let _result = self.write_summary(&mut std::io::stdout().lock());
+    }
+
+    /// Writes the report and flushes the destination.
+    ///
+    /// # Errors
+    /// Returns the first write or flush error.
+    pub fn write_summary<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+        writeln!(
+            writer,
             "index_rebuild.scanned_version_records: {}",
             self.index_rebuild.scanned_version_records
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.scanned_retained_shards: {}",
             self.index_rebuild.scanned_retained_shards
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.rebuilt_latest_records: {}",
             self.index_rebuild.rebuilt_latest_records
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.unchanged_latest_records: {}",
             self.index_rebuild.unchanged_latest_records
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.removed_stale_latest_records: {}",
             self.index_rebuild.removed_stale_latest_records
-        );
+        )?;
         for location in &self
             .index_rebuild
             .preserved_latest_records_unreadable_version
         {
-            println!(
+            writeln!(
+                writer,
                 "index_rebuild.kept_latest_record_unreadable_version: {}",
                 location
-            );
+            )?;
         }
-        println!(
+        writeln!(
+            writer,
             "index_rebuild.scanned_reconstructions: {}",
             self.index_rebuild.scanned_reconstructions
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.unchanged_reconstructions: {}",
             self.index_rebuild.unchanged_reconstructions
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.removed_stale_reconstructions: {}",
             self.index_rebuild.removed_stale_reconstructions
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.rebuilt_dedupe_shard_mappings: {}",
             self.index_rebuild.rebuilt_dedupe_shard_mappings
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.unchanged_dedupe_shard_mappings: {}",
             self.index_rebuild.unchanged_dedupe_shard_mappings
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.removed_stale_dedupe_shard_mappings: {}",
             self.index_rebuild.removed_stale_dedupe_shard_mappings
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "index_rebuild.issue_count: {}",
             self.index_rebuild.issue_count()
-        );
-        report_output::print_lifecycle_repair_summary_prefixed(
+        )?;
+        report_output::write_lifecycle_repair_summary_prefixed(
+            writer,
             &self.lifecycle_repair,
             "lifecycle_repair",
-        );
-        println!("fsck.latest_records: {}", self.fsck.latest_records);
-        println!("fsck.version_records: {}", self.fsck.version_records);
-        println!(
+        )?;
+        writeln!(writer, "fsck.latest_records: {}", self.fsck.latest_records)?;
+        writeln!(
+            writer,
+            "fsck.version_records: {}",
+            self.fsck.version_records
+        )?;
+        writeln!(
+            writer,
             "fsck.inspected_chunk_references: {}",
             self.fsck.inspected_chunk_references
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "fsck.inspected_dedupe_shard_mappings: {}",
             self.fsck.inspected_dedupe_shard_mappings
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "fsck.inspected_reconstructions: {}",
             self.fsck.inspected_reconstructions
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "fsck.inspected_webhook_deliveries: {}",
             self.fsck.inspected_webhook_deliveries
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "fsck.inspected_provider_repository_states: {}",
             self.fsck.inspected_provider_repository_states
-        );
-        println!("fsck.issue_count: {}", self.fsck.issue_count());
+        )?;
+        writeln!(writer, "fsck.issue_count: {}", self.fsck.issue_count())?;
+        writer.flush()
     }
 
     pub fn print_cli_summary(&self, root: &Path, webhook_retention_seconds: u64) {
-        println!("root: {}", root.display());
-        println!("webhook_retention_seconds: {webhook_retention_seconds}");
-        self.print_summary();
+        let _result = self.write_cli_summary(
+            &mut std::io::stdout().lock(),
+            root,
+            webhook_retention_seconds,
+        );
+    }
+
+    /// Writes the report and flushes the destination.
+    ///
+    /// # Errors
+    /// Returns the first write or flush error.
+    pub fn write_cli_summary<W: std::io::Write + ?Sized>(
+        &self,
+        writer: &mut W,
+        root: &Path,
+        webhook_retention_seconds: u64,
+    ) -> std::io::Result<()> {
+        writeln!(writer, "root: {}", root.display())?;
+        writeln!(
+            writer,
+            "webhook_retention_seconds: {webhook_retention_seconds}"
+        )?;
+        self.write_summary(writer)?;
+        writer.flush()
     }
 
     pub fn print_issues(&self) {
+        let _result = self.write_issues(&mut std::io::stderr().lock());
+    }
+
+    /// Writes the report and flushes the destination.
+    ///
+    /// # Errors
+    /// Returns the first write or flush error.
+    pub fn write_issues<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
         for issue in &self.index_rebuild.issues {
-            eprintln!(
+            writeln!(
+                writer,
                 "index_rebuild.issue: {} location={} detail={}",
                 issue.kind.as_str(),
                 issue.location,
                 issue.detail
-            );
+            )?;
         }
         for issue in &self.fsck.issues {
-            eprintln!(
+            writeln!(
+                writer,
                 "fsck.issue: {} location={} detail={}",
                 issue.kind.as_str(),
                 issue.location,
                 issue.detail
-            );
+            )?;
         }
+        writer.flush()
     }
 }
 
@@ -440,5 +504,28 @@ mod tests {
         assert_eq!(second, first, "a quiescent repair rerun must converge");
         assert!(second.index_rebuild.is_clean());
         assert!(second.fsck.is_clean());
+    }
+
+    #[test]
+    fn repair_writers_preserve_text_and_propagate_write_and_flush_errors() {
+        let report = report_with_issues();
+        crate::hold::output_test_support::assert_writer_errors(|writer| {
+            report.write_summary(writer)
+        });
+        crate::hold::output_test_support::assert_writer_errors(|writer| {
+            report.write_cli_summary(writer, Path::new("/root"), 60)
+        });
+        crate::hold::output_test_support::assert_writer_errors(|writer| {
+            report.write_issues(writer)
+        });
+        let mut bytes = Vec::new();
+        report.write_issues(&mut bytes).expect("issues");
+        assert_eq!(bytes, b"index_rebuild.issue: invalid_version_record_json location=records/abc detail=record json was invalid\nfsck.issue: missing_chunk location=chunks/xyz detail=record json was invalid\n");
+        bytes.clear();
+        report
+            .write_cli_summary(&mut bytes, Path::new("/root"), 60)
+            .expect("summary");
+        assert!(bytes.starts_with(b"root: /root\nwebhook_retention_seconds: 60\nindex_rebuild.scanned_version_records: 10\n"));
+        assert!(bytes.ends_with(b"fsck.issue_count: 1\n"));
     }
 }
