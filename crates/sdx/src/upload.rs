@@ -985,7 +985,9 @@ impl UploadSession {
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when the reader fails or the upload fails.
+    /// Returns [`SdxError`] when the reader fails or the upload fails. A failed
+    /// reader does not register a file in the session; xorbs already uploaded
+    /// while streaming may remain stored.
     pub async fn upload_stream<R>(
         &self,
         remote: &str,
@@ -1012,10 +1014,12 @@ impl UploadSession {
                 ChunkBatch::Done => break,
             }
         }
-        let info = pipeline.finish().await?;
+        // Channel EOF can mean a reader error or panic rather than successful
+        // ingestion. Confirm the worker before committing file metadata.
         reader_task
             .await
             .map_err(|error| SdxError::TaskJoin(error.to_string()))??;
+        let info = pipeline.finish().await?;
         // Record the pending path registration; applied in `finalize`.
         self.inner
             .state
@@ -1535,6 +1539,113 @@ mod tests {
             xorbs[0].chunks[0].chunk_hash,
             expected.chunk_entries[0].hash
         );
+    }
+
+    struct FailingReader {
+        remaining: usize,
+        panic: bool,
+    }
+
+    fn panic_in_owned_reader() {
+        std::panic::resume_unwind(Box::new(String::from("owned reader panic")));
+    }
+
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                if self.panic {
+                    panic_in_owned_reader();
+                }
+                return Err(std::io::Error::other("owned reader failure"));
+            }
+            let count = self.remaining.min(buffer.len());
+            let bytes = buffer
+                .get_mut(..count)
+                .ok_or_else(|| std::io::Error::other("owned reader buffer range invalid"))?;
+            for (byte, value) in bytes.iter_mut().zip((0u8..=250).cycle()) {
+                *byte = value;
+            }
+            self.remaining = self
+                .remaining
+                .checked_sub(count)
+                .ok_or_else(|| std::io::Error::other("owned reader byte count invalid"))?;
+            Ok(count)
+        }
+    }
+
+    async fn check_failed_reader_does_not_publish(remaining: usize, panic: bool) {
+        for recover in [false, true] {
+            let (server, client) = mock_client().await;
+            let session = client.upload_session().unwrap();
+            let error = session
+                .upload_stream("remote/failed.bin", FailingReader { remaining, panic })
+                .await
+                .unwrap_err();
+            if panic {
+                assert!(
+                    matches!(error, crate::SdxError::TaskJoin(message) if message.contains("owned reader panic"))
+                );
+            } else {
+                assert!(
+                    matches!(error, crate::SdxError::Io(error) if error.to_string() == "owned reader failure")
+                );
+            }
+            {
+                let state = session.inner.state.lock().await;
+                assert!(state.file_infos.is_empty());
+                assert!(state.file_reports.is_empty());
+                assert!(state.pending_registrations.is_empty());
+            }
+            let expected = if recover {
+                Some(
+                    session
+                        .upload_bytes("remote/success.bin", b"complete file".to_vec())
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let expected_shard = {
+                let state = session.inner.state.lock().await;
+                let xorbs = state.xorb_infos.values().cloned().collect::<Vec<_>>();
+                serialize_shard(&state.file_infos, &xorbs)
+            };
+            let report = session.finalize().await.unwrap();
+            assert_eq!(report.files, expected.into_iter().collect::<Vec<_>>());
+            assert_eq!(report.shard_posts, u64::from(recover));
+            let requests = server.received_requests().await.unwrap();
+            let registrations = requests
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .collect::<Vec<_>>();
+            assert_eq!(registrations.len(), usize::from(recover));
+            if recover {
+                assert!(registrations[0].url.path().ends_with("/remote/success.bin"));
+                assert_eq!(shard_post_body(&server).await, expected_shard);
+            } else {
+                assert!(
+                    requests
+                        .iter()
+                        .all(|request| request.url.path() != "/v1/shards")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_reader_immediate_error_does_not_publish_file() {
+        check_failed_reader_does_not_publish(0, false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_reader_partial_error_does_not_publish_file() {
+        check_failed_reader_does_not_publish(1024 * 1024, false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_reader_panic_does_not_publish_file() {
+        check_failed_reader_does_not_publish(0, true).await;
     }
 
     #[tokio::test]
