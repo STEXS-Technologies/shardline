@@ -281,6 +281,11 @@ shardline gc --mark \
   --orphan-inventory reports/gc-orphans.json
 ```
 
+Export destinations must be distinct and must not be nested below each other.
+The CLI checks destinations, including reserved deployment state, before GC runs
+or creates any output. Ordinary report directories under the deployment root are
+supported.
+
 Example: S3 object storage with Postgres-backed metadata still uses the same command
 shape, but the adapter choice comes from environment/config rather than the `--root`
 flag:

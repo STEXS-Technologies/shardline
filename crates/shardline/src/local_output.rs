@@ -125,6 +125,30 @@ pub(crate) fn validate_deployment_output(
     Ok(())
 }
 
+/// Validate all report destinations before processing, rejecting paths that
+/// would replace each other or turn another destination's parent into a file.
+pub(crate) fn validate_deployment_outputs(
+    config: &shardline_server::ServerConfig,
+    outputs: &[&Path],
+) -> io::Result<()> {
+    let mut resolved = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        validate_deployment_output(config, output)?;
+        let path = resolved_output_path(output)?;
+        if resolved
+            .iter()
+            .any(|previous: &PathBuf| path.starts_with(previous) || previous.starts_with(&path))
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "report output destinations must not overlap each other",
+            ));
+        }
+        resolved.push(path);
+    }
+    Ok(())
+}
+
 fn reserved_deployment_output_error() -> io::Error {
     io::Error::new(
         ErrorKind::InvalidInput,
