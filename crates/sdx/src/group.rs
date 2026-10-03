@@ -65,7 +65,7 @@ pub enum XetTaskState {
     Queued,
     /// Stream started and reconstruction is in flight.
     InProgress,
-    /// Stream finished normally (all scheduled bytes delivered).
+    /// Stream finished normally (the consumer observed end of stream).
     Completed,
     /// A background task failed; the error message is attached.
     Failed(String),
@@ -174,9 +174,7 @@ impl StreamRegistration {
         if self.run_state.is_cancelled() {
             return XetTaskState::Cancelled;
         }
-        let scheduled = self.run_state.total_bytes_scheduled();
-        let delivered = self.run_state.total_bytes_delivered();
-        if self.finished.load(Ordering::Relaxed) || (scheduled > 0 && delivered >= scheduled) {
+        if self.finished.load(Ordering::Relaxed) {
             return XetTaskState::Completed;
         }
         if self.started.load(Ordering::Relaxed) {
@@ -1222,6 +1220,203 @@ mod tests {
         let out = drain(&mut stream).await;
         assert_eq!(out, vec![9u8; 64]);
         assert!(group.status().contains(&(id, XetTaskState::Completed)));
+    }
+
+    #[tokio::test]
+    async fn pending_reconstruction_block_is_in_progress_until_observed_eof() {
+        for unordered in [false, true] {
+            let server = MockServer::start().await;
+            let payload = serialize_payload(&[&[7u8; 64]]);
+            let end = payload.len().checked_sub(1).expect("nonempty fixture");
+            let body = v2_response_body(
+                0,
+                serde_json::Value::Array(vec![
+                    json!({
+                        "hash": XORB_HASH, "unpacked_length": 64,
+                        "range": {"start": 0, "end": 1}
+                    });
+                    64
+                ]),
+                json!({XORB_HASH: [{
+                    "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                    "ranges": [{"chunks": {"start": 0, "end": 1},
+                                "bytes": {"start": 0, "end": end}}]
+                }]}),
+            );
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let entered_handler = entered.clone();
+            let release_handler = release.clone();
+            let second_body = body.clone();
+            let app = axum::Router::new().route(
+                "/second",
+                axum::routing::get(move || {
+                    let entered = entered_handler.clone();
+                    let release = release_handler.clone();
+                    let body = second_body.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(body)
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let gate_server = tokio::spawn(async move { axum::serve(listener, app).await });
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+                .and(header("range", "bytes=0-4095"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+                .and(header("range", "bytes=4096-8191"))
+                .respond_with(
+                    ResponseTemplate::new(307)
+                        .insert_header("Location", format!("http://{address}/second")),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+                .respond_with(ResponseTemplate::new(416))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/transfer/xorb/default/{XORB_HASH}")))
+                .respond_with(
+                    ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes 0-{end}/{}", payload.len()))
+                        .set_body_raw(payload, "application/octet-stream"),
+                )
+                .mount(&server)
+                .await;
+            let group = client(&server).await.new_download_stream_group();
+            let mut out = Vec::new();
+            if unordered {
+                let mut stream = group
+                    .download_unordered_stream(FILE_ID, None)
+                    .await
+                    .unwrap();
+                for _ in 0..64 {
+                    let (_, chunk) = stream.next().await.unwrap().unwrap();
+                    out.extend_from_slice(&chunk);
+                }
+                timeout(Duration::from_secs(3), entered.notified())
+                    .await
+                    .unwrap();
+                assert_eq!(out, vec![7u8; 4096]);
+                assert!(
+                    group
+                        .status()
+                        .contains(&(stream.task_id(), XetTaskState::InProgress))
+                );
+                release.notify_one();
+                while let Some((_, chunk)) = stream.next().await.unwrap() {
+                    out.extend_from_slice(&chunk);
+                }
+                assert!(
+                    group
+                        .status()
+                        .contains(&(stream.task_id(), XetTaskState::Completed))
+                );
+            } else {
+                let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
+                for _ in 0..64 {
+                    out.extend_from_slice(&stream.next().await.unwrap().unwrap());
+                }
+                timeout(Duration::from_secs(3), entered.notified())
+                    .await
+                    .unwrap();
+                assert_eq!(out, vec![7u8; 4096]);
+                assert!(
+                    group
+                        .status()
+                        .contains(&(stream.task_id(), XetTaskState::InProgress))
+                );
+                release.notify_one();
+                while let Some(chunk) = stream.next().await.unwrap() {
+                    out.extend_from_slice(&chunk);
+                }
+                assert!(
+                    group
+                        .status()
+                        .contains(&(stream.task_id(), XetTaskState::Completed))
+                );
+            }
+            assert_eq!(out, vec![7u8; 8192]);
+            assert!(group.status().is_empty());
+            gate_server.abort();
+            assert!(gate_server.await.unwrap_err().is_cancelled());
+            tokio::task::unconstrained(async { drop(server) }).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_download_wrappers_complete_only_after_eof() {
+        for unordered in [false, true] {
+            let server = MockServer::start().await;
+            mocks(&server, None).await;
+            let group = client(&server).await.new_download_stream_group();
+            if unordered {
+                let mut stream = group
+                    .download_unordered_stream(FILE_ID, None)
+                    .await
+                    .unwrap();
+                let group_probe = group.clone();
+                tokio::task::spawn_blocking(move || {
+                    let id = stream.task_id();
+                    let mut out = Vec::new();
+                    for _ in 0..2 {
+                        let (_, chunk) = stream.blocking_next().unwrap().unwrap();
+                        out.extend_from_slice(&chunk);
+                    }
+                    assert!(
+                        group_probe
+                            .status()
+                            .contains(&(id, XetTaskState::InProgress))
+                    );
+                    assert!(stream.blocking_next().unwrap().is_none());
+                    assert!(
+                        group_probe
+                            .status()
+                            .contains(&(id, XetTaskState::Completed))
+                    );
+                    out.sort_unstable();
+                    assert_eq!(out, [vec![7u8; 64], vec![9u8; 64]].concat());
+                })
+                .await
+                .unwrap();
+            } else {
+                let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
+                let group_probe = group.clone();
+                tokio::task::spawn_blocking(move || {
+                    let id = stream.task_id();
+                    let mut out = Vec::new();
+                    for _ in 0..2 {
+                        out.extend_from_slice(&stream.blocking_next().unwrap().unwrap());
+                    }
+                    assert!(
+                        group_probe
+                            .status()
+                            .contains(&(id, XetTaskState::InProgress))
+                    );
+                    assert!(stream.blocking_next().unwrap().is_none());
+                    assert!(
+                        group_probe
+                            .status()
+                            .contains(&(id, XetTaskState::Completed))
+                    );
+                    assert_eq!(out, [vec![7u8; 64], vec![9u8; 64]].concat());
+                })
+                .await
+                .unwrap();
+            }
+            assert!(group.status().is_empty());
+            tokio::task::unconstrained(async { drop(server) }).await;
+        }
     }
 
     #[tokio::test]
