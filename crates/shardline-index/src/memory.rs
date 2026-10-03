@@ -897,10 +897,13 @@ impl UploadIntentStore for MemoryIndexStore {
                 "reliability event has no authoritative upload intent".into(),
             ));
         };
-        let events = state
+        // Validate a candidate before publishing it: a rejected event must not
+        // change the authoritative journal or poison subsequent reads.
+        let mut events = state
             .reliability_events
-            .entry(event.operation.operation_id.clone())
-            .or_default();
+            .get(&event.operation.operation_id)
+            .cloned()
+            .unwrap_or_default();
         if let Some(existing) = events
             .iter()
             .find(|existing| existing.sequence == event.sequence)
@@ -914,9 +917,9 @@ impl UploadIntentStore for MemoryIndexStore {
         }
         events.push(event.clone());
         events.sort_by_key(|stored_event| stored_event.sequence);
-        let (tenant, repository) = upload_lifecycle_identity(events);
+        let (tenant, repository) = upload_lifecycle_identity(&events);
         verify_upload_lifecycle_events(
-            events,
+            &events,
             tenant,
             repository,
             intent.intent_id(),
@@ -925,6 +928,9 @@ impl UploadIntentStore for MemoryIndexStore {
             intent.state(),
         )
         .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state
+            .reliability_events
+            .insert(event.operation.operation_id.clone(), events);
         Ok(())
     }
 
@@ -2210,6 +2216,77 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn memory_rejected_reliability_event_preserves_intent_and_recovery() {
+        for target_state in [UploadIntentState::Storing, UploadIntentState::Failed] {
+            let intent = UploadIntent::new(
+                format!("memory-rejected-{target_state:?}"),
+                "objects/rejected".into(),
+                "a".repeat(64),
+                42,
+            );
+            let donor = MemoryIndexStore::new();
+            donor
+                .create_intent_scoped(&intent, "tenant-a", "repo-a")
+                .await
+                .unwrap();
+            donor
+                .transition_intent(intent.intent_id(), target_state)
+                .await
+                .unwrap();
+            let donor_events = donor.reliability_events(intent.intent_id()).await.unwrap();
+            let event = donor_events.last().unwrap();
+            let store = MemoryIndexStore::new();
+            store
+                .create_intent_scoped(&intent, "tenant-a", "repo-a")
+                .await
+                .unwrap();
+            let before = store.reliability_events(intent.intent_id()).await.unwrap();
+            store
+                .record_reliability_event(before.first().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                store.reliability_events(intent.intent_id()).await.unwrap(),
+                before
+            );
+            assert!(store.record_reliability_event(event).await.is_err());
+            assert_eq!(
+                store.reliability_events(intent.intent_id()).await.unwrap(),
+                before
+            );
+            assert_eq!(
+                store
+                    .intent_by_id(intent.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                UploadIntentState::Created
+            );
+            assert!(
+                store
+                    .transition_intent(intent.intent_id(), target_state)
+                    .await
+                    .unwrap()
+            );
+            store.record_reliability_event(event).await.unwrap();
+            assert_eq!(
+                store.reliability_events(intent.intent_id()).await.unwrap(),
+                donor_events
+            );
+            assert_eq!(
+                store
+                    .intent_by_id(intent.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                target_state
+            );
+        }
     }
 
     #[test]
