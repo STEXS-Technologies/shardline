@@ -73,6 +73,9 @@ monitor reports no remaining work:
 shardline db migrate backfill --batch-size 256
 ```
 
+The batch size must be positive and fit PostgreSQL's `BIGINT` row-limit type.
+Invalid batch sizes are rejected before connecting to the database.
+
 Repair one known-corrupt reliability operation only after validating its
 authoritative materialized row. The confirmation flag is required because the
 selected evidence chain is discarded and rebuilt:
