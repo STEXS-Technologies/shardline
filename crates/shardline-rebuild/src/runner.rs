@@ -18,6 +18,10 @@ use super::{
 
 /// Rebuilds latest-record state from immutable version records.
 ///
+/// The caller must prevent concurrent writes and destructive maintenance for
+/// the entire operation. Deployment entry points acquire the exclusive
+/// maintenance barrier; this generic store-level function cannot do so.
+///
 /// # Errors
 ///
 /// Returns [`RebuildError`] when version records cannot be scanned or latest records
