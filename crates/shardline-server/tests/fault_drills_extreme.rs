@@ -1027,16 +1027,16 @@ async fn drill_extreme_4_postgres_kill_mid_transaction() {
 
 /// Three cycles of: complete PUT (ACKed), then an in-flight overwrite killed
 /// at chunk evidence. Every ACKed object must survive byte-exact, chunk
-/// growth must be bounded by the measured per-cycle deltas (each capped at
-/// <= 16 new files: ~4-5 committed PUT chunks + 8 aborted-overwrite chunks
-/// at a 64 KiB chunk size), and no multipart sessions may leak.
+/// growth must be bounded by the canonical CDC work for all supplied bytes,
+/// including writes completing after the serve task aborts. Per-cycle observed
+/// growth remains capped at 16 and no multipart sessions may leak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_extreme_5_repeated_kill_cycles() {
     let mut harness = DrillHarness::new(3600);
     harness.spawn_server().await;
 
     let baseline = count_chunk_files(&harness.root);
-    let mut total_growth = 0usize;
+    let mut submitted_chunk_budget = 0usize;
 
     for i in 0..3u64 {
         let cycle_start = count_chunk_files(&harness.root);
@@ -1046,6 +1046,26 @@ async fn drill_extreme_5_repeated_kill_cycles() {
         // payloads and the aborted overwrite would dedup 100% against the
         // previous cycle (no new chunk evidence). Use distinct odd seeds.
         let payload = deterministic_bytes(256 * 1024 + 17 * i as usize, 101 + 2 * i);
+        let overwrite = deterministic_bytes(512 * 1024, 201 + 2 * i);
+        // Dropping the HTTP serve task is not an OS process kill: already
+        // running blocking object-store writes can finish after a checkpoint.
+        // Independently derive the finite chunk budget from the same CDC
+        // pipeline for every supplied byte, including the aborted request's
+        // tail (which can only overestimate work without EOF).
+        for bytes in [&payload, &overwrite] {
+            let work = shardline_server::ingest_without_storage_with_parallelism(
+                harness.chunk_size,
+                NonZeroUsize::new(128).unwrap(),
+                "growth-budget",
+                bytes::Bytes::copy_from_slice(bytes),
+                None,
+            )
+            .await
+            .unwrap();
+            submitted_chunk_budget = submitted_chunk_budget
+                .checked_add(usize::try_from(work.inserted_chunks).unwrap())
+                .unwrap();
+        }
         let expected_sha = sha256_hex(&payload);
         let put = harness.s3_put_bytes(&key, payload.clone()).await;
         assert_eq!(put.status().as_u16(), 200, "cycle {i} complete PUT");
@@ -1065,12 +1085,7 @@ async fn drill_extreme_5_repeated_kill_cycles() {
                 .send()
                 .await
         });
-        tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
-            512 * 1024,
-            201 + 2 * i,
-        ))))
-        .await
-        .unwrap();
+        tx.send(Ok(bytes::Bytes::from(overwrite))).await.unwrap();
         let root = harness.root.clone();
         wait_until(
             Duration::from_secs(5),
@@ -1098,14 +1113,17 @@ async fn drill_extreme_5_repeated_kill_cycles() {
             "cycle {i} chunk growth {delta} exceeds cap 16 (committed PUT ~4-5 chunks + \
              aborted 512 KiB overwrite ~8 chunks)"
         );
-        total_growth += delta;
+        assert!(
+            cycle_end <= baseline + submitted_chunk_budget,
+            "cycle {i}: chunk files exceed canonical supplied-work budget"
+        );
     }
 
     // No unbounded growth across cycles.
     let final_count = count_chunk_files(&harness.root);
     assert!(
-        final_count <= baseline + total_growth,
-        "unbounded chunk growth: {final_count} > {baseline} + {total_growth}"
+        final_count <= baseline + submitted_chunk_budget,
+        "unbounded chunk growth: {final_count} > {baseline} + {submitted_chunk_budget} canonical supplied chunks"
     );
     // Single-PUT overwrites never create multipart sessions.
     assert_eq!(

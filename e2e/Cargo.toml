@@ -86,7 +86,7 @@ shardline-vcs = { path = "../crates/shardline-vcs" }
 shardline-xet-core = { path = "../crates/shardline-xet-core" }
 blake3 = "1.8.3"
 redis = "1.0.2"
-sqlx = { version = "0.8.6", default-features = false }
+sqlx = { version = "0.9", default-features = false }
 xet-client = "1.5.1"
 xet-data = "1.5.1"
 xet-runtime = "1.5.1"
@@ -100,7 +100,7 @@ reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = { version = "0.10", features = ["compress"] }
-rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
 tokio = { version = "1.48.0", features = ["full"] }
 tempfile = "3.15"
 tracing = "0.1"
