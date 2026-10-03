@@ -1181,6 +1181,22 @@ pub(crate) fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> s
     Ok(())
 }
 
+#[cfg(any(not(unix), test))]
+struct PortableTemporaryFile {
+    path: std::path::PathBuf,
+    published: bool,
+}
+
+#[cfg(any(not(unix), test))]
+impl Drop for PortableTemporaryFile {
+    fn drop(&mut self) {
+        if !self.published {
+            // Cleanup must not replace the original write, flush or rename error.
+            let _ignored = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[cfg(not(unix))]
 pub(crate) fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // Defense-in-depth: ensure the path stays within the root directory.
@@ -1193,30 +1209,48 @@ pub(crate) fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> s
         )
     })?;
     std::fs::create_dir_all(parent)?;
-    let temporary = write_temporary_file(path, bytes)?;
-    std::fs::rename(&temporary, path)?;
+    let mut temporary = write_temporary_file(path, bytes)?;
+    std::fs::rename(&temporary.path, path)?;
+    temporary.published = true;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn write_temporary_file(path: &Path, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
-    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let now_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("tmp-{pid}-{seq}-{now_nanos}"));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    file.write_all(bytes)?;
-    file.flush()?;
-    Ok(temporary)
+fn write_temporary_file(path: &Path, bytes: &[u8]) -> std::io::Result<PortableTemporaryFile> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path must have a parent directory",
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path must have a file name",
+        )
+    })?;
+    loop {
+        let temporary = parent.join(shardline_storage::temporary_file_name(file_name));
+        let opened_file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let temporary = PortableTemporaryFile {
+            path: temporary,
+            published: false,
+        };
+        // Close the writer before guard cleanup on platforms that cannot unlink
+        // an open file, including early write/flush errors.
+        let mut file = opened_file;
+        file.write_all(bytes)?;
+        file.flush()?;
+        return Ok(temporary);
+    }
 }
 
 #[cfg(test)]
@@ -1281,5 +1315,53 @@ mod session_lock_cancellation_tests {
             shutdown_without_unlock,
             "cancelled lock tasks stalled runtime shutdown"
         );
+    }
+}
+
+#[cfg(test)]
+mod portable_temporary_guard_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::PortableTemporaryFile;
+    use std::{
+        fs,
+        io::{self, Write},
+    };
+
+    #[test]
+    fn partial_file_guard_cleanup_preserves_original_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("temporary");
+        let failed = (|| -> io::Result<()> {
+            let opened = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            let _temporary = PortableTemporaryFile {
+                path: path.clone(),
+                published: false,
+            };
+            let mut writer = opened;
+            writer.write_all(b"partial bytes")?;
+            // Exercise cleanup after an error with a partially written file.
+            Err(io::Error::from_raw_os_error(28))
+        })();
+        assert_eq!(failed.unwrap_err().raw_os_error(), Some(28));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn published_guard_preserves_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("temporary");
+        let destination = root.path().join("destination");
+        fs::write(&path, b"published bytes").unwrap();
+        let mut temporary = PortableTemporaryFile {
+            path,
+            published: false,
+        };
+        fs::rename(&temporary.path, &destination).unwrap();
+        temporary.published = true;
+        drop(temporary);
+        assert_eq!(fs::read(destination).unwrap(), b"published bytes");
     }
 }
