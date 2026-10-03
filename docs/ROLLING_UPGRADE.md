@@ -91,6 +91,12 @@ barrier, but an older server does not participate in that barrier. Dry-run GC re
 safe. Resume scheduled destructive GC only after every API and transfer replica runs
 the barrier-aware version.
 
+Pause scheduled lifecycle repair and full repair during the rollout as well, and
+upgrade maintenance binaries before resuming these jobs. Older lifecycle repair
+can delete unexpired finite retention holds for objects that have not arrived yet;
+older fsck can reject these valid future-object holds. Resume maintenance only
+when every maintenance job uses the new future-object retention semantics.
+
 ## Procedure
 
 The example uses the Production Scaled profile (`kubectl`). For systemd or host-native

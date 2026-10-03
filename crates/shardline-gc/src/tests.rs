@@ -1394,48 +1394,89 @@ fn validate_integrity_quarantine_length_mismatch_errors() {
     });
 }
 
-#[test]
-fn validate_integrity_active_retention_hold_missing_object_errors() {
-    // An active retention hold whose object is missing should error.
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let dir = std::env::temp_dir().join(format!("gc-test-act-mis-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("chunks")).unwrap();
-        let object_store = ServerObjectStore::local(&dir).unwrap();
-        let index_store = MemoryIndexStore::new();
-
-        let now = shardline_protocol::unix_now_seconds_lossy();
-        let key =
-            ObjectKey::parse("ab/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .unwrap();
-        let hold = RetentionHold::new(
-            key,
-            "test hold".to_owned(),
-            now,
-            Some(now + 3600), // still active
-        )
-        .unwrap();
+#[tokio::test]
+async fn future_holds_allow_gc_and_protect_later_arriving_objects() {
+    let root = tempfile::tempdir().unwrap();
+    let object_store = ServerObjectStore::local(root.path()).unwrap();
+    let index_store = MemoryIndexStore::new();
+    let record_store = MemoryRecordStore::new();
+    let now = shardline_protocol::unix_now_seconds_lossy();
+    let permanent_key = ObjectKey::parse(&format!("aa/{}", "a".repeat(64))).unwrap();
+    let finite_key = ObjectKey::parse(&format!("bb/{}", "b".repeat(64))).unwrap();
+    let unrelated_key = ObjectKey::parse(&format!("cc/{}", "c".repeat(64))).unwrap();
+    for (key, expiry) in [(&permanent_key, None), (&finite_key, Some(now + 3600))] {
+        let hold = RetentionHold::new(key.clone(), "future".to_owned(), now, expiry).unwrap();
         index_store.upsert_retention_hold(&hold).await.unwrap();
-
-        // No object exists → error.
-        let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
-        assert!(
-            result.is_err(),
-            "active hold with missing object should error"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            matches!(
-                err,
-                GcError::InvalidLifecycleMetadata(
-                    InvalidLifecycleMetadataError::ActiveRetentionHoldMissingObject { .. }
-                )
-            ),
-            "expected ActiveRetentionHoldMissingObject, got: {err:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
+    run_gc_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        &[ServerFrontend::Xet],
+        LocalGcOptions::dry_run(),
+    )
+    .await
+    .unwrap();
+    // An unrelated candidate can be swept while both held keys are still absent.
+    put_object(&object_store, &unrelated_key, b"unrelated bytes");
+    index_store
+        .upsert_quarantine_candidate(
+            &QuarantineCandidate::new(unrelated_key.clone(), 15, now - 100, now - 1).unwrap(),
+        )
+        .await
+        .unwrap();
+    run_gc_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        &[ServerFrontend::Xet],
+        LocalGcOptions::sweep_only(),
+    )
+    .await
+    .unwrap();
+    assert!(!object_store.contains(&unrelated_key).unwrap());
+    assert!(!object_store.contains(&permanent_key).unwrap());
+    assert!(!object_store.contains(&finite_key).unwrap());
+    assert_eq!(index_store.list_retention_holds().await.unwrap().len(), 2);
+    // The future keys then arrive as otherwise-unreferenced managed chunks.
+    put_object(&object_store, &permanent_key, b"permanent future bytes");
+    put_object(&object_store, &finite_key, b"finite future bytes");
+    run_gc_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        &[ServerFrontend::Xet],
+        LocalGcOptions::mark_only(86400),
+    )
+    .await
+    .unwrap();
+    assert!(
+        index_store
+            .list_quarantine_candidates()
+            .await
+            .unwrap()
+            .is_empty(),
+        "mark must exclude both held orphan keys"
+    );
+    run_gc_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        &[ServerFrontend::Xet],
+        LocalGcOptions::sweep_only(),
+    )
+    .await
+    .unwrap();
+    assert!(object_store.contains(&permanent_key).unwrap());
+    assert!(object_store.contains(&finite_key).unwrap());
+    assert!(
+        index_store
+            .list_quarantine_candidates()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(index_store.list_retention_holds().await.unwrap().len(), 2);
 }
 
 #[test]

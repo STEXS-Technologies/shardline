@@ -107,16 +107,8 @@ where
             }
 
             if hold.is_active_at(now_unix_seconds) {
-                if object_store.metadata(object_key)?.is_none() {
-                    push_issue(
-                        report,
-                        FsckIssueKind::MissingHeldObject,
-                        location.clone(),
-                        FsckIssueDetail::ActiveRetentionHoldReason {
-                            reason: hold.reason().to_owned(),
-                        },
-                    )?;
-                }
+                // An administrative hold may intentionally precede its object.
+                // Required record bytes are validated by the record scanner.
                 if quarantined_object_keys.contains(&object_key_string) {
                     push_issue(
                         report,
@@ -399,7 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_hold_missing_object_detected() {
+    async fn future_retention_hold_is_valid() {
         use shardline_index::LifecycleStore;
         let store = shardline_index::MemoryIndexStore::new();
         let obj_key = make_key("ab/1234");
@@ -413,8 +405,7 @@ mod tests {
         .unwrap();
         LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
         let report = run_lifecycle_check(&store, None).await;
-        assert_eq!(report.issue_count(), 1);
-        assert_eq!(report.issues[0].kind, FsckIssueKind::MissingHeldObject);
+        assert!(report.is_clean());
     }
 
     #[tokio::test]

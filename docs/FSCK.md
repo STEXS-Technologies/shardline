@@ -63,8 +63,8 @@ For each record it verifies:
 - every visible latest record still matches the immutable version record it points at
 - quarantine metadata points at existing objects, retains the observed object length,
   and does not target currently reachable live objects
-- active retention holds point at existing objects and do not coexist with quarantine
-  state
+- active retention holds may protect future keys without current objects and do not
+  coexist with quarantine state
 - processed webhook delivery claims have plausible processing timestamps
 - reconstruction rows reference registered xorbs and are not empty
 - provider repository lifecycle state uses valid repository identity and plausible

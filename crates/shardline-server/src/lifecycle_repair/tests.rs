@@ -72,10 +72,10 @@ fn classify_retention_hold_expired_release_is_delete_expired() {
 }
 
 #[test]
-fn classify_retention_hold_missing_object_is_delete_missing() {
+fn classify_retention_hold_future_object_is_kept() {
     assert_eq!(
         classify_retention_hold_repair_action(Some(150), 10, false, 100),
-        RetentionHoldRepairAction::DeleteMissing
+        RetentionHoldRepairAction::Keep
     );
 }
 
@@ -1015,13 +1015,13 @@ async fn repair_deletes_expired_retention_hold() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repair_deletes_retention_hold_for_missing_object() {
+async fn repair_preserves_retention_hold_for_future_object() {
     let (_root, record_store, index_store, object_store) = make_test_stores();
     let options = LifecycleRepairOptions::default();
     let now = 1000;
 
     let key = ObjectKey::parse("test/retention-missing").unwrap();
-    // Not expired (release > now), but object does not exist → DeleteMissing
+    // A nonexpired hold protects its key before the object arrives.
     let hold = RetentionHold::new(key.clone(), "missing hold".to_owned(), 0, Some(2000)).unwrap();
     index_store.upsert_retention_hold(&hold).unwrap();
 
@@ -1038,10 +1038,10 @@ async fn repair_deletes_retention_hold_for_missing_object() {
 
     assert_eq!(report.scanned_retention_holds, 1);
     assert_eq!(report.removed_expired_retention_holds, 0);
-    assert_eq!(report.removed_missing_retention_holds, 1);
+    assert_eq!(report.removed_missing_retention_holds, 0);
 
     let holds_after = index_store.list_retention_holds().unwrap();
-    assert_eq!(holds_after.len(), 0);
+    assert_eq!(holds_after, vec![hold]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1576,7 +1576,7 @@ async fn repair_mixed_scenario_all_lifecycle_categories() {
     let hold_active = RetentionHold::new(active_key, "active".to_owned(), 0, Some(2000)).unwrap();
     index_store.upsert_retention_hold(&hold_active).unwrap();
 
-    // 3. Retention hold — missing object (will be deleted)
+    // 3. Retention hold — future object (protection survives)
     let missing_key = ObjectKey::parse("test/retention-missing").unwrap();
     let hold_missing =
         RetentionHold::new(missing_key.clone(), "missing-obj".to_owned(), 0, Some(2000)).unwrap();
@@ -1667,7 +1667,7 @@ async fn repair_mixed_scenario_all_lifecycle_categories() {
     // Retention holds: 4 scanned (expired, active, missing, hold-for-q)
     assert_eq!(report.scanned_retention_holds, 4);
     assert_eq!(report.removed_expired_retention_holds, 1);
-    assert_eq!(report.removed_missing_retention_holds, 1);
+    assert_eq!(report.removed_missing_retention_holds, 0);
 
     // Quarantine: 4 scanned (missing, keep, reachable, held)
     assert_eq!(report.scanned_quarantine_candidates, 4);
@@ -1682,9 +1682,9 @@ async fn repair_mixed_scenario_all_lifecycle_categories() {
 
     // ── Verify store state after repair ────────────────────────────────
 
-    // Only the active retention hold and the hold-for-q should remain
+    // The active, future-object, and hold-for-q holds remain
     let holds_after = index_store.list_retention_holds().unwrap();
-    assert_eq!(holds_after.len(), 2);
+    assert_eq!(holds_after.len(), 3);
 
     // Only the keep quarantine should remain
     let q_after = index_store.list_quarantine_candidates().unwrap();
@@ -1766,7 +1766,7 @@ async fn repair_blackhole_store_treats_all_objects_as_missing() {
     let options = LifecycleRepairOptions::default();
     let now = 1000;
 
-    // Retention hold with active (non-expired) hold → object missing → DeleteMissing
+    // An active hold survives even when the object is currently missing.
     let key = ObjectKey::parse("test/any-key").unwrap();
     let hold = RetentionHold::new(key, "test".to_owned(), 0, Some(2000)).unwrap();
     index_store.upsert_retention_hold(&hold).unwrap();
@@ -1784,7 +1784,7 @@ async fn repair_blackhole_store_treats_all_objects_as_missing() {
 
     assert_eq!(report.scanned_retention_holds, 1);
     assert_eq!(report.removed_expired_retention_holds, 0);
-    assert_eq!(report.removed_missing_retention_holds, 1);
+    assert_eq!(report.removed_missing_retention_holds, 0);
 
     // Quarantine candidate for any key → object missing → DeleteMissing
     let q_key = ObjectKey::parse("test/q-any-key").unwrap();
@@ -1840,7 +1840,7 @@ async fn repair_no_frontends_still_processes_lifecycle_items() {
 
     assert_eq!(report.scanned_records, 1);
     assert_eq!(report.scanned_retention_holds, 1);
-    assert_eq!(report.removed_missing_retention_holds, 1); // object doesn't exist
+    assert_eq!(report.removed_missing_retention_holds, 0); // object doesn't exist
     assert_eq!(report.referenced_objects, 1); // chunk key still referenced
 }
 
@@ -2037,4 +2037,109 @@ async fn repair_multi_chunk_xorb_members_all_reachable() {
     assert_eq!(report.removed_reachable_quarantine_candidates, 2);
     assert_eq!(report.removed_missing_quarantine_candidates, 0);
     assert_eq!(report.removed_held_quarantine_candidates, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn future_holds_survive_repair_and_fsck_without_hiding_missing_record_bytes() {
+    let (root, record_store, index_store, object_store) = make_test_stores();
+    let now = shardline_protocol::unix_now_seconds_lossy();
+    let future_key = ObjectKey::parse("future/finite").unwrap();
+    let finite = RetentionHold::new(
+        future_key.clone(),
+        "future finite".to_owned(),
+        now,
+        Some(now + 3600),
+    )
+    .unwrap();
+    let permanent = RetentionHold::new(
+        ObjectKey::parse("future/permanent").unwrap(),
+        "future permanent".to_owned(),
+        now,
+        None,
+    )
+    .unwrap();
+    for hold in [&finite, &permanent] {
+        index_store.upsert_retention_hold(hold).unwrap();
+    }
+    let expired_key = ObjectKey::parse("future/expired").unwrap();
+    let stale =
+        RetentionHold::new(expired_key.clone(), "old expired".to_owned(), 0, Some(1)).unwrap();
+    let replacement =
+        RetentionHold::new(expired_key, "replacement".to_owned(), now, Some(now + 3600)).unwrap();
+    index_store.upsert_retention_hold(&stale).unwrap();
+    index_store.upsert_retention_hold(&replacement).unwrap();
+    assert!(
+        !index_store
+            .delete_retention_hold_if_matches(&stale)
+            .unwrap()
+    );
+    let expired = RetentionHold::new(
+        ObjectKey::parse("future/actually-expired").unwrap(),
+        "expired".to_owned(),
+        0,
+        Some(1),
+    )
+    .unwrap();
+    index_store.upsert_retention_hold(&expired).unwrap();
+    let report = run_lifecycle_repair_with_stores_at_time(
+        &record_store,
+        &index_store,
+        &object_store,
+        &[ServerFrontend::Xet],
+        LifecycleRepairOptions::default(),
+        now,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.removed_expired_retention_holds, 1);
+    assert_eq!(report.removed_missing_retention_holds, 0);
+    let holds = index_store.list_retention_holds().unwrap();
+    assert_eq!(holds.len(), 3);
+    for expected in [&finite, &permanent, &replacement] {
+        assert!(holds.contains(expected));
+    }
+    let fsck = shardline_fsck::run_fsck_with_stores(
+        &record_store,
+        &index_store,
+        &root.path().join("chunks"),
+        &object_store,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(fsck.is_clean(), "future keys are valid: {fsck:?}");
+    // A hold on the missing chunk must not mask a genuine record-byte failure.
+    let hash = valid_hash();
+    let chunk_key = crate::chunk_store::chunk_object_key(&hash).unwrap();
+    index_store
+        .upsert_retention_hold(
+            &RetentionHold::new(chunk_key, "held missing record bytes".to_owned(), now, None)
+                .unwrap(),
+        )
+        .unwrap();
+    let mut record = single_chunk_record("missing-required-bytes", &hash, 65536);
+    record.chunks.first_mut().unwrap().packed_end = record.total_bytes;
+    record.content_hash =
+        shardline_server_core::content_hash(record.total_bytes, record.chunk_size, &record.chunks);
+    record_store.write_version_record(&record).await.unwrap();
+    let fsck = shardline_fsck::run_fsck_with_stores(
+        &record_store,
+        &index_store,
+        &root.path().join("chunks"),
+        &object_store,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        fsck.issues
+            .iter()
+            .any(|issue| issue.kind == shardline_fsck::FsckIssueKind::MissingChunk)
+    );
+    assert!(
+        !fsck
+            .issues
+            .iter()
+            .any(|issue| issue.kind == shardline_fsck::FsckIssueKind::MissingHeldObject)
+    );
 }

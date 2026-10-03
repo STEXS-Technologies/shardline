@@ -653,14 +653,8 @@ where
             }
 
             if hold.is_active_at(now_unix_seconds) {
-                if object_store.metadata(hold.object_key())?.is_none() {
-                    return Err(
-                        InvalidLifecycleMetadataError::ActiveRetentionHoldMissingObject {
-                            object_key: hold.object_key().as_str().to_owned(),
-                        }
-                        .into(),
-                    );
-                }
+                // Holds may protect future keys; a hold alone does not assert
+                // object existence. Independent record/evidence checks remain.
                 if quarantined_object_keys.contains(hold.object_key()) {
                     // A held+quarantined object is a REPAIRABLE state, not a
                     // hard abort. A hold and a quarantine entry on the same key
