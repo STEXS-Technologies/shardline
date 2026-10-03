@@ -63,12 +63,14 @@ mod object;
 #[cfg(feature = "s3")]
 mod s3;
 mod store;
+mod temporary_name;
+pub use temporary_name::temporary_file_name;
 
 #[cfg(unix)]
 pub use anchored_fs::{
     AnchoredPathOptions, AnchoredTarget, ensure_parent_path_matches_anchor, fd_child_path,
     open_anchored_target, open_directory_chain, open_new_file, remove_at, remove_if_present,
-    rename_at, sync_parent_directory, temporary_file_name, write_anchored_temporary_file,
+    rename_at, sync_parent_directory, write_anchored_temporary_file,
 };
 pub use async_store::{AsyncObjectStore, SyncObjectStoreBridge};
 pub use fault_injection::{LocalPublishBoundary, LocalPublishFault};
