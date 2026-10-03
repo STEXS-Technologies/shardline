@@ -3,6 +3,7 @@ use std::iter::repeat_n;
 use bytes::Bytes;
 use shardline_protocol::ByteRange;
 
+use super::types::try_vec_with_capacity;
 use super::{BenchRuntimeError, ConcurrentIngestUploadCase, ConcurrentUploadCase};
 
 pub(crate) fn build_concurrent_upload_cases(
@@ -12,7 +13,8 @@ pub(crate) fn build_concurrent_upload_cases(
     concurrency: u32,
 ) -> Result<Vec<ConcurrentUploadCase>, BenchRuntimeError> {
     let chunk_count = base.len().div_ceil(chunk_size);
-    let mut cases = Vec::with_capacity(usize::try_from(concurrency)?);
+    let mut cases =
+        try_vec_with_capacity(usize::try_from(concurrency)?, "concurrent upload cases")?;
     for worker_index in 0..concurrency {
         let worker_index_usize = usize::try_from(worker_index)?;
         let selected_chunk = worker_index_usize
@@ -47,13 +49,13 @@ pub(crate) fn build_concurrent_ingest_upload_cases(
     concurrency: u32,
 ) -> Result<Vec<ConcurrentIngestUploadCase>, BenchRuntimeError> {
     let upload_cases = build_concurrent_upload_cases(base, mutated_bytes, chunk_size, concurrency)?;
-    let cases = upload_cases
-        .into_iter()
-        .map(|case| ConcurrentIngestUploadCase {
+    let mut cases = try_vec_with_capacity(upload_cases.len(), "concurrent ingest cases")?;
+    for case in upload_cases {
+        cases.push(ConcurrentIngestUploadCase {
             file_id: case.file_id,
             body: case.expected_bytes,
-        })
-        .collect();
+        });
+    }
     Ok(cases)
 }
 
@@ -63,7 +65,7 @@ pub(crate) fn build_worker_update(
     mutated_bytes: usize,
     worker_index: u32,
 ) -> Result<Bytes, BenchRuntimeError> {
-    let mut updated = base.to_vec();
+    let mut updated = copy_asset(base)?;
     let end = start
         .checked_add(mutated_bytes)
         .ok_or_else(|| BenchRuntimeError::WorkerMutationWindowOverflow)?;
@@ -85,7 +87,7 @@ pub(crate) fn build_worker_update(
 }
 
 pub(crate) fn build_base_asset(length: usize) -> Result<Vec<u8>, BenchRuntimeError> {
-    let mut bytes = Vec::with_capacity(length);
+    let mut bytes = try_vec_with_capacity(length, "base asset")?;
     for index in 0..length {
         let value = u8::try_from((index.saturating_mul(31).saturating_add(17)) % 251)?;
         bytes.push(value);
@@ -98,7 +100,7 @@ pub(crate) fn build_sparse_update(
     base: &[u8],
     mutated_bytes: usize,
 ) -> Result<Vec<u8>, BenchRuntimeError> {
-    let mut updated = base.to_vec();
+    let mut updated = copy_asset(base)?;
     let remaining = base
         .len()
         .checked_sub(mutated_bytes)
@@ -146,12 +148,12 @@ pub(crate) fn build_cross_repository_assets(
     let capacity = chunk_size
         .checked_mul(3)
         .ok_or_else(|| BenchRuntimeError::CrossRepositoryAssetOverflow)?;
-    let mut base = Vec::with_capacity(capacity);
+    let mut base = try_vec_with_capacity(capacity, "cross-repository asset")?;
     base.extend(repeat_n(0x11, chunk_size));
     base.extend(repeat_n(0x22, chunk_size));
     base.extend(repeat_n(0x33, chunk_size));
 
-    let mut updated = base.clone();
+    let mut updated = copy_asset(&base)?;
     let middle_start = chunk_size;
     let middle_end = chunk_size
         .checked_mul(2)
@@ -162,4 +164,10 @@ pub(crate) fn build_cross_repository_assets(
     middle.fill(0x44);
 
     Ok((base, updated))
+}
+
+fn copy_asset(base: &[u8]) -> Result<Vec<u8>, BenchRuntimeError> {
+    let mut copy = try_vec_with_capacity(base.len(), "asset copy")?;
+    copy.extend_from_slice(base);
+    Ok(copy)
 }

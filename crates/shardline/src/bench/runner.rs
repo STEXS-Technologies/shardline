@@ -39,24 +39,7 @@ pub async fn run_bench(
     let base_bytes = config.base_bytes;
     let mutated_bytes = config.mutated_bytes;
 
-    if iterations == 0 {
-        return Err(BenchRuntimeError::ZeroIterations);
-    }
-    if concurrency == 0 {
-        return Err(BenchRuntimeError::ZeroConcurrency);
-    }
-    if upload_max_in_flight_chunks == 0 {
-        return Err(BenchRuntimeError::ZeroUploadMaxInFlightChunks);
-    }
-    if chunk_size_bytes == 0 {
-        return Err(BenchRuntimeError::ZeroChunkSize);
-    }
-    if mutated_bytes == 0 {
-        return Err(BenchRuntimeError::ZeroMutatedBytes);
-    }
-    if mutated_bytes > base_bytes {
-        return Err(BenchRuntimeError::MutatedBytesExceedBaseBytes);
-    }
+    config.validate_e2e()?;
 
     fs::create_dir_all(storage_dir).await?;
     let run_root = allocate_bench_run_root(storage_dir).await?;
@@ -97,7 +80,7 @@ pub async fn run_bench(
         .ok_or(BenchRuntimeError::MissingRunNamespace)?
         .to_owned();
 
-    let mut detail = Vec::with_capacity(usize::try_from(iterations)?);
+    let mut detail = try_vec_with_capacity(usize::try_from(iterations)?, "iteration reports")?;
     let mut benchmark_backend_names: Option<(String, String)> = None;
     let mut total_initial_upload_micros = 0_u64;
     let mut total_sparse_update_upload_micros = 0_u64;
@@ -436,27 +419,7 @@ pub async fn run_ingest_bench(config: BenchConfig) -> Result<IngestBenchReport, 
     let base_bytes = config.base_bytes;
     let mutated_bytes = config.mutated_bytes;
 
-    if !scenario.supports_ingest() {
-        return Err(BenchRuntimeError::UnsupportedScenarioForMode);
-    }
-    if iterations == 0 {
-        return Err(BenchRuntimeError::ZeroIterations);
-    }
-    if concurrency == 0 {
-        return Err(BenchRuntimeError::ZeroConcurrency);
-    }
-    if upload_max_in_flight_chunks == 0 {
-        return Err(BenchRuntimeError::ZeroUploadMaxInFlightChunks);
-    }
-    if chunk_size_bytes == 0 {
-        return Err(BenchRuntimeError::ZeroChunkSize);
-    }
-    if mutated_bytes == 0 {
-        return Err(BenchRuntimeError::ZeroMutatedBytes);
-    }
-    if mutated_bytes > base_bytes {
-        return Err(BenchRuntimeError::MutatedBytesExceedBaseBytes);
-    }
+    config.validate_ingest()?;
 
     let base = build_base_asset(base_bytes)?;
     let updated = build_sparse_update(&base, mutated_bytes)?;
@@ -477,7 +440,7 @@ pub async fn run_ingest_bench(config: BenchConfig) -> Result<IngestBenchReport, 
         updated: Bytes::from(updated),
     };
 
-    let mut detail = Vec::with_capacity(usize::try_from(iterations)?);
+    let mut detail = try_vec_with_capacity(usize::try_from(iterations)?, "iteration reports")?;
     let mut total_initial_upload_micros = 0_u64;
     let mut total_sparse_update_upload_micros = 0_u64;
     let mut total_concurrent_upload_micros = 0_u64;
