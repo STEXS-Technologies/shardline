@@ -152,6 +152,7 @@ pub enum DatabaseMigrationCommand {
     /// their StateChronicle Merkle commitments.
     Backfill {
         /// Maximum number of rows considered per materialized-state table.
+        /// Must be positive and representable as a PostgreSQL BIGINT.
         batch_size: usize,
     },
     /// Explicitly discard and rebuild one named reliability operation.
@@ -609,6 +610,9 @@ pub async fn run_database_migration(
     if let DatabaseMigrationCommand::Repair { operation_kind, .. } = options.command() {
         parse_repair_operation_kind(operation_kind)?;
     }
+    if let DatabaseMigrationCommand::Backfill { batch_size } = options.command() {
+        backfill_batch_limit(*batch_size)?;
+    }
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -738,6 +742,17 @@ async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), DatabaseMig
     Ok(())
 }
 
+fn backfill_batch_limit(batch_size: usize) -> Result<i64, DatabaseMigrationError> {
+    if batch_size == 0 {
+        return Err(DatabaseMigrationError::Backfill(
+            "backfill batch size must be positive".to_owned(),
+        ));
+    }
+    i64::try_from(batch_size).map_err(|error| {
+        DatabaseMigrationError::Backfill(format!("invalid backfill batch size: {error}"))
+    })
+}
+
 /// Gives pre-journal durable state a deterministic, verifiable evidence
 /// prefix. This runs under the migration advisory lock and is idempotent: a
 /// row with any evidence already present is left untouched.
@@ -755,9 +770,7 @@ async fn backfill_reliability_merkle_commits(
     pool: &PgPool,
     batch_size: usize,
 ) -> Result<(), DatabaseMigrationError> {
-    let batch_size = i64::try_from(batch_size.max(1)).map_err(|error| {
-        DatabaseMigrationError::Backfill(format!("invalid Merkle backfill batch size: {error}"))
-    })?;
+    let batch_size = backfill_batch_limit(batch_size)?;
     let mut transaction = pool.begin().await?;
     let rows = query(
         "SELECT operation_kind, operation_id, sequence, event_json
@@ -1259,7 +1272,11 @@ async fn reconcile_reliability_events(
     if !required_tables_exist {
         return Ok(());
     }
-    let batch_size = i64::try_from(batch_size.max(1)).unwrap_or(i64::MAX);
+    let batch_size = if repair_missing {
+        backfill_batch_limit(batch_size)?
+    } else {
+        0 // Verification streams all rows and does not use a SQL LIMIT.
+    };
     let mut transaction = pool.begin().await?;
     if !repair_missing {
         query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -2639,6 +2656,34 @@ mod tests {
 
     fn quoted_identifier(identifier: &str) -> String {
         format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+
+    #[tokio::test]
+    async fn invalid_backfill_batch_is_rejected_before_database_connection() {
+        let mut invalid = vec![0];
+        if let Some(too_large) = usize::try_from(i64::MAX)
+            .ok()
+            .and_then(|maximum| maximum.checked_add(1))
+        {
+            invalid.push(too_large);
+            invalid.push(usize::MAX);
+        }
+        for batch_size in invalid {
+            let result = run_test_migration_command(
+                "postgres://localhost:1/no_connection",
+                DatabaseMigrationCommand::Backfill { batch_size },
+            )
+            .await;
+            assert!(
+                matches!(result, Err(DatabaseMigrationError::Backfill(ref message))
+                if message.contains("backfill batch size"))
+            );
+        }
+        assert_eq!(super::backfill_batch_limit(1).unwrap(), 1);
+        assert_eq!(super::backfill_batch_limit(1000).unwrap(), 1000);
+        if let Ok(maximum) = usize::try_from(i64::MAX) {
+            assert_eq!(super::backfill_batch_limit(maximum).unwrap(), i64::MAX);
+        }
     }
 
     #[tokio::test]
