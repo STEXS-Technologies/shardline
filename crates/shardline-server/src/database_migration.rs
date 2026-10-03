@@ -671,14 +671,15 @@ async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), DatabaseMig
     // Postgres. Protect bootstrap itself, including status/verify commands,
     // before callers acquire their longer-lived migration guard.
     let mut transaction = acquire_migration_lock(pool).await?;
-    query(&format!(
+    // The interpolated table name is a fixed application constant; data values stay bound.
+    query(sqlx::AssertSqlSafe(format!(
         "CREATE TABLE IF NOT EXISTS {MIGRATION_HISTORY_TABLE} (
             version TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             checksum TEXT NOT NULL,
             applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )"
-    ))
+    )))
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -2456,11 +2457,11 @@ async fn apply_one_migration(
 ) -> Result<(), DatabaseMigrationError> {
     let mut transaction = pool.begin().await?;
     raw_sql(migration.up_sql).execute(&mut *transaction).await?;
-    query(&format!(
+    query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO {MIGRATION_HISTORY_TABLE} (version, name, checksum)
          VALUES ($1, $2, $3)
          ON CONFLICT (version) DO NOTHING"
-    ))
+    )))
     .bind(migration.version)
     .bind(migration.name)
     .bind(migration_checksum(migration))
@@ -2483,9 +2484,9 @@ async fn revert_one_migration(
     raw_sql(migration.down_sql)
         .execute(&mut *transaction)
         .await?;
-    query(&format!(
+    query(sqlx::AssertSqlSafe(format!(
         "DELETE FROM {MIGRATION_HISTORY_TABLE} WHERE version = $1"
-    ))
+    )))
     .bind(migration.version)
     .execute(&mut *transaction)
     .await?;
@@ -2498,13 +2499,13 @@ async fn revert_one_migration(
 }
 
 async fn load_applied_migrations(pool: &PgPool) -> Result<Vec<AppliedMigration>, SqlxError> {
-    let rows = query(&format!(
+    let rows = query(sqlx::AssertSqlSafe(format!(
         "SELECT version, checksum,
                 to_char(applied_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
                     AS applied_at_utc
          FROM {MIGRATION_HISTORY_TABLE}
          ORDER BY version"
-    ))
+    )))
     .fetch_all(pool)
     .await?;
 
@@ -2573,6 +2574,10 @@ mod tests {
     ) -> Result<DatabaseMigrationReport, DatabaseMigrationError> {
         let options = DatabaseMigrationOptions::new(database_url.to_owned(), command);
         run_database_migration(&options).await
+    }
+
+    fn quoted_identifier(identifier: &str) -> String {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2860,10 +2865,13 @@ mod tests {
             .unwrap()
             .as_nanos();
         let schema = format!("migration_bootstrap_{suffix}");
-        query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
+        query(sqlx::AssertSqlSafe(format!(
+            "CREATE SCHEMA {}",
+            quoted_identifier(&schema)
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
         let search_path = schema.clone();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(10)
@@ -2919,10 +2927,13 @@ mod tests {
             .unwrap();
         assert!(exists);
         pool.close().await;
-        query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&admin)
-            .await
-            .unwrap();
+        query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA {} CASCADE",
+            quoted_identifier(&schema)
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2977,10 +2988,13 @@ mod tests {
         let mut admin_url = url::Url::parse(&base_database_url).unwrap();
         admin_url.set_path("postgres");
         let admin_pool = sqlx::PgPool::connect(admin_url.as_str()).await.unwrap();
-        sqlx::query(&format!("CREATE DATABASE {database_name}"))
-            .execute(&admin_pool)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE {}",
+            quoted_identifier(&database_name)
+        )))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
 
         let mut test_url = url::Url::parse(&base_database_url).unwrap();
         test_url.set_path(&database_name);
@@ -3121,10 +3135,13 @@ mod tests {
             .await
             .expect("read-only reliability verification should succeed on a complete schema");
 
-        sqlx::query(&format!("DROP DATABASE {database_name} WITH (FORCE)"))
-            .execute(&admin_pool)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {} WITH (FORCE)",
+            quoted_identifier(&database_name)
+        )))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
         admin_pool.close().await;
     }
 

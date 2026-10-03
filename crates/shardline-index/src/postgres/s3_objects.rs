@@ -482,7 +482,10 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         sql.push_str(" ORDER BY object_key COLLATE \"C\"");
         write!(sql, " LIMIT ${index}")
             .map_err(|e| PostgresMetadataStoreError::IntegerOutOfRange(e.to_string()))?;
-        let mut q = query(&sql).bind(scope_namespace).bind(lower);
+        // Only fixed SQL fragments and placeholder numbers are assembled; values stay bound.
+        let mut q = query(sqlx::AssertSqlSafe(sql))
+            .bind(scope_namespace)
+            .bind(lower);
         if let Some(upper) = upper {
             q = q.bind(upper);
         }

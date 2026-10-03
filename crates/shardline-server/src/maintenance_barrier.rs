@@ -258,7 +258,8 @@ async fn acquire_postgres(
     } else {
         "pg_advisory_xact_lock_shared"
     };
-    sqlx::query(&format!("SELECT {function}($1)"))
+    // The function name is selected only from the two fixed advisory-lock functions above.
+    sqlx::query(sqlx::AssertSqlSafe(format!("SELECT {function}($1)")))
         .bind(GC_WRITE_BARRIER_KEY)
         .execute(&mut *transaction)
         .await

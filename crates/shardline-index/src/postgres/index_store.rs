@@ -4664,9 +4664,9 @@ mod tests {
             } else {
                 "shardline_retention_holds"
             };
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "DELETE FROM {table} WHERE object_key='zz/../invalid'"
-            ))
+            )))
             .execute(&pool)
             .await
             .unwrap();
@@ -4703,9 +4703,9 @@ mod tests {
             } else {
                 "held_at_unix_seconds"
             };
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE {table} SET {column}={column}+1 WHERE object_key='inventory/0000'"
-            ))
+            )))
             .execute(&pool)
             .await
             .unwrap();
@@ -4747,9 +4747,9 @@ mod tests {
             assert_eq!(callbacks, 0);
             sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json=$3 WHERE operation_kind=$1 AND operation_id='inventory/0519' AND sequence=$2")
                 .bind(kind).bind(sequence).bind(commit).execute(&pool).await.unwrap();
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE {table} SET {column}={column}-1 WHERE object_key='inventory/0000'"
-            ))
+            )))
             .execute(&pool)
             .await
             .unwrap();
