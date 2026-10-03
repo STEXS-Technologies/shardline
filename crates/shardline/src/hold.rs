@@ -13,35 +13,70 @@ use thiserror::Error;
 use crate::config::load_server_config;
 
 pub fn print_hold_summary(hold: &RetentionHold) {
-    println!("object_key: {}", hold.object_key().as_str());
-    println!("reason: {}", hold.reason());
-    println!("held_at_unix_seconds: {}", hold.held_at_unix_seconds());
+    let _result = write_hold_summary(&mut std::io::stdout().lock(), hold);
+}
+
+/// Writes the report and flushes the destination.
+///
+/// # Errors
+/// Returns the first write or flush error.
+pub fn write_hold_summary<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    hold: &RetentionHold,
+) -> std::io::Result<()> {
+    writeln!(writer, "object_key: {}", hold.object_key().as_str())?;
+    writeln!(writer, "reason: {}", hold.reason())?;
+    writeln!(
+        writer,
+        "held_at_unix_seconds: {}",
+        hold.held_at_unix_seconds()
+    )?;
     match hold.release_after_unix_seconds() {
-        Some(value) => println!("release_after_unix_seconds: {value}"),
-        None => println!("release_after_unix_seconds: none"),
+        Some(value) => writeln!(writer, "release_after_unix_seconds: {value}")?,
+        None => writeln!(writer, "release_after_unix_seconds: none")?,
     }
+    writer.flush()
 }
 
 pub fn print_hold_list_summary(root: &Path, active_only: bool, holds: &[RetentionHold]) {
-    println!("root: {}", root.display());
-    println!("active_only: {active_only}");
-    println!("hold_count: {}", holds.len());
+    let _result = write_hold_list_summary(&mut std::io::stdout().lock(), root, active_only, holds);
+}
+
+/// Writes the report and flushes the destination.
+///
+/// # Errors
+/// Returns the first write or flush error.
+pub fn write_hold_list_summary<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    root: &Path,
+    active_only: bool,
+    holds: &[RetentionHold],
+) -> std::io::Result<()> {
+    writeln!(writer, "root: {}", root.display())?;
+    writeln!(writer, "active_only: {active_only}")?;
+    writeln!(writer, "hold_count: {}", holds.len())?;
     for (index, hold) in holds.iter().enumerate() {
-        println!("hold[{index}].object_key: {}", hold.object_key().as_str());
-        println!("hold[{index}].reason: {}", hold.reason());
-        println!(
+        writeln!(
+            writer,
+            "hold[{index}].object_key: {}",
+            hold.object_key().as_str()
+        )?;
+        writeln!(writer, "hold[{index}].reason: {}", hold.reason())?;
+        writeln!(
+            writer,
             "hold[{index}].held_at_unix_seconds: {}",
             hold.held_at_unix_seconds()
-        );
+        )?;
         match hold.release_after_unix_seconds() {
             Some(value) => {
-                println!("hold[{index}].release_after_unix_seconds: {value}");
+                writeln!(writer, "hold[{index}].release_after_unix_seconds: {value}")?;
             }
             None => {
-                println!("hold[{index}].release_after_unix_seconds: none");
+                writeln!(writer, "hold[{index}].release_after_unix_seconds: none")?;
             }
         }
     }
+    writer.flush()
 }
 
 /// Retention-hold runtime failure.
@@ -616,5 +651,86 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!stored.is_active_at(unix_now_seconds_lossy()));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod output_test_support {
+    use std::io::{self, Write};
+
+    struct FaultWriter {
+        remaining: usize,
+        fail_flush: bool,
+    }
+    impl Write for FaultWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_flush {
+                return Ok(bytes.len());
+            }
+            if self.remaining == 0 {
+                return Err(io::Error::from_raw_os_error(28));
+            }
+            let length = bytes.len().min(self.remaining);
+            self.remaining = self.remaining.saturating_sub(length);
+            Ok(length)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn assert_writer_errors(mut write: impl FnMut(&mut dyn Write) -> io::Result<()>) {
+        let mut partial = FaultWriter {
+            remaining: 7,
+            fail_flush: false,
+        };
+        assert!(matches!(write(&mut partial), Err(error) if error.raw_os_error() == Some(28)));
+        let mut flush = FaultWriter {
+            remaining: 0,
+            fail_flush: true,
+        };
+        assert!(
+            matches!(write(&mut flush), Err(error) if error.kind() == io::ErrorKind::BrokenPipe && error.to_string() == "flush failure")
+        );
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+    #[test]
+    fn hold_writers_preserve_text_and_propagate_write_and_flush_errors() {
+        let hold = RetentionHold::new(
+            ObjectKey::parse("future/key").expect("key"),
+            "reason".to_owned(),
+            10,
+            Some(20),
+        )
+        .expect("hold");
+        let mut bytes = Vec::new();
+        write_hold_summary(&mut bytes, &hold).expect("summary");
+        assert_eq!(bytes, b"object_key: future/key\nreason: reason\nheld_at_unix_seconds: 10\nrelease_after_unix_seconds: 20\n");
+        output_test_support::assert_writer_errors(|writer| write_hold_summary(writer, &hold));
+        output_test_support::assert_writer_errors(|writer| {
+            write_hold_list_summary(
+                writer,
+                Path::new("/root"),
+                true,
+                std::slice::from_ref(&hold),
+            )
+        });
+        bytes.clear();
+        write_hold_list_summary(
+            &mut bytes,
+            Path::new("/root"),
+            true,
+            std::slice::from_ref(&hold),
+        )
+        .expect("list");
+        assert_eq!(bytes, b"root: /root\nactive_only: true\nhold_count: 1\nhold[0].object_key: future/key\nhold[0].reason: reason\nhold[0].held_at_unix_seconds: 10\nhold[0].release_after_unix_seconds: 20\n");
     }
 }
