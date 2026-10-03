@@ -44,7 +44,12 @@ use crate::{
     server_role::ServerRole,
 };
 
-pub(crate) const fn validate_chunk_size(chunk_size: NonZeroUsize) -> Result<(), ServerConfigError> {
+/// Validates a target chunk size against the canonical CDC protocol limits.
+///
+/// # Errors
+///
+/// Returns [`ServerConfigError`] unless the size is a power of two in 128..=1 GiB.
+pub const fn validate_chunk_size(chunk_size: NonZeroUsize) -> Result<(), ServerConfigError> {
     use crate::upload_ingest::cdc::{MAX_TARGET_CHUNK_SIZE, MIN_TARGET_CHUNK_SIZE};
     if chunk_size.get() < MIN_TARGET_CHUNK_SIZE {
         return Err(ServerConfigError::ChunkSizeTooSmall);

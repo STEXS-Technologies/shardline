@@ -151,7 +151,7 @@ pub use config::file::parse_toml_config_for_fuzzing;
 pub use config::{
     AuthProviderKind, DeploymentMode, ObjectStorageAdapter, ServerConfig, ServerConfigError,
     ShardMetadataLimits, env::load_index_postgres_url_from_toml, file::load_toml_config,
-    load_server_config_from_env_with_toml,
+    load_server_config_from_env_with_toml, validate_chunk_size,
 };
 pub use database_migration::{
     DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand, DatabaseMigrationError,

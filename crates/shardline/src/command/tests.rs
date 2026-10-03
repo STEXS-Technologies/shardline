@@ -1561,3 +1561,34 @@ fn parse_explicit_hub_tree_recovery() {
     );
     assert!(CliCommand::parse(["shardline", "repair", "hub-tree"]).is_err());
 }
+
+#[test]
+fn parse_bench_rejects_invalid_chunks_and_unrepresentable_assets() {
+    for mode in ["e2e", "ingest"] {
+        for (chunk, base) in [
+            ("8".to_owned(), "256".to_owned()),
+            ("129".to_owned(), "256".to_owned()),
+            ("128".to_owned(), usize::MAX.to_string()),
+        ] {
+            let args: Vec<String> = [
+                "shardline",
+                "bench",
+                "--mode",
+                mode,
+                "--storage-dir",
+                "/unused-benchmark-storage",
+                "--chunk-size-bytes",
+                &chunk,
+                "--base-bytes",
+                &base,
+                "--mutated-bytes",
+                "8",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            let error = CliCommand::parse(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        }
+    }
+}
