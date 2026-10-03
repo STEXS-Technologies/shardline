@@ -35,57 +35,27 @@ const LOCAL_FILE_MODE: u32 = 0o600;
 type LocalWriteHook = Box<dyn FnOnce() + Send>;
 
 #[cfg(test)]
-struct LocalWriteHookRegistration {
-    path: PathBuf,
-    hook: LocalWriteHook,
-}
-
-#[cfg(test)]
-type LocalWriteHookSlot = Option<LocalWriteHookRegistration>;
-
-#[cfg(test)]
-static BEFORE_LOCAL_WRITE_HOOK: LazyLock<Mutex<LocalWriteHookSlot>> =
-    LazyLock::new(|| Mutex::new(None));
+static BEFORE_LOCAL_WRITE_HOOKS: LazyLock<
+    Mutex<std::collections::HashMap<PathBuf, LocalWriteHook>>,
+> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 #[cfg(test)]
 pub(crate) fn set_before_local_write_hook(path: PathBuf, hook: impl FnOnce() + Send + 'static) {
-    let mut slot = match BEFORE_LOCAL_WRITE_HOOK.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    *slot = Some(LocalWriteHookRegistration {
-        path,
-        hook: Box::new(hook),
-    });
+    let mut hooks = BEFORE_LOCAL_WRITE_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    hooks.insert(path, Box::new(hook));
 }
 
 #[cfg(test)]
 fn run_before_local_write_hook(path: &Path) {
-    let hook = match BEFORE_LOCAL_WRITE_HOOK.lock() {
-        Ok(mut guard) => take_matching_local_write_hook(&mut guard, path),
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            take_matching_local_write_hook(&mut guard, path)
-        }
-    };
+    let hook = BEFORE_LOCAL_WRITE_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(path);
     if let Some(hook) = hook {
         hook();
     }
-}
-
-#[cfg(test)]
-fn take_matching_local_write_hook(
-    slot: &mut LocalWriteHookSlot,
-    path: &Path,
-) -> Option<LocalWriteHook> {
-    if slot
-        .as_ref()
-        .is_none_or(|registration| registration.path != path)
-    {
-        return None;
-    }
-
-    slot.take().map(|registration| registration.hook)
 }
 
 #[cfg(not(test))]
@@ -95,20 +65,66 @@ pub(crate) fn hard_link_file_if_absent(
     root: &Path,
     path: &Path,
     temporary: &Path,
+    source_file: &File,
 ) -> io::Result<()> {
     #[cfg(unix)]
     {
-        hard_link_file_if_absent_unix(root, path, temporary)
+        hard_link_file_if_absent_unix(root, path, temporary, source_file)
     }
 
     #[cfg(not(unix))]
     {
+        let _source_file = source_file;
         path.strip_prefix(root)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path escapes root"))?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         fs::hard_link(temporary, path)
     }
+}
+
+// A duplicate can observe another writer's name before that writer has synced
+// its containing directory. Verify through the pinned parent, then make both
+// the verified bytes and the name durable before acknowledging the duplicate.
+pub(crate) fn verify_existing_object_durable<VerifyError>(
+    root: &Path,
+    path: &Path,
+    verify: impl FnOnce(&Path) -> Result<File, VerifyError>,
+) -> Result<(), VerifyError>
+where
+    VerifyError: From<io::Error>,
+{
+    #[cfg(unix)]
+    {
+        let anchored = open_anchored_target(root, path)?;
+        let file = verify(&anchored.final_path())?;
+        run_before_local_write_hook(&anchored.logical_path());
+        sync_verified_existing_file(&anchored, &file)?;
+    }
+    #[cfg(not(unix))]
+    {
+        path.strip_prefix(root)
+            .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "path escapes root"))?;
+        let _file = verify(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_verified_existing_file(anchored: &AnchoredTarget, file: &File) -> io::Result<()> {
+    // Never unlink an existing winner on a verification or durability failure.
+    ensure_parent_path_matches_anchor(anchored)?;
+    file.sync_all()?;
+    local_publish_failpoint(
+        &anchored.logical_path(),
+        LocalPublishBoundary::BeforeParentSync,
+    )?;
+    sync_parent_directory(anchored)?;
+    ensure_parent_path_matches_anchor(anchored)?;
+    local_publish_failpoint(
+        &anchored.logical_path(),
+        LocalPublishBoundary::AfterParentDurable,
+    )
 }
 
 pub(crate) enum PutBytesIfAbsentOutcome {
@@ -168,11 +184,31 @@ pub(crate) fn write_bytes_atomically(root: &Path, path: &Path, bytes: &[u8]) -> 
 }
 
 #[cfg(unix)]
-fn hard_link_file_if_absent_unix(root: &Path, path: &Path, temporary: &Path) -> io::Result<()> {
+fn hard_link_file_if_absent_unix(
+    root: &Path,
+    path: &Path,
+    temporary: &Path,
+    source_file: &File,
+) -> io::Result<()> {
     let anchored = open_anchored_target(root, path)?;
     run_before_local_write_hook(&anchored.logical_path());
     let final_path = anchored.final_path();
+    // The caller pins the verified source inode. Sync it before publication,
+    // then reject a source-path replacement rather than acknowledge its bytes.
+    source_file.sync_all()?;
     fs::hard_link(temporary, &final_path)?;
+    let installed = open_existing_regular_file(&final_path)?;
+    use std::os::unix::fs::MetadataExt;
+    let source_metadata = source_file.metadata()?;
+    let installed_metadata = installed.metadata()?;
+    if (source_metadata.dev(), source_metadata.ino())
+        != (installed_metadata.dev(), installed_metadata.ino())
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "hard-link source changed during anchored publication",
+        ));
+    }
     local_publish_failpoint(&anchored.logical_path(), LocalPublishBoundary::AfterInstall)?;
     if let Err(error) = ensure_parent_path_matches_anchor(&anchored) {
         remove_if_present(&final_path)?;
@@ -204,8 +240,8 @@ fn put_bytes_if_absent_unix(
 
     match open_existing_regular_file(&final_path) {
         Ok(file) => {
-            ensure_file_matches_bytes(file, bytes)?;
-            ensure_parent_path_matches_anchor(&anchored)?;
+            ensure_file_matches_bytes(file.try_clone()?, bytes)?;
+            sync_verified_existing_file(&anchored, &file)?;
             return Ok(PutBytesIfAbsentOutcome::AlreadyExists);
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -236,11 +272,8 @@ fn put_bytes_if_absent_unix(
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
             remove_if_present(&temporary)?;
             let existing = open_existing_regular_file(&final_path)?;
-            ensure_file_matches_bytes(existing, bytes)?;
-            if let Err(mismatch_error) = ensure_parent_path_matches_anchor(&anchored) {
-                remove_if_present(&final_path)?;
-                return Err(mismatch_error);
-            }
+            ensure_file_matches_bytes(existing.try_clone()?, bytes)?;
+            sync_verified_existing_file(&anchored, &existing)?;
             Ok(PutBytesIfAbsentOutcome::AlreadyExists)
         }
         Err(error) => {
@@ -712,11 +745,23 @@ mod tests {
         let dest = root.join("aa").join("linked.bin");
 
         // First hard link succeeds
-        hard_link_file_if_absent(&root, &dest, &temporary).unwrap();
+        hard_link_file_if_absent(
+            &root,
+            &dest,
+            &temporary,
+            &std::fs::File::open(&temporary).unwrap(),
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"linked");
 
         // Second hard link returns AlreadyExists (callers handle this)
-        let err = hard_link_file_if_absent(&root, &dest, &temporary).unwrap_err();
+        let err = hard_link_file_if_absent(
+            &root,
+            &dest,
+            &temporary,
+            &std::fs::File::open(&temporary).unwrap(),
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     }
 
@@ -1005,7 +1050,12 @@ mod tests {
             let _ = symlink(&escape_dir, hook_root.join("sub"));
         });
 
-        let result = hard_link_file_if_absent(&root, &dest, &temporary);
+        let result = hard_link_file_if_absent(
+            &root,
+            &dest,
+            &temporary,
+            &std::fs::File::open(&temporary).unwrap(),
+        );
         // Should fail because the parent directory was swapped
         assert!(result.is_err(), "expected error from parent swap, got Ok");
     }
@@ -1150,7 +1200,12 @@ mod tests {
             let _ = symlink(&escape_dir, hook_root.join("sub"));
         });
 
-        let result = hard_link_file_if_absent(&root, &dest, &temporary);
+        let result = hard_link_file_if_absent(
+            &root,
+            &dest,
+            &temporary,
+            &std::fs::File::open(&temporary).unwrap(),
+        );
         // The hard link itself succeeds to /proc/self/fd/N/target.bin
         // in the ORIGINAL directory, but the anchor check detects the
         // parent was swapped (logical path is now a symlink) and fails.

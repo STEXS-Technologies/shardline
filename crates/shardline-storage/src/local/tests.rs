@@ -1537,7 +1537,12 @@ fn local_existing_object_outcome_with_temporary_bytes_matches() {
     std::fs::write(&path, b"exact match").unwrap();
     let temp = storage.path().join("temp.bin");
     std::fs::write(&temp, b"temp data").unwrap();
-    let result = super::io::existing_object_outcome(&path, &temp, Some(b"exact match"));
+    let result = super::io::existing_object_outcome(
+        storage.path(),
+        &path,
+        &std::fs::File::open(&temp).unwrap(),
+        Some(b"exact match"),
+    );
     assert!(result.is_ok());
 }
 
@@ -1548,7 +1553,12 @@ fn local_existing_object_outcome_with_temporary_bytes_mismatch() {
     std::fs::write(&path, b"exact match").unwrap();
     let temp = storage.path().join("temp2.bin");
     std::fs::write(&temp, b"temp data").unwrap();
-    let result = super::io::existing_object_outcome(&path, &temp, Some(b"wrong bytes"));
+    let result = super::io::existing_object_outcome(
+        storage.path(),
+        &path,
+        &std::fs::File::open(&temp).unwrap(),
+        Some(b"wrong bytes"),
+    );
     assert!(result.is_err());
 }
 
@@ -1559,7 +1569,12 @@ fn local_existing_object_outcome_without_temporary_bytes_matches() {
     std::fs::write(&path, b"same content").unwrap();
     let temp = storage.path().join("temp3.bin");
     std::fs::write(&temp, b"same content").unwrap();
-    let result = super::io::existing_object_outcome(&path, &temp, None);
+    let result = super::io::existing_object_outcome(
+        storage.path(),
+        &path,
+        &std::fs::File::open(&temp).unwrap(),
+        None,
+    );
     assert!(result.is_ok());
 }
 
@@ -1570,7 +1585,12 @@ fn local_existing_object_outcome_without_temporary_bytes_mismatch() {
     std::fs::write(&path, b"existing data").unwrap();
     let temp = storage.path().join("temp4.bin");
     std::fs::write(&temp, b"different data").unwrap();
-    let result = super::io::existing_object_outcome(&path, &temp, None);
+    let result = super::io::existing_object_outcome(
+        storage.path(),
+        &path,
+        &std::fs::File::open(&temp).unwrap(),
+        None,
+    );
     assert!(result.is_err());
 }
 
@@ -2121,4 +2141,201 @@ fn local_remove_empty_ancestors_with_concurrent_delete() {
         !storage.path().join("a/b/c").exists(),
         "empty directory should have been removed"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn duplicate_publication_requires_parent_durability_after_interrupted_install() {
+    use crate::{LocalPublishBoundary, LocalPublishFault, fault_injection::arm_fault};
+    #[derive(Debug, Clone, Copy)]
+    enum Operation {
+        Put,
+        Temporary,
+        Copy,
+    }
+    for operation in [Operation::Put, Operation::Temporary, Operation::Copy] {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("duplicate/object").unwrap();
+        let path = store.path_for_key(&key);
+        let bytes = b"complete winning payload";
+        let integrity = ObjectIntegrity::new(super::util::chunk_hash(bytes), bytes.len() as u64);
+        let guard = arm_fault(
+            path.clone(),
+            LocalPublishBoundary::AfterInstall,
+            LocalPublishFault::InputOutput,
+        );
+        assert!(
+            ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(bytes), &integrity)
+                .is_err()
+        );
+        drop(guard);
+        let temporary = storage.path().join("temporary");
+        fs::write(&temporary, bytes).unwrap();
+        let source = ObjectKey::parse("source").unwrap();
+        ObjectStore::put_if_absent(&store, &source, ObjectBody::from_slice(bytes), &integrity)
+            .unwrap();
+        let guard = arm_fault(
+            path.clone(),
+            LocalPublishBoundary::BeforeParentSync,
+            LocalPublishFault::SyncFailure,
+        );
+        let result = match operation {
+            Operation::Put => {
+                ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(bytes), &integrity)
+            }
+            Operation::Temporary => {
+                store.put_temporary_file_if_absent(&key, &temporary, &integrity)
+            }
+            Operation::Copy => store.copy_object_if_absent(&source, &key),
+        };
+        assert!(
+            matches!(result, Err(LocalObjectStoreError::Io(error)) if error.raw_os_error() == Some(libc::EIO)),
+            "{operation:?}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read(store.path_for_key(&source)).unwrap(), bytes);
+        if matches!(operation, Operation::Temporary) {
+            assert!(!temporary.exists());
+        }
+        drop(guard);
+        assert!(matches!(
+            ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(bytes), &integrity),
+            Ok(PutOutcome::AlreadyExists)
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn async_duplicate_publication_propagates_parent_sync_failure() {
+    use crate::{
+        AsyncObjectStore, LocalPublishBoundary, LocalPublishFault, fault_injection::arm_fault,
+    };
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+    let key = ObjectKey::parse("async/object").unwrap();
+    let bytes = b"payload";
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(bytes), bytes.len() as u64);
+    ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(bytes), &integrity).unwrap();
+    let path = store.path_for_key(&key);
+    let _guard = arm_fault(
+        path.clone(),
+        LocalPublishBoundary::BeforeParentSync,
+        LocalPublishFault::SyncFailure,
+    );
+    let result =
+        AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(bytes), &integrity)
+            .await;
+    assert!(
+        matches!(result, Err(LocalObjectStoreError::Io(error)) if error.raw_os_error() == Some(libc::EIO))
+    );
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn duplicate_parent_swap_preserves_the_existing_winner() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+    let key = ObjectKey::parse("swap/object").unwrap();
+    let bytes = b"winning payload";
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(bytes), bytes.len() as u64);
+    ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(bytes), &integrity).unwrap();
+    let path = store.path_for_key(&key);
+    let parent = path.parent().unwrap().to_path_buf();
+    let detached = storage.path().join("detached");
+    let detached_for_hook = detached.clone();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("object"), b"unrelated payload").unwrap();
+    let outside_for_hook = outside.path().to_path_buf();
+    set_before_local_write_hook(path, move || {
+        fs::rename(&parent, &detached_for_hook).unwrap();
+        symlink(&outside_for_hook, &parent).unwrap();
+    });
+    assert!(
+        ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(bytes), &integrity)
+            .is_err()
+    );
+    assert_eq!(fs::read(detached.join("object")).unwrap(), bytes);
+    assert_eq!(
+        fs::read(outside.path().join("object")).unwrap(),
+        b"unrelated payload"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_publication_rejects_source_path_replacement_after_pinning() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+    let source = ObjectKey::parse("source").unwrap();
+    let destination = ObjectKey::parse("destination/object").unwrap();
+    let bytes = b"verified source";
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(bytes), bytes.len() as u64);
+    ObjectStore::put_if_absent(&store, &source, ObjectBody::from_slice(bytes), &integrity).unwrap();
+    let source_path = store.path_for_key(&source);
+    let detached = storage.path().join("detached-source");
+    let source_for_hook = source_path.clone();
+    let detached_for_hook = detached.clone();
+    set_before_local_write_hook(store.path_for_key(&destination), move || {
+        fs::rename(&source_for_hook, &detached_for_hook).unwrap();
+        fs::write(source_for_hook, b"replacement source").unwrap();
+    });
+    let result = store.copy_object_if_absent(&source, &destination);
+    assert!(
+        matches!(result, Err(LocalObjectStoreError::Io(error)) if error.kind() == IoErrorKind::InvalidData)
+    );
+    assert_eq!(fs::read(detached).unwrap(), bytes);
+    assert_eq!(fs::read(source_path).unwrap(), b"replacement source");
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_duplicate_compares_the_verified_source_after_path_replacement() {
+    for matching_target in [false, true] {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("duplicate/object").unwrap();
+        let requested = b"OldPayload";
+        let replacement = b"NewPayload";
+        let target_bytes = if matching_target {
+            requested
+        } else {
+            replacement
+        };
+        let target_integrity = ObjectIntegrity::new(
+            super::util::chunk_hash(target_bytes),
+            target_bytes.len() as u64,
+        );
+        ObjectStore::put_if_absent(
+            &store,
+            &key,
+            ObjectBody::from_slice(target_bytes),
+            &target_integrity,
+        )
+        .unwrap();
+        let temporary = storage.path().join("temporary");
+        fs::write(&temporary, requested).unwrap();
+        let detached = storage.path().join("verified-source");
+        let temporary_for_hook = temporary.clone();
+        let detached_for_hook = detached.clone();
+        set_before_local_write_hook(store.path_for_key(&key), move || {
+            fs::rename(&temporary_for_hook, &detached_for_hook).unwrap();
+            fs::write(temporary_for_hook, replacement).unwrap();
+        });
+        let requested_integrity =
+            ObjectIntegrity::new(super::util::chunk_hash(requested), requested.len() as u64);
+        let result = store.put_temporary_file_if_absent(&key, &temporary, &requested_integrity);
+        if matching_target {
+            assert!(matches!(result, Ok(PutOutcome::AlreadyExists)));
+        } else {
+            assert!(
+                matches!(result, Err(LocalObjectStoreError::IntegrityHashMismatch)),
+                "{result:?}"
+            );
+        }
+        assert_eq!(fs::read(store.path_for_key(&key)).unwrap(), target_bytes);
+        assert_eq!(fs::read(detached).unwrap(), requested);
+    }
 }
