@@ -1076,7 +1076,7 @@ async fn rebuild_does_not_roll_back_latest_when_newest_version_is_corrupt() {
     // Once the version is repaired, a clean scan can safely recreate the head.
     conn.execute(
         "UPDATE shardline_file_records SET record = ?1, updated_at_unix_seconds = ?2 WHERE record_kind = 'version' AND content_hash = ?3",
-        rusqlite::params![serde_json::to_vec(&latest).unwrap(), 4_000_000_000_u64, &latest.content_hash],
+        rusqlite::params![serde_json::to_vec(&latest).unwrap(), 4_000_000_000_i64, &latest.content_hash],
     )
     .unwrap();
     let report = run_index_rebuild_with_stores(

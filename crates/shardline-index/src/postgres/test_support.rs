@@ -6,6 +6,11 @@ use std::{
 use sqlx::{PgPool, postgres::PgPoolOptions, query, query_scalar};
 use tokio::sync::OnceCell;
 
+// Quote catalog identifiers before inserting them into test-only DDL.
+fn quoted_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 static NEXT_SCHEMA: AtomicU64 = AtomicU64::new(1);
 static CLEANED_STALE_SCHEMAS: OnceCell<()> = OnceCell::const_new();
 
@@ -51,14 +56,18 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
             .await
             .unwrap_or_default();
             for schema_name in schema_names {
-                query(&format!("DROP SCHEMA {schema_name} CASCADE"))
-                    .execute(&admin_pool)
-                    .await
-                    .ok();
+                query(sqlx::AssertSqlSafe(format!(
+                    "DROP SCHEMA {} CASCADE",
+                    quoted_identifier(&schema_name)
+                )))
+                .execute(&admin_pool)
+                .await
+                .ok();
             }
         })
         .await;
-    query(&format!("CREATE SCHEMA {schema}"))
+    let schema = quoted_identifier(&schema);
+    query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&admin_pool)
         .await
         .ok()?;
@@ -72,9 +81,10 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
     .await
     .ok()?;
     for table_name in table_names {
-        query(&format!(
+        let table_name = quoted_identifier(&table_name);
+        query(sqlx::AssertSqlSafe(format!(
             "CREATE TABLE {schema}.{table_name} (LIKE public.{table_name} INCLUDING ALL)"
-        ))
+        )))
         .execute(&admin_pool)
         .await
         .ok()?;
@@ -94,7 +104,8 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
     .ok()?;
     for definition in trigger_definitions {
         let isolated_definition = definition.replace(" ON public.", &format!(" ON {schema}."));
-        query(&isolated_definition)
+        // This SQL comes from PostgreSQL pg_get_triggerdef, with a quoted schema substitution.
+        query(sqlx::AssertSqlSafe(isolated_definition))
             .execute(&admin_pool)
             .await
             .ok()?;
@@ -107,7 +118,9 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
         .after_connect(move |connection, _metadata| {
             let search_path = search_path.clone();
             Box::pin(async move {
-                query(&search_path).execute(connection).await?;
+                query(sqlx::AssertSqlSafe(search_path))
+                    .execute(connection)
+                    .await?;
                 Ok(())
             })
         })

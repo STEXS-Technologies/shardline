@@ -37,6 +37,10 @@ static PG: OnceCell<(DockerLocalStack, String)> = OnceCell::const_new();
 
 /// Ensure the global Docker Postgres is running with migrations applied.
 /// Returns the connection URL. Each test creates its own `PgPool`.
+fn quoted_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 async fn ensure_pg() -> &'static str {
     let (_, url) = PG
         .get_or_init(|| async {
@@ -1888,14 +1892,20 @@ async fn test_migration_partial_apply_and_revert() {
         url.to_string()
     };
     let admin_pool = sqlx::PgPool::connect(&admin_url).await.unwrap();
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name}"))
-        .execute(&admin_pool)
-        .await
-        .ok();
-    sqlx::query(&format!("CREATE DATABASE {db_name}"))
-        .execute(&admin_pool)
-        .await
-        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {}",
+        quoted_identifier(&db_name)
+    )))
+    .execute(&admin_pool)
+    .await
+    .ok();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE {}",
+        quoted_identifier(&db_name)
+    )))
+    .execute(&admin_pool)
+    .await
+    .unwrap();
 
     let test_url = {
         let mut url = url::Url::parse(&base_url).unwrap();
@@ -1958,10 +1968,13 @@ async fn test_migration_partial_apply_and_revert() {
     pool.close().await;
 
     // Cleanup
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name}"))
-        .execute(&admin_pool)
-        .await
-        .ok();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {}",
+        quoted_identifier(&db_name)
+    )))
+    .execute(&admin_pool)
+    .await
+    .ok();
     admin_pool.close().await;
 }
 
@@ -1995,14 +2008,20 @@ async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
     let mut admin_url = url::Url::parse(&base_url).unwrap();
     admin_url.set_path("postgres");
     let admin_pool = sqlx::PgPool::connect(admin_url.as_str()).await.unwrap();
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name}"))
-        .execute(&admin_pool)
-        .await
-        .ok();
-    sqlx::query(&format!("CREATE DATABASE {db_name}"))
-        .execute(&admin_pool)
-        .await
-        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {}",
+        quoted_identifier(&db_name)
+    )))
+    .execute(&admin_pool)
+    .await
+    .ok();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE {}",
+        quoted_identifier(&db_name)
+    )))
+    .execute(&admin_pool)
+    .await
+    .unwrap();
 
     let mut database_url = url::Url::parse(&base_url).unwrap();
     database_url.set_path(&db_name);
@@ -2095,10 +2114,13 @@ async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
     );
 
     pool.close().await;
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name}"))
-        .execute(&admin_pool)
-        .await
-        .ok();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {}",
+        quoted_identifier(&db_name)
+    )))
+    .execute(&admin_pool)
+    .await
+    .ok();
     admin_pool.close().await;
 }
 

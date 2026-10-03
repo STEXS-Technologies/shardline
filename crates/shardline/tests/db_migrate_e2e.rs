@@ -110,12 +110,17 @@ async fn exercise_db_migrate_applies_reports_and_reverts_live_postgres_schema()
 }
 
 async fn recreate_database(pool: &PgPool, database_name: &str) -> Result<(), Box<dyn Error>> {
-    query(&format!("DROP DATABASE IF EXISTS {database_name}"))
-        .execute(pool)
-        .await?;
-    query(&format!("CREATE DATABASE {database_name}"))
-        .execute(pool)
-        .await?;
+    let database_identifier = format!("\"{}\"", database_name.replace('"', "\"\""));
+    query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {database_identifier}"
+    )))
+    .execute(pool)
+    .await?;
+    query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE {database_identifier}"
+    )))
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
