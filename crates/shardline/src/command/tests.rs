@@ -1566,7 +1566,10 @@ fn parse_explicit_hub_tree_recovery() {
 fn parse_bench_rejects_invalid_chunks_and_unrepresentable_assets() {
     for mode in ["e2e", "ingest"] {
         for (chunk, base) in [
+            ("0".to_owned(), "256".to_owned()),
             ("8".to_owned(), "256".to_owned()),
+            ("127".to_owned(), "256".to_owned()),
+            (usize::MAX.to_string(), "256".to_owned()),
             ("129".to_owned(), "256".to_owned()),
             ("128".to_owned(), usize::MAX.to_string()),
         ] {
