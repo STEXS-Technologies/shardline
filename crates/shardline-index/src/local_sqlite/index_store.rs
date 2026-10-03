@@ -1523,66 +1523,109 @@ impl LifecycleStore for LocalIndexStore {
         let mut connection = self.open_connection()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut statement = transaction.prepare(
-            "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
-             FROM shardline_webhook_deliveries
-             WHERE processed_at_unix_seconds < ?1",
-        )?;
-        let rows = statement.query_map(
-            params![u64_to_i64(older_than_unix_seconds)?],
-            super::helpers::webhook_delivery_from_row,
-        )?;
-        let deliveries = collect_rows(rows)?;
-        drop(statement);
-        let operation_ids = deliveries
-            .iter()
-            .map(|delivery| {
-                Ok::<_, LocalIndexStoreError>(
-                    webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
-                        .evidence_operation()?
-                        .operation_id,
+        let cutoff = u64_to_i64(older_than_unix_seconds)?;
+        let batch_size = i64::try_from(INVENTORY_BATCH_SIZE)
+            .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?;
+        let mut purged = 0_u64;
+        let mut cursor: Option<(String, String, String, String)> = None;
+        // Keyset pages follow the composite primary key. The next read seeks
+        // after the preceding page without OFFSET or retaining all deliveries
+        // and evidence. One Immediate transaction keeps every page atomic,
+        // including late verification errors.
+        loop {
+            let deliveries = if let Some((provider, owner, repo, delivery_id)) = &cursor {
+                let mut statement = transaction.prepare(
+                    "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                     FROM shardline_webhook_deliveries
+                     WHERE processed_at_unix_seconds < ?1
+                       AND (provider, owner, repo, delivery_id) > (?2, ?3, ?4, ?5)
+                     ORDER BY provider, owner, repo, delivery_id LIMIT ?6",
+                )?;
+                collect_rows(statement.query_map(
+                    params![cutoff, provider, owner, repo, delivery_id, batch_size],
+                    super::helpers::webhook_delivery_from_row,
+                )?)?
+            } else {
+                let mut statement = transaction.prepare(
+                    "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                     FROM shardline_webhook_deliveries
+                     WHERE processed_at_unix_seconds < ?1
+                     ORDER BY provider, owner, repo, delivery_id LIMIT ?2",
+                )?;
+                collect_rows(statement.query_map(
+                    params![cutoff, batch_size],
+                    super::helpers::webhook_delivery_from_row,
+                )?)?
+            };
+            let Some(last) = deliveries.last() else {
+                break;
+            };
+            cursor = Some((
+                last.provider().as_str().to_owned(),
+                last.owner().to_owned(),
+                last.repo().to_owned(),
+                last.delivery_id().to_owned(),
+            ));
+            purged = purged
+                .checked_add(
+                    u64::try_from(deliveries.len()).map_err(|error| {
+                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
+                    })?,
                 )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let heads = super::helpers::load_latest_verified_event_json_batch(
-            &transaction,
-            shardline_reliability::OperationKind::WebhookDelivery,
-            &operation_ids,
-        )?;
-        for (delivery, operation_id) in deliveries.iter().zip(operation_ids) {
-            let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-            let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
-            let evidence = heads
-                .get(&operation_id)
-                .map(|event| {
-                    shardline_reliability::WebhookDeliveryEvidenceLog::from_head(
-                        serde_json::from_value(event.clone())?,
+                .ok_or_else(|| {
+                    LocalIndexStoreError::IntegerOutOfRange("webhook purge count overflow".into())
+                })?;
+            let operation_ids = deliveries
+                .iter()
+                .map(|delivery| {
+                    Ok::<_, LocalIndexStoreError>(
+                        webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
+                            .evidence_operation()?
+                            .operation_id,
                     )
                 })
-                .transpose()?
-                .unwrap_or_default();
-            let (evidence, evidence_was_empty) =
-                verify_and_append_snapshot_transition(evidence, snapshot, released)?;
-            transaction.execute(
-                "DELETE FROM shardline_webhook_deliveries
-                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
-                params![
-                    delivery.provider().as_str(),
-                    delivery.owner(),
-                    delivery.repo(),
-                    delivery.delivery_id(),
-                ],
+                .collect::<Result<Vec<_>, _>>()?;
+            let heads = super::helpers::load_latest_verified_event_json_batch(
+                &transaction,
+                shardline_reliability::OperationKind::WebhookDelivery,
+                &operation_ids,
             )?;
-            if evidence_was_empty {
-                for event in evidence.events() {
+            for (delivery, operation_id) in deliveries.iter().zip(operation_ids) {
+                let snapshot =
+                    webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+                let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
+                let evidence = heads
+                    .get(&operation_id)
+                    .map(|event| {
+                        shardline_reliability::WebhookDeliveryEvidenceLog::from_head(
+                            serde_json::from_value(event.clone())?,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                let (evidence, evidence_was_empty) =
+                    verify_and_append_snapshot_transition(evidence, snapshot, released)?;
+                transaction.execute(
+                    "DELETE FROM shardline_webhook_deliveries
+                     WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                    params![
+                        delivery.provider().as_str(),
+                        delivery.owner(),
+                        delivery.repo(),
+                        delivery.delivery_id(),
+                    ],
+                )?;
+                if evidence_was_empty {
+                    for event in evidence.events() {
+                        persist_webhook_evidence(&transaction, event)?;
+                    }
+                } else if let Some(event) = evidence.events().last() {
                     persist_webhook_evidence(&transaction, event)?;
                 }
-            } else if let Some(event) = evidence.events().last() {
-                persist_webhook_evidence(&transaction, event)?;
             }
         }
         transaction.commit()?;
-        Ok(u64::try_from(deliveries.len()).unwrap_or(u64::MAX))
+        Ok(purged)
     }
 
     fn provider_repository_state(
@@ -3077,6 +3120,152 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    fn purge_batch_fixture() -> (LocalIndexStore, WebhookDelivery) {
+        let store = make_store();
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let mut last = None;
+        for index in 0..(INVENTORY_BATCH_SIZE * 2 + 1) {
+            let delivery = WebhookDelivery::new(
+                RepositoryProvider::GitHub,
+                format!("owner-{}", index / INVENTORY_BATCH_SIZE),
+                "repo".into(),
+                format!("batch-{:05}", index % INVENTORY_BATCH_SIZE),
+                100,
+            )
+            .unwrap();
+            let snapshot =
+                webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Processed).unwrap();
+            let mut evidence =
+                shardline_reliability::WebhookDeliveryEvidenceLog::baseline(snapshot.clone())
+                    .unwrap();
+            if index == INVENTORY_BATCH_SIZE * 2 {
+                evidence
+                    .record(
+                        webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Released)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                evidence.record(snapshot).unwrap();
+            }
+            transaction.execute(
+                "INSERT INTO shardline_webhook_deliveries(provider,owner,repo,delivery_id,processed_at_unix_seconds) VALUES('github',?1,'repo',?2,100)",
+                params![delivery.owner(),delivery.delivery_id()],
+            ).unwrap();
+            for event in evidence.events() {
+                persist_webhook_evidence(&transaction, event).unwrap();
+            }
+            last = Some(delivery);
+        }
+        transaction.commit().unwrap();
+        (store, last.unwrap())
+    }
+
+    #[test]
+    fn webhook_delivery_purge_batches_count_and_preserve_cutoff_and_retry() {
+        let (store, last) = purge_batch_fixture();
+        for timestamp in [200, 201] {
+            let delivery = WebhookDelivery::new(
+                RepositoryProvider::GitHub,
+                "owner".into(),
+                "repo".into(),
+                format!("fresh-{timestamp}"),
+                timestamp,
+            )
+            .unwrap();
+            assert!(LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap());
+        }
+        // Missing evidence still gets a valid baseline and release transition.
+        let operation = webhook_snapshot(&last, WebhookDeliveryLifecycleState::Processed)
+            .unwrap()
+            .evidence_operation()
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        connection.execute("DELETE FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1", [&operation.operation_id]).unwrap();
+        assert_eq!(
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, 0).unwrap(),
+            0
+        );
+        assert_eq!(
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).unwrap(),
+            u64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap()
+        );
+        assert_eq!(
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).unwrap(),
+            0
+        );
+        let remaining = LifecycleStore::list_webhook_deliveries(&store).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(
+            remaining
+                .iter()
+                .all(|delivery| delivery.processed_at_unix_seconds() >= 200)
+        );
+        assert!(LifecycleStore::record_webhook_delivery(&store, &last).unwrap());
+        assert!(!LifecycleStore::record_webhook_delivery(&store, &last).unwrap());
+    }
+
+    #[test]
+    fn webhook_delivery_purge_late_corruption_rolls_back_every_page() {
+        let (store, last) = purge_batch_fixture();
+        let operation = webhook_snapshot(&last, WebhookDeliveryLifecycleState::Processed)
+            .unwrap()
+            .evidence_operation()
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        let original: String = connection.query_row("SELECT merkle_commit_json FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=2", [&operation.operation_id], |row| row.get(0)).unwrap();
+        let baseline: String = connection.query_row("SELECT merkle_commit_json FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=0", [&operation.operation_id], |row| row.get(0)).unwrap();
+        for sql in [
+            "UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json='{}' WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=0",
+        ] {
+            connection.execute(sql, [&operation.operation_id]).unwrap();
+            assert!(LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).is_err());
+            let rows: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM shardline_webhook_deliveries",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let events: i64 = connection.query_row("SELECT COUNT(*) FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery'", [], |row| row.get(0)).unwrap();
+            assert_eq!(rows, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap());
+            assert_eq!(events, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 3).unwrap());
+            connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json=?1 WHERE operation_kind='WebhookDelivery' AND operation_id=?2 AND sequence=2", params![original,operation.operation_id]).unwrap();
+            connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json=?1 WHERE operation_kind='WebhookDelivery' AND operation_id=?2 AND sequence=0", params![baseline,operation.operation_id]).unwrap();
+        }
+        connection.execute("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=101 WHERE delivery_id=?1 AND owner=?2", params![last.delivery_id(), last.owner()]).unwrap();
+        assert!(LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).is_err());
+        let rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_webhook_deliveries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap());
+    }
+
+    #[test]
+    fn webhook_delivery_purge_rejects_negative_timestamp_without_writes() {
+        let (store, last) = purge_batch_fixture();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .unwrap();
+        connection.execute("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=-1 WHERE delivery_id=?1 AND owner=?2", params![last.delivery_id(), last.owner()]).unwrap();
+        assert!(LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).is_err());
+        let rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_webhook_deliveries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap());
     }
 
     // ── LifecycleStore: provider repository state ──────────────────────────
