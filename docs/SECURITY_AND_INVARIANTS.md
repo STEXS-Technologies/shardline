@@ -43,6 +43,8 @@ These invariants must hold in all builds:
   Missing roots remain absent, and missing-path retries create or prune no directories.
   Removal uses pinned parent descriptors and rejects detected namespace replacements;
   empty-directory pruning preserves nonempty directories and the configured root.
+  Deletion retains a constant number of directory descriptors regardless of key
+  depth; ancestor identity snapshots preserve namespace checks while pruning.
 - A xorb is stored only if its body parses and its hash matches its content-addressed
   key.
 - A shard is registered only if its body parses and all referenced xorbs exist.
