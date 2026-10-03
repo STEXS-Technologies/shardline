@@ -206,6 +206,18 @@ impl Drop for ReadConnection {
 // inventory. Decode and evidence passes finish before any visitor side effect.
 pub(crate) const INVENTORY_BATCH_SIZE: usize = 256;
 
+const WEBHOOK_RETENTION_NEXT_PAGE_SQL: &str = "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                     FROM shardline_webhook_deliveries
+                     WHERE processed_at_unix_seconds < ?1
+                       AND (processed_at_unix_seconds, provider, owner, repo, delivery_id)
+                         > (?2, ?3, ?4, ?5, ?6)
+                     ORDER BY processed_at_unix_seconds, provider, owner, repo, delivery_id LIMIT ?7";
+
+const WEBHOOK_RETENTION_FIRST_PAGE_SQL: &str = "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                     FROM shardline_webhook_deliveries
+                     WHERE processed_at_unix_seconds < ?1
+                     ORDER BY processed_at_unix_seconds, provider, owner, repo, delivery_id LIMIT ?2";
+
 pub(crate) trait InventoryEntry: Sized + Send + 'static {
     const TABLE: &'static str;
     const COLUMNS: &'static str;
@@ -1527,40 +1539,39 @@ impl LifecycleStore for LocalIndexStore {
         let batch_size = i64::try_from(INVENTORY_BATCH_SIZE)
             .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?;
         let mut purged = 0_u64;
-        let mut cursor: Option<(String, String, String, String)> = None;
-        // Keyset pages follow the composite primary key. The next read seeks
-        // after the preceding page without OFFSET or retaining all deliveries
-        // and evidence. One Immediate transaction keeps every page atomic,
+        let mut cursor: Option<(i64, String, String, String, String)> = None;
+        // Keyset pages follow the covering retention index, so retained deliveries
+        // beyond the cutoff are never scanned. Pages retain at most 256 rows
+        // and their evidence. One Immediate transaction keeps every page atomic,
         // including late verification errors.
         loop {
-            let deliveries = if let Some((provider, owner, repo, delivery_id)) = &cursor {
-                let mut statement = transaction.prepare(
-                    "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
-                     FROM shardline_webhook_deliveries
-                     WHERE processed_at_unix_seconds < ?1
-                       AND (provider, owner, repo, delivery_id) > (?2, ?3, ?4, ?5)
-                     ORDER BY provider, owner, repo, delivery_id LIMIT ?6",
-                )?;
-                collect_rows(statement.query_map(
-                    params![cutoff, provider, owner, repo, delivery_id, batch_size],
-                    super::helpers::webhook_delivery_from_row,
-                )?)?
-            } else {
-                let mut statement = transaction.prepare(
-                    "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
-                     FROM shardline_webhook_deliveries
-                     WHERE processed_at_unix_seconds < ?1
-                     ORDER BY provider, owner, repo, delivery_id LIMIT ?2",
-                )?;
-                collect_rows(statement.query_map(
-                    params![cutoff, batch_size],
-                    super::helpers::webhook_delivery_from_row,
-                )?)?
-            };
+            let deliveries =
+                if let Some((processed_at, provider, owner, repo, delivery_id)) = &cursor {
+                    let mut statement = transaction.prepare(WEBHOOK_RETENTION_NEXT_PAGE_SQL)?;
+                    collect_rows(statement.query_map(
+                        params![
+                            cutoff,
+                            processed_at,
+                            provider,
+                            owner,
+                            repo,
+                            delivery_id,
+                            batch_size
+                        ],
+                        super::helpers::webhook_delivery_from_row,
+                    )?)?
+                } else {
+                    let mut statement = transaction.prepare(WEBHOOK_RETENTION_FIRST_PAGE_SQL)?;
+                    collect_rows(statement.query_map(
+                        params![cutoff, batch_size],
+                        super::helpers::webhook_delivery_from_row,
+                    )?)?
+                };
             let Some(last) = deliveries.last() else {
                 break;
             };
             cursor = Some((
+                u64_to_i64(last.processed_at_unix_seconds())?,
                 last.provider().as_str().to_owned(),
                 last.owner().to_owned(),
                 last.repo().to_owned(),
@@ -3122,18 +3133,26 @@ mod tests {
         );
     }
 
-    fn purge_batch_fixture() -> (LocalIndexStore, WebhookDelivery) {
+    fn purge_fixture(count: usize, processed_at: u64) -> (LocalIndexStore, WebhookDelivery) {
         let store = make_store();
         let mut connection = store.open_connection().unwrap();
         let transaction = connection.transaction().unwrap();
         let mut last = None;
-        for index in 0..(INVENTORY_BATCH_SIZE * 2 + 1) {
+        for index in 0..count {
+            // Timestamp order deliberately conflicts with the composite key.
+            // Keep the final record latest for late-page corruption controls.
+            let observed_at = processed_at
+                + if index == count.saturating_sub(1) {
+                    5
+                } else {
+                    (index * 31 % 5) as u64
+                };
             let delivery = WebhookDelivery::new(
                 RepositoryProvider::GitHub,
                 format!("owner-{}", index / INVENTORY_BATCH_SIZE),
                 "repo".into(),
                 format!("batch-{:05}", index % INVENTORY_BATCH_SIZE),
-                100,
+                observed_at,
             )
             .unwrap();
             let snapshot =
@@ -3141,7 +3160,7 @@ mod tests {
             let mut evidence =
                 shardline_reliability::WebhookDeliveryEvidenceLog::baseline(snapshot.clone())
                     .unwrap();
-            if index == INVENTORY_BATCH_SIZE * 2 {
+            if index == count.saturating_sub(1) {
                 evidence
                     .record(
                         webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Released)
@@ -3151,8 +3170,8 @@ mod tests {
                 evidence.record(snapshot).unwrap();
             }
             transaction.execute(
-                "INSERT INTO shardline_webhook_deliveries(provider,owner,repo,delivery_id,processed_at_unix_seconds) VALUES('github',?1,'repo',?2,100)",
-                params![delivery.owner(),delivery.delivery_id()],
+                "INSERT INTO shardline_webhook_deliveries(provider,owner,repo,delivery_id,processed_at_unix_seconds) VALUES('github',?1,'repo',?2,?3)",
+                params![delivery.owner(),delivery.delivery_id(),u64_to_i64(observed_at).unwrap()],
             ).unwrap();
             for event in evidence.events() {
                 persist_webhook_evidence(&transaction, event).unwrap();
@@ -3164,8 +3183,37 @@ mod tests {
     }
 
     #[test]
+    fn webhook_delivery_noop_purge_work_does_not_grow_with_retained_rows() {
+        let mut steps = Vec::new();
+        for count in [100, 2000] {
+            let (store, _) = purge_fixture(count, 1000);
+            let connection = store.open_connection().unwrap();
+            let mut statement = connection
+                .prepare(WEBHOOK_RETENTION_FIRST_PAGE_SQL)
+                .unwrap();
+            {
+                let mut rows = statement
+                    .query(params![200, i64::try_from(INVENTORY_BATCH_SIZE).unwrap()])
+                    .unwrap();
+                assert!(rows.next().unwrap().is_none());
+            }
+            steps.push(statement.get_status(rusqlite::StatementStatus::VmStep));
+            assert_eq!(
+                LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).unwrap(),
+                0
+            );
+        }
+        // Without the retention index/order, the valid larger inventory takes
+        // thousands of VM steps even though no row is eligible for retention.
+        assert!(
+            steps[1] <= steps[0] + 20,
+            "no-op query work grew: {steps:?}"
+        );
+    }
+
+    #[test]
     fn webhook_delivery_purge_batches_count_and_preserve_cutoff_and_retry() {
-        let (store, last) = purge_batch_fixture();
+        let (store, last) = purge_fixture(INVENTORY_BATCH_SIZE * 2 + 1, 100);
         for timestamp in [200, 201] {
             let delivery = WebhookDelivery::new(
                 RepositoryProvider::GitHub,
@@ -3209,7 +3257,7 @@ mod tests {
 
     #[test]
     fn webhook_delivery_purge_late_corruption_rolls_back_every_page() {
-        let (store, last) = purge_batch_fixture();
+        let (store, last) = purge_fixture(INVENTORY_BATCH_SIZE * 2 + 1, 100);
         let operation = webhook_snapshot(&last, WebhookDeliveryLifecycleState::Processed)
             .unwrap()
             .evidence_operation()
@@ -3237,7 +3285,7 @@ mod tests {
             connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json=?1 WHERE operation_kind='WebhookDelivery' AND operation_id=?2 AND sequence=2", params![original,operation.operation_id]).unwrap();
             connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json=?1 WHERE operation_kind='WebhookDelivery' AND operation_id=?2 AND sequence=0", params![baseline,operation.operation_id]).unwrap();
         }
-        connection.execute("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=101 WHERE delivery_id=?1 AND owner=?2", params![last.delivery_id(), last.owner()]).unwrap();
+        connection.execute("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=106 WHERE delivery_id=?1 AND owner=?2", params![last.delivery_id(), last.owner()]).unwrap();
         assert!(LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).is_err());
         let rows: i64 = connection
             .query_row(
@@ -3251,7 +3299,7 @@ mod tests {
 
     #[test]
     fn webhook_delivery_purge_rejects_negative_timestamp_without_writes() {
-        let (store, last) = purge_batch_fixture();
+        let (store, last) = purge_fixture(INVENTORY_BATCH_SIZE * 2 + 1, 100);
         let connection = store.open_connection().unwrap();
         connection
             .execute_batch("PRAGMA ignore_check_constraints=ON")
