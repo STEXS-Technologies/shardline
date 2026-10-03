@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     error::Error as StdError,
     ffi::OsStr,
     fs::{self, OpenOptions},
@@ -132,7 +132,7 @@ pub(crate) fn load_verified_event_json(
 /// replay remains available through [`load_verified_event_json`] for fsck and
 /// repair; current-state reads use this bounded boundary.
 pub(crate) fn load_latest_verified_event_json(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     operation_kind: OperationKind,
     operation_id: &str,
 ) -> Result<Option<Value>, LocalIndexStoreError> {
@@ -209,19 +209,36 @@ pub(crate) fn load_latest_verified_event_json(
 }
 
 pub(crate) fn load_latest_verified_event_json_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     operation_kind: OperationKind,
     operation_ids: &[String],
 ) -> Result<HashMap<String, Value>, LocalIndexStoreError> {
-    if operation_ids.is_empty() {
-        return Ok(HashMap::new());
+    // Keep each query below SQLite's traditional 999-variable ceiling (one
+    // additional parameter identifies the operation kind). All chunks share
+    // the caller's transaction and run the same evidence verification.
+    const IDS_PER_QUERY: usize = 900;
+    let mut heads = HashMap::with_capacity(operation_ids.len());
+    for ids in operation_ids.chunks(IDS_PER_QUERY) {
+        heads.extend(load_latest_verified_event_json_chunk(
+            transaction,
+            operation_kind,
+            ids,
+        )?);
     }
-    let placeholders = (0..operation_ids.len())
-        .map(|index| format!("?{}", index.saturating_add(2)))
+    Ok(heads)
+}
+
+// Drive the full composite-key seek from bounded requested IDs. Correlating
+// MAX(sequence) to an outer historical event instead scans every event for
+// that ID and repeats the maximum lookup for each candidate row.
+fn latest_verified_event_json_batch_sql(operation_count: usize) -> String {
+    let requested = (0..operation_count)
+        .map(|index| format!("(?{})", index.saturating_add(2)))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!(
-        "SELECT latest.operation_id, latest.sequence, latest.event_json,
+    format!(
+        "WITH requested(operation_id) AS (VALUES {requested})
+         SELECT latest.operation_id, latest.sequence, latest.event_json,
                 latest.merkle_commit_json,
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -239,19 +256,33 @@ pub(crate) fn load_latest_verified_event_json_batch(
                     ORDER BY previous.sequence DESC
                     LIMIT 1
                 ) END
-         FROM shardline_reliability_events AS latest
+         FROM requested CROSS JOIN shardline_reliability_events AS latest
          WHERE latest.operation_kind = ?1
-           AND latest.operation_id IN ({placeholders})
+           AND latest.operation_id = requested.operation_id
            AND latest.sequence = (
                SELECT MAX(current.sequence)
                FROM shardline_reliability_events AS current
                WHERE current.operation_kind = ?1
-                 AND current.operation_id = latest.operation_id
+                 AND current.operation_id = requested.operation_id
            )"
-    );
+    )
+}
+
+fn load_latest_verified_event_json_chunk(
+    transaction: &Connection,
+    operation_kind: OperationKind,
+    operation_ids: &[String],
+) -> Result<HashMap<String, Value>, LocalIndexStoreError> {
+    if operation_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // Deduplicate requested IDs so the seeks preserve IN membership semantics
+    // and avoid repeated Merkle verification.
+    let requested_ids = operation_ids.iter().collect::<BTreeSet<_>>();
+    let sql = latest_verified_event_json_batch_sql(requested_ids.len());
     let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
     parameters.push(operation_kind.as_str().to_owned());
-    parameters.extend(operation_ids.iter().cloned());
+    parameters.extend(requested_ids.into_iter().cloned());
     let mut statement = transaction.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
         Ok((
@@ -662,7 +693,7 @@ pub(crate) fn quarantine_snapshot(
 }
 
 pub(crate) fn load_quarantine_evidence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     object_key: &str,
 ) -> Result<QuarantineEvidenceLog, LocalIndexStoreError> {
     let rows = load_latest_verified_event_json(
@@ -679,7 +710,7 @@ pub(crate) fn load_quarantine_evidence(
 }
 
 pub(crate) fn load_quarantine_evidence_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     object_keys: &[String],
 ) -> Result<HashMap<String, QuarantineEvidenceLog>, LocalIndexStoreError> {
     let heads = load_latest_verified_event_json_batch(
@@ -723,7 +754,7 @@ pub(crate) fn retention_snapshot(
 }
 
 pub(crate) fn load_retention_evidence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     object_key: &str,
 ) -> Result<RetentionEvidenceLog, LocalIndexStoreError> {
     let rows = load_latest_verified_event_json(
@@ -740,7 +771,7 @@ pub(crate) fn load_retention_evidence(
 }
 
 pub(crate) fn load_retention_evidence_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     object_keys: &[String],
 ) -> Result<HashMap<String, RetentionEvidenceLog>, LocalIndexStoreError> {
     let heads = load_latest_verified_event_json_batch(
@@ -783,7 +814,7 @@ pub(crate) fn webhook_snapshot(
 }
 
 pub(crate) fn load_webhook_evidence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     delivery: &WebhookDelivery,
 ) -> Result<WebhookDeliveryEvidenceLog, LocalIndexStoreError> {
     let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
@@ -803,7 +834,7 @@ pub(crate) fn load_webhook_evidence(
 }
 
 pub(crate) fn load_webhook_evidence_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     deliveries: &[WebhookDelivery],
 ) -> Result<HashMap<String, WebhookDeliveryEvidenceLog>, LocalIndexStoreError> {
     let operation_ids = deliveries
@@ -1096,7 +1127,7 @@ pub(crate) fn provider_evidence_operation_id(snapshot: &ProviderLifecycleSnapsho
 }
 
 pub(crate) fn load_provider_evidence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     snapshot: &ProviderLifecycleSnapshot,
 ) -> Result<ProviderEvidenceLog, LocalIndexStoreError> {
     let operation_id = provider_evidence_operation_id(snapshot);
@@ -1111,7 +1142,7 @@ pub(crate) fn load_provider_evidence(
 }
 
 pub(crate) fn load_provider_evidence_batch(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     snapshots: &[ProviderLifecycleSnapshot],
 ) -> Result<HashMap<String, ProviderEvidenceLog>, LocalIndexStoreError> {
     let operation_ids = snapshots
@@ -1191,11 +1222,18 @@ pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), Loca
     // Re-applying `journal_mode=WAL` for every request connection turns a
     // harmless setup step into a write-style pragma that can race with active
     // readers under concurrent protocol traffic.
-    let journal_mode: String =
-        connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-    if !journal_mode.eq_ignore_ascii_case("wal") {
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-    }
+    // SQLite can return SQLITE_BUSY immediately when concurrent cold
+    // connections both try to upgrade their journal-mode read locks. Retrying
+    // the whole read/set operation releases that lock and observes a peer's
+    // successful WAL transition, including peers in another process.
+    retry_sqlite_busy(|| {
+        let journal_mode: String =
+            connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            connection.pragma_update(None, "journal_mode", "WAL")?;
+        }
+        Ok(())
+    })?;
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "trusted_schema", "OFF")?;
@@ -1236,28 +1274,23 @@ pub(crate) fn ensure_local_schema_migrations_table(
 pub(crate) fn apply_pending_local_migrations(
     connection: &mut Connection,
 ) -> Result<(), LocalIndexStoreError> {
-    let mut applied_versions = Vec::new();
-    {
-        let mut statement = connection.prepare(&format!(
-            "SELECT version
-             FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE}
-             ORDER BY version"
-        ))?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        for row in rows {
-            applied_versions.push(row?);
-        }
-    }
-
     for migration in LOCAL_SQLITE_MIGRATIONS {
-        if applied_versions
-            .iter()
-            .any(|version| version == migration.version)
-        {
+        // Check history after taking the SQLite write lock. A process-local
+        // coordinator cannot protect against another process applying the same
+        // migration between an unlocked history read and this transaction.
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let applied = transaction
+            .query_row(
+                &format!("SELECT 1 FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE} WHERE version = ?1"),
+                [migration.version],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if applied {
             continue;
         }
-
-        let transaction = connection.transaction()?;
         transaction.execute_batch(migration.up_sql)?;
         transaction.execute(
             &format!(
@@ -2797,6 +2830,7 @@ pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         ),
         other @ LocalIndexStoreError::Io(_)
         | other @ LocalIndexStoreError::Sqlite(_)
+        | other @ LocalIndexStoreError::HubTreeRecoveryRequired(_)
         | other @ LocalIndexStoreError::Json(_)
         | other @ LocalIndexStoreError::MetadataLengthMismatch { .. }
         | other @ LocalIndexStoreError::HashParse(_)
@@ -3571,5 +3605,146 @@ mod tests {
         assert!(repaired > 0);
         verify_reliability_events(&connection)
             .expect("explicit Merkle repair should restore the chain");
+    }
+
+    #[test]
+    fn evidence_head_batch_vm_work_does_not_scale_with_history() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE shardline_reliability_events (
+                operation_kind TEXT NOT NULL, operation_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL, event_json TEXT NOT NULL,
+                merkle_commit_json TEXT,
+                PRIMARY KEY(operation_kind, operation_id, sequence));
+             CREATE INDEX missing_merkle ON shardline_reliability_events
+                (operation_kind, operation_id, sequence)
+                WHERE merkle_commit_json IS NULL;",
+            )
+            .unwrap();
+        let ids = (0..10)
+            .map(|index| format!("objects/{index}"))
+            .chain(std::iter::once("objects/missing".to_owned()))
+            .collect::<Vec<_>>();
+        for id in ids.iter().take(10) {
+            connection.execute("INSERT INTO shardline_reliability_events VALUES ('RetentionHold', ?1, 1, '{}', '{}')", [id]).unwrap();
+        }
+        let read_steps = || {
+            let sql = latest_verified_event_json_batch_sql(ids.len());
+            let mut parameters = vec!["RetentionHold".to_owned()];
+            parameters.extend(ids.clone());
+            let mut statement = connection.prepare(&sql).unwrap();
+            let mut rows = statement
+                .query(params_from_iter(parameters.iter()))
+                .unwrap();
+            let mut count = 0;
+            while rows.next().unwrap().is_some() {
+                count += 1;
+            }
+            drop(rows);
+            assert_eq!(count, 10);
+            statement.get_status(rusqlite::StatementStatus::VmStep)
+        };
+        let short_history_steps = read_steps();
+        connection.execute_batch("BEGIN").unwrap();
+        {
+            let mut insert = connection.prepare("INSERT INTO shardline_reliability_events VALUES ('RetentionHold', ?1, ?2, '{}', '{}')").unwrap();
+            for id in ids.iter().take(10) {
+                for sequence in 2..=2000 {
+                    insert.execute(params![id, sequence]).unwrap();
+                }
+            }
+        }
+        connection.execute_batch("COMMIT").unwrap();
+        let long_history_steps = read_steps();
+        // Index-tree depth can change; inspecting all historical rows cannot.
+        assert!(
+            long_history_steps < short_history_steps * 2 + 500,
+            "head query work grew with history: {short_history_steps} -> {long_history_steps}"
+        );
+    }
+
+    fn evidence_head_batch_parity_fixture() -> (tempfile::TempDir, Connection, String) {
+        use crate::{LifecycleStore, RetentionHold};
+        let directory = tempfile::tempdir().unwrap();
+        let store = super::super::LocalIndexStore::new(directory.path().to_path_buf()).unwrap();
+        let object_key = ObjectKey::parse("objects/head").unwrap();
+        for version in 0..3 {
+            let hold = RetentionHold::new(
+                object_key.clone(),
+                format!("version-{version}"),
+                100 + version,
+                None,
+            )
+            .unwrap();
+            LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
+        }
+        let connection = store.open_connection().unwrap();
+        (directory, connection, object_key.as_str().to_owned())
+    }
+
+    #[test]
+    fn evidence_head_batch_handles_missing_duplicates_chunks_and_kind_isolation() {
+        let (_directory, connection, id) = evidence_head_batch_parity_fixture();
+        let expected =
+            load_latest_verified_event_json(&connection, OperationKind::RetentionHold, &id)
+                .unwrap()
+                .unwrap();
+        connection.execute(
+            "INSERT INTO shardline_reliability_events(operation_kind,operation_id,sequence,event_json,created_at_unix_seconds,merkle_commit_json)
+             VALUES('Upload', ?1, 99999, 'invalid unrelated kind', 0, NULL)", [&id]).unwrap();
+        assert!(
+            load_latest_verified_event_json_batch(&connection, OperationKind::RetentionHold, &[])
+                .unwrap()
+                .is_empty()
+        );
+        for ids in [
+            vec!["missing".to_owned(), id.clone(), id.clone()],
+            vec![id.clone(); 901],
+            (0..901)
+                .map(|index| format!("missing-{index}"))
+                .chain(std::iter::once(id.clone()))
+                .collect(),
+        ] {
+            let heads = load_latest_verified_event_json_batch(
+                &connection,
+                OperationKind::RetentionHold,
+                &ids,
+            )
+            .unwrap();
+            assert_eq!(heads.len(), 1);
+            assert_eq!(heads.get(&id), Some(&expected));
+        }
+    }
+
+    #[test]
+    fn evidence_head_batch_preserves_fail_closed_errors_for_heads_and_predecessors() {
+        let (_directory, connection, id) = evidence_head_batch_parity_fixture();
+        let latest: i64 = connection.query_row(
+            "SELECT MAX(sequence) FROM shardline_reliability_events WHERE operation_kind='RetentionHold' AND operation_id=?1",
+            [&id], |row| row.get(0)).unwrap();
+        for mutation in [
+            "UPDATE shardline_reliability_events SET event_json='invalid JSON' WHERE operation_kind='RetentionHold' AND operation_id=?1 AND sequence=?2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='RetentionHold' AND operation_id=?1 AND sequence=?2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json='{\"tampered\":true}' WHERE operation_kind='RetentionHold' AND operation_id=?1 AND sequence=?2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='RetentionHold' AND operation_id=?1 AND sequence<?2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json='{\"tampered\":true}' WHERE operation_kind='RetentionHold' AND operation_id=?1 AND sequence=?2-1",
+        ] {
+            connection.execute_batch("SAVEPOINT corruption").unwrap();
+            connection.execute(mutation, params![id, latest]).unwrap();
+            let single =
+                load_latest_verified_event_json(&connection, OperationKind::RetentionHold, &id)
+                    .expect_err("single fails closed");
+            let batch = load_latest_verified_event_json_batch(
+                &connection,
+                OperationKind::RetentionHold,
+                std::slice::from_ref(&id),
+            )
+            .expect_err("batch fails closed");
+            assert_eq!(format!("{single:?}"), format!("{batch:?}"), "{mutation}");
+            connection
+                .execute_batch("ROLLBACK TO corruption; RELEASE corruption")
+                .unwrap();
+        }
     }
 }

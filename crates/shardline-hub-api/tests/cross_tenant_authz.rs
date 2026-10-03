@@ -196,6 +196,144 @@ fn request(method: &str, uri: &str, headers: HeaderMap, body: Body) -> Request<B
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_content_commits_in_two_repositories_keep_independent_trees() {
+    let (_tmp, state) = build_state();
+    for name in ["alice/own", "bob/own"] {
+        state
+            .store
+            .create_repo(HubRepoType::Model, name, true)
+            .unwrap();
+    }
+    let app = shardline_hub_api::hub_routes(state.clone(), true);
+    for (owner, path) in [("alice", "private.txt"), ("bob", "attacker.txt")] {
+        let body = format!(
+            "{{\"header\":{{\"message\":\"same message\"}}}}\n{{\"file\":{{\"path\":\"{path}\",\"content\":\"aGVsbG8=\"}}}}\n"
+        );
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                &format!("/api/models/{owner}/own/commit/main"),
+                ndjson_headers(&format!("{owner}:own:write")),
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let alice_sha = state
+        .store
+        .resolve_revision("alice/own", "main")
+        .unwrap()
+        .unwrap();
+    let bob_sha = state
+        .store
+        .resolve_revision("bob/own", "main")
+        .unwrap()
+        .unwrap();
+    let alice_paths: Vec<_> = state
+        .store
+        .get_files(&alice_sha)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    let bob_paths: Vec<_> = state
+        .store
+        .get_files(&bob_sha)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(alice_paths, ["private.txt"]);
+    assert_eq!(bob_paths, ["attacker.txt"]);
+    assert_ne!(alice_sha, bob_sha);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_different_delete_cannot_change_a_published_commit_tree() {
+    let (_tmp, state) = build_state();
+    state
+        .store
+        .create_repo(HubRepoType::Model, "alice/own", true)
+        .unwrap();
+    let app = shardline_hub_api::hub_routes(state.clone(), true);
+    let initial = r#"{"header":{"message":"initial"}}
+{"file":{"path":"a.txt","content":"YQ=="}}
+{"file":{"path":"b.txt","content":"Yg=="}}
+"#;
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/models/alice/own/commit/main",
+            ndjson_headers("alice:own:write"),
+            Body::from(initial),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let parent = state
+        .store
+        .resolve_revision("alice/own", "main")
+        .unwrap()
+        .unwrap();
+    let delete_a =
+        "{\"header\":{\"message\":\"delete\"}}\n{\"deletedEntry\":{\"path\":\"a.txt\"}}\n";
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/models/alice/own/commit/main",
+            ndjson_headers("alice:own:write"),
+            Body::from(delete_a),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let published = state
+        .store
+        .resolve_revision("alice/own", "main")
+        .unwrap()
+        .unwrap();
+    let delete_b =
+        "{\"header\":{\"message\":\"delete\"}}\n{\"deletedEntry\":{\"path\":\"b.txt\"}}\n";
+    let response = app
+        .oneshot(request(
+            "POST",
+            &format!("/api/models/alice/own/commit/{parent}"),
+            ndjson_headers("alice:own:write"),
+            Body::from(delete_b),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !response.status().is_success(),
+        "a stale parent must be rejected"
+    );
+    assert_eq!(
+        state
+            .store
+            .resolve_revision("alice/own", "main")
+            .unwrap()
+            .unwrap(),
+        published
+    );
+    let paths: Vec<_> = state
+        .store
+        .get_files(&published)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(
+        paths,
+        ["b.txt"],
+        "failed stale commit must preserve the published tree"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_repo_commit_succeeds() {
     let (_tmp, state) = build_state();
     seed_repo(&state, "alice/own");

@@ -132,6 +132,7 @@ pub mod dedup;
 pub mod error;
 pub mod group;
 pub mod hash;
+mod local_output;
 pub mod reconstruction;
 pub mod retry;
 pub mod revisions;

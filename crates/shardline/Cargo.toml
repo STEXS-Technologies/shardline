@@ -30,6 +30,9 @@ name = "shardline"
 path = "src/main.rs"
 
 [dependencies]
+blake3.workspace = true
+sha2.workspace = true
+shardline-protocol-adapters.workspace = true
 bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
 dotenvy.workspace = true
@@ -44,6 +47,7 @@ sdx.workspace = true
 shardline-auth.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
+shardline-reliability.workspace = true
 shardline-server.workspace = true
 shardline-storage = { workspace = true, features = ["s3"] }
 sqlx = { workspace = true, features = [
@@ -52,6 +56,7 @@ sqlx = { workspace = true, features = [
     "postgres",
 ] }
 thiserror.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "test-util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

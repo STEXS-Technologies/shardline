@@ -17,7 +17,7 @@ use shardline_storage::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared, fd_child_path,
     open_directory_chain as open_directory_chain_shared, open_new_file as open_new_file_shared,
-    remove_at, remove_if_present, rename_at, temporary_file_name,
+    remove_at, remove_if_present, rename_at, sync_parent_directory, temporary_file_name,
 };
 
 #[cfg(test)]
@@ -80,6 +80,123 @@ fn take_matching_local_write_hook(
 #[cfg(not(test))]
 const fn run_before_local_write_hook(_path: &Path) {}
 
+/// Reject report destinations that overlap persistent deployment state before any
+/// server operation or output-directory creation. Ordinary reports under the root
+/// remain valid destinations.
+pub(crate) fn validate_deployment_output(
+    config: &shardline_server::ServerConfig,
+    output: &Path,
+) -> io::Result<()> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    crate::local_path::ensure_directory_path_components_are_not_symlinked(parent)?;
+    ensure_existing_target_is_regular_or_missing(output)?;
+    let root = resolved_output_path(config.root_dir())?;
+    let output = resolved_output_path(output)?;
+    let state_directories = [
+        "chunks",
+        "files",
+        "file_versions",
+        "gc",
+        "hub",
+        ".resource-locks",
+        "tmp",
+    ];
+    let state_files = [
+        "metadata.sqlite3",
+        "metadata.sqlite3-wal",
+        "metadata.sqlite3-shm",
+        "metadata.sqlite3-journal",
+        ".gc-write-barrier.lock",
+    ];
+    for state in state_directories {
+        let reserved = resolved_output_path(&root.join(state))?;
+        if output.starts_with(&reserved) || reserved.starts_with(&output) {
+            return Err(reserved_deployment_output_error());
+        }
+    }
+    for state in state_files {
+        if output.starts_with(resolved_output_path(&root.join(state))?) {
+            return Err(reserved_deployment_output_error());
+        }
+    }
+    Ok(())
+}
+
+/// Validate all report destinations before processing, rejecting paths that
+/// would replace each other or turn another destination's parent into a file.
+pub(crate) fn validate_deployment_outputs(
+    config: &shardline_server::ServerConfig,
+    outputs: &[&Path],
+) -> io::Result<()> {
+    let mut resolved = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        validate_deployment_output(config, output)?;
+        let path = resolved_output_path(output)?;
+        if resolved
+            .iter()
+            .any(|previous: &PathBuf| path.starts_with(previous) || previous.starts_with(&path))
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "report output destinations must not overlap each other",
+            ));
+        }
+        resolved.push(path);
+    }
+    Ok(())
+}
+
+fn reserved_deployment_output_error() -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidInput,
+        "report output must not overlap reserved deployment state",
+    )
+}
+
+// Resolve existing ancestors without creating directories. This also catches
+// aliases into state trees and protects names whose directories do not yet exist.
+fn resolved_output_path(path: &Path) -> io::Result<PathBuf> {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    let mut ancestor = normalized.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let name = ancestor.file_name().ok_or_else(invalid_output_path_error)?;
+                missing.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(invalid_output_path_error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Writes one local CLI output file through an anchored temporary path.
 ///
 /// # Errors
@@ -88,35 +205,9 @@ const fn run_before_local_write_hook(_path: &Path) {}
 /// output path is symlinked or otherwise non-regular, or the parent directory changes before
 /// the final commit completes.
 pub fn write_output_bytes(path: &Path, bytes: &[u8], create_parent: bool) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut writer = AtomicOutputFile::create(path, create_parent)?;
-        writer.write_all(bytes)?;
-        writer.commit()
-    }
-
-    #[cfg(not(unix))]
-    {
-        if create_parent {
-            ensure_parent_directory(path)?;
-        }
-        // Reject if the output path is a symlink to prevent write-through-symlink attacks
-        if path.exists() || path.symlink_metadata().is_ok() {
-            let meta = path.symlink_metadata().map_err(|e| {
-                io::Error::new(e.kind(), format!("failed to stat output path: {e}"))
-            })?;
-            if meta.file_type().is_symlink() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "output path {} is a symlink; refusing to follow",
-                        path.display()
-                    ),
-                ));
-            }
-        }
-        fs::write(path, bytes)
-    }
+    let mut writer = AtomicOutputFile::create(path, create_parent)?;
+    writer.write_all(bytes)?;
+    writer.commit()
 }
 
 pub(crate) fn remove_output_file_if_present(path: &Path) -> io::Result<bool> {
@@ -159,6 +250,53 @@ fn ensure_parent_directory(path: &Path) -> io::Result<()> {
     fs::create_dir_all(parent)
 }
 
+#[cfg(not(unix))]
+pub(crate) struct AtomicOutputFile {
+    temporary: tempfile::NamedTempFile,
+    final_path: PathBuf,
+}
+
+#[cfg(not(unix))]
+impl AtomicOutputFile {
+    pub(crate) fn create(path: &Path, create_parent: bool) -> io::Result<Self> {
+        if create_parent {
+            ensure_parent_directory(path)?;
+        }
+        ensure_existing_target_is_regular_or_missing(path)?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        Ok(Self {
+            temporary,
+            final_path: path.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn commit(mut self) -> io::Result<()> {
+        self.temporary.flush()?;
+        self.temporary.as_file().sync_all()?;
+        run_before_local_write_hook(&self.final_path);
+        ensure_existing_target_is_regular_or_missing(&self.final_path)?;
+        self.temporary
+            .persist(&self.final_path)
+            .map_err(|error| error.error)?;
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+impl Write for AtomicOutputFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.temporary.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.temporary.flush()
+    }
+}
+
 #[cfg(unix)]
 pub(crate) struct AtomicOutputFile {
     file: File,
@@ -170,6 +308,10 @@ pub(crate) struct AtomicOutputFile {
 
 #[cfg(unix)]
 impl AtomicOutputFile {
+    pub(crate) fn try_clone_file(&self) -> io::Result<File> {
+        self.file.try_clone()
+    }
+
     pub(crate) fn create(path: &Path, create_parent: bool) -> io::Result<Self> {
         let anchored = open_anchored_target(path, create_parent)?;
         let final_path = anchored.final_path();
@@ -189,6 +331,7 @@ impl AtomicOutputFile {
 
     pub(crate) fn commit(mut self) -> io::Result<()> {
         self.file.flush()?;
+        self.file.sync_all()?;
         run_before_local_write_hook(&self.anchored.logical_path());
         ensure_existing_target_is_regular_or_missing(&self.final_path)?;
         let temp_name = self
@@ -200,6 +343,7 @@ impl AtomicOutputFile {
             temp_name,
             self.anchored.file_name(),
         )?;
+        sync_parent_directory(&self.anchored)?;
         if let Err(error) = ensure_parent_path_matches_anchor(&self.anchored) {
             drop(remove_at(
                 self.anchored.parent_dir(),
@@ -290,7 +434,6 @@ fn open_new_file(path: &Path) -> io::Result<File> {
     open_new_file_shared(path, anchored_path_options().file_mode)
 }
 
-#[cfg(unix)]
 fn ensure_existing_target_is_regular_or_missing(path: &Path) -> io::Result<()> {
     match symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(()),
@@ -325,12 +468,20 @@ fn invalid_output_path_error() -> io::Error {
 
 /// Prints an error and its full source chain to stderr.
 pub fn print_error_chain(error: &dyn Error) {
-    eprintln!("{error}");
+    let _output_result = write_error_chain(&mut io::stderr().lock(), error);
+}
+
+pub(crate) fn write_error_chain(
+    writer: &mut (impl Write + ?Sized),
+    error: &dyn Error,
+) -> io::Result<()> {
+    writeln!(writer, "{error}")?;
     let mut source = error.source();
     while let Some(next) = source {
-        eprintln!("caused by: {next}");
+        writeln!(writer, "caused by: {next}")?;
         source = next.source();
     }
+    writer.flush()
 }
 
 #[cfg(test)]
@@ -343,6 +494,54 @@ mod tests {
         effective_parent_path, remove_output_file_if_present, set_before_local_write_hook,
         write_output_bytes,
     };
+
+    #[test]
+    fn deployment_outputs_reserve_state_even_before_it_exists() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("deployment");
+        let config = crate::config::load_server_config(Some(&root), None).unwrap();
+        for name in [
+            "metadata.sqlite3",
+            "metadata.sqlite3-wal",
+            "metadata.sqlite3-shm",
+            "metadata.sqlite3-journal",
+            "metadata.sqlite3/nested.json",
+            ".gc-write-barrier.lock",
+            "chunks/aa/object",
+            "files/record.json",
+            "file_versions/record.json",
+            "gc/quarantine.json",
+            "hub/metadata.sqlite3",
+            ".resource-locks/resource.lock",
+            "tmp/lfs-patch/state",
+        ] {
+            let result = super::validate_deployment_output(&config, &root.join(name));
+            assert!(
+                matches!(result, Err(error) if error.kind() == ErrorKind::InvalidInput),
+                "{name}"
+            );
+        }
+        assert!(
+            super::validate_deployment_output(&config, &root.join("reports/retention.json"))
+                .is_ok()
+        );
+        assert!(super::validate_deployment_output(&config, &root.join("manifest.json")).is_ok());
+        assert!(!root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deployment_outputs_detect_aliased_state_directories() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("deployment");
+        std::fs::create_dir_all(root.join("chunks")).unwrap();
+        let alias = sandbox.path().join("alias");
+        symlink(root.join("chunks"), &alias).unwrap();
+        let config = crate::config::load_server_config(Some(&root), None).unwrap();
+        assert!(
+            super::validate_deployment_output(&config, &alias.join("nested/report.json")).is_err()
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -640,5 +839,67 @@ mod tests {
         }
 
         super::print_error_chain(&NoSourceError);
+    }
+    #[test]
+    fn uncommitted_stream_preserves_previous_output_and_cleans_temporary_file() {
+        use std::io::Write;
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("output.json");
+        std::fs::write(&output, b"previous").unwrap();
+        {
+            let mut writer = super::AtomicOutputFile::create(&output, false).unwrap();
+            writer.write_all(b"incomplete new output").unwrap();
+        }
+        assert_eq!(std::fs::read(output).unwrap(), b"previous");
+        assert_eq!(std::fs::read_dir(sandbox.path()).unwrap().count(), 1);
+    }
+    struct FailingDiagnosticWriter {
+        fail_write: bool,
+        error_kind: std::io::ErrorKind,
+        bytes: Vec<u8>,
+    }
+
+    impl std::io::Write for FailingDiagnosticWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                return Err(std::io::Error::from(self.error_kind));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(self.error_kind))
+        }
+    }
+
+    #[test]
+    fn error_chain_writer_preserves_details_and_propagates_write_and_flush_failures() {
+        let error = ChainedError {
+            message: "outer error",
+            source: Some(Box::new(TestError("inner cause"))),
+        };
+        let mut bytes = Vec::new();
+        super::write_error_chain(&mut bytes, &error).unwrap();
+        assert_eq!(bytes, b"outer error\ncaused by: inner cause\n");
+        for error_kind in [
+            std::io::ErrorKind::StorageFull,
+            std::io::ErrorKind::BrokenPipe,
+        ] {
+            for fail_write in [true, false] {
+                let mut writer = FailingDiagnosticWriter {
+                    fail_write,
+                    error_kind,
+                    bytes: Vec::new(),
+                };
+                let returned = super::write_error_chain(&mut writer, &error).unwrap_err();
+                assert_eq!(returned.kind(), error_kind);
+                if fail_write {
+                    assert!(writer.bytes.is_empty());
+                } else {
+                    assert_eq!(writer.bytes, bytes);
+                }
+            }
+        }
     }
 }

@@ -1,7 +1,7 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -19,7 +19,65 @@ use super::{
     LocalIndexStoreError, helpers,
 };
 
-static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+// Hold the registry only while finding the root's coordinator. SQLite I/O and
+// cold bootstrap must never block connections for an unrelated database.
+type LocalDatabaseInitialization = Arc<Mutex<bool>>;
+// Bound coordinators for historical roots, while retaining every coordinator
+// currently owned by an initializing or waiting caller. New-root churn prunes
+// in batches; warm lookups never scan the registry.
+const MAX_CACHED_LOCAL_DATABASES: usize = 1024;
+const LOCAL_DATABASE_CACHE_PRUNE_TARGET: usize = MAX_CACHED_LOCAL_DATABASES / 2;
+
+#[derive(Default)]
+struct LocalDatabaseInitializationCache {
+    databases: HashMap<PathBuf, LocalDatabaseInitialization>,
+}
+
+impl LocalDatabaseInitializationCache {
+    fn get_or_insert(&mut self, path: &Path) -> LocalDatabaseInitialization {
+        if let Some(initialization) = self.databases.get(path) {
+            return Arc::clone(initialization);
+        }
+        if self.databases.len() >= MAX_CACHED_LOCAL_DATABASES {
+            let mut retained_idle = 0_usize;
+            // Only the registry owns an idle coordinator. Never evict active
+            // or waiting callers, even when their count exceeds the cache cap.
+            // This scan costs O(active + cached roots) on threshold insertions;
+            // batches amortize scans across ordinary inactive-root churn.
+            self.databases.retain(|_, initialization| {
+                if Arc::strong_count(initialization) > 1 {
+                    return true;
+                }
+                if retained_idle < LOCAL_DATABASE_CACHE_PRUNE_TARGET {
+                    retained_idle = retained_idle.saturating_add(1);
+                    return true;
+                }
+                false
+            });
+        }
+        let initialization = Arc::new(Mutex::new(false));
+        self.databases
+            .insert(path.to_owned(), Arc::clone(&initialization));
+        initialization
+    }
+}
+
+static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<LocalDatabaseInitializationCache>> =
+    OnceLock::new();
+
+pub(super) fn database_initialization(
+    path: &Path,
+) -> Result<LocalDatabaseInitialization, LocalIndexStoreError> {
+    let mut databases = INITIALIZED_LOCAL_DATABASES
+        .get_or_init(|| Mutex::new(LocalDatabaseInitializationCache::default()))
+        .lock()
+        .map_err(|error| {
+            LocalIndexStoreError::Io(std::io::Error::other(format!(
+                "local metadata initialization registry poisoned: {error}"
+            )))
+        })?;
+    Ok(databases.get_or_insert(path))
+}
 
 /// Local SQLite implementation of [`IndexStore`](crate::IndexStore).
 #[derive(Debug, Clone)]
@@ -152,7 +210,8 @@ impl LocalIndexStore {
         batch_size: usize,
     ) -> Result<usize, LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let updated = helpers::backfill_reliability_merkle_commits(&transaction, batch_size)?;
         transaction.commit()?;
         Ok(updated)
@@ -167,7 +226,8 @@ impl LocalIndexStore {
     /// persisted event is invalid or has a broken sequence.
     pub fn repair_reliability_merkle_commits(&self) -> Result<usize, LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let repaired = helpers::repair_reliability_merkle_commits(&transaction)?;
         transaction.commit()?;
         Ok(repaired)
@@ -189,25 +249,26 @@ impl LocalIndexStore {
         helpers::initialize_local_metadata_root(&self.root)?;
         let database_path = self.database_path();
         helpers::ensure_sqlite_database_path_is_safe(&database_path)?;
+        // Serialize the first journal-mode transition and schema bootstrap for
+        // this root before opening a connection. Separate processes still use
+        // SQLite's locks and bounded busy retries below.
+        let initialization = database_initialization(&database_path)?;
+        let mut initialized = initialization.lock().map_err(|error| {
+            LocalIndexStoreError::Io(std::io::Error::other(format!(
+                "local metadata initialization lock poisoned: {error}"
+            )))
+        })?;
         let database_preexisted = database_path.exists();
         let mut connection =
             Connection::open_with_flags(&database_path, helpers::sqlite_open_flags())?;
         helpers::prepare_connection(&mut connection)?;
-        let mut initialized = INITIALIZED_LOCAL_DATABASES
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .map_err(|error| {
-                LocalIndexStoreError::Io(std::io::Error::other(format!(
-                    "local metadata initialization lock poisoned: {error}"
-                )))
-            })?;
         if !database_preexisted {
             // A caller may remove and recreate a temporary/test root while a
             // server task still owns the store. Treat the recreated file as a
             // new database even if this process initialized the old inode.
-            initialized.remove(&database_path);
+            *initialized = false;
         }
-        if initialized.contains(&database_path) {
+        if *initialized {
             let schema_table_exists = connection
                 .query_row(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -217,14 +278,14 @@ impl LocalIndexStore {
                 .optional()?
                 .is_some();
             if !schema_table_exists {
-                initialized.remove(&database_path);
+                *initialized = false;
             }
         }
-        if !initialized.contains(&database_path) {
+        if !*initialized {
             helpers::ensure_local_schema_migrations_table(&connection)?;
             helpers::apply_pending_local_migrations(&mut connection)?;
             helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
-            initialized.insert(database_path);
+            *initialized = true;
         }
         let import_state = connection
             .query_row(
@@ -491,13 +552,6 @@ impl LocalRecordStore {
         helpers::collect_rows(rows)
     }
 
-    fn escape_like(value: &str) -> String {
-        value
-            .replace('\\', "\\\\")
-            .replace('_', "\\_")
-            .replace('%', "\\%")
-    }
-
     pub(crate) fn list_repository_record_locators(
         &self,
         kind: RecordKind,
@@ -505,16 +559,19 @@ impl LocalRecordStore {
     ) -> Result<Vec<LocalRecordLocator>, LocalIndexStoreError> {
         let connection = self.open_connection()?;
         let scope_key = shared_repository_record_scope_key(repository);
-        let scope_prefix = format!("{}%", Self::escape_like(&scope_key));
+        let upper = crate::hub::prefix_successor(&scope_key).ok_or_else(|| {
+            LocalIndexStoreError::BlockingTask("repository scope has no prefix upper bound".into())
+        })?;
         let mut statement = connection.prepare(
             "SELECT record_key, record_kind, scope_key, file_id, content_hash
              FROM shardline_file_records
              WHERE record_kind = ?1
-               AND (scope_key = ?2 OR scope_key LIKE ?3 ESCAPE '\\')
+               AND scope_key >= ?2 AND scope_key < ?3
+               AND substr(scope_key, 1, length(?2)) = ?2
              ORDER BY record_key",
         )?;
         let rows = statement.query_map(
-            params![kind.as_str(), scope_key, scope_prefix],
+            params![kind.as_str(), scope_key, upper],
             helpers::local_record_locator_from_row,
         )?;
         helpers::collect_rows(rows)
@@ -539,3 +596,86 @@ impl LocalRecordStore {
 }
 
 pub(crate) use crate::record_kind::RecordKind;
+
+#[cfg(test)]
+mod initialization_cache_tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+
+    fn inactive_count(cache: &LocalDatabaseInitializationCache) -> usize {
+        cache
+            .databases
+            .values()
+            .filter(|entry| Arc::strong_count(entry) == 1)
+            .count()
+    }
+
+    #[test]
+    fn inactive_root_churn_is_bounded_and_evicted_roots_reinitialize() {
+        let mut cache = LocalDatabaseInitializationCache::default();
+        let first_path = PathBuf::from("first");
+        let first = cache.get_or_insert(&first_path);
+        *first.lock().expect("coordinator") = true;
+        drop(first);
+        for root in 0..10_000 {
+            drop(cache.get_or_insert(&PathBuf::from(format!("root-{root}"))));
+            assert!(inactive_count(&cache) <= MAX_CACHED_LOCAL_DATABASES);
+        }
+        // Pick a root actually evicted by arbitrary HashMap batch pruning.
+        let evicted = (0..10_000)
+            .map(|root| PathBuf::from(format!("root-{root}")))
+            .find(|path| !cache.databases.contains_key(path))
+            .expect("evicted root");
+        let reopened = cache.get_or_insert(&evicted);
+        assert!(!*reopened.lock().expect("fresh coordinator"));
+        *reopened.lock().expect("initialized coordinator") = true;
+        assert!(Arc::ptr_eq(&reopened, &cache.get_or_insert(&evicted)));
+        assert!(
+            *cache
+                .get_or_insert(&evicted)
+                .lock()
+                .expect("warm coordinator")
+        );
+    }
+
+    #[test]
+    fn mixed_active_and_idle_roots_preserve_live_identity_and_initialization() {
+        let mut cache = LocalDatabaseInitializationCache::default();
+        let pinned_path = PathBuf::from("pinned");
+        let pinned = cache.get_or_insert(&pinned_path);
+        let guard = pinned.lock().expect("initializing coordinator");
+        for root in 0..5000 {
+            drop(cache.get_or_insert(&PathBuf::from(format!("idle-{root}"))));
+            assert!(inactive_count(&cache) <= MAX_CACHED_LOCAL_DATABASES);
+            assert!(Arc::ptr_eq(&pinned, &cache.get_or_insert(&pinned_path)));
+        }
+        drop(guard);
+        *pinned.lock().expect("initialized coordinator") = true;
+        assert!(
+            *cache
+                .get_or_insert(&pinned_path)
+                .lock()
+                .expect("same coordinator")
+        );
+    }
+
+    #[test]
+    fn all_live_roots_can_exceed_cap_then_idle_entries_are_pruned() {
+        let mut cache = LocalDatabaseInitializationCache::default();
+        let paths = (0..MAX_CACHED_LOCAL_DATABASES + 100)
+            .map(|root| PathBuf::from(format!("active-{root}")))
+            .collect::<Vec<_>>();
+        let pinned = paths
+            .iter()
+            .map(|path| cache.get_or_insert(path))
+            .collect::<Vec<_>>();
+        assert_eq!(cache.databases.len(), paths.len());
+        for (path, coordinator) in paths.iter().zip(&pinned) {
+            assert!(Arc::ptr_eq(coordinator, &cache.get_or_insert(path)));
+        }
+        drop(pinned);
+        drop(cache.get_or_insert(Path::new("trigger-prune")));
+        assert!(inactive_count(&cache) <= MAX_CACHED_LOCAL_DATABASES);
+        assert_eq!(cache.databases.len(), LOCAL_DATABASE_CACHE_PRUNE_TARGET + 1);
+    }
+}

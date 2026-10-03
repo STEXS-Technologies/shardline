@@ -508,6 +508,22 @@ not a separate binary.
 
 ## History and Status
 
+File downloads stream into a temporary file beside the destination and publish
+the completed contents atomically. Failed transfers and cancellation before
+publication preserve existing destination bytes; replacing a hard link changes
+only the selected destination. On Unix, downloads reject symlinks in the
+destination path, create private files (mode `0600`), and synchronize the file
+and containing directory before reporting success. Once final publication has
+started, cancelling the awaiting task may still allow publication to finish.
+
+Recursive downloads validate remote paths before writing any files: absolute
+paths, parent traversal, and entries outside the requested remote directory
+are rejected. Upload trees reject symlinks and special files to prevent cycles
+and accidental uploads outside the selected tree.
+
+Directory sync reads each local file and lets content-addressed uploads deduplicate
+unchanged data. Equal file sizes alone do not establish that contents are unchanged.
+
 The `sdx` CLI was originally tracked as a design proposal in
 [issue #19](https://github.com/STEXS-Technologies/shardline/issues/19). The proposal
 staged the work in four phases — a read-only download CLI, a write/upload CLI,

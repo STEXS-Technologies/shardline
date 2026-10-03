@@ -1,4 +1,6 @@
 use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
     fs::{self, File},
     io::{Error as IoError, ErrorKind, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -13,7 +15,7 @@ use crate::{
     ObjectPrefix, ObjectStore, PutOutcome,
     local_fs::{
         PutBytesIfAbsentOutcome, hard_link_file_if_absent, put_bytes_if_absent,
-        write_bytes_atomically,
+        verify_existing_object_durable, write_bytes_atomically,
     },
 };
 
@@ -31,6 +33,29 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct LocalObjectStore {
     root: PathBuf,
+}
+
+// Only the bytewise key determines page membership and output ordering.
+struct FlatNamespaceCandidate(ObjectMetadata);
+
+impl PartialEq for FlatNamespaceCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.key() == other.0.key()
+    }
+}
+
+impl Eq for FlatNamespaceCandidate {}
+
+impl PartialOrd for FlatNamespaceCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FlatNamespaceCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.key().as_str().cmp(other.0.key().as_str())
+    }
 }
 
 impl LocalObjectStore {
@@ -110,10 +135,17 @@ impl LocalObjectStore {
         temporary: &Path,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, LocalObjectStoreError> {
-        verify_file_integrity(temporary, integrity)?;
+        let verified_source = verify_file_integrity(temporary, integrity)?;
         let path = self.key_path(key);
         metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
-        io::link_temporary_file_if_absent(&self.root, &path, temporary, integrity, None)
+        io::link_temporary_file_if_absent(
+            &self.root,
+            &path,
+            temporary,
+            &verified_source,
+            integrity,
+            None,
+        )
     }
 
     /// Copies an existing object to a new key if the destination is absent.
@@ -129,14 +161,16 @@ impl LocalObjectStore {
     ) -> Result<PutOutcome, LocalObjectStoreError> {
         let source_path = self.key_path(source);
         let destination_path = self.key_path(destination);
-        let _source = open_existing_object_file(&source_path)?;
+        let source_file = open_existing_object_file(&source_path)?;
         metadata::ensure_parent_directories_are_not_symlinked(&self.root, &destination_path)?;
-        match hard_link_file_if_absent(&self.root, &destination_path, &source_path) {
+        match hard_link_file_if_absent(&self.root, &destination_path, &source_path, &source_file) {
             Ok(()) => Ok(PutOutcome::Inserted),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                let existing = open_existing_object_file(&destination_path)?;
-                let source_file = open_existing_object_file(&source_path)?;
-                ensure_files_match(existing, source_file)?;
+                verify_existing_object_durable(&self.root, &destination_path, |anchored_path| {
+                    let existing = open_existing_object_file(anchored_path)?;
+                    ensure_files_match(existing.try_clone()?, source_file.try_clone()?)?;
+                    Ok::<File, LocalObjectStoreError>(existing)
+                })?;
                 Ok(PutOutcome::AlreadyExists)
             }
             Err(error) => Err(LocalObjectStoreError::Io(error)),
@@ -184,7 +218,10 @@ impl LocalObjectStore {
         let Some(entries) = read_dir_if_exists(&directory)? else {
             return Ok(Vec::new());
         };
-        let mut children = Vec::new();
+        // Directory iteration is unordered, so examine all eligible children but
+        // retain only the smallest requested keys. Do not reserve `limit`: callers
+        // may request an arbitrarily large limit for a small namespace.
+        let mut children = BinaryHeap::<FlatNamespaceCandidate>::new();
         for entry in entries {
             let entry = entry.map_err(LocalObjectStoreError::Io)?;
             let file_type = entry.file_type().map_err(LocalObjectStoreError::Io)?;
@@ -208,11 +245,21 @@ impl LocalObjectStore {
             if let Some(modified) = modified_unix_nanos(&fs_metadata) {
                 metadata = metadata.with_modified(modified);
             }
-            children.push(metadata);
+            // Keep validation and mtime extraction above selection, including for
+            // zero-sized pages and entries beyond the returned page.
+            if children.len() < limit {
+                children.push(FlatNamespaceCandidate(metadata));
+            } else if let Some(mut largest) = children.peek_mut()
+                && metadata.key().as_str() < largest.0.key().as_str()
+            {
+                *largest = FlatNamespaceCandidate(metadata);
+            }
         }
-        children.sort_by(|left, right| left.key().as_str().cmp(right.key().as_str()));
-        children.truncate(limit);
-        Ok(children)
+        Ok(children
+            .into_sorted_vec()
+            .into_iter()
+            .map(|candidate| candidate.0)
+            .collect())
     }
 
     fn key_path(&self, key: &ObjectKey) -> PathBuf {
@@ -233,8 +280,12 @@ impl ObjectStore for LocalObjectStore {
         let path = self.key_path(key);
         metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
         match open_existing_object_file(&path) {
-            Ok(file) => {
-                ensure_file_matches_bytes(file, body.as_slice())?;
+            Ok(_) => {
+                verify_existing_object_durable(&self.root, &path, |anchored_path| {
+                    let file = open_existing_object_file(anchored_path)?;
+                    ensure_file_matches_bytes(file.try_clone()?, body.as_slice())?;
+                    Ok::<File, LocalObjectStoreError>(file)
+                })?;
                 return Ok(PutOutcome::AlreadyExists);
             }
             Err(LocalObjectStoreError::Io(error)) if error.kind() == ErrorKind::NotFound => {}
@@ -316,13 +367,21 @@ impl ObjectStore for LocalObjectStore {
     fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
         let path = self.key_path(key);
         metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
-        match fs::remove_file(&path) {
-            Ok(()) => {
-                walk::remove_empty_ancestors(&path, &self.root)?;
-                Ok(DeleteOutcome::Deleted)
+        #[cfg(unix)]
+        {
+            crate::local_fs::delete_object_durably(&self.root, &path)
+                .map_err(LocalObjectStoreError::Io)
+        }
+        #[cfg(not(unix))]
+        {
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    walk::remove_empty_ancestors(&path, &self.root)?;
+                    Ok(DeleteOutcome::Deleted)
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(DeleteOutcome::NotFound),
+                Err(error) => Err(LocalObjectStoreError::Io(error)),
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(DeleteOutcome::NotFound),
-            Err(error) => Err(LocalObjectStoreError::Io(error)),
         }
     }
 }

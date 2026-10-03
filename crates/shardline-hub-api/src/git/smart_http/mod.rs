@@ -8,6 +8,7 @@
 pub mod error;
 mod limits;
 pub mod pack_parse;
+mod projection;
 pub mod receive_pack;
 pub mod ref_advertisement;
 pub mod tree_walk;

@@ -62,7 +62,10 @@ static BEFORE_LOCAL_TEXT_FILE_READ_HOOK: LazyLock<Mutex<LocalTextFileReadHookSlo
 pub struct GcScheduleInstallOptions {
     /// Directory that receives the unit files.
     pub output_dir: PathBuf,
-    /// Unit basename without the `.service` or `.timer` suffix.
+    /// Systemd unit basename without the `.service` or `.timer` suffix.
+    ///
+    /// Supports ASCII letters, digits, `:`, `-`, `_`, `.`, `\`, and optional
+    /// `@` instance/template notation. At most 247 bytes, leaving room for `.service`.
     pub unit_prefix: String,
     /// `systemd.timer` calendar expression.
     pub calendar: String,
@@ -120,13 +123,26 @@ pub struct GcScheduleInstallReport {
 
 impl GcScheduleInstallReport {
     pub fn print_summary(&self) {
-        println!("service_path: {}", self.service_path.display());
-        println!("timer_path: {}", self.timer_path.display());
-        println!("binary_path: {}", self.binary_path.display());
-        println!("env_file: {}", self.env_file.display());
-        println!("working_directory: {}", self.working_directory.display());
-        println!("calendar: {}", self.calendar);
-        println!("retention_seconds: {}", self.retention_seconds);
+        let _result = self.write_summary(&mut std::io::stdout().lock());
+    }
+
+    /// Writes the report and flushes the destination.
+    ///
+    /// # Errors
+    /// Returns the first write or flush error.
+    pub fn write_summary<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+        writeln!(writer, "service_path: {}", self.service_path.display())?;
+        writeln!(writer, "timer_path: {}", self.timer_path.display())?;
+        writeln!(writer, "binary_path: {}", self.binary_path.display())?;
+        writeln!(writer, "env_file: {}", self.env_file.display())?;
+        writeln!(
+            writer,
+            "working_directory: {}",
+            self.working_directory.display()
+        )?;
+        writeln!(writer, "calendar: {}", self.calendar)?;
+        writeln!(writer, "retention_seconds: {}", self.retention_seconds)?;
+        writer.flush()
     }
 }
 
@@ -145,10 +161,19 @@ pub struct GcScheduleUninstallReport {
 
 impl GcScheduleUninstallReport {
     pub fn print_summary(&self) {
-        println!("service_path: {}", self.service_path.display());
-        println!("timer_path: {}", self.timer_path.display());
-        println!("removed_service: {}", self.removed_service);
-        println!("removed_timer: {}", self.removed_timer);
+        let _result = self.write_summary(&mut std::io::stdout().lock());
+    }
+
+    /// Writes the report and flushes the destination.
+    ///
+    /// # Errors
+    /// Returns the first write or flush error.
+    pub fn write_summary<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+        writeln!(writer, "service_path: {}", self.service_path.display())?;
+        writeln!(writer, "timer_path: {}", self.timer_path.display())?;
+        writeln!(writer, "removed_service: {}", self.removed_service)?;
+        writeln!(writer, "removed_timer: {}", self.removed_timer)?;
+        writer.flush()
     }
 }
 
@@ -167,6 +192,9 @@ pub enum GcScheduleError {
         /// Invalid field name.
         field: &'static str,
     },
+    /// The unit prefix was a path, invalid systemd name, or too long.
+    #[error("invalid unit-prefix: value must be a systemd unit basename of at most 247 bytes")]
+    InvalidUnitPrefix,
     /// The output directory was not a directory after creation.
     #[error("invalid output directory: {0}")]
     InvalidOutputDirectory(PathBuf),
@@ -258,9 +286,20 @@ pub enum GcScheduleError {
 pub fn install_gc_schedule(
     options: &GcScheduleInstallOptions,
 ) -> Result<GcScheduleInstallReport, GcScheduleError> {
+    install_gc_schedule_with_writer(&mut std::io::stdout().lock(), options)
+}
+
+/// Installs the schedule while writing dry-run output to the supplied destination.
+///
+/// # Errors
+/// Returns option, filesystem, output write, or output flush errors.
+pub fn install_gc_schedule_with_writer<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    options: &GcScheduleInstallOptions,
+) -> Result<GcScheduleInstallReport, GcScheduleError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = options;
+        let _ = (options, writer);
         Err(GcScheduleError::Io(io::Error::new(
             io::ErrorKind::Unsupported,
             "scheduled garbage collection via systemd is only supported on Linux",
@@ -281,18 +320,20 @@ pub fn install_gc_schedule(
         let timer_unit = render_timer_unit(&resolved);
 
         if resolved.dry_run {
-            println!(
+            writeln!(
+                writer,
                 "Would write {} ({} bytes):\n{}\n",
                 service_path.display(),
                 service_unit.len(),
                 service_unit
-            );
-            println!(
+            )?;
+            writeln!(
+                writer,
                 "Would write {} ({} bytes):\n{}\n",
                 timer_path.display(),
                 timer_unit.len(),
                 timer_unit
-            );
+            )?;
         } else {
             ensure_output_directory(&resolved.output_dir)?;
             if !resolved.output_dir.is_dir() {
@@ -303,6 +344,7 @@ pub fn install_gc_schedule(
             write_output_bytes(&timer_path, timer_unit.as_bytes(), true)?;
         }
 
+        writer.flush()?;
         Ok(GcScheduleInstallReport {
             service_path,
             timer_path,
@@ -325,7 +367,7 @@ pub fn uninstall_gc_schedule(
     output_dir: &Path,
     unit_prefix: &str,
 ) -> Result<GcScheduleUninstallReport, GcScheduleError> {
-    validate_text_field("unit-prefix", unit_prefix)?;
+    validate_unit_prefix(unit_prefix)?;
 
     let service_path = output_dir.join(format!("{unit_prefix}.service"));
     let timer_path = output_dir.join(format!("{unit_prefix}.timer"));
@@ -348,7 +390,7 @@ fn remove_if_present(path: &Path) -> io::Result<bool> {
 fn resolve_install_options(
     options: &GcScheduleInstallOptions,
 ) -> Result<GcScheduleInstallOptions, GcScheduleError> {
-    validate_text_field("unit-prefix", &options.unit_prefix)?;
+    validate_unit_prefix(&options.unit_prefix)?;
     validate_text_field("calendar", &options.calendar)?;
     validate_absolute_path_field("env-file", &options.env_file)?;
     validate_absolute_path_field("working-directory", &options.working_directory)?;
@@ -425,6 +467,33 @@ fn validate_absolute_path_field(field: &'static str, path: &Path) -> Result<(), 
         field,
         path: path.to_path_buf(),
     })
+}
+
+// Systemd allows 255 bytes per unit filename, including the 8-byte `.service`.
+const MAX_SYSTEMD_UNIT_PREFIX_BYTES: usize = 247;
+
+fn validate_unit_prefix(value: &str) -> Result<(), GcScheduleError> {
+    validate_text_field("unit-prefix", value)?;
+    if value.len() > MAX_SYSTEMD_UNIT_PREFIX_BYTES
+        || value.starts_with('@')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b":-_.\\@".contains(&byte))
+        || value.contains('/')
+    {
+        return Err(GcScheduleError::InvalidUnitPrefix);
+    }
+    // Check the actual filename: `.` and `..` prefixes become safe, valid
+    // `..service` and `...service` files after the suffix is added. Native
+    // components still reject Windows path prefixes/separators on Windows.
+    let file_name = format!("{value}.service");
+    let mut components = Path::new(&file_name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(GcScheduleError::InvalidUnitPrefix);
+    }
+    Ok(())
 }
 
 fn validate_text_field(field: &'static str, value: &str) -> Result<(), GcScheduleError> {
@@ -1468,6 +1537,127 @@ mod tests {
     // ── uninstall_gc_schedule validation ────────────────────────────────
 
     #[test]
+    fn unit_prefix_rejects_paths_and_invalid_systemd_names() {
+        for prefix in [
+            "../sibling",
+            "/absolute",
+            "nested/name",
+            "./name",
+            "name/",
+            "name with spaces",
+            "name$invalid",
+            "unicode-é",
+            "@instance",
+        ] {
+            assert!(
+                matches!(
+                    super::validate_unit_prefix(prefix),
+                    Err(GcScheduleError::InvalidUnitPrefix)
+                ),
+                "accepted path prefix {prefix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_prefix_reserves_the_full_service_suffix_length() {
+        assert!(super::validate_unit_prefix(&"n".repeat(247)).is_ok());
+        assert!(matches!(
+            super::validate_unit_prefix(&"n".repeat(248)),
+            Err(GcScheduleError::InvalidUnitPrefix)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn schedule_path_prefixes_preserve_sibling_units_before_any_install_work() {
+        let sandbox = tempfile::tempdir().expect("owned fixture");
+        let units = sandbox.path().join("units");
+        let sibling = sandbox.path().join("sibling");
+        std::fs::create_dir_all(&sibling).expect("sibling directory");
+        let service = sibling.join("synthetic.service");
+        let timer = sibling.join("synthetic.timer");
+        std::fs::write(&service, b"previous service").expect("synthetic service");
+        std::fs::write(&timer, b"previous timer").expect("synthetic timer");
+
+        for prefix in [
+            "../sibling/synthetic".to_owned(),
+            sibling.join("synthetic").to_string_lossy().into_owned(),
+        ] {
+            let options = GcScheduleInstallOptions {
+                output_dir: units.clone(),
+                unit_prefix: prefix.clone(),
+                binary_path: sandbox.path().join("missing-binary"),
+                env_file: sandbox.path().join("missing-env"),
+                working_directory: sandbox.path().join("uncreated-work"),
+                ..GcScheduleInstallOptions::default()
+            };
+            assert!(matches!(
+                install_gc_schedule(&options),
+                Err(GcScheduleError::InvalidUnitPrefix)
+            ));
+            assert!(matches!(
+                uninstall_gc_schedule(&units, &prefix),
+                Err(GcScheduleError::InvalidUnitPrefix)
+            ));
+            assert_eq!(
+                std::fs::read(&service).expect("preserved service"),
+                b"previous service"
+            );
+            assert_eq!(
+                std::fs::read(&timer).expect("preserved timer"),
+                b"previous timer"
+            );
+            assert!(!units.exists());
+            assert!(!options.working_directory.exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn schedule_basename_prefixes_preserve_colons_and_literal_escapes() {
+        let sandbox = tempfile::tempdir().expect("owned fixture");
+        let units = sandbox.path().join("units");
+        let env_file = sandbox.path().join("service.env");
+        std::fs::write(&env_file, b"").expect("owned environment file");
+        for prefix in [
+            "ordinary-name",
+            ".",
+            "..",
+            "name:colon",
+            r"name\x2descape",
+            "name@instance",
+            "name@",
+            "name@@instance",
+        ] {
+            let options = GcScheduleInstallOptions {
+                output_dir: units.clone(),
+                unit_prefix: prefix.to_owned(),
+                env_file: env_file.clone(),
+                binary_path: std::env::current_exe().expect("test binary"),
+                working_directory: sandbox.path().join("work"),
+                user: "root".to_owned(),
+                group: "root".to_owned(),
+                ..GcScheduleInstallOptions::default()
+            };
+            let installed = install_gc_schedule(&options).expect("valid basename installation");
+            assert_eq!(
+                installed.service_path,
+                units.join(format!("{prefix}.service"))
+            );
+            assert_eq!(installed.timer_path, units.join(format!("{prefix}.timer")));
+            assert!(
+                std::fs::read_to_string(&installed.timer_path)
+                    .expect("timer content")
+                    .contains(&format!("Unit={prefix}.service\n"))
+            );
+            let removed = uninstall_gc_schedule(&units, prefix).expect("valid basename removal");
+            assert!(removed.removed_service && removed.removed_timer);
+            assert!(!installed.service_path.exists() && !installed.timer_path.exists());
+        }
+    }
+
+    #[test]
     fn uninstall_gc_schedule_rejects_empty_prefix() {
         let sandbox = tempfile::tempdir().unwrap();
         let result = super::uninstall_gc_schedule(sandbox.path(), "");
@@ -1642,5 +1832,85 @@ mod tests {
             result,
             Err(GcScheduleError::ControlCharacters { field: "test" })
         ));
+    }
+
+    #[test]
+    fn schedule_writers_preserve_text_and_propagate_write_and_flush_errors() {
+        let install = super::GcScheduleInstallReport {
+            service_path: "/service".into(),
+            timer_path: "/timer".into(),
+            binary_path: "/binary".into(),
+            env_file: "/env".into(),
+            working_directory: "/work".into(),
+            calendar: "daily".to_owned(),
+            retention_seconds: 60,
+        };
+        let uninstall = super::GcScheduleUninstallReport {
+            service_path: "/service".into(),
+            timer_path: "/timer".into(),
+            removed_service: true,
+            removed_timer: false,
+        };
+        crate::hold::output_test_support::assert_writer_errors(|writer| {
+            install.write_summary(writer)
+        });
+        crate::hold::output_test_support::assert_writer_errors(|writer| {
+            uninstall.write_summary(writer)
+        });
+        let mut bytes = Vec::new();
+        install.write_summary(&mut bytes).expect("install summary");
+        assert_eq!(bytes, b"service_path: /service\ntimer_path: /timer\nbinary_path: /binary\nenv_file: /env\nworking_directory: /work\ncalendar: daily\nretention_seconds: 60\n");
+        bytes.clear();
+        uninstall
+            .write_summary(&mut bytes)
+            .expect("uninstall summary");
+        assert_eq!(bytes, b"service_path: /service\ntimer_path: /timer\nremoved_service: true\nremoved_timer: false\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn schedule_dry_run_writer_errors_do_not_write_units() {
+        let root = tempfile::tempdir().expect("fixture");
+        let env_file = root.path().join("env");
+        std::fs::write(
+            &env_file,
+            format!("SHARDLINE_ROOT_DIR={}\n", root.path().display()),
+        )
+        .expect("env");
+        let options = super::GcScheduleInstallOptions {
+            output_dir: root.path().join("units"),
+            env_file,
+            binary_path: std::env::current_exe().expect("test binary"),
+            working_directory: root.path().to_path_buf(),
+            user: "root".to_owned(),
+            group: "root".to_owned(),
+            dry_run: true,
+            ..super::GcScheduleInstallOptions::default()
+        };
+        crate::hold::output_test_support::assert_writer_errors(|writer| {
+            super::install_gc_schedule_with_writer(writer, &options)
+                .map(|_report| ())
+                .map_err(|error| {
+                    if let super::GcScheduleError::Io(error) = error {
+                        error
+                    } else {
+                        std::io::Error::other(error)
+                    }
+                })
+        });
+        let mut bytes = Vec::new();
+        let report = super::install_gc_schedule_with_writer(&mut bytes, &options).expect("dry run");
+        assert!(
+            bytes
+                .starts_with(format!("Would write {} (", report.service_path.display()).as_bytes())
+        );
+        assert!(
+            bytes
+                .windows(b"[Timer]".len())
+                .any(|window| window == b"[Timer]")
+        );
+        assert!(!report.service_path.exists());
+        assert!(!report.timer_path.exists());
+        assert!(!options.output_dir.exists());
     }
 }

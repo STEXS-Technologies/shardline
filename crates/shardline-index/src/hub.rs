@@ -53,7 +53,11 @@ pub struct HubRepo {
 }
 
 impl HubRepo {
-    /// Generates a deterministic SHA for a commit.
+    /// Generates the legacy 16-hex NDJSON identity for diagnosis and compatibility.
+    ///
+    /// This identity omits repository and complete-tree ownership and must never
+    /// be used for new stored trees. Persistence quarantines these identities;
+    /// recovery uses a repository-bound full-tree digest instead.
     ///
     /// # Errors
     ///
@@ -71,6 +75,50 @@ impl HubRepo {
         files_hash.hash(&mut hasher);
         Ok(format!("{:016x}", hasher.finish()))
     }
+}
+
+/// Repository search ordering; revision timestamps tie by repository identity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HubRepoSearchOrder {
+    #[default]
+    RepoIdAsc,
+    RepoIdDesc,
+    LastModifiedAsc,
+    LastModifiedDesc,
+}
+
+impl HubRepoSearchOrder {
+    pub(crate) const fn sql(self) -> &'static str {
+        match self {
+            Self::RepoIdAsc => "repo_id ASC",
+            Self::RepoIdDesc => "repo_id DESC",
+            Self::LastModifiedAsc => "updated_at_unix_seconds ASC, repo_id ASC",
+            Self::LastModifiedDesc => "updated_at_unix_seconds DESC, repo_id ASC",
+        }
+    }
+}
+
+/// Predicates applied before the search result limit.
+#[derive(Debug, Clone, Default)]
+pub struct HubRepoSearchOptions {
+    /// Exact scoped repository identity; None retains permissive visibility.
+    pub caller_repo_id: Option<String>,
+    pub author: Option<String>,
+    pub order: HubRepoSearchOrder,
+}
+
+/// Smallest Unicode string strictly above every string with this prefix.
+pub(crate) fn prefix_successor(prefix: &str) -> Option<String> {
+    let mut result = prefix.to_owned();
+    while let Some(last) = result.pop() {
+        let next = u32::from(last).checked_add(1)?;
+        let next = if next == 0xd800 { 0xe000 } else { next };
+        if let Some(next) = char::from_u32(next) {
+            result.push(next);
+            return Some(result);
+        }
+    }
+    None
 }
 
 /// A Hub revision record.
@@ -100,22 +148,179 @@ pub struct HubRef {
 ///
 /// Tags deliberately keep their full `refs/tags/...` name, while branches use
 /// their short name so Hub API revisions such as `main` and Git Smart HTTP
-/// `refs/heads/main` address the same ref.
+/// `refs/heads/main` address the same ref. Branches whose short name begins
+/// `refs/` keep their full spelling to avoid aliasing tags or other namespaces.
+/// Existing ambiguous historical keys are not reinterpreted.
 #[must_use]
 pub fn canonical_ref_name(ref_name: &str) -> &str {
     ref_name
         .strip_prefix("refs/heads/")
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !name.starts_with("refs/"))
         .unwrap_or(ref_name)
 }
 
+/// Outcome of atomically registering a nonduplicate webhook within a repository ceiling.
+#[derive(Debug, Clone)]
+pub enum HubWebhookCreateOutcome {
+    Created(HubWebhook),
+    /// This exact URL is already registered for the repository.
+    Duplicate,
+    /// The repository already has at least the caller's maximum webhook count.
+    LimitReached,
+    /// The custom store has not implemented atomic bounded registration.
+    Unsupported,
+}
+
+/// Outcome of atomic create-only ref publication.
+#[derive(Debug, Clone)]
+pub enum HubRefCreateOutcome {
+    Created(HubRevision),
+    AlreadyExists,
+    /// The custom store has not implemented atomic create-only publication.
+    Unsupported,
+}
+
+/// Outcome of atomic publication to an existing ref at its exact expected head.
+#[derive(Debug, Clone)]
+pub enum HubRefUpdateOutcome {
+    Updated(HubRevision),
+    /// The ref is absent or no longer points to the expected revision.
+    Conflict,
+    /// The custom store has not implemented strict atomic ref updates.
+    Unsupported,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HubRefPublicationMode {
+    Upsert,
+    CreateOnly,
+    UpdateOnly,
+}
+
 /// A Hub file entry within a commit tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HubFileEntry {
     pub path: String,
     pub size: u64,
     pub sha: String,
     pub is_lfs: bool,
+}
+
+/// Maximum complete tree supported by built-in Hub readers.
+pub const HUB_TREE_READ_CEILING: usize = 100_000;
+
+/// A relative file or immediate directory in a repository tree page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HubTreePageEntry {
+    Directory { path: String },
+    File(HubFileEntry),
+}
+
+impl HubTreePageEntry {
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Directory { path } => path,
+            Self::File(file) => &file.path,
+        }
+    }
+
+    const fn kind(&self) -> u8 {
+        match self {
+            Self::Directory { .. } => 0,
+            Self::File(_) => 1,
+        }
+    }
+}
+
+/// Explicit tree listing options. Cursor is the existing relative entry path.
+#[derive(Debug, Clone)]
+pub struct HubTreePageOptions {
+    pub path: String,
+    pub recursive: bool,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+impl HubTreePageOptions {
+    #[must_use]
+    pub fn prefix(&self) -> String {
+        if self.path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.path)
+        }
+    }
+
+    #[must_use]
+    pub fn page_limit(&self) -> usize {
+        self.limit.min(HUB_TREE_READ_CEILING)
+    }
+}
+
+/// A page with one extra row consumed to determine whether more entries exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubTreePage {
+    pub entries: Vec<HubTreePageEntry>,
+    pub has_more: bool,
+}
+
+impl HubTreePage {
+    pub(crate) fn from_entries(mut entries: Vec<HubTreePageEntry>, limit: usize) -> Self {
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        Self { entries, has_more }
+    }
+
+    fn from_files(files: Vec<HubFileEntry>, options: &HubTreePageOptions) -> Self {
+        let prefix = options.prefix();
+        let mut entries = Vec::new();
+        let mut directories = std::collections::BTreeSet::new();
+        for mut file in files {
+            let Some(relative) = file.path.strip_prefix(&prefix) else {
+                continue;
+            };
+            if options.recursive {
+                if relative.is_empty() {
+                    continue;
+                }
+            } else if let Some((directory, _rest)) = relative.split_once('/') {
+                directories.insert(directory.to_owned());
+                continue;
+            }
+            file.path = relative.to_owned();
+            entries.push(HubTreePageEntry::File(file));
+        }
+        entries.extend(
+            directories
+                .into_iter()
+                .map(|path| HubTreePageEntry::Directory { path }),
+        );
+        entries.sort_by(|left, right| {
+            left.kind()
+                .cmp(&right.kind())
+                .then_with(|| left.path().cmp(right.path()))
+        });
+        if let Some(cursor) = &options.cursor {
+            let start = entries
+                .iter()
+                .position(|entry| entry.path() == cursor)
+                .and_then(|position| position.checked_add(1))
+                .unwrap_or(entries.len());
+            drop(entries.drain(..start));
+        }
+        Self::from_entries(entries, options.limit)
+    }
+}
+
+/// Shared initial revision: its tree is always empty, even if legacy rows exist.
+pub const EMPTY_HUB_REVISION: &str = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+
+/// Legacy NDJSON identities did not bind paths, deletions, or repository identity.
+/// Their stored trees cannot be trusted, even with only one current owner.
+pub(crate) fn hub_tree_requires_recovery(commit_sha: &str) -> bool {
+    commit_sha.len() == 16 && commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// A registered webhook for a Hub repository.
@@ -181,10 +386,26 @@ pub trait HubStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<HubRepo>, Self::Error>;
 
-    /// Creates a new revision (commit) in a repository.
+    /// Searches visible repositories, filtering and ordering before limiting.
     ///
-    /// If `parent_sha` is provided, implements optimistic concurrency: returns
-    /// `Err` if the current HEAD does not match.
+    /// # Errors
+    /// Returns an error when storage or metadata verification fails.
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Self::Error>;
+
+    /// Creates a revision or points a ref at an existing immutable revision.
+    ///
+    /// Reusing an existing repository revision changes only the target ref;
+    /// its original parent, message, timestamp and history record stay intact.
+    ///
+    /// If `parent_sha` is provided, an existing ref must match it. A missing
+    /// ref may be created from an existing historical parent revision. Use
+    /// `update_revision_if_current` when ref absence must also be a conflict.
     ///
     /// # Errors
     ///
@@ -198,6 +419,43 @@ pub trait HubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error>;
+    /// Atomically updates an existing ref only when its current SHA equals `expected_sha`.
+    ///
+    /// Missing and moved refs are conflicts. Custom stores must override this
+    /// method; the compatibility default fails closed without any writes.
+    ///
+    /// # Errors
+    /// Returns an error on storage or reliability failure.
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        let _ = (repo_id, expected_sha, new_sha, ref_name, message);
+        Ok(HubRefUpdateOutcome::Unsupported)
+    }
+
+    /// Atomically creates a missing ref, without modifying existing bindings.
+    ///
+    /// Custom stores must override this method to support create-only Git pushes.
+    /// The compatibility default fails closed and performs no writes.
+    ///
+    /// # Errors
+    /// Returns an error on storage or reliability failure.
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Self::Error> {
+        let _ = (repo_id, parent_sha, new_sha, ref_name, message);
+        Ok(HubRefCreateOutcome::Unsupported)
+    }
 
     /// Lists the active branch and tag references for a repository.
     ///
@@ -205,6 +463,23 @@ pub trait HubStore: Send + Sync {
     ///
     /// Returns an error when the storage backend operation fails.
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error>;
+
+    /// Lists refs only when the complete result fits `limit`; `None` means overflow.
+    ///
+    /// Built-in adapters apply the ceiling in SQL before row decoding. Custom
+    /// adapters should override this fallback to provide the same memory bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata or reliability verification fails.
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRef>>, Self::Error> {
+        let entries = self.list_refs(repo_id)?;
+        Ok((entries.len() <= limit).then_some(entries))
+    }
 
     /// Deletes an active branch or tag only if it still points to `expected_sha`.
     ///
@@ -229,6 +504,23 @@ pub trait HubStore: Send + Sync {
     /// Returns an error when the storage backend operation fails.
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error>;
 
+    /// Lists revisions only when the complete result fits `limit`; `None` means overflow.
+    ///
+    /// Built-in adapters apply the ceiling in SQL before row decoding. Custom
+    /// adapters should override this fallback to provide the same memory bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata or reliability verification fails.
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRevision>>, Self::Error> {
+        let entries = self.list_revisions(repo_id)?;
+        Ok((entries.len() <= limit).then_some(entries))
+    }
+
     /// Resolves a revision string ("main", a SHA, or a ref name) to a SHA.
     ///
     /// # Errors
@@ -249,10 +541,69 @@ pub trait HubStore: Send + Sync {
 
     /// Returns all file entries at a given commit SHA.
     ///
+    /// Built-in adapters reject trees above 100,000 entries; they never return a
+    /// silently truncated tree. Legacy 16-hex identities require explicit recovery.
+    ///
     /// # Errors
     ///
     /// Returns an error when the storage backend operation fails.
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error>;
+
+    /// Reads a complete tree only when it fits `limit`; `None` means overflow.
+    ///
+    /// Built-in adapters apply the ceiling in SQL before row decoding. Custom
+    /// adapters should override the fallback to provide the same memory bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on recovery-required revisions or storage failures.
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubFileEntry>>, Self::Error> {
+        let files = self.get_files(commit_sha)?;
+        Ok((files.len() <= limit).then_some(files))
+    }
+
+    /// Read an explicit relative tree page. Built-ins return None on whole-tree
+    /// ceiling overflow and bound decoded SQL rows. This compatibility fallback
+    /// preserves each custom store's existing get_files and limit behavior; it
+    /// loads a complete tree and is not memory bounded.
+    ///
+    /// # Errors
+    /// Returns storage errors or recovery-required revision errors.
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<Option<HubTreePage>, Self::Error> {
+        Ok(Some(HubTreePage::from_files(
+            self.get_files(commit_sha)?,
+            options,
+        )))
+    }
+
+    /// Atomically registers a URL once, provided the repository has fewer than `limit` webhooks.
+    ///
+    /// Duplicate URLs take priority over the count ceiling, including at zero.
+    /// Checks and insertion share a transaction with repository deletion. The
+    /// compatibility default returns Unsupported without reads or writes.
+    /// Unbounded `create_webhook` remains available for library callers.
+    ///
+    /// # Errors
+    /// Returns an error on storage failure or when the repository is missing.
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Self::Error> {
+        let _ = (repo_id, url, events, secret, limit);
+        Ok(HubWebhookCreateOutcome::Unsupported)
+    }
 
     /// Creates a webhook for a repository.
     ///
@@ -351,6 +702,14 @@ trait ErasedHubStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>>;
 
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>>;
+
     fn create_revision(
         &self,
         repo_id: &str,
@@ -359,10 +718,31 @@ trait ErasedHubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>>;
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>>;
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Box<dyn std::error::Error + Send + Sync>>;
 
     fn list_refs(
         &self,
         repo_id: &str,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>>;
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
     ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn delete_ref(
@@ -375,6 +755,11 @@ trait ErasedHubStore: Send + Sync {
     fn list_revisions(
         &self,
         repo_id: &str,
+    ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
     ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn resolve_revision(
@@ -393,7 +778,26 @@ trait ErasedHubStore: Send + Sync {
         &self,
         commit_sha: &str,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>>;
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>>;
 
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Box<dyn std::error::Error + Send + Sync>>;
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -461,6 +865,17 @@ impl<T: HubStore> ErasedHubStore for T {
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        T::search_repos_with_options(self, repo_type, name_prefix, limit, options)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
     fn create_revision(
         &self,
         repo_id: &str,
@@ -471,6 +886,45 @@ impl<T: HubStore> ErasedHubStore for T {
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(self, repo_id, parent_sha, new_sha, ref_name, message)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::update_revision_if_current(self, repo_id, expected_sha, new_sha, ref_name, message)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_revision_if_absent(self, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_refs_bounded(self, repo_id, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub refs exceed the requested listing limit",
+                )) as _
+            })
     }
 
     fn list_refs(
@@ -488,6 +942,23 @@ impl<T: HubStore> ErasedHubStore for T {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::delete_ref(self, repo_id, ref_name, expected_sha)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_revisions_bounded(self, repo_id, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub revisions exceed the requested listing limit",
+                )) as _
+            })
     }
 
     fn list_revisions(
@@ -516,6 +987,23 @@ impl<T: HubStore> ErasedHubStore for T {
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_files_bounded(self, commit_sha, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub tree exceeds the requested listing limit",
+                )) as _
+            })
+    }
+
     fn get_files(
         &self,
         commit_sha: &str,
@@ -524,6 +1012,34 @@ impl<T: HubStore> ErasedHubStore for T {
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_tree_page(self, commit_sha, options)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub tree exceeds the 100000-entry metadata read ceiling",
+                )) as _
+            })
+    }
+
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_webhook_bounded(self, repo_id, url, events, secret, limit)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -645,6 +1161,21 @@ impl BoxedHubStore {
         self.inner.search_repos(repo_type, name_prefix, limit)
     }
 
+    /// Searches with visibility, author and ordering applied before the limit.
+    ///
+    /// # Errors
+    /// Returns an error when storage or metadata verification fails.
+    pub fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .search_repos_with_options(repo_type, name_prefix, limit, options)
+    }
+
     /// Creates a new revision.
     ///
     /// # Errors
@@ -662,11 +1193,56 @@ impl BoxedHubStore {
             .create_revision(repo_id, parent_sha, new_sha, ref_name, message)
     }
 
+    /// Atomically updates an existing ref at exactly `expected_sha`.
+    ///
+    /// # Errors
+    /// Returns an error on storage or reliability failure.
+    pub fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .update_revision_if_current(repo_id, expected_sha, new_sha, ref_name, message)
+    }
+
+    /// Atomically publishes a revision only when its target ref is absent.
+    ///
+    /// # Errors
+    /// Returns an error on storage or reliability failure.
+    pub fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .create_revision_if_absent(repo_id, parent_sha, new_sha, ref_name, message)
+    }
+
+    /// Lists refs, failing before returning a partial result if `limit` is exceeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on listing overflow, storage or reliability failure.
+    pub fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.list_refs_bounded(repo_id, limit)
+    }
+
     /// Lists active branches and tags.
     ///
     /// # Errors
     ///
-    /// Returns an error when the storage backend operation fails.
+    /// Returns an error when metadata storage or reliability verification fails.
     pub fn list_refs(
         &self,
         repo_id: &str,
@@ -689,11 +1265,24 @@ impl BoxedHubStore {
         self.inner.delete_ref(repo_id, ref_name, expected_sha)
     }
 
+    /// Lists revisions, failing before returning a partial result if `limit` is exceeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on listing overflow, storage or reliability failure.
+    pub fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.list_revisions_bounded(repo_id, limit)
+    }
+
     /// Lists all revisions.
     ///
     /// # Errors
     ///
-    /// Returns an error when the storage backend operation fails.
+    /// Returns an error when metadata storage or reliability verification fails.
     pub fn list_revisions(
         &self,
         repo_id: &str,
@@ -732,11 +1321,57 @@ impl BoxedHubStore {
     /// # Errors
     ///
     /// Returns an error when the storage backend operation fails.
+    /// Reads a complete tree, failing on overflow rather than returning partial data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on overflow, recovery-required revisions or storage failure.
+    pub fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.get_files_bounded(commit_sha, limit)
+    }
+
+    /// Returns all entries for a tree within the adapter's supported ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on overflow, recovery-required revisions or storage failure.
     pub fn get_files(
         &self,
         commit_sha: &str,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
         self.inner.get_files(commit_sha)
+    }
+
+    /// Read an explicit tree page, preserving whole-tree overflow errors.
+    ///
+    /// # Errors
+    /// Returns storage, recovery-required, or whole-tree ceiling errors.
+    pub fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.get_tree_page(commit_sha, options)
+    }
+
+    /// Atomically registers a nonduplicate webhook within `limit`.
+    ///
+    /// # Errors
+    /// Returns an error on storage failure or when the repository is missing.
+    pub fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .create_webhook_bounded(repo_id, url, events, secret, limit)
     }
 
     /// Creates a webhook for a repository.
@@ -856,6 +1491,17 @@ where
         T::search_repos(&self.0, repo_type, name_prefix, limit).map_err(Into::into)
     }
 
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        T::search_repos_with_options(&self.0, repo_type, name_prefix, limit, options)
+            .map_err(Into::into)
+    }
+
     fn create_revision(
         &self,
         repo_id: &str,
@@ -866,6 +1512,45 @@ where
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
             .map_err(Into::into)
+    }
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::update_revision_if_current(&self.0, repo_id, expected_sha, new_sha, ref_name, message)
+            .map_err(Into::into)
+    }
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_revision_if_absent(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(Into::into)
+    }
+
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_refs_bounded(&self.0, repo_id, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub refs exceed the requested listing limit",
+                )) as _
+            })
     }
 
     fn list_refs(
@@ -882,6 +1567,23 @@ where
         expected_sha: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::delete_ref(&self.0, repo_id, ref_name, expected_sha).map_err(Into::into)
+    }
+
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_revisions_bounded(&self.0, repo_id, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub revisions exceed the requested listing limit",
+                )) as _
+            })
     }
 
     fn list_revisions(
@@ -907,6 +1609,23 @@ where
         T::store_files(&self.0, commit_sha, files).map_err(Into::into)
     }
 
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_files_bounded(&self.0, commit_sha, limit)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub tree exceeds the requested listing limit",
+                )) as _
+            })
+    }
+
     fn get_files(
         &self,
         commit_sha: &str,
@@ -914,6 +1633,33 @@ where
         T::get_files(&self.0, commit_sha).map_err(Into::into)
     }
 
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_tree_page(&self.0, commit_sha, options)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub tree exceeds the 100000-entry metadata read ceiling",
+                )) as _
+            })
+    }
+
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_webhook_bounded(&self.0, repo_id, url, events, secret, limit).map_err(Into::into)
+    }
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -959,6 +1705,208 @@ where
     ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
         T::webhooks_for_event(&self.0, repo_id, event).map_err(Into::into)
     }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+pub(crate) fn assert_atomic_webhook_registration<S>(store: &S)
+where
+    S: HubStore + Clone + 'static,
+    S::Error: std::fmt::Debug,
+{
+    use std::sync::{Arc, Barrier};
+    for repo in [
+        "bounded/case",
+        "bounded/Case",
+        "bounded/cap",
+        "bounded/duplicate",
+    ] {
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+    }
+    assert!(matches!(
+        store
+            .create_webhook_bounded("bounded/case", "https://example.com/zero", &[], None, 0)
+            .unwrap(),
+        HubWebhookCreateOutcome::LimitReached
+    ));
+    assert!(store.list_webhooks("bounded/case").unwrap().is_empty());
+    assert!(
+        store
+            .create_webhook_bounded(
+                "bounded/missing",
+                "https://example.com/missing",
+                &[],
+                None,
+                50
+            )
+            .is_err()
+    );
+    for repo in ["bounded/case", "bounded/Case"] {
+        assert!(matches!(
+            store
+                .create_webhook_bounded(
+                    repo,
+                    "https://example.com/shared",
+                    &["push".into()],
+                    Some("opaque-secret"),
+                    1
+                )
+                .unwrap(),
+            HubWebhookCreateOutcome::Created(_)
+        ));
+        // Duplicate wins over both a full ceiling and the zero ceiling.
+        assert!(matches!(
+            store
+                .create_webhook_bounded(repo, "https://example.com/shared", &[], None, 0)
+                .unwrap(),
+            HubWebhookCreateOutcome::Duplicate
+        ));
+        assert!(matches!(
+            store
+                .create_webhook_bounded(repo, "https://example.com/over", &[], None, 1)
+                .unwrap(),
+            HubWebhookCreateOutcome::LimitReached
+        ));
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 1);
+    }
+    let existing = store.list_webhooks("bounded/case").unwrap();
+    assert_eq!(
+        existing[0].secret.as_ref().map(SecretString::expose_secret),
+        Some("opaque-secret")
+    );
+    store
+        .delete_webhook("bounded/case", &existing[0].id)
+        .unwrap();
+    assert!(matches!(
+        store
+            .create_webhook_bounded(
+                "bounded/case",
+                "https://example.com/replacement",
+                &[],
+                None,
+                1
+            )
+            .unwrap(),
+        HubWebhookCreateOutcome::Created(_)
+    ));
+    assert_eq!(store.list_webhooks("bounded/Case").unwrap().len(), 1);
+    // Preserve the deliberately unbounded library API, including duplicate URLs.
+    store
+        .create_webhook("bounded/case", "https://example.com/replacement", &[], None)
+        .unwrap();
+    assert_eq!(store.list_webhooks("bounded/case").unwrap().len(), 2);
+    assert!(matches!(
+        store
+            .create_webhook_bounded(
+                "bounded/case",
+                "https://example.com/replacement",
+                &[],
+                None,
+                1
+            )
+            .unwrap(),
+        HubWebhookCreateOutcome::Duplicate
+    ));
+    assert!(matches!(
+        store
+            .create_webhook_bounded("bounded/case", "https://example.com/third", &[], None, 1)
+            .unwrap(),
+        HubWebhookCreateOutcome::LimitReached
+    ));
+    for index in 0..49 {
+        store
+            .create_webhook(
+                "bounded/cap",
+                &format!("https://example.com/seed/{index}"),
+                &[],
+                None,
+            )
+            .unwrap();
+    }
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for index in 0..2 {
+        let store = (*store).clone();
+        let barrier = barrier.clone();
+        let runtime = runtime.clone();
+        workers.push(std::thread::spawn(move || {
+            let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+            barrier.wait();
+            store
+                .create_webhook_bounded(
+                    "bounded/cap",
+                    &format!("https://example.com/race/{index}"),
+                    &[],
+                    None,
+                    50,
+                )
+                .unwrap()
+        }));
+    }
+    let outcomes: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, HubWebhookCreateOutcome::Created(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, HubWebhookCreateOutcome::LimitReached))
+            .count(),
+        1
+    );
+    assert_eq!(store.list_webhooks("bounded/cap").unwrap().len(), 50);
+    let duplicate_barrier = Arc::new(Barrier::new(8));
+    let mut duplicate_workers = Vec::new();
+    for _ in 0..8 {
+        let store = (*store).clone();
+        let duplicate_barrier = duplicate_barrier.clone();
+        let runtime = runtime.clone();
+        duplicate_workers.push(std::thread::spawn(move || {
+            let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+            duplicate_barrier.wait();
+            store
+                .create_webhook_bounded(
+                    "bounded/duplicate",
+                    "https://example.com/duplicate",
+                    &[],
+                    None,
+                    50,
+                )
+                .unwrap()
+        }));
+    }
+    let duplicate_outcomes: Vec<_> = duplicate_workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(
+        duplicate_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, HubWebhookCreateOutcome::Created(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        duplicate_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, HubWebhookCreateOutcome::Duplicate))
+            .count(),
+        7
+    );
+    assert_eq!(store.list_webhooks("bounded/duplicate").unwrap().len(), 1);
 }
 
 #[cfg(test)]
@@ -1153,6 +2101,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn custom_atomic_create_default_is_unsupported_and_does_not_publish() {
+        for store in [
+            BoxedHubStore::new(MemoryHubStore::new()),
+            BoxedHubStore::from_store(MemoryHubStore::new()),
+        ] {
+            store
+                .create_repo(HubRepoType::Model, "owner/custom", false)
+                .unwrap();
+            assert!(matches!(
+                store
+                    .create_revision_if_absent("owner/custom", None, "new-sha", "feature", "new")
+                    .unwrap(),
+                HubRefCreateOutcome::Unsupported
+            ));
+            assert!(
+                store
+                    .resolve_revision("owner/custom", "feature")
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(store.list_revisions("owner/custom").unwrap().is_empty());
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // In-memory HubStore for exercising all BoxedHubStore delegation paths
     // ---------------------------------------------------------------------------
@@ -1240,6 +2213,48 @@ mod tests {
             Ok(matched)
         }
 
+        fn search_repos_with_options(
+            &self,
+            repo_type: Option<HubRepoType>,
+            name_prefix: &str,
+            limit: usize,
+            options: &HubRepoSearchOptions,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            let repos = self.repos.lock().unwrap();
+            let mut matched: Vec<_> = repos
+                .values()
+                .filter(|r| r.repo_id.starts_with(name_prefix))
+                .filter(|r| repo_type.is_none_or(|t| r.repo_type == t))
+                .filter(|r| {
+                    options
+                        .caller_repo_id
+                        .as_deref()
+                        .is_none_or(|id| !r.private || r.repo_id == id)
+                })
+                .filter(|r| {
+                    options
+                        .author
+                        .as_deref()
+                        .is_none_or(|author| r.repo_id.starts_with(&format!("{author}/")))
+                })
+                .cloned()
+                .collect();
+            matched.sort_by(|a, b| match options.order {
+                HubRepoSearchOrder::RepoIdAsc => a.repo_id.cmp(&b.repo_id),
+                HubRepoSearchOrder::RepoIdDesc => b.repo_id.cmp(&a.repo_id),
+                HubRepoSearchOrder::LastModifiedAsc => a
+                    .updated_at_unix_seconds
+                    .cmp(&b.updated_at_unix_seconds)
+                    .then_with(|| a.repo_id.cmp(&b.repo_id)),
+                HubRepoSearchOrder::LastModifiedDesc => b
+                    .updated_at_unix_seconds
+                    .cmp(&a.updated_at_unix_seconds)
+                    .then_with(|| a.repo_id.cmp(&b.repo_id)),
+            });
+            matched.truncate(limit);
+            Ok(matched)
+        }
+
         fn create_revision(
             &self,
             repo_id: &str,
@@ -1292,7 +2307,15 @@ mod tests {
                 message: Some(message.to_owned()),
                 created_at_unix_seconds: 200,
             };
-            repo_revisions.push(revision.clone());
+            let revision = if let Some(existing) = repo_revisions
+                .iter()
+                .find(|existing| existing.sha == new_sha)
+            {
+                existing.clone()
+            } else {
+                repo_revisions.push(revision.clone());
+                revision
+            };
             drop(revisions);
             self.refs
                 .lock()
@@ -1916,5 +2939,261 @@ mod tests {
             Some("s3kr3t")
         );
         assert!(wh.active);
+    }
+    #[test]
+    fn atomic_create_override_is_forwarded_by_both_boxed_constructors() {
+        for store in [
+            BoxedHubStore::new(OptimizedTreePageStore),
+            BoxedHubStore::from_store(OptimizedTreePageStore),
+        ] {
+            assert!(matches!(
+                store
+                    .create_revision_if_absent("owner/repo", None, "sha", "branch", "message")
+                    .unwrap(),
+                HubRefCreateOutcome::AlreadyExists
+            ));
+        }
+    }
+
+    struct OptimizedTreePageStore;
+    impl HubStore for OptimizedTreePageStore {
+        type Error = Box<dyn std::error::Error + Send + Sync>;
+        fn create_repo(
+            &self,
+            _repo_type: HubRepoType,
+            _name: &str,
+            _private: bool,
+        ) -> Result<HubRepo, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn get_repo(&self, _repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn search_repos(
+            &self,
+            _repo_type: Option<HubRepoType>,
+            _name_prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn search_repos_with_options(
+            &self,
+            _repo_type: Option<HubRepoType>,
+            _name_prefix: &str,
+            _limit: usize,
+            _options: &HubRepoSearchOptions,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn create_revision(
+            &self,
+            _repo_id: &str,
+            _parent_sha: Option<&str>,
+            _new_sha: &str,
+            _ref_name: &str,
+            _message: &str,
+        ) -> Result<HubRevision, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn create_revision_if_absent(
+            &self,
+            _repo_id: &str,
+            _parent_sha: Option<&str>,
+            _new_sha: &str,
+            _ref_name: &str,
+            _message: &str,
+        ) -> Result<HubRefCreateOutcome, Self::Error> {
+            Ok(HubRefCreateOutcome::AlreadyExists)
+        }
+        fn list_refs(&self, _repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn delete_ref(
+            &self,
+            _repo_id: &str,
+            _ref_name: &str,
+            _expected_sha: &str,
+        ) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn list_revisions(&self, _repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn resolve_revision(
+            &self,
+            _repo_id: &str,
+            _revision: &str,
+        ) -> Result<Option<String>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn store_files(
+            &self,
+            _commit_sha: &str,
+            _files: &[HubFileEntry],
+        ) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn get_files(&self, _commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn list_webhooks(&self, _repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn delete_repo(&self, _repo_id: &str) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn delete_webhook(&self, _repo_id: &str, _webhook_id: &str) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn update_webhook_secret(
+            &self,
+            _repo_id: &str,
+            _webhook_id: &str,
+            _secret: Option<&str>,
+        ) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn webhooks_for_event(
+            &self,
+            _repo_id: &str,
+            _event: &str,
+        ) -> Result<Vec<HubWebhook>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn create_webhook(
+            &self,
+            _repo_id: &str,
+            _url: &str,
+            _events: &[String],
+            _secret: Option<&str>,
+        ) -> Result<HubWebhook, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn get_tree_page(
+            &self,
+            _commit_sha: &str,
+            _options: &HubTreePageOptions,
+        ) -> Result<Option<HubTreePage>, Self::Error> {
+            Ok(Some(HubTreePage {
+                entries: vec![HubTreePageEntry::Directory {
+                    path: "override".to_owned(),
+                }],
+                has_more: false,
+            }))
+        }
+    }
+
+    #[test]
+    fn tree_page_erasure_retains_optimized_override() {
+        let options = HubTreePageOptions {
+            path: String::new(),
+            recursive: false,
+            cursor: None,
+            limit: 1,
+        };
+        for store in [
+            BoxedHubStore::new(OptimizedTreePageStore),
+            BoxedHubStore::from_store(OptimizedTreePageStore),
+        ] {
+            assert_eq!(
+                store.get_tree_page("commit", &options).unwrap().entries,
+                vec![HubTreePageEntry::Directory {
+                    path: "override".to_owned()
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn tree_page_legacy_custom_store_preserves_large_tree_limit() {
+        for store in [
+            BoxedHubStore::new(MemoryHubStore::new()),
+            BoxedHubStore::from_store(MemoryHubStore::new()),
+        ] {
+            let files: Vec<_> = (0..100_001)
+                .map(|number| HubFileEntry {
+                    path: format!("{number:06}"),
+                    size: 1,
+                    sha: "sha".to_owned(),
+                    is_lfs: false,
+                })
+                .collect();
+            store.store_files("custom", &files).unwrap();
+            let page = store
+                .get_tree_page(
+                    "custom",
+                    &HubTreePageOptions {
+                        path: String::new(),
+                        recursive: true,
+                        cursor: None,
+                        limit: 100_001,
+                    },
+                )
+                .unwrap();
+            assert_eq!(page.entries.len(), 100_001);
+            assert!(!page.has_more);
+        }
+    }
+    #[test]
+    fn boxed_hub_store_strict_updates_default_to_unsupported_without_writes() {
+        let store = BoxedHubStore::from_store(MemoryHubStore::new());
+        store
+            .create_repo(HubRepoType::Model, "strict/repo", true)
+            .unwrap();
+        let before = store.list_refs("strict/repo").unwrap();
+        assert!(matches!(
+            store
+                .update_revision_if_current("strict/repo", "old", "new", "feature", "update")
+                .unwrap(),
+            HubRefUpdateOutcome::Unsupported
+        ));
+        assert_eq!(store.list_refs("strict/repo").unwrap(), before);
+        assert!(store.list_revisions("strict/repo").unwrap().is_empty());
+    }
+    #[test]
+    fn boxed_webhook_bounded_default_is_unsupported_without_writes() {
+        let store = BoxedHubStore::from_store(MemoryHubStore::new());
+        store
+            .create_repo(HubRepoType::Model, "bounded/custom", true)
+            .unwrap();
+        assert!(matches!(
+            store
+                .create_webhook_bounded(
+                    "bounded/custom",
+                    "https://example.com/custom",
+                    &[],
+                    None,
+                    1
+                )
+                .unwrap(),
+            HubWebhookCreateOutcome::Unsupported
+        ));
+        assert!(store.list_webhooks("bounded/custom").unwrap().is_empty());
+    }
+    #[test]
+    fn boxed_webhook_bounded_default_does_not_dispatch_legacy_reads_or_writes() {
+        for store in [
+            BoxedHubStore::new(OptimizedTreePageStore),
+            BoxedHubStore::from_store(OptimizedTreePageStore),
+        ] {
+            // Both legacy methods on this fixture return errors. Reaching the
+            // Unsupported outcome proves neither method was dispatched.
+            assert!(matches!(
+                store
+                    .create_webhook_bounded(
+                        "bounded/custom",
+                        "https://example.com/custom",
+                        &[],
+                        None,
+                        1
+                    )
+                    .unwrap(),
+                HubWebhookCreateOutcome::Unsupported
+            ));
+        }
     }
 }

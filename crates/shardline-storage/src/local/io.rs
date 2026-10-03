@@ -8,7 +8,10 @@ use std::{
 
 use shardline_protocol::ShardlineHash;
 
-use crate::{ObjectIntegrity, PutOutcome, local_fs::hard_link_file_if_absent};
+use crate::{
+    ObjectIntegrity, PutOutcome,
+    local_fs::{hard_link_file_if_absent, verify_existing_object_durable},
+};
 
 use super::metadata::{ensure_parent_directories_are_not_symlinked, ensure_regular_file_metadata};
 use super::store::LocalObjectStoreError;
@@ -17,9 +20,10 @@ use super::util::{VERIFY_BUFFER_A, VERIFY_BUFFER_B, VERIFY_BUFFER_BYTES};
 pub fn verify_file_integrity(
     path: &Path,
     integrity: &ObjectIntegrity,
-) -> Result<(), LocalObjectStoreError> {
+) -> Result<File, LocalObjectStoreError> {
     let file = open_existing_object_file(path)?;
-    verify_open_file_integrity(file, integrity)
+    verify_open_file_integrity(file.try_clone()?, integrity)?;
+    Ok(file)
 }
 
 pub fn verify_open_file_integrity(
@@ -66,17 +70,18 @@ pub fn link_temporary_file_if_absent(
     root: &Path,
     path: &Path,
     temporary: &Path,
+    verified_source: &File,
     _integrity: &ObjectIntegrity,
     temporary_bytes: Option<&[u8]>,
 ) -> Result<PutOutcome, LocalObjectStoreError> {
     ensure_parent_directories_are_not_symlinked(root, path)?;
-    match hard_link_file_if_absent(root, path, temporary) {
+    match hard_link_file_if_absent(root, path, temporary, verified_source) {
         Ok(()) => {
             remove_temporary_file(temporary)?;
             Ok(PutOutcome::Inserted)
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            let outcome = existing_object_outcome(path, temporary, temporary_bytes);
+            let outcome = existing_object_outcome(root, path, verified_source, temporary_bytes);
             remove_temporary_file(temporary)?;
             outcome
         }
@@ -88,18 +93,20 @@ pub fn link_temporary_file_if_absent(
 }
 
 pub fn existing_object_outcome(
+    root: &Path,
     path: &Path,
-    temporary: &Path,
+    verified_source: &File,
     temporary_bytes: Option<&[u8]>,
 ) -> Result<PutOutcome, LocalObjectStoreError> {
-    let existing = open_existing_object_file(path)?;
-    if let Some(temporary_bytes) = temporary_bytes {
-        ensure_file_matches_bytes(existing, temporary_bytes)?;
-        return Ok(PutOutcome::AlreadyExists);
-    }
-
-    let temporary = open_existing_object_file(temporary)?;
-    ensure_files_match(existing, temporary)?;
+    verify_existing_object_durable(root, path, |anchored_path| {
+        let existing = open_existing_object_file(anchored_path)?;
+        if let Some(temporary_bytes) = temporary_bytes {
+            ensure_file_matches_bytes(existing.try_clone()?, temporary_bytes)?;
+        } else {
+            ensure_files_match(existing.try_clone()?, verified_source.try_clone()?)?;
+        }
+        Ok::<File, LocalObjectStoreError>(existing)
+    })?;
     Ok(PutOutcome::AlreadyExists)
 }
 

@@ -44,6 +44,7 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 http-body-util = "0.1"
 proptest.workspace = true
 rusqlite.workspace = true

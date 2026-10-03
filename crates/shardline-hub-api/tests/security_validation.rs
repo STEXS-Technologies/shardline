@@ -395,26 +395,29 @@ fn validate_commit_has_path_validation() {
 // FINDING 5: Decompression Bomb — FIXED
 // ============================================================================
 
-/// Validates that decompress_zlib now has an output size limit.
-///
-/// **[FIXED]**: `MAX_DECOMPRESSED_SIZE` is defined and enforced after
-/// decompression. Oversized output is rejected.
+/// Oversized declared inflation is rejected before invoking the decoder.
 #[test]
 fn validate_decompress_zlib_has_size_limit() {
-    let smart_http_source = include_str!("../src/git/smart_http/pack_parse.rs");
-
-    assert!(
-        smart_http_source.contains("MAX_DECOMPRESSED_SIZE"),
-        "decompress_zlib has MAX_DECOMPRESSED_SIZE constant"
-    );
-    assert!(
-        smart_http_source.contains("output.len() > MAX_DECOMPRESSED_SIZE"),
-        "decompress_zlib checks decompressed size against limit"
-    );
-    assert!(
-        smart_http_source.contains("exceeds maximum size"),
-        "decompress_zlib returns error for oversized output"
-    );
+    use sha1::{Digest, Sha1};
+    let mut pack = b"PACK".to_vec();
+    pack.extend_from_slice(&2u32.to_be_bytes());
+    pack.extend_from_slice(&1u32.to_be_bytes());
+    let size = 512usize * 1024 * 1024 + 1;
+    pack.push(0xb0 | (size & 15) as u8);
+    let mut size = size >> 4;
+    while size != 0 {
+        let mut byte = (size & 127) as u8;
+        size >>= 7;
+        if size != 0 {
+            byte |= 128;
+        }
+        pack.push(byte);
+    }
+    pack.extend_from_slice(&Sha1::digest(&pack));
+    assert!(matches!(
+        shardline_hub_api::git::smart_http::parse_pack_data(&pack),
+        Err(shardline_hub_api::git::pack::PackError::ExcessiveDecompressedSize)
+    ));
 }
 
 /// Validates that parse_pack_data now validates shift overflow.
@@ -423,14 +426,20 @@ fn validate_decompress_zlib_has_size_limit() {
 /// before left-shifting, preventing integer overflow from malicious packs.
 #[test]
 fn validate_pack_parser_shift_overflow_protected() {
-    let smart_http_source = include_str!("../src/git/smart_http/pack_parse.rs");
-
-    let parse_start = smart_http_source.find("fn parse_pack_data").unwrap();
-    let parse_fn = &smart_http_source[parse_start..parse_start + 2500];
-
+    let mut pack = Vec::new();
+    pack.extend_from_slice(b"PACK");
+    pack.extend_from_slice(&2u32.to_be_bytes());
+    pack.extend_from_slice(&1u32.to_be_bytes());
+    pack.push(0xb0); // blob header with an unterminated size varint
+    pack.extend_from_slice(&[0xff; 10]);
+    use sha1::{Digest, Sha1};
+    pack.extend_from_slice(&Sha1::digest(&pack));
     assert!(
-        parse_fn.contains("shift >= 64"),
-        "parse_pack_data checks shift overflow before left-shift"
+        matches!(
+            shardline_hub_api::git::smart_http::parse_pack_data(&pack),
+            Err(shardline_hub_api::git::pack::PackError::ShiftOverflow)
+        ),
+        "malicious pack size must be rejected before shifting past integer width"
     );
 }
 
@@ -618,9 +627,14 @@ async fn validate_commit_body_bounded_by_router() {
         .await
         .unwrap();
 
+    let status = response.status();
+    let response_body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     assert_eq!(
-        response.status(),
+        status,
         StatusCode::OK,
-        "Small commit body accepted within 64MB limit"
+        "Small commit body accepted within64MB limit: {}",
+        String::from_utf8_lossy(&response_body)
     );
 }

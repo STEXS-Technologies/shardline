@@ -36,10 +36,23 @@ pub struct ProviderlessSetupReport {
 
 impl ProviderlessSetupReport {
     pub fn print_summary(&self) {
-        println!("state_dir: {}", self.state_dir.display());
-        println!("root_dir: {}", self.data_dir.display());
-        println!("token_signing_key_file: {}", self.key_file.display());
-        println!("env_file: {}", self.env_file.display());
+        let _result = self.write_summary(&mut std::io::stdout().lock());
+    }
+
+    /// Writes the report and flushes the destination.
+    ///
+    /// # Errors
+    /// Returns the first write or flush error.
+    pub fn write_summary<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+        writeln!(writer, "state_dir: {}", self.state_dir.display())?;
+        writeln!(writer, "root_dir: {}", self.data_dir.display())?;
+        writeln!(
+            writer,
+            "token_signing_key_file: {}",
+            self.key_file.display()
+        )?;
+        writeln!(writer, "env_file: {}", self.env_file.display())?;
+        writer.flush()
     }
 }
 
@@ -364,5 +377,24 @@ mod tests {
             contents.contains("SHARDLINE_TOKEN_SIGNING_KEY_FILE=/tmp/.shardline/token-signing-key")
         );
         assert!(contents.contains("SHARDLINE_OBJECT_STORAGE_ADAPTER=local"));
+    }
+
+    #[test]
+    fn setup_writer_preserves_text_and_propagates_write_and_flush_errors() {
+        let report = super::ProviderlessSetupReport {
+            state_dir: "/state".into(),
+            data_dir: "/data".into(),
+            key_file: "/key".into(),
+            env_file: "/env".into(),
+        };
+        crate::hold::output_test_support::assert_writer_errors(|writer| {
+            report.write_summary(writer)
+        });
+        let mut bytes = Vec::new();
+        report.write_summary(&mut bytes).expect("summary");
+        assert_eq!(
+            bytes,
+            b"state_dir: /state\nroot_dir: /data\ntoken_signing_key_file: /key\nenv_file: /env\n"
+        );
     }
 }

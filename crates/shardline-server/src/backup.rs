@@ -94,7 +94,8 @@ impl BackupManifestObjectEntry {
 /// # Errors
 ///
 /// Returns [`ServerError`] when metadata enumeration, object inventory, or manifest
-/// writing fails.
+/// writing or final writer flushing fails. Success flushes the writer; it does not
+/// synchronize the output to durable storage (for example, with `fsync`).
 pub async fn write_backup_manifest<Writer>(
     config: ServerConfig,
     writer: Writer,
@@ -144,13 +145,12 @@ where
     })
     .await?;
 
-    report.reconstruction_rows = u64::try_from(
-        index_store
-            .list_reconstruction_file_ids()
-            .await
-            .map_err(Into::into)?
-            .len(),
-    )?;
+    index_store
+        .visit_reconstruction_file_ids(|_file_id| {
+            report.reconstruction_rows = checked_increment(report.reconstruction_rows)?;
+            Ok::<(), ServerError>(())
+        })
+        .await?;
 
     index_store
         .visit_dedupe_shard_mappings(|_mapping| {
@@ -297,6 +297,7 @@ where
         &mut first_field,
     )?;
     writer.write_all(b"}\n")?;
+    writer.flush()?;
 
     Ok(report)
 }
@@ -808,5 +809,141 @@ mod tests {
         let result = write_backup_manifest(config, &mut buffer).await;
         // Should fail because no real Postgres is available.
         assert!(result.is_err());
+    }
+    #[tokio::test]
+    async fn reconstruction_inventory_counts_all_rows_and_rejects_corrupt_ids_before_output() {
+        use shardline_index::{FileId, FileReconstruction};
+        use shardline_protocol::ShardlineHash;
+
+        let root = tempfile::tempdir().unwrap();
+        let index = LocalIndexStore::open(root.path().to_path_buf());
+        for number in 0u64..1025 {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&number.to_be_bytes());
+            index
+                .insert_reconstruction(
+                    &FileId::new(ShardlineHash::from_bytes(hash)),
+                    &FileReconstruction::new(Vec::new()),
+                )
+                .unwrap();
+        }
+        let config = crate::ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
+        );
+        let mut output = Vec::new();
+        let report = write_backup_manifest(config.clone(), &mut output)
+            .await
+            .unwrap();
+        assert_eq!(report.reconstruction_rows, 1025);
+        let manifest: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(manifest["reconstruction_rows"], 1025);
+
+        let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_file_reconstructions (file_id, terms, updated_at_unix_seconds) VALUES (?1, ?2, 0)",
+                rusqlite::params!["zz-invalid-id", "[]"],
+            )
+            .unwrap();
+        let mut rejected_output = Vec::new();
+        assert!(
+            write_backup_manifest(config, &mut rejected_output)
+                .await
+                .is_err()
+        );
+        assert!(rejected_output.is_empty());
+    }
+    struct ManifestReceiver {
+        bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        fail_write: bool,
+        fail_flush: bool,
+        flushed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Write for ManifestReceiver {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                return Err(std::io::Error::from_raw_os_error(28));
+            }
+            self.bytes
+                .lock()
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_flush {
+                Err(std::io::Error::from_raw_os_error(28))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn manifest_test_config(root: &std::path::Path) -> ServerConfig {
+        ServerConfig::new(
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            root.to_path_buf(),
+            std::num::NonZeroUsize::MIN,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_manifest_writer_propagates_buffered_write_and_flush_errors() {
+        let root = tempfile::tempdir().unwrap();
+        for (fail_write, fail_flush) in [(true, false), (false, true)] {
+            let receiver = ManifestReceiver {
+                bytes: std::sync::Arc::default(),
+                fail_write,
+                fail_flush,
+                flushed: std::sync::Arc::default(),
+            };
+            let error = if fail_write {
+                let buffered = std::io::BufWriter::with_capacity(65536, receiver);
+                write_backup_manifest(manifest_test_config(root.path()), buffered)
+                    .await
+                    .unwrap_err()
+            } else {
+                write_backup_manifest(manifest_test_config(root.path()), receiver)
+                    .await
+                    .unwrap_err()
+            };
+            assert!(
+                matches!(error, ServerError::Io(ref io_error) if io_error.raw_os_error() == Some(28))
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_manifest_writer_delivers_buffered_bytes_before_success() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = std::sync::Arc::<std::sync::Mutex<Vec<u8>>>::default();
+        let flushed = std::sync::Arc::<std::sync::atomic::AtomicBool>::default();
+        let receiver = ManifestReceiver {
+            bytes: bytes.clone(),
+            fail_write: false,
+            fail_flush: false,
+            flushed: flushed.clone(),
+        };
+        let buffered = std::io::BufWriter::with_capacity(65536, receiver);
+        let report = write_backup_manifest(manifest_test_config(root.path()), buffered)
+            .await
+            .unwrap();
+        assert!(flushed.load(std::sync::atomic::Ordering::SeqCst));
+        let received = bytes.lock().unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&received).unwrap();
+        assert_eq!(
+            json.get("manifest_version").unwrap(),
+            report.manifest_version
+        );
+        assert_eq!(json.get("object_count").unwrap(), report.object_count);
+        assert!(received.ends_with(b"}\n"));
     }
 }

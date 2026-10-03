@@ -2516,10 +2516,14 @@ async fn single_chunk_file_ingest_is_xorb_backed_and_reconstructs_byte_identical
 
     // The server download stream returns byte-identical data.
     use futures_util::StreamExt;
-    let mut stream =
-        crate::download_stream::file_record_byte_stream(object_store, record.clone(), None)
-            .await
-            .unwrap();
+    let mut stream = crate::download_stream::file_record_byte_stream(
+        object_store,
+        record.clone(),
+        None,
+        crate::admission::ExecutionPools::default_sizes().blocking_io,
+    )
+    .await
+    .unwrap();
     let mut downloaded = Vec::new();
     while let Some(item) = stream.next().await {
         downloaded.extend_from_slice(&item.unwrap());
@@ -4241,6 +4245,7 @@ async fn s3_multipart_roundtrip_through_full_router() {
     // UploadPart (two parts).
     let part1: &[u8] = b"e2e-part-one-";
     let part2: &[u8] = b"second-part";
+    let mut part_etags = Vec::new();
     for (part_number, content) in [(1_u32, part1), (2, part2)] {
         let put = app
             .clone()
@@ -4257,16 +4262,25 @@ async fn s3_multipart_roundtrip_through_full_router() {
             .await
             .unwrap();
         assert_eq!(put.status(), StatusCode::OK);
-        assert!(put.headers().contains_key(header::ETAG));
+        part_etags.push(
+            put.headers()
+                .get(header::ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        );
     }
 
     // CompleteMultipartUpload.
     let complete_body = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
-         \x20 <Part><PartNumber>1</PartNumber><ETag>\"{upload_id}-1\"</ETag></Part>\n\
-         \x20 <Part><PartNumber>2</PartNumber><ETag>\"{upload_id}-2\"</ETag></Part>\n\
-         </CompleteMultipartUpload>\n"
+         \x20 <Part><PartNumber>1</PartNumber><ETag>{part1_etag}</ETag></Part>\n\
+         \x20 <Part><PartNumber>2</PartNumber><ETag>{part2_etag}</ETag></Part>\n\
+         </CompleteMultipartUpload>\n",
+        part1_etag = part_etags[0],
+        part2_etag = part_etags[1],
     );
     let complete = app
         .clone()
@@ -5331,19 +5345,24 @@ async fn bazel_invalid_hash_returns_error() {
 const OCI_TEST_REPO: &str = "team/assets";
 
 /// A minimal OCI image manifest JSON for testing.
-fn test_manifest_json(config_digest: &str, layer_digest: &str) -> String {
+fn test_manifest_json(
+    config_digest: &str,
+    layer_digest: &str,
+    config_size: usize,
+    layer_size: usize,
+) -> String {
     json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": config_size,
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [
             {
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
+                "size": layer_size,
                 "digest": format!("sha256:{layer_digest}")
             }
         ]
@@ -5385,7 +5404,12 @@ async fn oci_setup_manifest(app: &Router, repository: &str, tag: &str) -> String
     let config_digest = oci_upload_blob(app, repository, config_data).await;
     let layer_digest = oci_upload_blob(app, repository, layer_data).await;
 
-    let manifest_json = test_manifest_json(&config_digest, &layer_digest);
+    let manifest_json = test_manifest_json(
+        &config_digest,
+        &layer_digest,
+        config_data.len(),
+        layer_data.len(),
+    );
     let manifest_bytes = manifest_json.as_bytes();
     let manifest_digest = sha256_hex(manifest_bytes);
 

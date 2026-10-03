@@ -97,6 +97,26 @@ pub struct TreeEntryOutcome {
     pub created: bool,
 }
 
+/// Atomic tree registration result, including repository capacity checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeRegistrationOutcome {
+    /// Revision and path were published in one storage transaction.
+    Registered(TreeEntryOutcome),
+    /// The repository revision or tree capacity would be exceeded.
+    LimitExceeded,
+}
+
+/// Outcome of insert-only revision creation with an atomic repository limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionCreationOutcome {
+    /// A new revision was inserted.
+    Created,
+    /// This exact revision already exists; all attributes remain unchanged.
+    AlreadyExists,
+    /// A new revision would exceed repository capacity; no rows were changed.
+    LimitExceeded,
+}
+
 /// A revision registry row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevisionRecord {
@@ -131,6 +151,43 @@ pub struct RevisionRecord {
 pub trait TreeStore: Send + Sync {
     /// Adapter-specific error type.
     type Error: Send + Sync;
+
+    /// Atomically checks repository capacity, creates or refreshes the revision,
+    /// and upserts its path mapping. Existing revision creation time is retained.
+    /// Must serialize with revision deletion/pruning across storage connections.
+    /// Capacity rejection and persistence failure publish neither change.
+    ///
+    /// # Errors
+    /// Returns the adapter error when persistence fails.
+    async fn register_tree_entry(
+        &self,
+        entry: &TreeEntry,
+        max_revisions: usize,
+        max_tree_entries: usize,
+    ) -> Result<TreeRegistrationOutcome, Self::Error>;
+
+    /// Inserts a revision only if absent; a conflict leaves all attributes intact.
+    ///
+    /// # Errors
+    /// Returns the adapter error when persistence fails.
+    async fn create_revision_if_absent(&self, rev: &RevisionRecord) -> Result<bool, Self::Error> {
+        Ok(matches!(
+            self.create_revision_bounded(rev, usize::MAX).await?,
+            RevisionCreationOutcome::Created
+        ))
+    }
+
+    /// Atomically checks repository capacity and inserts a new revision.
+    /// Existing-name conflicts take precedence over the capacity result and never
+    /// refresh attributes. Serializes with registration/deletion across connections.
+    ///
+    /// # Errors
+    /// Returns the adapter error when persistence fails.
+    async fn create_revision_bounded(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<RevisionCreationOutcome, Self::Error>;
 
     /// Inserts or replaces a path mapping, reporting whether it was newly created.
     ///
@@ -200,9 +257,8 @@ pub trait TreeStore: Send + Sync {
 
     /// Counts the revision registry rows for a repository.
     ///
-    /// Used to enforce the per-repo revision-registry cap (F-75) before an
-    /// insert: the count-then-insert race at the boundary is acceptable, the
-    /// cap is a bound not a hard invariant.
+    /// A count is only a snapshot; mutations enforce capacity atomically through
+    /// [`TreeStore::create_revision_bounded`] and [`TreeStore::register_tree_entry`].
     ///
     /// # Errors
     ///
@@ -407,3 +463,7 @@ mod tests {
         assert_ne!(record, other);
     }
 }
+
+#[cfg(test)]
+#[path = "tree_registration_tests.rs"]
+mod registration_tests;

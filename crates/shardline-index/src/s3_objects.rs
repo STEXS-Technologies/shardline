@@ -1,3 +1,19 @@
+/// Inclusive or exclusive lower bound for a raw S3 key scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S3ObjectScanStart<'key> {
+    /// Include a key exactly equal to the bound.
+    Inclusive(&'key str),
+    /// Resume strictly after the bound.
+    Exclusive(&'key str),
+}
+
+/// Returns the exclusive UTF-8 lexical upper bound of a prefix.
+/// Empty or all-largest-scalar prefixes have no upper bound.
+#[must_use]
+pub fn s3_prefix_successor(prefix: &str) -> Option<String> {
+    crate::hub::prefix_successor(prefix)
+}
+
 /// One indexed S3 object row for the S3 frontend's listing index.
 ///
 /// Rows are keyed by `(scope_namespace, object_key)`. `object_key` is the
@@ -107,6 +123,52 @@ pub trait S3ObjectIndexStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<S3ObjectEntry>, Self::Error>;
 
+    /// Scans a bounded prefix page from an inclusive or exclusive raw-key bound.
+    ///
+    /// Builtin stores use indexed UTF-8 byte ordering. The compatibility default
+    /// adds an exact lookup for an inclusive bound before the existing exclusive
+    /// scan, without loading the whole namespace.
+    ///
+    /// # Errors
+    /// Returns the adapter error when either lookup or scan fails.
+    async fn scan_s3_objects_from(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        start: Option<S3ObjectScanStart<'_>>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, Self::Error> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        match start {
+            None => {
+                self.scan_s3_objects(scope_namespace, prefix, None, limit)
+                    .await
+            }
+            Some(S3ObjectScanStart::Exclusive(key)) => {
+                self.scan_s3_objects(scope_namespace, prefix, Some(key), limit)
+                    .await
+            }
+            Some(S3ObjectScanStart::Inclusive(key)) => {
+                let mut values = Vec::new();
+                if key.starts_with(prefix)
+                    && let Some(entry) = self.scan_s3_object_exact(scope_namespace, key).await?
+                {
+                    values.push(entry);
+                }
+                let remaining = limit.saturating_sub(values.len());
+                if remaining > 0 {
+                    values.extend(
+                        self.scan_s3_objects(scope_namespace, prefix, Some(key), remaining)
+                            .await?,
+                    );
+                }
+                Ok(values)
+            }
+        }
+    }
+
     /// Resolves exactly one S3 object row by its full raw key — no prefix
     /// matching — returning `None` when the exact key is absent.
     ///
@@ -166,5 +228,125 @@ mod tests {
             ..entry.clone()
         };
         assert_ne!(entry, other);
+    }
+}
+
+#[cfg(test)]
+mod range_contract_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    struct CustomStore(Vec<S3ObjectEntry>);
+    #[async_trait::async_trait]
+    impl S3ObjectIndexStore for CustomStore {
+        type Error = std::convert::Infallible;
+        async fn upsert_s3_object(&self, _: &S3ObjectEntry) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        async fn compare_and_swap_s3_object(
+            &self,
+            _: Option<&S3ObjectEntry>,
+            _: &S3ObjectEntry,
+        ) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
+        async fn delete_s3_object(&self, _: &str, _: &str) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
+        async fn scan_s3_objects(
+            &self,
+            scope: &str,
+            prefix: &str,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<S3ObjectEntry>, Self::Error> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|entry| {
+                    entry.scope_namespace == scope
+                        && entry.object_key.starts_with(prefix)
+                        && cursor.is_none_or(|cursor| entry.object_key.as_str() > cursor)
+                })
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+        async fn scan_s3_object_exact(
+            &self,
+            scope: &str,
+            key: &str,
+        ) -> Result<Option<S3ObjectEntry>, Self::Error> {
+            Ok(self
+                .0
+                .iter()
+                .find(|entry| entry.scope_namespace == scope && entry.object_key == key)
+                .cloned())
+        }
+    }
+    #[tokio::test]
+    async fn inclusive_default_preserves_exact_successor_and_limit() {
+        let store = CustomStore(
+            ["a/child", "a0", "a1", "z"]
+                .into_iter()
+                .map(|key| S3ObjectEntry {
+                    scope_namespace: "scope".into(),
+                    object_key: key.into(),
+                    file_id: "file".into(),
+                    size_bytes: 1,
+                    content_hash: "hash".into(),
+                    etag: "etag".into(),
+                    user_metadata: Vec::new(),
+                    updated_at_unix_seconds: 0,
+                })
+                .collect(),
+        );
+        let inclusive = store
+            .scan_s3_objects_from("scope", "a", Some(S3ObjectScanStart::Inclusive("a0")), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            inclusive
+                .iter()
+                .map(|entry| entry.object_key.as_str())
+                .collect::<Vec<_>>(),
+            ["a0", "a1"]
+        );
+        let exclusive = store
+            .scan_s3_objects_from("scope", "a", Some(S3ObjectScanStart::Exclusive("a0")), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            exclusive
+                .iter()
+                .map(|entry| entry.object_key.as_str())
+                .collect::<Vec<_>>(),
+            ["a1"]
+        );
+        assert!(
+            store
+                .scan_s3_objects_from("scope", "a", Some(S3ObjectScanStart::Inclusive("a0")), 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .scan_s3_objects_from("scope", "a", Some(S3ObjectScanStart::Inclusive("z")), 2)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn utf8_prefix_boundaries_skip_surrogates_and_carry_maximum_scalar() {
+        assert_eq!(s3_prefix_successor("a/").as_deref(), Some("a0"));
+        assert_eq!(s3_prefix_successor("é・").as_deref(), Some("éー"));
+        assert_eq!(
+            s3_prefix_successor("a\u{d7ff}").as_deref(),
+            Some("a\u{e000}")
+        );
+        assert_eq!(s3_prefix_successor("a\u{10ffff}").as_deref(), Some("b"));
+        assert_eq!(s3_prefix_successor("\u{10ffff}\u{10ffff}"), None);
+        assert_eq!(s3_prefix_successor(""), None);
     }
 }

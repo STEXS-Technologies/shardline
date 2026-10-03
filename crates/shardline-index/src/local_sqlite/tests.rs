@@ -1593,3 +1593,521 @@ async fn exercise_local_record_store_lifecycle() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+fn assert_bootstrap_database_complete(root: &Path) {
+    let connection = open_sqlite_connection(root).unwrap();
+    let mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT version FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE} ORDER BY version"
+        ))
+        .unwrap();
+    let versions = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let expected = LOCAL_SQLITE_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .collect::<Vec<_>>();
+    assert_eq!(versions, expected);
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+}
+
+#[test]
+fn concurrent_cold_local_bootstrap_threads() {
+    let directory = tempfile::tempdir().unwrap();
+    for round in 0..20 {
+        let root = directory.path().join(format!("root-{round}"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers = (0..8)
+            .map(|_| {
+                let store = LocalIndexStore::open(root.clone());
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.probe()
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), Ok(()));
+        }
+        assert_bootstrap_database_complete(&root);
+    }
+}
+
+#[test]
+fn local_bootstrap_process_child() {
+    let Some(root) = std::env::var_os("SHARDLINE_BOOTSTRAP_TEST_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let worker = std::env::var("SHARDLINE_BOOTSTRAP_TEST_WORKER").unwrap();
+    fs::write(root.join(format!("ready-{worker}")), []).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !root.join("start").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "parent did not release process barrier"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    LocalIndexStore::open(root.join("database"))
+        .probe()
+        .unwrap();
+}
+
+#[test]
+fn concurrent_cold_local_bootstrap_processes() {
+    let directory = tempfile::tempdir().unwrap();
+    for round in 0..4 {
+        let root = directory.path().join(format!("root-{round}"));
+        fs::create_dir_all(&root).unwrap();
+        let mut children = Vec::with_capacity(4);
+        for worker in 0..4 {
+            children.push(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "local_sqlite::tests::local_bootstrap_process_child",
+                        "--nocapture",
+                    ])
+                    .env("SHARDLINE_BOOTSTRAP_TEST_ROOT", &root)
+                    .env("SHARDLINE_BOOTSTRAP_TEST_WORKER", worker.to_string())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let ready = loop {
+            if (0..4).all(|worker| root.join(format!("ready-{worker}")).exists()) {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        // Always release and reap children before reporting a barrier failure.
+        fs::write(root.join("start"), []).unwrap();
+        let results = children
+            .into_iter()
+            .map(|child| child.wait_with_output().unwrap())
+            .collect::<Vec<_>>();
+        assert!(ready, "child processes did not reach their barrier");
+        for output in results {
+            assert!(
+                output.status.success(),
+                "bootstrap child failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_bootstrap_database_complete(&root.join("database"));
+    }
+}
+
+#[test]
+fn blocked_local_bootstrap_does_not_block_other_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let blocked = LocalIndexStore::open(directory.path().join("blocked"));
+    let warm = LocalIndexStore::new(directory.path().join("warm")).unwrap();
+    let coordinator = super::store::database_initialization(
+        &blocked.root().join(LOCAL_METADATA_DATABASE_FILE_NAME),
+    )
+    .unwrap();
+    let guard = coordinator.lock().unwrap();
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let blocked_worker = std::thread::spawn(move || {
+        started_sender.send(()).unwrap();
+        blocked.probe()
+    });
+    started_receiver.recv().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cold = LocalIndexStore::open(directory.path().join("cold"));
+    let other_worker = std::thread::spawn(move || {
+        let result = warm.probe().and_then(|()| cold.probe());
+        sender.send(result).unwrap();
+    });
+    let progress = receiver.recv_timeout(std::time::Duration::from_secs(5));
+    drop(guard);
+    let blocked_result = blocked_worker.join().unwrap();
+    other_worker.join().unwrap();
+    assert_eq!(progress.unwrap(), Ok(()));
+    assert_eq!(blocked_result, Ok(()));
+}
+
+#[tokio::test]
+async fn upload_intent_length_bounds_preserve_identity_and_evidence() {
+    use crate::{UploadIntent, UploadIntentStore};
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    for length in [0, i64::MAX as u64] {
+        let intent = UploadIntent::new(
+            format!("valid-{length}"),
+            "objects/valid".to_owned(),
+            "hash".to_owned(),
+            length,
+        );
+        store.create_intent(&intent).await.unwrap();
+        store.create_intent(&intent).await.unwrap();
+        let persisted = store
+            .intent_by_id(intent.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.object_length(), length);
+        assert_eq!(
+            store
+                .reliability_events(intent.intent_id())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let existing_id = format!("valid-{}", i64::MAX);
+    let before = store.intent_by_id(&existing_id).await.unwrap().unwrap();
+    let evidence_before = store.reliability_events(&existing_id).await.unwrap();
+    for length in [i64::MAX as u64 + 1, u64::MAX] {
+        for intent_id in ["fresh-oversized", existing_id.as_str()] {
+            let intent = UploadIntent::new(
+                intent_id.to_owned(),
+                "objects/valid".to_owned(),
+                "hash".to_owned(),
+                length,
+            );
+            assert!(matches!(
+                store.create_intent(&intent).await,
+                Err(LocalIndexStoreError::IntegerOutOfRange(_))
+            ));
+        }
+        assert!(
+            store
+                .intent_by_id("fresh-oversized")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .reliability_events("fresh-oversized")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let after = store.intent_by_id(&existing_id).await.unwrap().unwrap();
+        assert!(before.has_same_identity(&after));
+        assert_eq!(after.state(), before.state());
+        assert_eq!(after.created_at(), before.created_at());
+        assert_eq!(after.updated_at(), before.updated_at());
+        assert_eq!(
+            store.reliability_events(&existing_id).await.unwrap(),
+            evidence_before
+        );
+    }
+}
+
+#[tokio::test]
+async fn upload_intent_evidence_batch_spans_chunks_and_rejects_late_corruption() {
+    use crate::{UploadIntent, UploadIntentState, UploadIntentStore};
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let mut operation_ids = Vec::with_capacity(901);
+    for index in 0..901 {
+        let intent_id = format!("chunk-intent-{index:04}");
+        let intent = UploadIntent::new(
+            intent_id.clone(),
+            "objects/chunk".to_owned(),
+            "hash".to_owned(),
+            1,
+        );
+        store.create_intent(&intent).await.unwrap();
+        operation_ids.push(intent_id);
+    }
+    assert_eq!(
+        store
+            .intents_by_state(UploadIntentState::Created)
+            .await
+            .unwrap()
+            .len(),
+        901
+    );
+    let mut connection = open_sqlite_connection(directory.path()).unwrap();
+    {
+        let transaction = connection.transaction().unwrap();
+        let heads = super::helpers::load_latest_verified_event_json_batch(
+            &transaction,
+            shardline_reliability::OperationKind::Upload,
+            &operation_ids,
+        )
+        .unwrap();
+        assert_eq!(heads.len(), 901);
+        assert!(operation_ids.iter().all(|id| heads.contains_key(id)));
+    }
+    // The first 900 heads remain valid. Failure must come from verifying the
+    // head in the second query, rather than accepting the successful prefix.
+    connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_kind = 'Upload' AND operation_id = ?1", [operation_ids.last().unwrap()]).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let result = super::helpers::load_latest_verified_event_json_batch(
+        &transaction,
+        shardline_reliability::OperationKind::Upload,
+        &operation_ids,
+    );
+    assert!(matches!(result, Err(LocalIndexStoreError::Reliability(_))));
+}
+
+#[test]
+fn concurrent_sqlite_lifecycle_writers_preserve_records_and_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    for round in 0..5 {
+        let store = LocalIndexStore::new(directory.path().join(format!("round-{round}"))).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::with_capacity(8);
+        for worker in 0..8 {
+            let store = store.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                let object_key = ObjectKey::parse(&format!("objects/worker-{worker}")).unwrap();
+                let hold =
+                    RetentionHold::new(object_key.clone(), "retain".to_owned(), 1, None).unwrap();
+                let candidate = QuarantineCandidate::new(object_key, 1, 1, 2).unwrap();
+                barrier.wait();
+                store.upsert_retention_hold(&hold).unwrap();
+                store.upsert_quarantine_candidate(&candidate).unwrap();
+                (hold, candidate)
+            }));
+        }
+        let records = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(store.list_retention_holds().unwrap().len(), 8);
+        assert_eq!(store.list_quarantine_candidates().unwrap().len(), 8);
+        let deletes = records
+            .into_iter()
+            .map(|(hold, candidate)| {
+                let store = store.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    assert!(store.delete_retention_hold_if_matches(&hold).unwrap());
+                    assert!(
+                        store
+                            .delete_quarantine_candidate_if_matches(&candidate)
+                            .unwrap()
+                    );
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in deletes {
+            worker.join().unwrap();
+        }
+        assert!(store.list_retention_holds().unwrap().is_empty());
+        assert!(store.list_quarantine_candidates().unwrap().is_empty());
+        store.verify_reliability_events().unwrap();
+    }
+}
+
+#[test]
+fn sqlite_readers_progress_while_a_writer_owns_the_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let object_key = ObjectKey::parse("objects/reader").unwrap();
+    let hold = RetentionHold::new(object_key.clone(), "retain".to_owned(), 1, None).unwrap();
+    store.upsert_retention_hold(&hold).unwrap();
+    let root = directory.path().to_owned();
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let mut connection = open_sqlite_connection(&root).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        ready_sender.send(()).unwrap();
+        release_receiver.recv().unwrap();
+        transaction.rollback().unwrap();
+    });
+    ready_receiver.recv().unwrap();
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        result_sender
+            .send(store.retention_hold(&object_key))
+            .unwrap()
+    });
+    let result = result_receiver.recv_timeout(std::time::Duration::from_secs(5));
+    release_sender.send(()).unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
+    assert_eq!(result.unwrap().unwrap(), Some(hold));
+}
+
+#[test]
+fn sqlite_writer_rolls_back_deletion_when_evidence_is_invalid() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let object_key = ObjectKey::parse("objects/rollback").unwrap();
+    let hold = RetentionHold::new(object_key.clone(), "retain".to_owned(), 1, None).unwrap();
+    store.upsert_retention_hold(&hold).unwrap();
+    let connection = open_sqlite_connection(directory.path()).unwrap();
+    connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_kind = 'RetentionHold'", []).unwrap();
+    let before = connection
+        .query_row(
+            "SELECT count(*) FROM shardline_reliability_events",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert!(store.delete_retention_hold(&object_key).is_err());
+    let persisted = connection
+        .query_row(
+            "SELECT reason FROM shardline_retention_holds WHERE object_key = ?1",
+            [object_key.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, "retain");
+    let after = connection
+        .query_row(
+            "SELECT count(*) FROM shardline_reliability_events",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn concurrent_sqlite_oci_reclamation_preserves_generations_and_evidence() {
+    use crate::{OciObjectKey, OciObjectKind, OciObjectStore};
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = std::sync::Arc::new(tokio::runtime::Runtime::new().unwrap());
+    for round in 0..5 {
+        let store = LocalIndexStore::new(directory.path().join(format!("oci-{round}"))).unwrap();
+        for worker in 0..8 {
+            let key = OciObjectKey {
+                scope_namespace: "scope".to_owned(),
+                repository: "repo".to_owned(),
+                kind: OciObjectKind::Blob,
+                digest_hex: format!("{worker:064x}"),
+            };
+            runtime.block_on(store.delete_oci_object(&key)).unwrap();
+        }
+        let tombstones = runtime
+            .block_on(store.list_oci_object_tombstones())
+            .unwrap();
+        assert_eq!(tombstones.len(), 8);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::with_capacity(8);
+        for tombstone in tombstones {
+            let store = store.clone();
+            let runtime = std::sync::Arc::clone(&runtime);
+            let barrier = std::sync::Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                let mut stale = tombstone.clone();
+                stale.deleted_at_unix_seconds = stale.deleted_at_unix_seconds.saturating_add(1);
+                barrier.wait();
+                assert!(
+                    !runtime
+                        .block_on(store.delete_oci_object_tombstone_if_unchanged(&stale))
+                        .unwrap()
+                );
+                assert!(
+                    runtime
+                        .block_on(store.oci_object_is_deleted(&tombstone.key))
+                        .unwrap()
+                );
+                assert!(
+                    runtime
+                        .block_on(store.delete_oci_object_tombstone_if_unchanged(&tombstone))
+                        .unwrap()
+                );
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(
+            runtime
+                .block_on(store.list_oci_object_tombstones())
+                .unwrap()
+                .is_empty()
+        );
+        store.verify_reliability_events().unwrap();
+    }
+}
+
+fn run_sqlite_mutation_with_brief_writer(
+    root: &Path,
+    action: impl FnOnce() -> Result<(), LocalIndexStoreError>,
+) {
+    let root = root.to_owned();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let mut connection = open_sqlite_connection(&root).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        sender.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        transaction.rollback().unwrap();
+    });
+    receiver.recv().unwrap();
+    let result = action();
+    writer.join().unwrap();
+    assert!(result.is_ok(), "mutation failed: {result:?}");
+}
+
+#[test]
+fn sqlite_oci_and_hub_writers_wait_for_brief_contention() {
+    use crate::hub::{HubRepoType, HubStore};
+    use crate::{OciObjectKey, OciObjectKind, OciObjectStore, OciTagEntry, OciTagStore};
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let key = OciObjectKey {
+        scope_namespace: "scope".to_owned(),
+        repository: "repo".to_owned(),
+        kind: OciObjectKind::Blob,
+        digest_hex: "a".repeat(64),
+    };
+    run_sqlite_mutation_with_brief_writer(directory.path(), || {
+        runtime.block_on(store.delete_oci_object(&key))
+    });
+    assert!(runtime.block_on(store.oci_object_is_deleted(&key)).unwrap());
+    run_sqlite_mutation_with_brief_writer(directory.path(), || {
+        runtime.block_on(store.publish_oci_object(&key, &[]))
+    });
+    assert!(!runtime.block_on(store.oci_object_is_deleted(&key)).unwrap());
+    let tag = OciTagEntry {
+        scope_namespace: "scope".to_owned(),
+        repository: "repo".to_owned(),
+        tag: "latest".to_owned(),
+        digest_hex: "b".repeat(64),
+    };
+    run_sqlite_mutation_with_brief_writer(directory.path(), || {
+        runtime.block_on(store.upsert_oci_tag(&tag))
+    });
+    assert_eq!(
+        runtime
+            .block_on(store.oci_tag("scope", "repo", "latest"))
+            .unwrap(),
+        Some(tag)
+    );
+    HubStore::create_repo(&store, HubRepoType::Model, "model", false).unwrap();
+    run_sqlite_mutation_with_brief_writer(directory.path(), || {
+        HubStore::delete_repo(&store, "model")
+    });
+    assert!(HubStore::get_repo(&store, "model").unwrap().is_none());
+    store.verify_reliability_events().unwrap();
+}

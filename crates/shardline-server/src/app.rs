@@ -265,12 +265,14 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     let oci_registry_token_limiter = Arc::new(Semaphore::new(
         config.oci_registry_token_max_in_flight_requests().get(),
     ));
-    let admission = WeightedAdmission::new(config.admission_max_weight());
-    let pools = ExecutionPools::with_sizes(
+    let admission = WeightedAdmission::try_new(config.admission_max_weight())?;
+    let pools = ExecutionPools::try_with_sizes(
         bounded_pool_size_from_env("SHARDLINE_HASHING_POOL_SIZE", 8),
         bounded_pool_size_from_env("SHARDLINE_PARSING_POOL_SIZE", 8),
         bounded_pool_size_from_env("SHARDLINE_BLOCKING_IO_POOL_SIZE", 16),
-    );
+    )?;
+    let mut backend = backend;
+    backend.set_stream_work_pool(pools.blocking_io.clone());
     let state = Arc::new(AppState {
         config,
         role,
@@ -369,10 +371,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/api/v1/integrity", get(admin_integrity))
         .route("/api/v1/nodes", get(admin_nodes))
         .route("/api/v1/tasks", get(admin_tasks))
-        .route("/api/v1/metrics", get(admin_metrics))
-        .layer(MetricsLayer)
-        .layer(middleware::from_fn(request_timeout_middleware))
-        .layer(middleware::from_fn(security_headers_middleware));
+        .route("/api/v1/metrics", get(admin_metrics));
     if role.serves_api() {
         app = app
             .route(
@@ -447,10 +446,21 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // Apply CORS after every optional frontend has been registered and the Hub
     // router has been merged, so preflight and normal requests are covered by
     // the same policy regardless of which protocol owns the route.
-    let app = app.layer(cors).layer(middleware::from_fn_with_state(
-        state,
-        gc_write_barrier_middleware,
-    ));
+    let app = app
+        .layer(middleware::from_fn_with_state(
+            state,
+            gc_write_barrier_middleware,
+        ))
+        // One deadline includes both GC admission and the protocol handler.
+        // Apply only after all routes/Hub/fallback services are present.
+        .layer(middleware::from_fn(request_timeout_middleware))
+        // Generated timeout responses retain CORS and security headers too.
+        .layer(cors)
+        .layer(middleware::from_fn(security_headers_middleware))
+        // Count every route, including frontend fallbacks and generated errors.
+        // This measures handler futures through response headers, not TCP connections
+        // or the lifetime of a streaming response body.
+        .layer(MetricsLayer);
 
     // Register route auth policies for auditability and fail-closed enforcement.
     let mut policy_registry = RoutePolicyRegistry::new();
@@ -485,9 +495,6 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 /// IO error.
 #[tracing::instrument(skip(config), fields(bind_addr = %config.bind_addr()))]
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
-    shardline_metrics::metrics()
-        .system
-        .set_uptime(shardline_protocol::unix_now_seconds_lossy() as i64);
     let listener = TcpListener::bind(config.bind_addr()).await?;
     tracing::info!("listening on {}", config.bind_addr());
     serve_with_listener(config, listener).await
@@ -503,10 +510,36 @@ pub async fn serve_with_listener(
     config: ServerConfig,
     listener: TcpListener,
 ) -> Result<(), ServerError> {
-    serve_with_listener_until(config, listener, async {
-        tokio::signal::ctrl_c().await.ok();
+    #[cfg(unix)]
+    let shutdown = shutdown_signal()?;
+    #[cfg(not(unix))]
+    let shutdown = shutdown_signal();
+    serve_with_listener_until(config, listener, shutdown).await
+}
+
+/// Register process signals before accepting connections. Container runtimes
+/// normally request termination with SIGTERM rather than terminal Ctrl-C.
+#[cfg(unix)]
+fn shutdown_signal() -> Result<impl Future<Output = ()> + Send, Error> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {},
+            _ = terminate.recv() => {},
+        }
     })
-    .await
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> impl Future<Output = ()> + Send {
+    async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to receive shutdown signal");
+        }
+    }
 }
 
 /// Runs the server until the supplied shutdown signal resolves.
@@ -522,6 +555,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let app = router(config.clone()).await?;
+    shardline_metrics::metrics().system.start_uptime();
     tracing::info!("router initialized, starting HTTP serve");
     let shutdown_timeout = config.shutdown_timeout();
     let (shutdown_started_tx, shutdown_started_rx) = oneshot::channel();

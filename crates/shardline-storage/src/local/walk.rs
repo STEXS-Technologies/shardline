@@ -51,12 +51,17 @@ where
             .to_str()
             .ok_or(LocalObjectStoreError::InvalidStoredKey)
             .map_err(Into::into)?;
+        // Windows uses backslashes as path separators. On other platforms a
+        // literal backslash is an invalid stored key, not a nested object name.
+        #[cfg(windows)]
         let relative = relative.replace('\\', "/");
+        #[cfg(windows)]
+        let relative = relative.as_str();
         if !relative.starts_with(prefix) {
             continue;
         }
 
-        let key = ObjectKey::parse(&relative)
+        let key = ObjectKey::parse(relative)
             .map_err(|_error| LocalObjectStoreError::InvalidStoredKey)
             .map_err(Into::into)?;
         let fs_metadata = fs::symlink_metadata(&path)
@@ -83,6 +88,7 @@ pub fn read_dir_if_exists(directory: &Path) -> Result<Option<ReadDir>, LocalObje
     }
 }
 
+#[cfg(not(unix))]
 pub fn remove_empty_ancestors(path: &Path, root: &Path) -> Result<(), LocalObjectStoreError> {
     let mut current = path.parent();
     while let Some(directory) = current {

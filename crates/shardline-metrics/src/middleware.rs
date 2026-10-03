@@ -36,6 +36,21 @@ pub struct MetricsService<S> {
     metrics: std::sync::Arc<CasMetrics>,
 }
 
+struct ActiveRequestGuard(std::sync::Arc<CasMetrics>);
+
+impl ActiveRequestGuard {
+    fn new(metrics: std::sync::Arc<CasMetrics>) -> Self {
+        metrics.system.connection_opened();
+        Self(metrics)
+    }
+}
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        self.0.system.connection_closed();
+    }
+}
+
 impl<S> Service<Request<Body>> for MetricsService<S>
 where
     S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
@@ -54,12 +69,15 @@ where
         let method = req.method().to_string();
         let path = req.uri().path().to_owned();
 
-        self.metrics.system.connection_opened();
+        let active_request = ActiveRequestGuard::new(self.metrics.clone());
 
-        let mut inner = self.inner.clone();
+        // Use the instance whose readiness was polled; clones may reset reservations.
+        let replacement = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, replacement);
         let metrics = self.metrics.clone();
 
         Box::pin(async move {
+            let _active_request = active_request;
             let response = inner.call(req).await?;
             let status = response.status().as_u16();
             let elapsed = start.elapsed();
@@ -70,8 +88,6 @@ where
             metrics
                 .transfer
                 .record_download_duration(elapsed.as_secs_f64());
-
-            metrics.system.connection_closed();
 
             tracing::debug!(
                 method,
@@ -243,5 +259,94 @@ mod tests {
         assert!(output.contains("shardline_active_connections"));
         assert!(output.contains("shardline_upload_duration_seconds_count"));
         assert!(output.contains("shardline_download_duration_seconds_count"));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+
+    use axum::{
+        body::Body,
+        http::{Request, Response},
+    };
+    use std::{
+        sync::Arc,
+        task::{Context, Poll, Waker},
+    };
+    use tower::{Layer, Service};
+
+    struct ReadyService(bool);
+    impl Clone for ReadyService {
+        fn clone(&self) -> Self {
+            Self(false)
+        }
+    }
+    impl Service<Request<Body>> for ReadyService {
+        type Response = Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.0 = true;
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, _: Request<Body>) -> Self::Future {
+            assert!(self.0, "the instance polled ready must receive the request");
+            self.0 = false;
+            std::future::ready(Ok(Response::new(Body::empty())))
+        }
+    }
+
+    #[test]
+    fn preserves_ready_instance_and_balances_completion() {
+        let metrics = Arc::new(crate::CasMetrics::new(&prometheus::Registry::new()));
+        let mut wrapped = super::MetricsLayer::new(metrics.clone()).layer(ReadyService(false));
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        for _ in 0..2 {
+            assert!(matches!(wrapped.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            let mut future = wrapped.call(Request::new(Body::empty()));
+            assert_eq!(metrics.system.active_connections.get(), 1);
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(_))));
+            drop(future);
+            assert_eq!(metrics.system.active_connections.get(), 0);
+        }
+    }
+
+    #[test]
+    fn balances_unpolled_drop_and_pending_cancellation() {
+        let metrics = Arc::new(crate::CasMetrics::new(&prometheus::Registry::new()));
+        let svc = tower::service_fn(|_: Request<Body>| {
+            std::future::pending::<Result<Response<Body>, std::convert::Infallible>>()
+        });
+        let mut wrapped = super::MetricsLayer::new(metrics.clone()).layer(svc);
+        let future = wrapped.call(Request::new(Body::empty()));
+        assert_eq!(metrics.system.active_connections.get(), 1);
+        drop(future);
+        assert_eq!(metrics.system.active_connections.get(), 0);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = wrapped.call(Request::new(Body::empty()));
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(metrics.system.active_connections.get(), 1);
+        drop(future);
+        assert_eq!(metrics.system.active_connections.get(), 0);
+    }
+
+    #[test]
+    fn balances_returned_service_error() {
+        let metrics = Arc::new(crate::CasMetrics::new(&prometheus::Registry::new()));
+        let svc = tower::service_fn(|_: Request<Body>| async {
+            Err::<Response<Body>, &str>("service error")
+        });
+        let mut wrapped = super::MetricsLayer::new(metrics.clone()).layer(svc);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = wrapped.call(Request::new(Body::empty()));
+        assert!(matches!(
+            future.as_mut().poll(&mut cx),
+            Poll::Ready(Err("service error"))
+        ));
+        drop(future);
+        assert_eq!(metrics.system.active_connections.get(), 0);
     }
 }

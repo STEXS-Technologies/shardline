@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use axum::{
     body::{Body, Bytes},
     http::{
-        HeaderMap, StatusCode, Uri,
+        HeaderMap, HeaderName, HeaderValue, StatusCode, Uri,
         header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     },
     response::{IntoResponse, Response},
@@ -169,6 +169,19 @@ pub(super) async fn load_reconstruction_response(
         .await
 }
 
+/// Read a singleton range field without silently choosing one conflicting value.
+pub(super) fn single_range_header(
+    headers: &HeaderMap,
+    name: HeaderName,
+) -> Result<Option<&HeaderValue>, ServerError> {
+    let mut values = headers.get_all(name).iter();
+    let first = values.next();
+    if values.next().is_some() {
+        return Err(ServerError::InvalidRangeHeader);
+    }
+    Ok(first)
+}
+
 pub(super) async fn load_reconstruction_range_response(
     state: &AppState,
     headers: &HeaderMap,
@@ -176,7 +189,7 @@ pub(super) async fn load_reconstruction_range_response(
     content_hash: Option<&str>,
     auth: &AuthorizedRepository,
 ) -> Result<Option<FileReconstructionResponse>, ServerError> {
-    let Some(header_value) = headers.get(RANGE) else {
+    let Some(header_value) = single_range_header(headers, RANGE)? else {
         return Ok(None);
     };
     let header_value = header_value
@@ -205,7 +218,8 @@ pub(super) fn parse_required_xorb_transfer_range(
     headers: &HeaderMap,
     total_length: u64,
 ) -> Result<ByteRange, ServerError> {
-    let header_value = headers.get(RANGE).ok_or(ServerError::InvalidRangeHeader)?;
+    let header_value =
+        single_range_header(headers, RANGE)?.ok_or(ServerError::InvalidRangeHeader)?;
     let header_value = header_value
         .to_str()
         .map_err(|_error| ServerError::InvalidRangeHeader)?;
@@ -261,6 +275,127 @@ pub fn parse_batch_reconstruction_query(query: &str) -> Result<Vec<String>, Serv
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, Uri, header::RANGE};
+
+    #[tokio::test]
+    async fn duplicate_range_rejected_by_xorb_and_reconstruction_http_handlers() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode, header},
+        };
+        use tower::ServiceExt;
+        let root = tempfile::TempDir::new().unwrap();
+        let config = crate::ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:0".to_owned(),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
+        )
+        .with_server_frontends([crate::ServerFrontend::Xet])
+        .unwrap();
+        let app = crate::app::router(config).await.unwrap();
+        let content = b"reconstruction-range-test-content";
+        let (xorb_bytes, xorb_hash) = crate::test_fixtures::single_chunk_xorb(content);
+        let (shard_bytes, file_id) =
+            crate::test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+        for (uri, bytes) in [
+            (format!("/v1/xorbs/default/{xorb_hash}"), xorb_bytes.clone()),
+            ("/v1/shards".to_owned(), shard_bytes),
+        ] {
+            let uploaded = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(Body::from(bytes))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(uploaded.status(), StatusCode::OK);
+        }
+        for uri in [
+            format!("/transfer/xorb/default/{xorb_hash}"),
+            format!("/v1/reconstructions/{file_id}"),
+            format!("/v2/reconstructions/{file_id}"),
+        ] {
+            for fields in [
+                ["bytes=0-3", "bytes=4-7"],
+                ["bytes=4-7", "bytes=0-3"],
+                ["bytes=0-3", "invalid"],
+                ["invalid", "bytes=0-3"],
+                ["bytes=0-3", "bytes=0-3"],
+            ] {
+                let rejected = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(&uri)
+                            .header(header::RANGE, fields[0])
+                            .header(header::RANGE, fields[1])
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    rejected.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{uri}: {fields:?}"
+                );
+            }
+            let valid = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::RANGE, "bytes=0-3")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if uri.starts_with("/transfer/") {
+                assert_eq!(valid.status(), StatusCode::PARTIAL_CONTENT);
+                assert_eq!(
+                    axum::body::to_bytes(valid.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    xorb_bytes.get(..4).unwrap()
+                );
+            } else {
+                assert_eq!(valid.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(valid.into_body(), 65536)
+                    .await
+                    .unwrap();
+                let _: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            }
+        }
+        let head = app
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                    .header(header::RANGE, "invalid")
+                    .header(header::RANGE, "bytes=0-3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(
+            head.headers()[header::CONTENT_LENGTH],
+            xorb_bytes.len().to_string()
+        );
+        assert!(
+            axum::body::to_bytes(head.into_body(), 1024)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     // --- parse_batch_reconstruction_query tests ---
 

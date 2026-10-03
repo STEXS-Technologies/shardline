@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS shardline_tree_entries_prefix_pattern_idx;

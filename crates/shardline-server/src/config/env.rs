@@ -469,17 +469,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_config_secret_key(config_key)?;
     }
 
-    // Validate chunk size bounds: the CDC chunker requires a power of two
-    // (see `upload_ingest::cdc::CdcChunker`), so a misconfigured value must
-    // fail startup with a clear error instead of panicking on the first
-    // upload. Upper bound is 1 GB.
-    const MAX_CHUNK_SIZE: usize = 1_073_741_824;
-    if chunk_size.get() > MAX_CHUNK_SIZE {
-        return Err(ServerConfigError::ChunkSizeTooLarge);
-    }
-    if !chunk_size.get().is_power_of_two() {
-        return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
-    }
+    super::types::config::validate_chunk_size(chunk_size)?;
 
     // Validate auth provider configuration.
     let auth_provider = AuthProviderKind::parse(
@@ -629,32 +619,40 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     Ok(config)
 }
 
-/// Loads a bounded pool size from an environment variable, falling back to `default`.
+/// Loads a bounded pool size, warning and falling back to `default` for zero,
+/// invalid syntax, or capacities above the batch-count/Tokio representable limit.
 pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroUsize {
     let fallback = NonZeroUsize::new(default).unwrap_or(NonZeroUsize::MIN);
     var(name).map_or_else(
         |_| fallback,
         |v| {
-            v.parse().unwrap_or_else(|_| {
-                tracing::warn!("invalid {name} value '{v}', using default {default}");
-                fallback
-            })
+            v.parse::<NonZeroUsize>()
+                .ok()
+                .filter(|capacity| capacity.get() <= crate::admission::maximum_counted_capacity())
+                .unwrap_or_else(|| {
+                    tracing::warn!("invalid {name} value '{v}', using default {default}");
+                    fallback
+                })
         },
     )
 }
 
-/// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
+/// Parses `SHARDLINE_ADMISSION_MAX_WEIGHT`, warning and falling back to 256 for
+/// invalid syntax, zero, or capacities above the batch-count/Tokio limit.
 pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
     let fallback = NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
     var("SHARDLINE_ADMISSION_MAX_WEIGHT").map_or_else(
         |_| fallback,
         |v| {
-            v.parse().unwrap_or_else(|_| {
-                tracing::warn!(
-                    "invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256"
-                );
-                fallback
-            })
+            v.parse::<NonZeroUsize>()
+                .ok()
+                .filter(|capacity| capacity.get() <= crate::admission::maximum_counted_capacity())
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256"
+                    );
+                    fallback
+                })
         },
     )
 }
@@ -977,6 +975,18 @@ pub fn load_server_config_from_env_with_toml(
     load_server_config_from_env()
 }
 
+/// Resolves the optional TOML metadata URL without loading server-only settings.
+///
+/// Expands `${VAR_NAME}` references using the same environment interpolation as
+/// server configuration. Callers apply explicit and environment URL precedence.
+#[must_use]
+pub fn load_index_postgres_url_from_toml(toml: &ShardlineTomlConfig) -> Option<String> {
+    toml.index
+        .as_ref()
+        .and_then(|index| index.postgres_url.as_deref())
+        .map(interpolate_env_vars)
+}
+
 /// Interpolates `${VAR_NAME}` patterns in `value` using the current process
 /// environment. Returns the original value when no patterns are found.
 fn interpolate_env_vars(value: &str) -> String {
@@ -1015,6 +1025,22 @@ fn interpolate_env_vars(value: &str) -> String {
 #[cfg(test)]
 mod interpolate_tests {
     use super::interpolate_env_vars;
+
+    #[test]
+    fn metadata_url_helper_interpolates_without_server_configuration() {
+        let config: super::ShardlineTomlConfig = toml::from_str(
+            "[index]\npostgres_url = \"${DATABASE_URL}\"\n[auth]\nprovider = \"not-a-server-provider\"\n",
+        )
+        .unwrap();
+        super::super::environment::set_test_var("DATABASE_URL", "postgres://owned/db");
+        assert_eq!(
+            super::load_index_postgres_url_from_toml(&config).as_deref(),
+            Some("postgres://owned/db")
+        );
+        super::super::environment::remove_test_var("DATABASE_URL");
+        let empty: super::ShardlineTomlConfig = toml::from_str("").unwrap();
+        assert!(super::load_index_postgres_url_from_toml(&empty).is_none());
+    }
 
     #[test]
     fn test_no_vars() {
@@ -1087,6 +1113,53 @@ mod interpolate_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn load_server_config_rejects_chunk_size_below_cdc_minimum() {
+        for size in [1, 2, 64, 127] {
+            set_env_var("SHARDLINE_CHUNK_SIZE", &size.to_string());
+            assert!(
+                matches!(
+                    super::load_server_config_from_env(),
+                    Err(super::ServerConfigError::ChunkSizeTooSmall)
+                ),
+                "size={size}"
+            );
+        }
+        remove_env_var("SHARDLINE_CHUNK_SIZE");
+    }
+
+    #[test]
+    fn resource_capacity_environment_rejects_overflow_with_existing_fallback() {
+        let maximum = crate::admission::maximum_counted_capacity();
+        for value in [
+            "0".to_owned(),
+            "invalid".to_owned(),
+            (maximum + 1).to_string(),
+            usize::MAX.to_string(),
+        ] {
+            set_env_var("SHARDLINE_ADMISSION_MAX_WEIGHT", &value);
+            assert_eq!(super::admission_max_weight_from_env().get(), 256);
+            for name in [
+                "SHARDLINE_HASHING_POOL_SIZE",
+                "SHARDLINE_PARSING_POOL_SIZE",
+                "SHARDLINE_BLOCKING_IO_POOL_SIZE",
+            ] {
+                set_env_var(name, &value);
+                assert_eq!(super::bounded_pool_size_from_env(name, 8).get(), 8);
+                remove_env_var(name);
+            }
+        }
+        set_env_var("SHARDLINE_ADMISSION_MAX_WEIGHT", &maximum.to_string());
+        assert_eq!(super::admission_max_weight_from_env().get(), maximum);
+        set_env_var("SHARDLINE_HASHING_POOL_SIZE", &maximum.to_string());
+        assert_eq!(
+            super::bounded_pool_size_from_env("SHARDLINE_HASHING_POOL_SIZE", 8).get(),
+            maximum
+        );
+        remove_env_var("SHARDLINE_HASHING_POOL_SIZE");
+        remove_env_var("SHARDLINE_ADMISSION_MAX_WEIGHT");
+    }
+
     use crate::ServerFrontend;
 
     use super::{

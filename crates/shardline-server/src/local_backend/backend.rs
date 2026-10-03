@@ -32,6 +32,7 @@ pub struct LocalBackend {
     pub(super) index_store: LocalIndexStore,
     pub(super) record_store: LocalRecordStore,
     pub(super) object_store: ServerObjectStore,
+    pub(crate) stream_work_pool: crate::admission::BoundedPool,
     pub(super) metadata_write_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) protocol_upload_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -130,6 +131,7 @@ impl LocalBackend {
             upload_max_in_flight_chunks,
             server_frontends: server_frontends.to_vec(),
             object_store,
+            stream_work_pool: crate::admission::ExecutionPools::default_sizes().blocking_io,
             metadata_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             protocol_upload_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
@@ -436,6 +438,19 @@ impl LocalBackend {
             .map_err(ServerError::from)
     }
 
+    pub(crate) async fn scan_s3_objects_from(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        start: Option<shardline_index::S3ObjectScanStart<'_>>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, ServerError> {
+        self.index_store
+            .scan_s3_objects_from(scope_namespace, prefix, start, limit)
+            .await
+            .map_err(ServerError::from)
+    }
+
     /// Resolves exactly one S3 object listing row by its full raw key (no
     /// prefix matching).
     ///
@@ -544,23 +559,12 @@ impl LocalBackend {
             .await?)
     }
 
-    /// Validates the referenced file record and upserts a path mapping, wrapped in
-    /// the metadata write lock so concurrent registrations cannot race.
-    ///
-    /// Auto-creates the revision registry row for `key` when it does not yet
-    /// exist, enforcing the same per-repo revision cap as `create_revision`
-    /// (F-89): a genuinely new revision is rejected with
-    /// [`ServerError::TooManyRevisions`] once the repo holds
-    /// `max_revisions_per_repo` rows, while a refresh of an existing revision
-    /// stays allowed at capacity. The count/exists-then-insert pair runs under
-    /// the metadata write lock, so concurrent `register_tree_path` calls cannot
-    /// overshoot the cap by more than one.
-    ///
-    /// Also enforces the per-repo tree-entry cap (F-103/F-108): once the repo
-    /// holds `max_tree_entries_per_repo` tree-entry rows, the registration is
-    /// rejected with [`ServerError::TooManyRevisions`] regardless of whether
-    /// the path already exists, mirroring `create_revision`'s count-before-insert
-    /// gate (a refresh at capacity is rejected too, so both paths agree at cap).
+    /// Validates the referenced file record, then atomically checks repository
+    /// capacity and publishes the revision and path mapping. Storage transactions
+    /// serialize registration with revision deletion/pruning across connections.
+    /// Existing revision creation time is preserved while update time refreshes.
+    /// An existing revision remains usable at the revision cap; the tree-entry
+    /// cap retains the existing rule that refreshes at full capacity are rejected.
     ///
     /// # Errors
     ///
@@ -586,43 +590,7 @@ impl LocalBackend {
             }
             Err(error) => return Err(error),
         };
-        // F-89: register_path auto-creates the revision registry row, so the
-        // F-75 per-repo cap must be enforced here too — not only in
-        // create_revision. Only a genuinely NEW revision counts against the
-        // cap; a refresh of an existing revision (upsert 'created' == false)
-        // is still allowed at capacity.
-        let repo_key = RepoKey::new(&key.provider, &key.owner, &key.repo);
-        let cap = u64::try_from(max_revisions_per_repo.get()).unwrap_or(u64::MAX);
-        if self.count_revisions(&repo_key).await? >= cap
-            && self
-                .index_store
-                .revision(&repo_key, &key.revision)
-                .await?
-                .is_none()
-        {
-            return Err(ServerError::TooManyRevisions);
-        }
-        // F-103/F-108: per-repo tree-entry cap. Unlike the F-89 revision cap
-        // (which exempts a refresh of an existing revision), the tree-entry
-        // gate rejects at capacity regardless of whether the path already
-        // exists — a refresh at cap would otherwise bypass the bound the same
-        // way create_revision's same-name upsert cannot, so both paths stay
-        // consistent under one gate.
-        let tree_cap = u64::try_from(max_tree_entries_per_repo.get()).unwrap_or(u64::MAX);
-        if self.index_store.count_tree_entries(&repo_key).await? >= tree_cap {
-            return Err(ServerError::TooManyRevisions);
-        }
         let now = unix_now_seconds_lossy();
-        let revision_record = RevisionRecord {
-            provider: key.provider.clone(),
-            owner: key.owner.clone(),
-            repo: key.repo.clone(),
-            revision: key.revision.clone(),
-            created_at_unix_seconds: now,
-            updated_at_unix_seconds: now,
-        };
-        // Auto-create the revision registry row when it does not yet exist.
-        let _created = self.index_store.upsert_revision(&revision_record).await?;
         let entry = TreeEntry {
             provider: key.provider.clone(),
             owner: key.owner.clone(),
@@ -633,7 +601,20 @@ impl LocalBackend {
             size_bytes: record.total_bytes,
             updated_at_unix_seconds: now,
         };
-        let outcome = self.index_store.upsert_tree_entry(&entry).await?;
+        let outcome = match self
+            .index_store
+            .register_tree_entry(
+                &entry,
+                max_revisions_per_repo.get(),
+                max_tree_entries_per_repo.get(),
+            )
+            .await?
+        {
+            shardline_index::TreeRegistrationOutcome::Registered(outcome) => outcome,
+            shardline_index::TreeRegistrationOutcome::LimitExceeded => {
+                return Err(ServerError::TooManyRevisions);
+            }
+        };
         Ok(super::RegisterPathOutcome {
             entry,
             created: outcome.created,
@@ -676,18 +657,16 @@ impl LocalBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError`] when the index upsert fails.
-    pub(crate) async fn create_revision(&self, rev: &RevisionRecord) -> Result<bool, ServerError> {
-        Ok(self.index_store.upsert_revision(rev).await?)
-    }
-
-    /// Counts the revision registry rows for a repository.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index count fails.
-    pub(crate) async fn count_revisions(&self, key: &RepoKey) -> Result<u64, ServerError> {
-        Ok(self.index_store.count_revisions(key).await?)
+    /// Returns [`ServerError`] when the index insertion fails.
+    pub(crate) async fn create_revision(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<shardline_index::RevisionCreationOutcome, ServerError> {
+        Ok(self
+            .index_store
+            .create_revision_bounded(rev, max_revisions)
+            .await?)
     }
 
     /// Deletes a revision and all of its tree entries, returning whether the revision

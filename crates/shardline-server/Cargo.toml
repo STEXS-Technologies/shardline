@@ -41,6 +41,7 @@ shardline-s3-adapter.workspace = true
 shardline-metrics.workspace = true
 shardline-server-core.workspace = true
 chrono.workspace = true
+httpdate.workspace = true
 shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true
 shardline-xet-adapter.workspace = true

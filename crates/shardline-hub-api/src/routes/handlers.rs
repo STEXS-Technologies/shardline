@@ -45,18 +45,16 @@ pub(crate) async fn git_head(
     // The extractor has already authorized this request and minted the
     // capability; the URL `(ns, repo)` is the repository identity.
     let repo_id = format!("{ns}/{repo}");
-    let revisions = state.store.list_revisions(&repo_id).map_err(|e| {
-        tracing::debug!("failed to list revisions for {repo_id}: {e}");
-        HubApiError::RepoNotFound
-    })?;
-
-    // Find HEAD revision — prefer explicit HEAD, then empty, then fall back to latest.
-    let head_sha = revisions
-        .iter()
-        .find(|r| r.ref_name == "HEAD" || r.ref_name.is_empty())
-        .or_else(|| revisions.first())
-        .map(|r| r.sha.as_str())
-        .unwrap_or("0000000000000000000000000000000000000000");
+    // Immutable history can contain newer commits after an acknowledged ref
+    // rollback, or commits on other branches. Resolve the live default ref.
+    let head_sha = state
+        .store
+        .resolve_revision(&repo_id, "main")
+        .map_err(|e| {
+            tracing::debug!("failed to resolve HEAD for {repo_id}: {e}");
+            HubApiError::RepoNotFound
+        })?
+        .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_owned());
 
     Ok(format!(
         "ref: refs/heads/main\n{head_sha} refs/heads/main\n"

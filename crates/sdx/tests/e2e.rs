@@ -325,15 +325,22 @@ const UNKNOWN_ID: char = 'f';
 const MEMORY_ID: char = '1';
 const MEMORY_MEASUREMENT_CHILD_ENV: &str = "SHARDLINE_SDX_MEMORY_MEASUREMENT_CHILD";
 
-/// Current resident set size of this process in KiB (Linux `/proc/self/status`).
+/// Linux process RSS counters; VmHWM records even brief allocations that
+/// sampling before/after a yielded chunk could miss.
+fn process_memory_kib(field: &str) -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .expect("Linux memory counter must be present")
+        .trim()
+        .trim_end_matches(" kB")
+        .parse()
+        .unwrap()
+}
+
 fn current_rss_kib() -> u64 {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            return rest.trim().trim_end_matches(" kB").parse().unwrap_or(0);
-        }
-    }
-    0
+    process_memory_kib("VmRSS:")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -642,74 +649,69 @@ async fn download_stream_byte_range_matches_uploaded_bytes() {
     assert_eq!(out, data[start as usize..end as usize]);
 }
 
-/// The milestone's key acceptance test: streaming a large file with a small
-/// buffer cap must keep resident RAM far below the file size.
-///
-/// A 256 MiB synthetic file is streamed through a 64 MiB byte-denominated buffer
-/// semaphore to a plain thread via `blocking_next()`; the memory added by the
-/// streaming pipeline (peak `VmRSS` sampled during the download, minus the
-/// pre-download baseline) must stay well below the 256 MiB file size. In
-/// isolation the streaming delta is ~98 MiB and the absolute peak ~140 MiB.
-///
-/// The server runs in-process, and its ingest retains freed-but-unreturned
-/// glibc arena memory after the upload; `malloc_trim(0)` releases it before
-/// the download. The measurement runs in a child instance of this test binary:
-/// `VmRSS` is process-wide, while the normal E2E harness runs many tests
-/// concurrently in one process. The child executes this exact test alone, so
-/// its RSS delta is attributable to the streaming pipeline rather than
-/// unrelated test allocations.
+/// Streams 256 MiB in an isolated client process against a server in the
+/// parent process. The kernel's client RSS high-water mark excludes server buffers
+/// and unrelated tests. For this 8 MiB prefetch workload, the 64 MiB extra
+/// RSS allowance detects transient retention and whole-file buffering. The
+/// decoded-byte and queued-term caps are also tested deterministically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stream_large_file_memory_bounded_cat() {
-    if std::env::var_os(MEMORY_MEASUREMENT_CHILD_ENV).is_none() {
+    let file_size = 256 * 1024 * 1024;
+    let file_id = hex_id(MEMORY_ID);
+    let Ok(base_url) = std::env::var(MEMORY_MEASUREMENT_CHILD_ENV) else {
+        let server = TestServer::start_with_chunk_size(NonZeroUsize::new(65_536).unwrap()).await;
+        let data = deterministic_random(file_size, 0xb00b5e);
+        server.upload(&file_id, &data).await;
+        drop(data);
         let current_exe = std::env::current_exe().unwrap();
         let status = tokio::task::spawn_blocking(move || {
             Command::new(current_exe)
                 .arg("--exact")
                 .arg("stream_large_file_memory_bounded_cat")
                 .arg("--nocapture")
-                .env(MEMORY_MEASUREMENT_CHILD_ENV, "1")
+                .env(MEMORY_MEASUREMENT_CHILD_ENV, &server.base_url)
                 .env("RUST_TEST_THREADS", "1")
                 .status()
         })
         .await
         .unwrap()
         .unwrap();
-        assert!(status.success(), "isolated RSS measurement child failed");
+        assert!(
+            status.success(),
+            "isolated client RSS measurement child failed"
+        );
         return;
-    }
-
-    // 64 KiB chunk target keeps term counts (and thus in-flight tasks) small;
-    // the file still spans multiple 64 MiB xorbs.
-    let server = TestServer::start_with_chunk_size(NonZeroUsize::new(65_536).unwrap()).await;
+    };
     let limits = StreamLimits {
         min_reconstruction_fetch_size: 4 * 1024 * 1024,
         max_reconstruction_fetch_size: 8 * 1024 * 1024,
         min_prefetch_buffer: 8 * 1024 * 1024,
         ..StreamLimits::default()
     };
-    let client = server.client_with(Some(64 * 1024 * 1024), Some(limits));
-
-    let file_size = 256 * 1024 * 1024; // 256 MiB — large enough to exercise
-    // multi-xorb streaming, small enough to avoid OOM on CI runners.
-    let data = deterministic_random(file_size, 0xb00b5e);
-    let file_id = hex_id(MEMORY_ID);
-    server.upload(&file_id, &data).await;
-    // Release the test's 256 MiB buffer before measuring the download's RSS.
-    drop(data);
-    tokio::task::yield_now().await;
-    // The server's in-process ingest retains freed-but-unreturned heap memory
-    // (glibc arena), which would mask the download's RSS; release it back to
-    // the OS so the assertion measures the streaming pipeline only.
-    // SAFETY: malloc_trim is a glibc extension; harmless in a test.
-    unsafe {
-        libc::malloc_trim(0);
-    }
-    tokio::task::yield_now().await;
+    let auth = Auth::new(
+        &base_url,
+        RepositoryId {
+            provider: "github".to_owned(),
+            owner: "team".to_owned(),
+            repo: "assets".to_owned(),
+            revision: "main".to_owned(),
+        },
+    )
+    .unwrap()
+    .with_api_key(BOOTSTRAP_KEY.to_owned())
+    .with_subject(SUBJECT.to_owned());
+    let client = XetClientBuilder::new()
+        .endpoint(format!(
+            "xet://{}/github/team/assets/main",
+            base_url.strip_prefix("http://").unwrap()
+        ))
+        .auth(auth)
+        .with_buffer_semaphore(64 * 1024 * 1024)
+        .with_stream_limits(limits)
+        .build()
+        .unwrap();
     let baseline_kib = current_rss_kib();
-
     let mut stream = client.download_stream(&file_id, None).await.unwrap();
-    // Consume on a plain (non-async) thread via the dedicated blocking runtime,
-    // sampling peak RSS throughout the stream.
     let handle = std::thread::spawn(move || {
         let mut peak_rss_kib = current_rss_kib();
         let mut total: u64 = 0;
@@ -717,7 +719,7 @@ async fn stream_large_file_memory_bounded_cat() {
             peak_rss_kib = peak_rss_kib.max(current_rss_kib());
             match stream.blocking_next() {
                 Ok(Some(chunk)) => {
-                    total = total.saturating_add(u64::try_from(chunk.len()).unwrap());
+                    total = total.saturating_add(u64::try_from(chunk.len()).unwrap())
                 }
                 Ok(None) => break,
                 Err(error) => return Err(error),
@@ -725,21 +727,17 @@ async fn stream_large_file_memory_bounded_cat() {
         }
         Ok((total, peak_rss_kib))
     });
-    let (total, peak_rss_kib) = handle.join().unwrap().unwrap();
-    assert_eq!(
-        total,
-        u64::try_from(file_size).unwrap(),
-        "streamed {total} of {file_size} bytes (byte-identity check)"
-    );
-
-    let bound_kib = 384 * 1024; // 384 MiB ≪ 256 MiB file; catches whole-file buffering
+    let (total, sampled_peak_kib) = handle.join().unwrap().unwrap();
+    let peak_rss_kib = sampled_peak_kib.max(process_memory_kib("VmHWM:"));
+    assert_eq!(total, u64::try_from(file_size).unwrap(), "streamed length");
+    let bound_kib = 64 * 1024;
     let streaming_delta_kib = peak_rss_kib.saturating_sub(baseline_kib);
+    eprintln!(
+        "client-only cat: file {file_size} bytes, buffer cap 64 MiB, baseline RSS {baseline_kib} KiB, peak VmHWM {peak_rss_kib} KiB (streaming delta {streaming_delta_kib} KiB)"
+    );
     assert!(
         streaming_delta_kib < bound_kib,
-        "streaming cat added {streaming_delta_kib} KiB over the {baseline_kib} KiB baseline (peak {peak_rss_kib} KiB), exceeding the {bound_kib} KiB bound for a {file_size}-byte file with a 64 MiB buffer cap"
-    );
-    eprintln!(
-        "memory-bounded cat: file {file_size} bytes, buffer cap 64 MiB, baseline RSS {baseline_kib} KiB, peak VmRSS {peak_rss_kib} KiB (streaming delta {streaming_delta_kib} KiB)"
+        "client streaming added {streaming_delta_kib} KiB (baseline {baseline_kib}, peak {peak_rss_kib}), exceeding the {bound_kib} KiB bound"
     );
 }
 
@@ -747,12 +745,12 @@ async fn stream_large_file_memory_bounded_cat() {
 // M2b2 E2E: on-disk chunk cache + stream group
 // ============================================================================
 
-/// Waits until the cache's spawned best-effort puts have landed (total bytes
+/// Waits until the cache's best-effort writes have landed (total bytes
 /// stable across two 20 ms samples).
 async fn wait_for_cache_settle(client: &sdx::XetClient) {
     let cache = client.chunk_cache().expect("cache configured on client");
     let mut previous = 0u64;
-    // Generous budget (20 s) for the spawned best-effort cache puts to land;
+    // Generous budget (20 s) for cache accounting to settle;
     // under instrumentation the puts can be slow, so poll until stable rather
     // than assuming a fixed short window.
     for _ in 0..1000 {
@@ -771,7 +769,7 @@ async fn wait_for_cache_settle(client: &sdx::XetClient) {
 /// The milestone's cache acceptance test: a warm cache serves the second
 /// download of the same file with **zero** additional xorb transfer requests.
 ///
-/// The first download populates the on-disk cache (best-effort spawned puts);
+/// The first download populates the on-disk cache (awaited best-effort writes);
 /// after it settles, the second download must be byte-identical and issue no
 /// new ranged xorb GETs (reconstruction metadata requests still occur).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -780,8 +778,8 @@ async fn cache_warm_second_download_issues_no_xorb_fetches() {
     let cache_dir = TempDir::new().unwrap();
     let client = server.client_with_cache_dir(cache_dir.path(), None, None);
     // ~256 KiB → ~2048 chunks at the 128-byte target (single xorb); every
-    // chunk is fetched individually by the streaming path, so the warm-cache
-    // request-count delta is still meaningful.
+    // adjacent chunks share fetch groups; a warm cache must eliminate every
+    // group fetch, so the request-count delta remains meaningful.
     let data = deterministic_random(262_144, 0xc4c4);
     let file_id = hex_id('7');
     server.upload(&file_id, &data).await;

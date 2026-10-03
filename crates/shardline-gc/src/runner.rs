@@ -54,7 +54,7 @@ use crate::{
     error::GcError,
     oci_tombstones::{OciRecordReclaimer, reclaim_oci_tombstones},
     quarantine::{
-        read_active_retention_hold_object_keys, read_last_gc_clock_anchor,
+        gc_boot_observation, read_active_retention_hold_object_keys, read_gc_clock_anchor,
         read_newest_stored_creation_timestamp, read_quarantine_entries,
         reconcile_quarantine_entries, sweep_quarantine_entries, write_last_gc_clock_anchor,
     },
@@ -175,33 +175,20 @@ where
     // for this run (warn), mirroring the backwards `temp_reaping_clock_is_skewed`
     // guard for the reaper.
     //
-    // The reference is creation-timestamps-only: `delete_after` (=
-    // `first_seen` + retention) and hold `release_after` are future-dated on
-    // any deployment with an active hold or a retention longer than the slack,
-    // and including them would blind the guard to forward jumps of days to
-    // weeks (the F-57 bypass). The anchor keeps the reference as fresh as the
-    // last trusted GC run so a low-churn deployment does not spuriously age the
-    // creation-only reference past the slack.
-    //
-    // F-88 hardening: a fired guard ALSO DEFERS THE MARK
-    // (`reconcile_quarantine_entries`) for the run. The mark stamps new
-    // quarantine candidates' `first_seen_unreachable_at` with `now`, so a
-    // jumped clock would write the jumped timestamp into the creation
-    // reference — the next run's guard would then see a "fresh" creation
-    // timestamp and go silent, letting the sweep delete pre-jump candidates up
-    // to (jump − slack) before their real retention elapsed and permanently
-    // poisoning the anchor with the jumped clock. Untrusted-clock timestamps
-    // must never enter the creation reference: a fired run stamps nothing,
-    // marks nothing, and deletes nothing, so the guard stays armed until a
-    // later trusted run (self-healing via the anchor and via server-side
-    // lifecycle events) refreshes the reference.
+    // On the same Linux boot, independent boot uptime advances the persisted
+    // trusted reference by actual elapsed time. Daily jitter and missed runs
+    // therefore do not trip the guard. Otherwise retain the creation-only
+    // fallback: future delete_after/release_after deadlines cannot establish
+    // clock trust. A deferred run never stamps lifecycle metadata or advances
+    // the anchor, keeping genuine jumps detectable across consecutive runs.
     let newest_stored_creation_timestamp =
         read_newest_stored_creation_timestamp(index_store).await?;
-    let last_gc_clock_anchor = read_last_gc_clock_anchor(object_store)?;
-    let retention_clock_is_skewed_forward = retention_clock_is_skewed_forward(
+    let last_gc_clock_anchor = read_gc_clock_anchor(object_store)?;
+    let retention_clock_is_skewed_forward = retention_clock_is_skewed_with_elapsed(
         now_unix_seconds,
         newest_stored_creation_timestamp,
-        last_gc_clock_anchor,
+        last_gc_clock_anchor.as_ref(),
+        gc_boot_observation().as_ref(),
     );
     if retention_clock_is_skewed_forward {
         tracing::warn!(
@@ -211,8 +198,8 @@ where
         );
     } else if options.mark || options.sweep {
         // The forward guard cleared: this run's wall clock is trustworthy
-        // (within the slack of every stored creation timestamp and the previous
-        // anchor), so persist it as the new last-GC-clock anchor. A fired run's
+        // (within the slack of the trusted elapsed reference or legacy lifecycle
+        // reference), so persist it as the new last-GC-clock anchor. A fired run's
         // `now` is suspect and is never stamped — the anchor stays at the last
         // TRUSTED observation, which is exactly what makes a between-runs jump
         // detectable on a low-churn deployment.
@@ -264,6 +251,7 @@ where
     let mut quarantine_entries = read_quarantine_entries(index_store).await?;
 
     let mut report = LocalGcReport {
+        retention_deferred_clock: retention_clock_is_skewed_forward,
         scanned_records: reachability.scanned_records,
         referenced_chunks: u64::try_from(reachability.referenced_object_keys.len())?,
         orphan_chunks: u64::try_from(orphan_objects.len())?,
@@ -555,6 +543,31 @@ pub(crate) const fn retention_clock_is_skewed_forward(
     now_unix_seconds > newest_stored.saturating_add(CLOCK_FORWARD_SLACK_SECONDS)
 }
 
+/// A matched boot observation separates an ordinary daily/missed run from an
+/// actual wall-clock step. The trusted anchor is never moved on a suspect run;
+/// as monotonic time passes or the clock is corrected, it can recover without
+/// lifecycle activity. A new boot or a legacy anchor has no elapsed-time proof.
+pub(crate) fn retention_clock_is_skewed_with_elapsed(
+    now: u64,
+    creation: Option<u64>,
+    anchor: Option<&crate::quarantine::GcClockAnchor>,
+    current_boot: Option<&crate::quarantine::GcBootObservation>,
+) -> bool {
+    if let Some(anchor) = anchor
+        && let (Some(previous), Some(current)) = (anchor.boot.as_ref(), current_boot)
+        && previous.boot_id == current.boot_id
+        && let Some(elapsed) = current.uptime_seconds.checked_sub(previous.uptime_seconds)
+    {
+        // Fresh server timestamps must not mask a jump since the trusted anchor.
+        return retention_clock_is_skewed_forward(
+            now,
+            None,
+            Some(anchor.wall_seconds.saturating_add(elapsed)),
+        );
+    }
+    retention_clock_is_skewed_forward(now, creation, anchor.map(|value| value.wall_seconds))
+}
+
 async fn validate_gc_index_integrity<IndexAdapter>(
     index_store: &IndexAdapter,
     object_store: &ServerObjectStore,
@@ -640,14 +653,8 @@ where
             }
 
             if hold.is_active_at(now_unix_seconds) {
-                if object_store.metadata(hold.object_key())?.is_none() {
-                    return Err(
-                        InvalidLifecycleMetadataError::ActiveRetentionHoldMissingObject {
-                            object_key: hold.object_key().as_str().to_owned(),
-                        }
-                        .into(),
-                    );
-                }
+                // Holds may protect future keys; a hold alone does not assert
+                // object existence. Independent record/evidence checks remain.
                 if quarantined_object_keys.contains(hold.object_key()) {
                     // A held+quarantined object is a REPAIRABLE state, not a
                     // hard abort. A hold and a quarantine entry on the same key
@@ -776,6 +783,101 @@ pub(crate) fn orphan_inventory_entry(
 #[cfg(test)]
 mod tests {
     use super::{retention_clock_is_skewed_forward, temp_reaping_clock_is_skewed};
+
+    fn boot(uptime: u64, id: &str) -> crate::quarantine::GcBootObservation {
+        crate::quarantine::GcBootObservation {
+            boot_id: id.to_owned(),
+            uptime_seconds: uptime,
+        }
+    }
+
+    #[test]
+    fn clock_elapsed_allows_daily_jitter_and_missed_runs_after_process_restart() {
+        use crate::quarantine::GcClockAnchor;
+        let wall = 2_000_000_000;
+        let anchor = GcClockAnchor {
+            wall_seconds: wall,
+            boot: Some(boot(100, "host-boot")),
+        };
+        // Serialize/reload the observation as separate cron processes do.
+        let persisted = serde_json::to_vec(&anchor).unwrap();
+        let reloaded: GcClockAnchor = serde_json::from_slice(&persisted).unwrap();
+        for elapsed in [86_401, 3 * 86_400, 30 * 86_400] {
+            assert!(!super::retention_clock_is_skewed_with_elapsed(
+                wall + elapsed,
+                Some(wall - 7 * 86_400),
+                Some(&reloaded),
+                Some(&boot(100 + elapsed, "host-boot")),
+            ));
+        }
+    }
+
+    #[test]
+    fn clock_elapsed_detects_jump_and_recovers_without_lifecycle_writes() {
+        use crate::quarantine::GcClockAnchor;
+        let wall = 2_000_000_000;
+        let anchor = GcClockAnchor {
+            wall_seconds: wall,
+            boot: Some(boot(100, "host-boot")),
+        };
+        let elapsed = 3 * 86_400;
+        let jumped = wall + elapsed + 10 * 86_400;
+        for extra_elapsed in [0, 86_400] {
+            // A newly stamped server lifecycle row cannot conceal the jump.
+            assert!(super::retention_clock_is_skewed_with_elapsed(
+                jumped + extra_elapsed,
+                Some(jumped),
+                Some(&anchor),
+                Some(&boot(100 + elapsed + extra_elapsed, "host-boot")),
+            ));
+        }
+        // A corrected clock clears the guard using the unchanged anchor.
+        assert!(!super::retention_clock_is_skewed_with_elapsed(
+            wall + elapsed,
+            None,
+            Some(&anchor),
+            Some(&boot(100 + elapsed, "host-boot")),
+        ));
+        // Real time catching up to a fixed suspect clock is also safe.
+        assert!(!super::retention_clock_is_skewed_with_elapsed(
+            jumped,
+            None,
+            Some(&anchor),
+            Some(&boot(100 + elapsed + 10 * 86_400, "host-boot")),
+        ));
+    }
+
+    #[test]
+    fn clock_elapsed_remains_conservative_after_reboot_or_without_observation() {
+        use crate::quarantine::GcClockAnchor;
+        let wall = 2_000_000_000;
+        let anchor = GcClockAnchor {
+            wall_seconds: wall,
+            boot: Some(boot(100, "old-boot")),
+        };
+        for current in [
+            None,
+            Some(boot(3 * 86_400, "new-boot")),
+            Some(boot(99, "old-boot")),
+        ] {
+            assert!(super::retention_clock_is_skewed_with_elapsed(
+                wall + 3 * 86_400,
+                None,
+                Some(&anchor),
+                current.as_ref(),
+            ));
+        }
+        let legacy = GcClockAnchor {
+            wall_seconds: wall,
+            boot: None,
+        };
+        assert!(super::retention_clock_is_skewed_with_elapsed(
+            wall + 3 * 86_400,
+            None,
+            Some(&legacy),
+            Some(&boot(3 * 86_400, "old-boot")),
+        ));
+    }
 
     #[test]
     fn temp_reaping_clock_skewed_when_gc_clock_behind_embedded_nanos() {

@@ -24,9 +24,10 @@
 //!    POSTed to `/v1/shards` — **xorbs-before-shard ordering is mandatory** and
 //!    enforced by the server (it rejects shards referencing absent xorbs).
 //!
-//! RAM bound during upload is one 8 MiB ingest block + one in-progress xorb
-//! (≤ 64 MiB) + one per-file pending tail (≤ 64 MiB), independent of file
-//! size. In-memory payloads are fed in 8 MiB slices and never cloned whole.
+//! Serialization workers and queued/running xorb POST payloads share the
+//! configured upload concurrency bound. Each file also retains its bounded
+//! pending xorb tail, ingest buffers, and metadata; caller-owned input bytes
+//! and the number of simultaneously open files are separate from that bound.
 //!
 //! # Deltas vs upstream / plan
 //!
@@ -45,11 +46,12 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use bytes::Bytes;
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use xet_core_structures::merklehash::{MerkleHash, file_hash};
 
 use crate::auth::TokenService;
@@ -117,13 +119,34 @@ pub struct UploadStreamHandle {
 }
 
 struct UploadStreamHandleInner {
-    pipeline: Mutex<Option<FileUploadPipeline>>,
+    session: UploadSession,
+    // Operations serialize asynchronously; synchronous abort only touches
+    // the short-lived state lock, never a guard held across network work.
+    operation: Mutex<()>,
+    pipeline: StdMutex<Option<FileUploadPipeline>>,
+    cancellation: CancellationToken,
     result: Arc<OnceLock<UploadFileInfo>>,
     task_id: u64,
     started: AtomicBool,
     finished: AtomicBool,
     aborted: AtomicBool,
-    error: Mutex<Option<String>>,
+    error: StdMutex<Option<String>>,
+}
+
+/// Once an operation consumes pipeline state, cancellation is terminal.
+struct UploadOperationGuard<'operation> {
+    inner: &'operation UploadStreamHandleInner,
+    completed: bool,
+}
+
+impl Drop for UploadOperationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.inner.aborted.store(true, Ordering::Relaxed);
+            self.inner.finished.store(true, Ordering::Relaxed);
+            self.inner.cancellation.cancel();
+        }
+    }
 }
 
 impl UploadStreamHandle {
@@ -134,21 +157,74 @@ impl UploadStreamHandle {
     }
 
     /// Feeds `data` into the ingest pipeline (chunk → dedup → pending xorb).
+    /// A processing error or cancellation after processing begins permanently
+    /// closes this handle; create a new handle to retry the file from the beginning.
     ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when the pipeline is already finished/aborted, the
     /// session is finalized, or a dedup/upload step fails.
     pub async fn write(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
+        let _operation = self.inner.session.inner.lifecycle.read().await;
+        self.inner.session.check_not_finalized().await?;
         let data = data.into();
-        let mut guard = self.inner.pipeline.lock().await;
-        let Some(pipeline) = guard.as_mut() else {
+        let _stream_operation = tokio::select! {
+            biased;
+            () = self.inner.cancellation.cancelled() => {
+                return Err(SdxError::UploadSession("stream aborted".to_owned()));
+            }
+            operation = self.inner.operation.lock() => operation,
+        };
+        let pipeline = self
+            .inner
+            .pipeline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(mut pipeline) = pipeline else {
             return Err(SdxError::UploadSession(
                 "stream already finished or aborted".to_owned(),
             ));
         };
+        let mut cancellation = UploadOperationGuard {
+            inner: &self.inner,
+            completed: false,
+        };
         self.inner.started.store(true, Ordering::Relaxed);
-        pipeline.add_data(data).await
+        let mut result = tokio::select! {
+            biased;
+            () = self.inner.cancellation.cancelled() => {
+                Err(SdxError::UploadSession("stream aborted".to_owned()))
+            }
+            result = pipeline.add_data(data) => result,
+        };
+        if result.is_ok() {
+            let mut state = self
+                .inner
+                .pipeline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.inner.aborted.load(Ordering::Relaxed) {
+                result = Err(SdxError::UploadSession("stream aborted".to_owned()));
+            } else {
+                // Abort takes this same state lock, so it either prevents
+                // restoration or removes the restored pipeline itself.
+                *state = Some(pipeline);
+            }
+        }
+        if let Err(error) = &result {
+            // Chunking consumes the entire block before asynchronous chunk
+            // processing. After a failure, the unprocessed chunks cannot be
+            // replayed, so this pipeline must never publish a partial file.
+            *self
+                .inner
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+            self.inner.finished.store(true, Ordering::Relaxed);
+        }
+        cancellation.completed = true;
+        result
     }
 
     /// Blocking version of [`write`](Self::write), bridged onto the
@@ -174,7 +250,21 @@ impl UploadStreamHandle {
     /// Returns [`SdxError`] when the pipeline is already finished, a xorb cut
     /// fails, or the file info cannot be registered.
     pub async fn finish(&self) -> Result<UploadFileInfo, SdxError> {
-        let pipeline = self.inner.pipeline.lock().await.take();
+        let _operation = self.inner.session.inner.lifecycle.read().await;
+        self.inner.session.check_not_finalized().await?;
+        let _stream_operation = tokio::select! {
+            biased;
+            () = self.inner.cancellation.cancelled() => {
+                return Err(SdxError::UploadSession("stream aborted".to_owned()));
+            }
+            operation = self.inner.operation.lock() => operation,
+        };
+        let pipeline = self
+            .inner
+            .pipeline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
         let Some(pipeline) = pipeline else {
             return Err(SdxError::UploadSession(
                 "stream already finished or aborted".to_owned(),
@@ -183,16 +273,31 @@ impl UploadStreamHandle {
         if self.inner.aborted.load(Ordering::Relaxed) {
             return Err(SdxError::UploadSession("stream aborted".to_owned()));
         }
-        let result = pipeline.finish().await;
+        let mut cancellation = UploadOperationGuard {
+            inner: &self.inner,
+            completed: false,
+        };
+        let result = tokio::select! {
+            biased;
+            () = self.inner.cancellation.cancelled() => {
+                Err(SdxError::UploadSession("stream aborted".to_owned()))
+            }
+            result = pipeline.finish() => result,
+        };
         match &result {
             Ok(info) => {
                 let _result = self.inner.result.set(info.clone());
             }
             Err(error) => {
-                *self.inner.error.lock().await = Some(error.to_string());
+                *self
+                    .inner
+                    .error
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
             }
         }
         self.inner.finished.store(true, Ordering::Relaxed);
+        cancellation.completed = true;
         result
     }
 
@@ -202,16 +307,29 @@ impl UploadStreamHandle {
         self.inner.result.get().cloned()
     }
 
-    /// Cancels this upload: drops the pipeline so subsequent
-    /// [`write`](Self::write)/[`finish`](Self::finish) fail.
+    /// Cancels this upload and any in-flight write or finish. Safe to call
+    /// inside an async runtime; subsequent writes and finishes fail.
     pub fn abort(&self) {
         self.inner.aborted.store(true, Ordering::Relaxed);
-        *self.inner.pipeline.blocking_lock() = None;
+        self.inner.finished.store(true, Ordering::Relaxed);
+        self.inner.cancellation.cancel();
+        let pipeline = self
+            .inner
+            .pipeline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        drop(pipeline);
     }
 
     /// Returns the status flags for group status probes.
     pub(crate) fn status_flags(&self) -> UploadStatusFlags {
-        let error = self.inner.error.blocking_lock().clone();
+        let error = self
+            .inner
+            .error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         UploadStatusFlags {
             started: self.inner.started.load(Ordering::Relaxed),
             finished: self.inner.finished.load(Ordering::Relaxed),
@@ -231,6 +349,8 @@ pub(crate) struct UploadStatusFlags {
 
 /// Shared state of one [`UploadSession`].
 struct UploadSessionInner {
+    /// File operations finish before finalize snapshots upload tasks and files.
+    lifecycle: RwLock<()>,
     transfer: TransferClient,
     tokens: TokenService,
     api_base: String,
@@ -246,6 +366,8 @@ struct UploadSessionInner {
     xorb_skipped: AtomicU64,
     shard_posts: AtomicU64,
     state: Mutex<SessionState>,
+    #[cfg(test)]
+    serialization_gate: Option<Arc<SerializationGate>>,
 }
 
 impl UploadSessionInner {
@@ -290,6 +412,32 @@ impl UploadSessionInner {
     }
 }
 
+#[cfg(test)]
+struct SerializationGate {
+    ready: StdMutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: StdMutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl SerializationGate {
+    fn wait(&self) -> Result<(), SdxError> {
+        let sender = self
+            .ready
+            .lock()
+            .map_err(|error| SdxError::TaskJoin(error.to_string()))?
+            .take();
+        if let Some(sender) = sender {
+            let _ = sender.send(());
+            self.release
+                .lock()
+                .map_err(|error| SdxError::TaskJoin(error.to_string()))?
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|error| SdxError::TaskJoin(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
 /// Session-wide state shared by all file pipelines in this session.
 struct SessionState {
     /// chunk hash → xorb + index for chunks placed/imported this session
@@ -310,6 +458,24 @@ struct SessionState {
     /// Last chunk index a global dedup query was issued for.
     last_global_query_index: Option<u64>,
     finalized: bool,
+    /// First observed background xorb failure; terminal even after its task is drained.
+    background_failure: Option<String>,
+}
+
+impl SessionState {
+    fn check_background_failure(&self) -> Result<(), SdxError> {
+        if let Some(message) = &self.background_failure {
+            return Err(SdxError::UploadSession(format!(
+                "session background xorb upload failed: {message}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn record_background_failure(&mut self, error: &SdxError) {
+        self.background_failure
+            .get_or_insert_with(|| error.to_string());
+    }
 }
 
 impl Default for SessionState {
@@ -324,6 +490,7 @@ impl Default for SessionState {
             global_chunk_index: 0,
             last_global_query_index: None,
             finalized: false,
+            background_failure: None,
         }
     }
 }
@@ -388,9 +555,15 @@ impl FileUploadPipeline {
     /// Feeds one ingest block into the chunker and processes every complete
     /// chunk.
     async fn add_data(&mut self, data: Bytes) -> Result<(), SdxError> {
-        let chunks = self.chunker.next_block_bytes(&data, false);
-        for chunk in chunks {
-            self.process_chunk(chunk).await?;
+        // Frame the owned input without copying it. Chunker carries its tail
+        // across frames, preserving the exact CDC boundaries and hashes.
+        for start in (0..data.len()).step_by(64 * 1024) {
+            let end = start.saturating_add(64 * 1024).min(data.len());
+            let frame = data.slice(start..end);
+            for chunk in self.chunker.next_block_bytes(&frame, false) {
+                self.process_chunk(chunk).await?;
+            }
+            tokio::task::yield_now().await;
         }
         Ok(())
     }
@@ -519,12 +692,36 @@ impl FileUploadPipeline {
         if self.pending.is_empty() {
             return Ok(());
         }
+        // Admit before queuing CPU work, and retain admission through the
+        // network POST. Cancellation cannot detach an unaccounted worker.
+        let upload_permit = self
+            .session
+            .inner
+            .upload_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_error| {
+                SdxError::UploadSession("upload permit semaphore closed".to_owned())
+            })?;
         let pairs: Vec<(Bytes, u64)> = self
             .pending
             .iter()
             .map(|(chunk, offset)| (chunk.data.clone(), *offset))
             .collect();
-        let built = build_xorb(&pairs)?;
+        #[cfg(test)]
+        let serialization_gate = self.session.inner.serialization_gate.clone();
+        let (built, upload_permit) = tokio::task::spawn_blocking(move || {
+            let permit = upload_permit;
+            #[cfg(test)]
+            if let Some(gate) = serialization_gate {
+                gate.wait()?;
+            }
+            let built = build_xorb(&pairs)?;
+            Ok::<_, SdxError>((built, permit))
+        })
+        .await
+        .map_err(|error| SdxError::TaskJoin(error.to_string()))??;
 
         // HEAD-first idempotency probe (retried on transient failures).
         let (base, token) = self.session.inner.cas_credentials().await?;
@@ -546,37 +743,39 @@ impl FileUploadPipeline {
                 .xorb_skipped
                 .fetch_add(1, Ordering::Relaxed);
         } else {
+            let upload_transfer = self.session.inner.transfer.clone();
+            let hash = built.xorb_hash_hex.clone();
+            let body = Bytes::from(built.serialized);
+            let mut state = self.session.inner.state.lock().await;
+            state.check_background_failure()?;
+            while let Some(completed) = state.xorb_upload_tasks.try_join_next() {
+                if let Err(error) = completed
+                    .map_err(|error| SdxError::TaskJoin(error.to_string()))
+                    .and_then(|result| result)
+                {
+                    state.record_background_failure(&error);
+                    return Err(error);
+                }
+            }
             self.session
                 .inner
                 .xorb_posts
                 .fetch_add(1, Ordering::Relaxed);
-            let permit = self.session.inner.upload_permits.clone();
-            let upload_transfer = self.session.inner.transfer.clone();
-            let hash = built.xorb_hash_hex.clone();
-            let body = Bytes::copy_from_slice(&built.serialized);
-            self.session
-                .inner
-                .state
-                .lock()
-                .await
-                .xorb_upload_tasks
-                .spawn(async move {
-                    let _permit = permit.acquire_owned().await.map_err(|_error| {
-                        SdxError::UploadSession("upload permit semaphore closed".to_owned())
-                    })?;
-                    // Retry the streaming xorb POST with backoff/refresh; the
-                    // serialized bytes are in memory, so replays are safe.
-                    retry
-                        .run(token, move |tok| {
-                            let tclient = upload_transfer.clone();
-                            let base = base.clone();
-                            let hash = hash.clone();
-                            let body = body.clone();
-                            async move { tclient.upload_xorb(&base, &tok, &hash, body).await }
-                        })
-                        .await?;
-                    Ok(())
-                });
+            state.xorb_upload_tasks.spawn(async move {
+                let _permit = upload_permit;
+                // Retry the streaming xorb POST with backoff/refresh; the
+                // serialized bytes are in memory, so replays are safe.
+                retry
+                    .run(token, move |tok| {
+                        let tclient = upload_transfer.clone();
+                        let base = base.clone();
+                        let hash = hash.clone();
+                        let body = body.clone();
+                        async move { tclient.upload_xorb(&base, &tok, &hash, body).await }
+                    })
+                    .await?;
+                Ok(())
+            });
         }
 
         let xorb_hash = parse_xet_hash_hex(&built.xorb_hash_hex)?;
@@ -699,6 +898,7 @@ impl FileUploadPipeline {
         };
 
         let mut state = self.session.inner.state.lock().await;
+        state.check_background_failure()?;
         state.file_infos.push(file_entry);
         state.file_reports.push(info.clone());
         Ok(info)
@@ -747,6 +947,7 @@ impl UploadSession {
             .map_err(TransferError::from)?;
         Ok(Self {
             inner: Arc::new(UploadSessionInner {
+                lifecycle: RwLock::new(()),
                 transfer: inner.transfer.clone(),
                 tokens: inner.tokens.clone(),
                 api_base: inner.api_base.clone(),
@@ -760,6 +961,8 @@ impl UploadSession {
                 xorb_skipped: AtomicU64::new(0),
                 shard_posts: AtomicU64::new(0),
                 state: Mutex::new(SessionState::default()),
+                #[cfg(test)]
+                serialization_gate: None,
             }),
         })
     }
@@ -809,7 +1012,9 @@ impl UploadSession {
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when the reader fails or the upload fails.
+    /// Returns [`SdxError`] when the reader fails or the upload fails. A failed
+    /// reader does not register a file in the session; xorbs already uploaded
+    /// while streaming may remain stored.
     pub async fn upload_stream<R>(
         &self,
         remote: &str,
@@ -818,6 +1023,7 @@ impl UploadSession {
     where
         R: Read + Send + 'static,
     {
+        let _operation = self.inner.lifecycle.read().await;
         self.check_not_finalized().await?;
         let mut pipeline = FileUploadPipeline::new(self.clone());
         let (tx, mut rx) = mpsc::channel::<Result<ChunkBatch, SdxError>>(2);
@@ -835,10 +1041,12 @@ impl UploadSession {
                 ChunkBatch::Done => break,
             }
         }
-        let info = pipeline.finish().await?;
+        // Channel EOF can mean a reader error or panic rather than successful
+        // ingestion. Confirm the worker before committing file metadata.
         reader_task
             .await
             .map_err(|error| SdxError::TaskJoin(error.to_string()))??;
+        let info = pipeline.finish().await?;
         // Record the pending path registration; applied in `finalize`.
         self.inner
             .state
@@ -862,13 +1070,16 @@ impl UploadSession {
     pub(crate) fn upload_stream_handle_with_id(&self, id: u64) -> UploadStreamHandle {
         UploadStreamHandle {
             inner: Arc::new(UploadStreamHandleInner {
-                pipeline: Mutex::new(Some(FileUploadPipeline::new(self.clone()))),
+                session: self.clone(),
+                operation: Mutex::new(()),
+                pipeline: StdMutex::new(Some(FileUploadPipeline::new(self.clone()))),
+                cancellation: CancellationToken::new(),
                 result: Arc::new(OnceLock::new()),
                 task_id: id,
                 started: AtomicBool::new(false),
                 finished: AtomicBool::new(false),
                 aborted: AtomicBool::new(false),
-                error: Mutex::new(None),
+                error: StdMutex::new(None),
             }),
         }
     }
@@ -879,10 +1090,21 @@ impl UploadSession {
     /// # Errors
     ///
     /// Returns [`SdxError`] when a xorb upload failed, the shard cannot be
-    /// built, or the shard POST fails. Calling twice fails.
+    /// built, or the shard POST fails. Calling twice fails. A background xorb
+    /// failure permanently prevents metadata publication: its first observer
+    /// receives the original error, and later operations return an
+    /// [`SdxError::UploadSession`] containing the first failure's context.
     pub async fn finalize(&self) -> Result<UploadReport, SdxError> {
+        let _finalize = self.inner.lifecycle.write().await;
         let mut tasks = {
             let mut state = self.inner.state.lock().await;
+            if let Err(error) = state.check_background_failure() {
+                // Drop all remaining tasks before returning; a failed session
+                // cannot publish metadata or benefit from more uploads.
+                let tasks = std::mem::take(&mut state.xorb_upload_tasks);
+                drop(tasks);
+                return Err(error);
+            }
             if state.finalized {
                 return Err(SdxError::UploadSession(
                     "session already finalized".to_owned(),
@@ -892,7 +1114,17 @@ impl UploadSession {
             std::mem::take(&mut state.xorb_upload_tasks)
         };
         while let Some(result) = tasks.join_next().await {
-            result.map_err(|error| SdxError::TaskJoin(error.to_string()))??;
+            if let Err(error) = result
+                .map_err(|error| SdxError::TaskJoin(error.to_string()))
+                .and_then(|result| result)
+            {
+                self.inner
+                    .state
+                    .lock()
+                    .await
+                    .record_background_failure(&error);
+                return Err(error);
+            }
         }
 
         let (file_infos, xorb_infos, files) = {
@@ -973,7 +1205,9 @@ impl UploadSession {
     }
 
     async fn check_not_finalized(&self) -> Result<(), SdxError> {
-        if self.inner.state.lock().await.finalized {
+        let state = self.inner.state.lock().await;
+        state.check_background_failure()?;
+        if state.finalized {
             return Err(SdxError::UploadSession(
                 "session already finalized".to_owned(),
             ));
@@ -996,7 +1230,14 @@ fn feed_reader<R: Read + Send + 'static>(
     let mut chunker = Chunker::new(chunk_target);
     let mut buffer = vec![0u8; INGESTION_BLOCK_SIZE];
     loop {
-        let n = reader.read(&mut buffer).map_err(SdxError::Io)?;
+        if tx.is_closed() {
+            return Err(SdxError::UploadSession("ingest channel closed".to_owned()));
+        }
+        let n = match reader.read(&mut buffer) {
+            Ok(n) => n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(SdxError::Io(error)),
+        };
         if n == 0 {
             break;
         }
@@ -1014,7 +1255,12 @@ fn feed_reader<R: Read + Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+
     use bytes::Bytes;
+
+    use super::{SerializationGate, StdMutex};
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -1137,6 +1383,173 @@ mod tests {
         request.body.clone()
     }
 
+    async fn assert_cancelled_serialization_retains_admission(explicit_abort: bool) {
+        let (server, client) = mock_client().await;
+        let mut session = client.upload_session().unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        Arc::get_mut(&mut session.inner).unwrap().serialization_gate =
+            Some(Arc::new(SerializationGate {
+                ready: StdMutex::new(Some(ready_tx)),
+                release: StdMutex::new(release_rx),
+            }));
+        let slots = session.inner.upload_permits.available_permits();
+        let held = session
+            .inner
+            .upload_permits
+            .clone()
+            .acquire_many_owned(u32::try_from(slots.saturating_sub(1)).unwrap())
+            .await
+            .unwrap();
+        let handle = session.upload_stream_handle();
+        handle.write(b"bounded".to_vec()).await.unwrap();
+        let finishing_handle = handle.clone();
+        let finishing = tokio::spawn(async move { finishing_handle.finish().await });
+        ready_rx.await.unwrap();
+        // This single-thread executor must progress while serialization blocks
+        // synchronously on its worker. Caller cancellation cannot free admission.
+        tokio::task::yield_now().await;
+        assert_eq!(session.inner.upload_permits.available_permits(), 0);
+        if explicit_abort {
+            handle.abort();
+            assert!(finishing.await.unwrap().is_err());
+        } else {
+            finishing.abort();
+            assert!(matches!(finishing.await, Err(error) if error.is_cancelled()));
+        }
+        assert_eq!(session.inner.upload_permits.available_permits(), 0);
+        assert!(handle.write(b"later".to_vec()).await.is_err());
+        assert!(handle.finish().await.is_err());
+        assert!(handle.try_finish().is_none());
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.xorb_posts, 0);
+        assert_eq!(report.shard_posts, 0);
+        release_tx.send(()).unwrap();
+        let completed = session
+            .inner
+            .upload_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        drop(completed);
+        drop(held);
+        assert_eq!(session.inner.upload_permits.available_permits(), slots);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method != "POST")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abort_during_serialization_keeps_worker_admitted_without_publication() {
+        assert_cancelled_serialization_retains_admission(true).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_finish_keeps_worker_admitted_without_publication() {
+        assert_cancelled_serialization_retains_admission(false).await;
+    }
+
+    #[tokio::test]
+    async fn slow_post_applies_backpressure_before_next_serialization() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/xet-write-token/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "casUrl": server.uri(), "exp": 4_000_000_000u64, "accessToken": WRITE_TOKEN,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"was_inserted": true}))
+                    .set_delay(std::time::Duration::from_secs(5)),
+            )
+            .mount(&server)
+            .await;
+        let client = build_client(&server).await;
+        let mut session = client.upload_session().unwrap();
+        Arc::get_mut(&mut session.inner).unwrap().upload_permits =
+            Arc::new(tokio::sync::Semaphore::new(1));
+        let slots = Arc::clone(&session.inner.upload_permits);
+        let first = session.upload_stream_handle();
+        first.write(b"first".to_vec()).await.unwrap();
+        first.finish().await.unwrap();
+        assert_eq!(slots.available_permits(), 0);
+        let second = session.upload_stream_handle();
+        second.write(b"second".to_vec()).await.unwrap();
+        let mut finishing = Box::pin(second.finish());
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                finishing.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
+        assert_eq!(session.inner.state.lock().await.xorb_upload_tasks.len(), 1);
+        assert_eq!(session.xorb_post_count(), 1);
+        drop(finishing);
+        drop(second);
+        drop(first);
+        // Dropping the session aborts its only admitted POST and frees capacity.
+        drop(session);
+        let released = slots.acquire_owned().await.unwrap();
+        drop(released);
+    }
+
+    #[tokio::test]
+    async fn queued_serialization_is_cancelled_before_worker_submission() {
+        let (_server, client) = mock_client().await;
+        let mut session = client.upload_session().unwrap();
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+        let (_release_tx, release_rx) = std::sync::mpsc::channel();
+        Arc::get_mut(&mut session.inner).unwrap().serialization_gate =
+            Some(Arc::new(SerializationGate {
+                ready: StdMutex::new(Some(ready_tx)),
+                release: StdMutex::new(release_rx),
+            }));
+        let slots = session.inner.upload_permits.available_permits();
+        let held = session
+            .inner
+            .upload_permits
+            .clone()
+            .acquire_many_owned(u32::try_from(slots).unwrap())
+            .await
+            .unwrap();
+        let handle = session.upload_stream_handle();
+        handle.write(b"bounded".to_vec()).await.unwrap();
+        let mut finishing = Box::pin(handle.finish());
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(finishing.as_mut().poll(cx).is_pending())
+        })
+        .await;
+        assert!(pending);
+        assert!(matches!(
+            ready_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        drop(finishing);
+        assert!(handle.finish().await.is_err());
+        drop(held);
+        assert_eq!(session.inner.upload_permits.available_permits(), slots);
+        assert!(session.finalize().await.unwrap().files.is_empty());
+    }
+
     #[tokio::test]
     async fn upload_bytes_stores_one_xorb_and_shard() {
         let (server, client) = mock_client().await;
@@ -1182,6 +1595,223 @@ mod tests {
             xorbs[0].chunks[0].chunk_hash,
             expected.chunk_entries[0].hash
         );
+    }
+
+    struct FailingReader {
+        remaining: usize,
+        panic: bool,
+    }
+
+    fn panic_in_owned_reader() {
+        std::panic::resume_unwind(Box::new(String::from("owned reader panic")));
+    }
+
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                if self.panic {
+                    panic_in_owned_reader();
+                }
+                return Err(std::io::Error::other("owned reader failure"));
+            }
+            let count = self.remaining.min(buffer.len());
+            let bytes = buffer
+                .get_mut(..count)
+                .ok_or_else(|| std::io::Error::other("owned reader buffer range invalid"))?;
+            for (byte, value) in bytes.iter_mut().zip((0u8..=250).cycle()) {
+                *byte = value;
+            }
+            self.remaining = self
+                .remaining
+                .checked_sub(count)
+                .ok_or_else(|| std::io::Error::other("owned reader byte count invalid"))?;
+            Ok(count)
+        }
+    }
+
+    async fn check_failed_reader_does_not_publish(remaining: usize, panic: bool) {
+        for recover in [false, true] {
+            let (server, client) = mock_client().await;
+            let session = client.upload_session().unwrap();
+            let error = session
+                .upload_stream("remote/failed.bin", FailingReader { remaining, panic })
+                .await
+                .unwrap_err();
+            if panic {
+                assert!(
+                    matches!(error, crate::SdxError::TaskJoin(message) if message.contains("owned reader panic"))
+                );
+            } else {
+                assert!(
+                    matches!(error, crate::SdxError::Io(error) if error.to_string() == "owned reader failure")
+                );
+            }
+            {
+                let state = session.inner.state.lock().await;
+                assert!(state.file_infos.is_empty());
+                assert!(state.file_reports.is_empty());
+                assert!(state.pending_registrations.is_empty());
+            }
+            let expected = if recover {
+                Some(
+                    session
+                        .upload_bytes("remote/success.bin", b"complete file".to_vec())
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let expected_shard = {
+                let state = session.inner.state.lock().await;
+                let xorbs = state.xorb_infos.values().cloned().collect::<Vec<_>>();
+                serialize_shard(&state.file_infos, &xorbs)
+            };
+            let report = session.finalize().await.unwrap();
+            assert_eq!(report.files, expected.into_iter().collect::<Vec<_>>());
+            assert_eq!(report.shard_posts, u64::from(recover));
+            let requests = server.received_requests().await.unwrap();
+            let registrations = requests
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .collect::<Vec<_>>();
+            assert_eq!(registrations.len(), usize::from(recover));
+            if recover {
+                assert!(registrations[0].url.path().ends_with("/remote/success.bin"));
+                assert_eq!(shard_post_body(&server).await, expected_shard);
+            } else {
+                assert!(
+                    requests
+                        .iter()
+                        .all(|request| request.url.path() != "/v1/shards")
+                );
+            }
+        }
+    }
+
+    struct InterruptedReader {
+        source: std::io::Cursor<Vec<u8>>,
+        interrupt_after_data: bool,
+        interrupted: bool,
+    }
+
+    impl std::io::Read for InterruptedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted && (!self.interrupt_after_data || self.source.position() > 0) {
+                self.interrupted = true;
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            let count = buffer.len().min(17);
+            let buffer = buffer
+                .get_mut(..count)
+                .ok_or_else(|| std::io::Error::other("owned short-reader range invalid"))?;
+            std::io::Read::read(&mut self.source, buffer)
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_reader_retries_before_and_between_short_reads() {
+        let (_server, client) = mock_client().await;
+        let session = client.upload_session().unwrap();
+        let payload = vec![42u8; 100];
+        let expected = session
+            .upload_bytes("remote/ordinary.bin", payload.clone())
+            .await
+            .unwrap();
+        for interrupt_after_data in [false, true] {
+            let info = session
+                .upload_stream(
+                    "remote/interrupted.bin",
+                    InterruptedReader {
+                        source: std::io::Cursor::new(payload.clone()),
+                        interrupt_after_data,
+                        interrupted: false,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(info.file_id, expected.file_id);
+            assert_eq!(info.total_bytes, 100);
+            assert_eq!(info.chunk_count, expected.chunk_count);
+        }
+        let report = session.finalize().await.unwrap();
+        assert_eq!(report.files.len(), 3);
+        assert!(
+            report
+                .files
+                .iter()
+                .all(|file| file.total_bytes == 100 && file.file_id == expected.file_id)
+        );
+    }
+
+    struct RepeatedInterruptedReader {
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        dropped: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl std::io::Read for RepeatedInterruptedReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        }
+    }
+
+    impl Drop for RepeatedInterruptedReader {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _ = dropped.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_reader_stops_when_upload_consumer_is_cancelled() {
+        let (_server, client) = mock_client().await;
+        let session = client.upload_session().unwrap();
+        let uploading_session = session.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let upload = tokio::spawn(async move {
+            uploading_session
+                .upload_stream(
+                    "remote/interrupted.bin",
+                    RepeatedInterruptedReader {
+                        started: Some(started_tx),
+                        dropped: Some(dropped_tx),
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_reader_immediate_error_does_not_publish_file() {
+        check_failed_reader_does_not_publish(0, false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_reader_partial_error_does_not_publish_file() {
+        check_failed_reader_does_not_publish(1024 * 1024, false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_reader_panic_does_not_publish_file() {
+        check_failed_reader_does_not_publish(0, true).await;
     }
 
     #[tokio::test]
@@ -1298,6 +1928,208 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalize_waits_for_in_progress_stream_upload() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(
+                ResponseTemplate::new(404).set_delay(std::time::Duration::from_millis(100)),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let session = client.upload_session().unwrap();
+        let upload_session = session.clone();
+        let upload = tokio::spawn(async move {
+            upload_session
+                .upload_bytes("remote/race", vec![0x5a; 4096])
+                .await
+        });
+        loop {
+            if server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    request
+                        .url
+                        .path()
+                        .starts_with("/v1/chunks/default-merkledb/")
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let report = session.finalize().await.unwrap();
+        let uploaded = upload.await.unwrap().unwrap();
+        assert_eq!(report.files, vec![uploaded]);
+        assert_eq!(report.shard_posts, 1);
+    }
+
+    #[tokio::test]
+    async fn push_upload_cannot_write_or_finish_after_session_finalize() {
+        let (_server, client) = mock_client().await;
+        let session = client.upload_session().unwrap();
+        let handle = session.upload_stream_handle();
+        handle.write(Bytes::from_static(b"tail")).await.unwrap();
+        session.finalize().await.unwrap();
+        assert!(handle.write(Bytes::from_static(b"late")).await.is_err());
+        assert!(handle.finish().await.is_err());
+        let late = session.upload_stream_handle();
+        assert!(late.write(Bytes::from_static(b"late")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_push_write_cannot_publish_partial_file() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(ResponseTemplate::new(404).set_delay(std::time::Duration::from_secs(1)))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let session = client.upload_session().unwrap();
+        let handle = session.upload_stream_handle();
+        let source = Bytes::from(vec![0x5a; 4096]);
+        {
+            let write = handle.write(source);
+            tokio::pin!(write);
+            tokio::select! {
+                result = &mut write => panic!("write unexpectedly completed: {result:?}"),
+                () = async {
+                    loop {
+                        if server.received_requests().await.unwrap().iter().any(|request| {
+                            request.url.path().starts_with("/v1/chunks/default-merkledb/")
+                        }) {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        }
+        assert!(handle.finish().await.is_err());
+        assert!(handle.write(Bytes::from_static(b"retry")).await.is_err());
+        assert!(handle.try_finish().is_none());
+        assert!(
+            handle
+                .inner
+                .aborted
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
+    }
+
+    async fn abort_during_network_work(finishing: bool) {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(ResponseTemplate::new(404).set_delay(std::time::Duration::from_secs(5)))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let session = client.upload_session().unwrap();
+        let handle = session.upload_stream_handle();
+        if finishing {
+            // This tail is below the chunk size and first queries dedup on finish.
+            handle
+                .write(Bytes::from_static(b"pending tail"))
+                .await
+                .unwrap();
+        }
+        let active_handle = handle.clone();
+        let active = tokio::spawn(async move {
+            if finishing {
+                active_handle.finish().await.map(|_| ())
+            } else {
+                active_handle.write(Bytes::from(vec![0x5a; 4096])).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|request| {
+                        request
+                            .url
+                            .path()
+                            .starts_with("/v1/chunks/default-merkledb/")
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active upload reached delayed network request");
+        let queued_handle = handle.clone();
+        let queued = tokio::spawn(async move {
+            queued_handle
+                .write(Bytes::from_static(b"queued data"))
+                .await
+        });
+        tokio::task::yield_now().await;
+        handle.abort();
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            assert!(active.await.unwrap().is_err());
+            assert!(queued.await.unwrap().is_err());
+        })
+        .await
+        .expect("abort stops active and queued operations without waiting for network");
+        assert!(handle.inner.pipeline.lock().unwrap().is_none());
+        assert!(handle.try_finish().is_none());
+        assert!(handle.finish().await.is_err());
+        assert!(handle.write(Bytes::from_static(b"retry")).await.is_err());
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
+    }
+
+    #[tokio::test]
+    async fn abort_stops_active_and_queued_push_writes_without_publication() {
+        abort_during_network_work(false).await;
+    }
+
+    #[tokio::test]
+    async fn abort_stops_active_push_finish_without_publication() {
+        abort_during_network_work(true).await;
+    }
+
+    #[tokio::test]
+    async fn failed_push_write_cannot_publish_partial_file() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(ResponseTemplate::new(429))
+            .with_priority(1)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let session = client.upload_session().unwrap();
+        let handle = session.upload_stream_handle();
+        let source = Bytes::from(vec![0x5a; 4096]);
+        let mut chunker = crate::chunker::Chunker::new(128);
+        assert!(chunker.next_block_bytes(&source, false).len() > 1);
+
+        assert!(handle.write(source).await.is_err());
+        assert!(handle.finish().await.is_err());
+        assert!(handle.write(Bytes::from_static(b"retry")).await.is_err());
+        assert!(handle.try_finish().is_none());
+        assert!(handle.inner.error.lock().unwrap().is_some());
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
+    }
+
+    #[tokio::test]
     async fn push_style_multiple_writes_preserve_all_bytes() {
         // Feed the payload in several uneven slices (including a sub-minimum
         // tail) and verify the pipeline reconstructs the exact source bytes.
@@ -1373,6 +2205,188 @@ mod tests {
             .with_retry_policy(policy)
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn consumed_background_xorb_failure_prevents_all_later_publication() {
+        use crate::error::{SdxError, TransferError};
+
+        for (status, consume) in [
+            (Some(400), true),
+            (Some(503), true),
+            (Some(400), false),
+            (None, true),
+        ] {
+            let failure = status.is_some();
+            let (server, _) = mock_client_opts(false, None).await;
+            if let Some(status) = status {
+                Mock::given(method("POST"))
+                    .and(path_regex(r"/v1/xorbs/default/.*"))
+                    .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                        "error": "owned_terminal_xorb_failure"
+                    })))
+                    .with_priority(1)
+                    .mount(&server)
+                    .await;
+            }
+            let port = server.uri().split(':').next_back().unwrap().to_owned();
+            let client = XetClientBuilder::new()
+                .endpoint(format!("xet://127.0.0.1:{port}/github/team/assets/main"))
+                .auth(
+                    Auth::new(
+                        &server.uri(),
+                        RepositoryId {
+                            provider: "github".to_owned(),
+                            owner: "team".to_owned(),
+                            repo: "assets".to_owned(),
+                            revision: "main".to_owned(),
+                        },
+                    )
+                    .unwrap()
+                    .with_api_key(BOOTSTRAP_KEY.to_owned()),
+                )
+                .with_upload_concurrency(1)
+                .with_retry_policy(
+                    crate::RetryPolicy::new()
+                        .with_max_attempts(u32::from(status == Some(503)))
+                        .with_base_delay(std::time::Duration::ZERO)
+                        .with_jitter(false),
+                )
+                .build()
+                .unwrap();
+            let session = client.upload_session().unwrap();
+            let info = session.upload_bytes("first", vec![1u8; 100]).await.unwrap();
+            assert_eq!(info.total_bytes, 100);
+            if consume {
+                let result = session.upload_bytes("second", vec![2u8; 100]).await;
+                if failure {
+                    if status == Some(503) {
+                        assert!(matches!(result,
+                            Err(SdxError::Transfer(TransferError::HttpStatus { status: 503, message, .. }))
+                            if message == "owned_terminal_xorb_failure"));
+                    } else {
+                        assert!(matches!(result,
+                            Err(SdxError::Transfer(TransferError::BadRequest(message)))
+                            if message == "owned_terminal_xorb_failure"));
+                    }
+                    let state = session.inner.state.lock().await;
+                    assert!(state.xorb_upload_tasks.is_empty());
+                    assert_eq!(state.file_reports.len(), 1);
+                    assert!(state.background_failure.is_some());
+                } else {
+                    assert_eq!(result.unwrap().total_bytes, 100);
+                }
+            }
+            let result = session.finalize().await;
+            if failure {
+                if consume {
+                    assert!(matches!(&result, Err(SdxError::UploadSession(message))
+                        if message.contains("owned_terminal_xorb_failure")));
+                } else {
+                    assert!(
+                        matches!(&result, Err(SdxError::Transfer(TransferError::BadRequest(message)))
+                        if message == "owned_terminal_xorb_failure")
+                    );
+                }
+                let terminal = session.finalize().await.unwrap_err().to_string();
+                assert!(terminal.contains("owned_terminal_xorb_failure"));
+                for data in [vec![3u8; 100], Vec::new()] {
+                    assert_eq!(
+                        session
+                            .upload_bytes("later", data)
+                            .await
+                            .unwrap_err()
+                            .to_string(),
+                        terminal
+                    );
+                }
+                let handle = session.upload_stream_handle();
+                assert_eq!(
+                    handle.write(Vec::new()).await.unwrap_err().to_string(),
+                    terminal
+                );
+                assert_eq!(handle.finish().await.unwrap_err().to_string(), terminal);
+                assert_eq!(session.xorb_post_count(), 1);
+                assert_eq!(
+                    session
+                        .inner
+                        .shard_posts
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    0
+                );
+            } else {
+                let report = result.unwrap();
+                assert_eq!(report.files.len(), 2);
+                assert_eq!(report.xorb_posts, 2);
+                assert_eq!(report.shard_posts, 1);
+                let empty = client.upload_session().unwrap();
+                assert!(empty.finalize().await.unwrap().files.is_empty());
+            }
+            let requests = server.received_requests().await.unwrap();
+            let xorb_posts = requests
+                .iter()
+                .filter(|request| {
+                    request.method.as_str() == "POST"
+                        && request.url.path().starts_with("/v1/xorbs/")
+                })
+                .count();
+            assert_eq!(xorb_posts, if status == Some(400) { 1 } else { 2 });
+            let shard_posts = requests
+                .iter()
+                .filter(|request| {
+                    request.method.as_str() == "POST" && request.url.path() == "/v1/shards"
+                })
+                .count();
+            let path_puts = requests
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .count();
+            assert_eq!(shard_posts, usize::from(!failure));
+            assert_eq!(path_puts, if failure { 0 } else { 2 });
+        }
+    }
+
+    #[tokio::test]
+    async fn consumed_background_xorb_task_join_failure_is_terminal() {
+        use crate::error::SdxError;
+
+        let (server, client) = mock_client_opts(false, None).await;
+        let session = client.upload_session().unwrap();
+        let mut state = session.inner.state.lock().await;
+        let task = state
+            .xorb_upload_tasks
+            .spawn(async { std::panic::resume_unwind(Box::new("owned_xorb_task_panic")) });
+        drop(state);
+        // Wait for completion, without removing the task from its JoinSet.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let error = session
+            .upload_bytes("first", vec![4u8; 100])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SdxError::TaskJoin(message) if message.contains("owned_xorb_task_panic"))
+        );
+        assert!(
+            matches!(session.finalize().await, Err(SdxError::UploadSession(message))
+            if message.contains("owned_xorb_task_panic"))
+        );
+        assert_eq!(session.xorb_post_count(), 0);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(
+                    |request| request.method.as_str() != "POST" && request.method.as_str() != "PUT"
+                )
+        );
     }
 
     /// The xorb POST 503s twice (retryable admission), then succeeds; the M4
