@@ -2339,3 +2339,173 @@ fn temporary_duplicate_compares_the_verified_source_after_path_replacement() {
         assert_eq!(fs::read(detached).unwrap(), requested);
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn deletion_sync_errors_retry_the_nearest_surviving_directory_without_creation() {
+    use crate::{LocalPublishBoundary, LocalPublishFault, fault_injection::arm_fault};
+    for failure in ["object", "aa/bb/cc", "aa/bb", "aa"] {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("aa/bb/cc/object").unwrap();
+        let integrity = ObjectIntegrity::new(super::util::chunk_hash(b"payload"), 7);
+        ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"payload"), &integrity)
+            .unwrap();
+        let changed_path = if failure == "object" {
+            store.path_for_key(&key)
+        } else {
+            storage.path().join(failure)
+        };
+        let boundary = if failure == "object" {
+            LocalPublishBoundary::BeforeParentSync
+        } else {
+            LocalPublishBoundary::BeforeDirectorySync
+        };
+        let guard = arm_fault(
+            changed_path.clone(),
+            boundary,
+            LocalPublishFault::SyncFailure,
+        );
+        let result = ObjectStore::delete_if_present(&store, &key);
+        assert!(
+            matches!(result, Err(LocalObjectStoreError::Io(error)) if error.raw_os_error() == Some(libc::EIO)),
+            "{failure}"
+        );
+        assert!(!store.path_for_key(&key).exists());
+        assert!(storage.path().exists());
+        if failure != "object" {
+            assert!(!changed_path.exists());
+        }
+        // A retry must attempt the missing name's containing-directory sync,
+        // rather than acknowledge NotFound while the same EIO remains armed.
+        let result = ObjectStore::delete_if_present(&store, &key);
+        assert!(
+            matches!(result, Err(LocalObjectStoreError::Io(error)) if error.raw_os_error() == Some(libc::EIO)),
+            "retry {failure}"
+        );
+        let names = ["aa", "aa/bb", "aa/bb/cc"];
+        let before = names.map(|name| storage.path().join(name).exists());
+        drop(guard);
+        assert!(matches!(
+            ObjectStore::delete_if_present(&store, &key),
+            Ok(DeleteOutcome::NotFound)
+        ));
+        assert_eq!(names.map(|name| storage.path().join(name).exists()), before);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn async_deletion_sync_error_preserves_siblings_and_retry_finishes() {
+    use crate::{
+        AsyncObjectStore, LocalPublishBoundary, LocalPublishFault, fault_injection::arm_fault,
+    };
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+    let key = ObjectKey::parse("aa/object").unwrap();
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(b"payload"), 7);
+    ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"payload"), &integrity)
+        .unwrap();
+    let sibling = storage.path().join("aa/sibling");
+    fs::write(&sibling, b"untouched sibling").unwrap();
+    let guard = arm_fault(
+        store.path_for_key(&key),
+        LocalPublishBoundary::BeforeParentSync,
+        LocalPublishFault::SyncFailure,
+    );
+    let result = AsyncObjectStore::delete_if_present(&store, &key).await;
+    assert!(
+        matches!(result, Err(LocalObjectStoreError::Io(error)) if error.raw_os_error() == Some(libc::EIO))
+    );
+    drop(guard);
+    assert!(matches!(
+        AsyncObjectStore::delete_if_present(&store, &key).await,
+        Ok(DeleteOutcome::NotFound)
+    ));
+    assert_eq!(fs::read(sibling).unwrap(), b"untouched sibling");
+    assert!(storage.path().join("aa").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_deletion_preserves_directory_structure_and_absent_root() {
+    let storage = shardline_test_support::TempStorage::new();
+    let missing_root = storage.path().join("absent/root");
+    let store = LocalObjectStore::open(missing_root);
+    let key = ObjectKey::parse("aa/bb/object").unwrap();
+    assert!(matches!(
+        ObjectStore::delete_if_present(&store, &key),
+        Ok(DeleteOutcome::NotFound)
+    ));
+    assert!(!storage.path().join("absent").exists());
+    let root = storage.path().join("existing");
+    fs::create_dir_all(root.join("aa/bb")).unwrap();
+    let store = LocalObjectStore::open(root.clone());
+    assert!(matches!(
+        ObjectStore::delete_if_present(&store, &key),
+        Ok(DeleteOutcome::NotFound)
+    ));
+    assert!(root.join("aa/bb").is_dir());
+    let missing_child = ObjectKey::parse("aa/missing/object").unwrap();
+    assert!(matches!(
+        ObjectStore::delete_if_present(&store, &missing_child),
+        Ok(DeleteOutcome::NotFound)
+    ));
+    assert!(!root.join("aa/missing").exists());
+    assert!(root.join("aa/bb").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn deletion_parent_replacement_preserves_original_and_outside_sentinel() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+    let key = ObjectKey::parse("aa/object").unwrap();
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(b"payload"), 7);
+    ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"payload"), &integrity)
+        .unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("object"), b"outside sentinel").unwrap();
+    let parent = storage.path().join("aa");
+    let moved = storage.path().join("detached");
+    let moved_for_hook = moved.clone();
+    let outside_for_hook = outside.path().to_path_buf();
+    set_before_local_write_hook(store.path_for_key(&key), move || {
+        fs::rename(&parent, moved_for_hook).unwrap();
+        symlink(outside_for_hook, parent).unwrap();
+    });
+    assert!(ObjectStore::delete_if_present(&store, &key).is_err());
+    assert_eq!(fs::read(moved.join("object")).unwrap(), b"payload");
+    assert_eq!(
+        fs::read(outside.path().join("object")).unwrap(),
+        b"outside sentinel"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn deletion_prune_replacement_preserves_outside_sentinel() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+    let key = ObjectKey::parse("aa/bb/object").unwrap();
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(b"payload"), 7);
+    ObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"payload"), &integrity)
+        .unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("sentinel"), b"outside sentinel").unwrap();
+    let directory = storage.path().join("aa/bb");
+    let moved = storage.path().join("detached");
+    let moved_for_hook = moved.clone();
+    let directory_for_hook = directory.clone();
+    let outside_for_hook = outside.path().to_path_buf();
+    set_before_local_write_hook(directory, move || {
+        fs::rename(&directory_for_hook, moved_for_hook).unwrap();
+        symlink(outside_for_hook, directory_for_hook).unwrap();
+    });
+    assert!(ObjectStore::delete_if_present(&store, &key).is_err());
+    assert!(moved.is_dir());
+    assert_eq!(
+        fs::read(outside.path().join("sentinel")).unwrap(),
+        b"outside sentinel"
+    );
+}

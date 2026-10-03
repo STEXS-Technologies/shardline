@@ -127,6 +127,152 @@ fn sync_verified_existing_file(anchored: &AnchoredTarget, file: &File) -> io::Re
     )
 }
 
+#[cfg(unix)]
+struct DeleteDirectory {
+    file: File,
+    logical_path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+fn ensure_delete_namespace_matches(directories: &[DeleteDirectory]) -> io::Result<()> {
+    let deepest = directories.last().ok_or_else(invalid_local_path_error)?;
+    crate::local_path::ensure_directory_path_components_are_not_symlinked(&deepest.logical_path)
+        .map_err(|error| match error {
+            crate::DirectoryPathError::Io(error) => error,
+            crate::DirectoryPathError::UnsupportedPrefix
+            | crate::DirectoryPathError::SymlinkedComponent(_)
+            | crate::DirectoryPathError::NonDirectoryComponent(_) => {
+                io::Error::new(ErrorKind::InvalidData, "local deletion namespace changed")
+            }
+        })?;
+    for directory in directories {
+        let anchored = AnchoredTarget::new(
+            directory.file.try_clone()?,
+            directory.logical_path.clone(),
+            std::ffi::OsString::new(),
+        );
+        ensure_parent_path_matches_anchor(&anchored)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_delete_directory(
+    directory: &DeleteDirectory,
+    changed_path: &Path,
+    directory_name: bool,
+) -> io::Result<()> {
+    let (before, after) = if directory_name {
+        (
+            LocalPublishBoundary::BeforeDirectorySync,
+            LocalPublishBoundary::AfterDirectoryDurable,
+        )
+    } else {
+        (
+            LocalPublishBoundary::BeforeParentSync,
+            LocalPublishBoundary::AfterParentDurable,
+        )
+    };
+    local_publish_failpoint(changed_path, before)?;
+    directory.file.sync_all()?;
+    local_publish_failpoint(changed_path, after)
+}
+
+/// Deletes an object and durably synchronizes its name and each pruned directory.
+/// Missing-path retries synchronize the nearest existing parent without creation.
+#[cfg(unix)]
+pub(crate) fn delete_object_durably(root: &Path, path: &Path) -> io::Result<crate::DeleteOutcome> {
+    use crate::anchored_fs::{
+        open_child_directory_no_follow, open_directory_chain, remove_at, remove_directory_at,
+    };
+    use std::path::Component;
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_prefix_error| invalid_local_path_error())?;
+    let parent = relative.parent().ok_or_else(invalid_local_path_error)?;
+    let file_name = relative.file_name().ok_or_else(invalid_local_path_error)?;
+    let root_file = match open_directory_chain(root, false, None, invalid_local_path_error) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(crate::DeleteOutcome::NotFound);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut directories = vec![DeleteDirectory {
+        file: root_file,
+        logical_path: root.to_path_buf(),
+    }];
+    for component in parent.components() {
+        let Component::Normal(name) = component else {
+            return Err(invalid_local_path_error());
+        };
+        let containing = directories.last().ok_or_else(invalid_local_path_error)?;
+        let logical_path = containing.logical_path.join(name);
+        let file = match open_child_directory_no_follow(&containing.file, name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                ensure_delete_namespace_matches(&directories)?;
+                sync_delete_directory(containing, &logical_path, true)?;
+                ensure_delete_namespace_matches(&directories)?;
+                return Ok(crate::DeleteOutcome::NotFound);
+            }
+            Err(error) => return Err(error),
+        };
+        directories.push(DeleteDirectory { file, logical_path });
+    }
+    let containing = directories.last().ok_or_else(invalid_local_path_error)?;
+    let anchored = AnchoredTarget::new(
+        containing.file.try_clone()?,
+        containing.logical_path.clone(),
+        file_name.to_os_string(),
+    );
+    run_before_local_write_hook(path);
+    ensure_delete_namespace_matches(&directories)?;
+    // A missing object may be another writer's not-yet-durable unlink.
+    let outcome = match remove_at(anchored.parent_dir(), file_name) {
+        Ok(()) => crate::DeleteOutcome::Deleted,
+        Err(error) if error.kind() == ErrorKind::NotFound => crate::DeleteOutcome::NotFound,
+        Err(error) => return Err(error),
+    };
+    sync_delete_directory(containing, path, false)?;
+    ensure_delete_namespace_matches(&directories)?;
+    if outcome == crate::DeleteOutcome::NotFound {
+        return Ok(outcome);
+    }
+    for index in (1..directories.len()).rev() {
+        let removed = directories
+            .get(index)
+            .ok_or_else(invalid_local_path_error)?;
+        let parent_index = index.checked_sub(1).ok_or_else(invalid_local_path_error)?;
+        let prune_parent = directories
+            .get(parent_index)
+            .ok_or_else(invalid_local_path_error)?;
+        let name = removed
+            .logical_path
+            .file_name()
+            .ok_or_else(invalid_local_path_error)?;
+        run_before_local_write_hook(&removed.logical_path);
+        ensure_delete_namespace_matches(
+            directories
+                .get(..=index)
+                .ok_or_else(invalid_local_path_error)?,
+        )?;
+        match remove_directory_at(&prune_parent.file, name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => break,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        sync_delete_directory(prune_parent, &removed.logical_path, true)?;
+        ensure_delete_namespace_matches(
+            directories
+                .get(..index)
+                .ok_or_else(invalid_local_path_error)?,
+        )?;
+    }
+    Ok(outcome)
+}
+
 pub(crate) enum PutBytesIfAbsentOutcome {
     Inserted,
     AlreadyExists,

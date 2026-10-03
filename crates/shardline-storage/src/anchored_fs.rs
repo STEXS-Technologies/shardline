@@ -199,6 +199,52 @@ pub fn open_or_create_child_directory(
     Ok(directory)
 }
 
+/// Opens an existing child directory through its parent descriptor without
+/// following a replacement symlink or creating a missing path.
+///
+/// # Errors
+///
+/// Returns an error when the name is invalid, missing, symlinked, or not a directory.
+pub(crate) fn open_child_directory_no_follow(parent: &File, name: &OsStr) -> io::Result<File> {
+    use std::{ffi::CString, os::fd::FromRawFd};
+    let name = CString::new(name.as_encoded_bytes())
+        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
+    // SAFETY: the borrowed parent descriptor stays open, the name is a valid
+    // C string, and no creation flag requires a variadic mode argument.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned descriptor; this transfers ownership
+    // exactly once to File, which will close it on drop.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+/// Removes an empty child directory through its pinned parent descriptor.
+///
+/// # Errors
+///
+/// Returns an error when the name is invalid, absent, symlinked, or nonempty.
+pub(crate) fn remove_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
+    use std::ffi::CString;
+    let name = CString::new(name.as_encoded_bytes())
+        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
+    // SAFETY: the borrowed parent descriptor stays open, the name is a valid
+    // C string, and AT_REMOVEDIR restricts removal to an empty directory.
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// Writes `bytes` into a new temporary file anchored beside the target path.
 ///
 /// # Errors
@@ -1478,5 +1524,65 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+}
+
+#[cfg(test)]
+mod deletion_primitive_tests {
+    use super::{open_child_directory_no_follow, remove_directory_at};
+    use std::{
+        ffi::OsStr,
+        fs::{self, File},
+        os::unix::fs::symlink,
+    };
+
+    #[test]
+    fn child_directory_open_never_follows_a_symlink_or_creates_a_path() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("sentinel"), b"preserved").unwrap();
+        symlink(outside.path(), root.path().join("alias")).unwrap();
+        let parent = File::open(root.path()).unwrap();
+        assert!(open_child_directory_no_follow(&parent, OsStr::new("alias")).is_err());
+        assert!(open_child_directory_no_follow(&parent, OsStr::new("missing")).is_err());
+        assert!(!root.path().join("missing").exists());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).unwrap(),
+            b"preserved"
+        );
+    }
+
+    #[test]
+    fn directory_removal_does_not_follow_a_symlink_or_remove_nonempty_children() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("sentinel"), b"preserved").unwrap();
+        symlink(outside.path(), root.path().join("alias")).unwrap();
+        fs::create_dir(root.path().join("nonempty")).unwrap();
+        fs::write(root.path().join("nonempty/sentinel"), b"preserved").unwrap();
+        let parent = File::open(root.path()).unwrap();
+        assert!(remove_directory_at(&parent, OsStr::new("alias")).is_err());
+        assert!(remove_directory_at(&parent, OsStr::new("nonempty")).is_err());
+        assert!(root.path().join("alias").is_symlink());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).unwrap(),
+            b"preserved"
+        );
+        assert_eq!(
+            fs::read(root.path().join("nonempty/sentinel")).unwrap(),
+            b"preserved"
+        );
+    }
+
+    #[test]
+    fn existing_empty_child_can_be_opened_and_removed_without_removing_root() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("child")).unwrap();
+        let parent = File::open(root.path()).unwrap();
+        let child = open_child_directory_no_follow(&parent, OsStr::new("child")).unwrap();
+        assert!(child.metadata().unwrap().is_dir());
+        remove_directory_at(&parent, OsStr::new("child")).unwrap();
+        assert!(!root.path().join("child").exists());
+        assert!(root.path().is_dir());
     }
 }
