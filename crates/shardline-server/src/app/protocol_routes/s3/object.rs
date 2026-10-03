@@ -534,7 +534,21 @@ fn check_copy_source_preconditions(
         ),
     ] {
         for value in headers.get_all(source_name) {
-            source_headers.append(target_name.clone(), value.clone());
+            // S3 copy-source validators also accept bare MD5 identities.
+            // Normalize only that spelling; keep HTTP tag-list validation
+            // and every repeated condition intact.
+            let bytes = value.as_bytes();
+            let normalized = if bytes.len() == 32 && bytes.iter().all(u8::is_ascii_hexdigit) {
+                let tag = value.to_str().map_err(|_error| {
+                    S3Error::invalid_argument("Invalid copy-source entity-tag header")
+                })?;
+                HeaderValue::from_str(&format!("\"{tag}\"")).map_err(|_error| {
+                    S3Error::invalid_argument("Invalid copy-source entity-tag header")
+                })?
+            } else {
+                value.clone()
+            };
+            source_headers.append(target_name.clone(), normalized);
         }
     }
     let conditions = read_conditional_headers(&source_headers)
