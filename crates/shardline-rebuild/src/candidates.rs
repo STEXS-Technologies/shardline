@@ -28,6 +28,36 @@ pub(super) struct VersionCandidate<Locator> {
     pub(super) modified_since_epoch: Duration,
 }
 
+// Checked RepositoryScope deserialization rejects invalid components before a
+// FileRecord can be constructed. Preserve the rebuild diagnostic without ever
+// exposing an unchecked scope or accepting a malformed record as a candidate.
+fn has_invalid_repository_components(bytes: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ScopeFields {
+        provider: shardline_protocol::RepositoryProvider,
+        owner: String,
+        name: String,
+        revision: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ScopeEnvelope {
+        repository_scope: Option<ScopeFields>,
+    }
+    let Ok(ScopeEnvelope {
+        repository_scope: Some(scope),
+    }) = serde_json::from_slice(bytes)
+    else {
+        return false;
+    };
+    RepositoryScope::new(
+        scope.provider,
+        &scope.owner,
+        &scope.name,
+        scope.revision.as_deref(),
+    )
+    .is_err()
+}
+
 pub(super) fn collect_candidate<RecordAdapter>(
     record_store: &RecordAdapter,
     entry: StoredRecord<RecordAdapter::Locator>,
@@ -61,12 +91,18 @@ where
             return Ok(());
         }
         Err(shardline_server_core::ParseStoredFileRecordError::Json(_)) => {
-            push_issue(
-                report,
-                IndexRebuildIssueKind::InvalidVersionRecordJson,
-                location,
-                IndexRebuildIssueDetail::RecordJsonInvalid,
-            )?;
+            let (kind, detail) = if has_invalid_repository_components(&bytes) {
+                (
+                    IndexRebuildIssueKind::InvalidVersionRepositoryScope,
+                    IndexRebuildIssueDetail::InvalidRepositoryScope,
+                )
+            } else {
+                (
+                    IndexRebuildIssueKind::InvalidVersionRecordJson,
+                    IndexRebuildIssueDetail::RecordJsonInvalid,
+                )
+            };
+            push_issue(report, kind, location, detail)?;
             report
                 .preserved_latest_records_unreadable_version
                 .push(record_store.locator_display(&path));
@@ -466,8 +502,8 @@ mod tests {
 
         // Now open the DB directly and insert a version record with an
         // invalid repository scope (empty owner).
-        // The JSON deserialization will produce a RepositoryScope with
-        // empty owner, which fails validate_repository_scope.
+        // Checked JSON deserialization rejects the scope; rebuild still
+        // reports the specific repository-component diagnostic.
         let conn = open_db(&root);
         let invalid_json = br#"{
             "file_id": "scoped.txt",
