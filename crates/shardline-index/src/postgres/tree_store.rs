@@ -296,7 +296,8 @@ impl TreeStore for PostgresIndexStore {
         write!(sql, " LIMIT ${index}")
             .map_err(|e| PostgresMetadataStoreError::IntegerOutOfRange(e.to_string()))?;
 
-        let mut q = query(&sql)
+        // Only fixed SQL fragments and placeholder numbers are assembled; values stay bound.
+        let mut q = query(sqlx::AssertSqlSafe(sql))
             .bind(&key.provider)
             .bind(&key.owner)
             .bind(&key.repo)
@@ -393,7 +394,8 @@ impl TreeStore for PostgresIndexStore {
         write!(sql, " LIMIT ${index}")
             .map_err(|e| PostgresMetadataStoreError::IntegerOutOfRange(e.to_string()))?;
 
-        let mut q = query(&sql)
+        // Only fixed SQL fragments and placeholder numbers are assembled; values stay bound.
+        let mut q = query(sqlx::AssertSqlSafe(sql))
             .bind(&key.provider)
             .bind(&key.owner)
             .bind(&key.repo);

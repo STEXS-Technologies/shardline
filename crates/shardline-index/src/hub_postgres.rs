@@ -447,7 +447,8 @@ impl HubStore for PostgresIndexStore {
                    AND ($4::TEXT IS NULL OR left(repo_id, length($4) + 1) = $4 || '/')
                  ORDER BY {} LIMIT $5", options.order.sql(),
             );
-            let rows = sqlx::query(&sql)
+            // Only fixed SQL fragments and placeholder numbers are assembled; values stay bound.
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(pattern)
                 .bind(repo_type.map(HubRepoType::as_str))
                 .bind(options.caller_repo_id)

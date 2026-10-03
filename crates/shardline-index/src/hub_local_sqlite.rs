@@ -778,14 +778,14 @@ impl HubStore for LocalIndexStore {
         let conn = open_hub_connection_rw(self.root())?;
         let now = unix_now_seconds_lossy();
         let counter: u64 = {
-            let row: Option<u64> = conn
+            let row: Option<i64> = conn
                 .query_row(
                     "SELECT COUNT(*) FROM shardline_hub_webhooks WHERE repo_id = ?1",
                     params![repo_id],
                     |row| row.get(0),
                 )
                 .optional()?;
-            row.unwrap_or(0)
+            i64_to_u64(row.unwrap_or(0))?
         };
         let id = format!("wh-{}-{}", now, counter);
         let events_str = events.join(",");
