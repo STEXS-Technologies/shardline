@@ -305,7 +305,7 @@ const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
     ),
 ];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 33] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 34] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -523,6 +523,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 33] = [
         name: "s3_listing_key_index",
         up_sql: include_str!("../migrations/20261002030000_s3_listing_key_index.up.sql"),
         down_sql: include_str!("../migrations/20261002030000_s3_listing_key_index.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261003000000",
+        name: "tree_prefix_pattern_index",
+        up_sql: include_str!("../migrations/20261003000000_tree_prefix_pattern_index.up.sql"),
+        down_sql: include_str!("../migrations/20261003000000_tree_prefix_pattern_index.down.sql"),
     },
 ];
 
@@ -2718,7 +2724,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 33);
+        assert_eq!(bundled_database_migrations().len(), 34);
     }
 
     #[test]

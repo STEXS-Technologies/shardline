@@ -51,22 +51,52 @@ pub async fn set_retention_hold(
     config: &ServerConfig,
     hold: &RetentionHold,
 ) -> Result<(), ServerError> {
+    set_retention_hold_with(config, || Ok::<_, ServerError>(hold.clone()))
+        .await
+        .map(|_| ())
+}
+
+/// Constructs and persists an administrative hold after acquiring the GC barrier.
+///
+/// The synchronous factory runs exactly once while the shared barrier is held.
+/// Relative expiration can start after GC has finished; metadata lock waits may
+/// still consume that duration. The factory must not reacquire this barrier.
+/// Absolute-time callers should use [`set_retention_hold`] instead.
+///
+/// # Errors
+///
+/// Returns the factory error or a converted [`ServerError`] from coordination or storage.
+pub async fn set_retention_hold_with<Build, E>(
+    config: &ServerConfig,
+    build_hold: Build,
+) -> Result<RetentionHold, E>
+where
+    Build: FnOnce() -> Result<RetentionHold, E>,
+    E: From<ServerError>,
+{
     if let Some(url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(url, 4)?;
         let _barrier = maintenance_barrier::acquire_postgres_shared(
             &maintenance_barrier::postgres_coordination_pool(url)?,
         )
         .await?;
+        let hold = build_hold()?;
         PostgresIndexStore::new(pool)
-            .upsert_retention_hold(hold)
-            .await?;
+            .upsert_retention_hold(&hold)
+            .await
+            .map_err(ServerError::from)?;
+        Ok(hold)
     } else {
         let _barrier = maintenance_barrier::acquire_local_shared(config.root_dir()).await?;
-        LocalIndexStore::new(config.root_dir().to_path_buf())?
-            .upsert_retention_hold(hold)
-            .await?;
+        let store =
+            LocalIndexStore::new(config.root_dir().to_path_buf()).map_err(ServerError::from)?;
+        let hold = build_hold()?;
+        store
+            .upsert_retention_hold(&hold)
+            .await
+            .map_err(ServerError::from)?;
+        Ok(hold)
     }
-    Ok(())
 }
 
 /// Releases an administrative hold while excluding mutating garbage collection.
@@ -445,5 +475,32 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+    #[tokio::test]
+    async fn hold_factory_error_is_preserved_and_absolute_expiration_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let result =
+            set_retention_hold_with(&config, || Err::<RetentionHold, _>(ServerError::Overflow))
+                .await;
+        assert!(matches!(result, Err(ServerError::Overflow)));
+        let index = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
+        assert!(
+            LifecycleStore::list_retention_holds(&index)
+                .unwrap()
+                .is_empty()
+        );
+        let absolute = RetentionHold::new(
+            ObjectKey::parse("retention/absolute").unwrap(),
+            "absolute".into(),
+            10,
+            Some(11),
+        )
+        .unwrap();
+        set_retention_hold(&config, &absolute).await.unwrap();
+        assert_eq!(
+            LifecycleStore::retention_hold(&index, absolute.object_key()).unwrap(),
+            Some(absolute)
+        );
     }
 }

@@ -117,6 +117,7 @@ are additive. These migrations create ordinary PostgreSQL indexes:
 | `20261002010000` | `shardline_hub_repos` | `shardline_hub_repos_search_prefix_idx` |
 | `20261002020000` | `shardline_hub_file_entries` | `shardline_hub_file_entries_page_idx` |
 | `20261002030000` | `shardline_s3_objects` | `shardline_s3_objects_scope_key_c_idx` |
+| `20261003000000` | `shardline_tree_entries` | `shardline_tree_entries_prefix_pattern_idx` |
 
 PostgreSQL's ordinary index build permits reads but blocks inserts, updates, and
 deletes on the indexed table. Build time depends on table size and available CPU,

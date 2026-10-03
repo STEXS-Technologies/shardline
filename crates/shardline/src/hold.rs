@@ -71,6 +71,15 @@ pub enum HoldRuntimeError {
     /// Timestamp arithmetic overflowed.
     #[error("retention hold timestamp overflowed")]
     Overflow,
+    /// A positive relative TTL expired while the metadata mutation was waiting.
+    #[error("retention hold expired before acknowledgement")]
+    Expired,
+}
+
+impl From<ServerError> for HoldRuntimeError {
+    fn from(value: ServerError) -> Self {
+        Self::Server(Box::new(value))
+    }
 }
 
 impl From<SqlxError> for HoldRuntimeError {
@@ -93,24 +102,28 @@ pub async fn run_hold_set(
 ) -> Result<RetentionHold, HoldRuntimeError> {
     let config = load_server_config(root, None)?;
     let object_key = ObjectKey::parse(object_key)?;
-    let held_at_unix_seconds = unix_now_seconds_lossy();
-    let release_after_unix_seconds = ttl_seconds
-        .map(|ttl| {
-            held_at_unix_seconds
-                .checked_add(ttl)
-                .ok_or(HoldRuntimeError::Overflow)
-        })
-        .transpose()?;
-    let hold = RetentionHold::new(
-        object_key,
-        reason.to_owned(),
-        held_at_unix_seconds,
-        release_after_unix_seconds,
-    )?;
-
-    shardline_server::set_retention_hold(&config, &hold)
-        .await
-        .map_err(|error| HoldRuntimeError::Server(Box::new(error)))?;
+    let hold = shardline_server::set_retention_hold_with(&config, || {
+        let held_at_unix_seconds = unix_now_seconds_lossy();
+        let release_after_unix_seconds = ttl_seconds
+            .map(|ttl| {
+                held_at_unix_seconds
+                    .checked_add(ttl)
+                    .ok_or(HoldRuntimeError::Overflow)
+            })
+            .transpose()?;
+        RetentionHold::new(
+            object_key,
+            reason.to_owned(),
+            held_at_unix_seconds,
+            release_after_unix_seconds,
+        )
+        .map_err(HoldRuntimeError::from)
+    })
+    .await?;
+    if ttl_seconds.is_some_and(|ttl| ttl > 0) && !hold.is_active_at(unix_now_seconds_lossy()) {
+        // Keep the expired row: deleting it could remove a concurrent replacement hold.
+        return Err(HoldRuntimeError::Expired);
+    }
     Ok(hold)
 }
 
@@ -511,5 +524,97 @@ mod tests {
             LifecycleStore::retention_hold(&index, &key).unwrap(),
             Some(held)
         );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relative_ttl_starts_after_gc_barrier_and_zero_ttl_stays_expired() {
+        let root = tempfile::tempdir().unwrap();
+        let barrier = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.path().join(".gc-write-barrier.lock"))
+            .unwrap();
+        barrier.lock().unwrap();
+        let path = root.path().to_path_buf();
+        let mut setter = tokio::spawn(async move {
+            run_hold_set(
+                Some(&path),
+                "retention/ttl-after-gc",
+                "relative TTL",
+                Some(2),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), &mut setter)
+                .await
+                .is_err()
+        );
+        let unlocked_at = unix_now_seconds_lossy();
+        drop(barrier);
+        let hold = setter.await.unwrap().unwrap();
+        assert!(hold.held_at_unix_seconds() >= unlocked_at);
+        assert_eq!(
+            hold.release_after_unix_seconds(),
+            Some(hold.held_at_unix_seconds() + 2)
+        );
+        assert!(hold.is_active_at(unix_now_seconds_lossy()));
+        let zero = run_hold_set(Some(root.path()), "retention/zero", "zero TTL", Some(0))
+            .await
+            .unwrap();
+        assert_eq!(
+            zero.release_after_unix_seconds(),
+            Some(zero.held_at_unix_seconds())
+        );
+        assert!(!zero.is_active_at(unix_now_seconds_lossy()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn positive_ttl_expired_by_sqlite_wait_returns_typed_error_without_deleting_row() {
+        let root = tempfile::tempdir().unwrap();
+        let index = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
+        let writer = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // Establish that warmed store setup completes with the same writer held:
+        // the subsequent wait is in the mutation after the hold factory runs.
+        let warm_path = root.path().to_path_buf();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                tokio::task::spawn_blocking(move || LocalIndexStore::new(warm_path))
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+        );
+
+        let path = root.path().to_path_buf();
+        let mut setter = tokio::spawn(async move {
+            run_hold_set(
+                Some(&path),
+                "retention/expired-write",
+                "slow metadata",
+                Some(1),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut setter)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+        writer.execute_batch("COMMIT").unwrap();
+        assert!(matches!(
+            setter.await.unwrap(),
+            Err(HoldRuntimeError::Expired)
+        ));
+        let key = ObjectKey::parse("retention/expired-write").unwrap();
+        let stored = LifecycleStore::retention_hold(&index, &key)
+            .unwrap()
+            .unwrap();
+        assert!(!stored.is_active_at(unix_now_seconds_lossy()));
     }
 }

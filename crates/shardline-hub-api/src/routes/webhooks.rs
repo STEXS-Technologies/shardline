@@ -363,24 +363,6 @@ pub(crate) async fn webhook_create(
         .get_repo(&name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RepoNotFound)?;
-    // Check for duplicate webhook URL.
-    let existing = state
-        .store
-        .list_webhooks(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    if existing.iter().any(|wh| wh.url == request.url) {
-        return Err(HubApiError::Conflict(format!(
-            "webhook with URL {} already exists for repo {name}",
-            request.url
-        )));
-    }
-    // Enforce the per-repo webhook count cap (F-94): an unbounded registration
-    // count would let a single repo starve the global delivery semaphore.
-    if existing.len() >= MAX_WEBHOOKS_PER_REPO {
-        return Err(HubApiError::PathValidation(format!(
-            "webhook count for repo {name} exceeds maximum of {MAX_WEBHOOKS_PER_REPO}"
-        )));
-    }
     // Encrypt the signing secret at rest when a cipher is configured.
     let secret_to_store: Option<String> =
         match (&state.webhook_secret_cipher, request.secret.as_ref()) {
@@ -393,15 +375,35 @@ pub(crate) async fn webhook_create(
         };
     let webhook = state
         .store
-        .create_webhook(
+        .create_webhook_bounded(
             &name,
             &request.url,
             &request.events,
             secret_to_store
                 .as_deref()
                 .or_else(|| request.secret.as_ref().map(SecretString::expose_secret)),
+            MAX_WEBHOOKS_PER_REPO,
         )
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let webhook = match webhook {
+        shardline_index::hub::HubWebhookCreateOutcome::Created(webhook) => webhook,
+        shardline_index::hub::HubWebhookCreateOutcome::Duplicate => {
+            return Err(HubApiError::Conflict(format!(
+                "webhook with URL {} already exists for repo {name}",
+                request.url,
+            )));
+        }
+        shardline_index::hub::HubWebhookCreateOutcome::LimitReached => {
+            return Err(HubApiError::PathValidation(format!(
+                "webhook count for repo {name} exceeds maximum of {MAX_WEBHOOKS_PER_REPO}",
+            )));
+        }
+        shardline_index::hub::HubWebhookCreateOutcome::Unsupported => {
+            return Err(HubApiError::CasError(
+                "atomic bounded webhook registration is unsupported by this store".to_owned(),
+            ));
+        }
+    };
     Ok((
         StatusCode::CREATED,
         Json(webhook_response_from_hub(&webhook)),
