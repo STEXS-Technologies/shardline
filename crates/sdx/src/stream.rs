@@ -4409,38 +4409,59 @@ mod tests {
         for chunk in &chunks {
             expected.extend_from_slice(chunk);
         }
-        let mut total = 0u64;
-        let mut peak_in_progress = 0u64;
-        // The byte-denominated semaphore is the actual memory bound: it caps the
-        // permits held by in-flight terms (acquired before a term is counted,
-        // released only when the consumer drains it). `bytes_in_progress` is a
-        // diagnostic counter sampled while the background pipeline runs. Under
-        // slow or instrumented execution a single sample can transiently read
-        // above `cap` between a term's permit acquisition and the consumer-side
-        // release — a measurement race, not an unbounded-buffer bug. Poll for a
-        // *sustained* overrun instead of failing on one instantaneous sample: a
-        // regression that buffers the whole file keeps `bytes_in_progress` above
-        // `cap` across every poll, while a transient race settles to `<= cap`
-        // within a few short polls (the fetch-window terms finish their sends
-        // and decrement the counter even though the consumer is not reading).
-        const QUIESCENCE_POLLS: u32 = 32;
-        while let Some((_offset, chunk)) = stream.next().await.unwrap() {
-            total = total.saturating_add(u64::try_from(chunk.len()).unwrap());
-            let mut poll = 0;
-            while stream.bytes_in_progress() > cap && poll < QUIESCENCE_POLLS {
-                // Yield so the writer's fetch/send tasks can decrement the counter.
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                poll = poll.saturating_add(1);
+        // Start without consuming: completed terms retain their backing block
+        // permits, so the producer must fill and then wait on this finite cap.
+        stream.start();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while ctx.buffer_semaphore.available_permits() != 0 || stream.receiver.is_empty() {
+                stream.run_state.check_background_error().unwrap();
+                tokio::task::yield_now().await;
             }
-            let settled = stream.bytes_in_progress();
-            peak_in_progress = peak_in_progress.max(settled);
-            assert!(
-                settled <= cap,
-                "in-flight bytes ({settled}) stayed above the {cap}-byte buffer cap across {QUIESCENCE_POLLS} quiescence polls"
-            );
+        })
+        .await
+        .expect("producer did not fill the buffer before consumption");
+        let peak_held = cap.saturating_sub(ctx.buffer_semaphore.available_permits());
+        assert_eq!(peak_held, cap);
+        assert!(peak_held > 0);
+
+        let initial = stream.receiver.try_recv().unwrap().unwrap();
+        {
+            let backing = initial
+                .permit
+                .as_ref()
+                .unwrap()
+                ._backing_block
+                .as_ref()
+                .unwrap();
+            let decoded = backing.data.get().unwrap();
+            let decoded_bytes = u64::try_from(decoded.data.len()).unwrap();
+            assert!(decoded_bytes > 0);
+            assert!(decoded_bytes <= decoded._buffer_permit.num_permits());
+            assert!(decoded._buffer_permit.num_permits() <= cap);
         }
-        assert_eq!(total, u64::try_from(expected.len()).unwrap());
-        assert!(peak_in_progress > 0);
+        // The completed item is still retained. A further reservation cannot
+        // succeed until consumption releases its backing block's capacity.
+        let mut waiting = Box::pin(ctx.buffer_semaphore.acquire_many(1));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        drop(waiting);
+
+        let mut received = std::collections::BTreeMap::new();
+        let (offset, chunk) = stream.process_term(Ok(initial)).unwrap().unwrap();
+        assert!(received.insert(offset, chunk).is_none());
+        while let Some((offset, chunk)) = stream.next().await.unwrap() {
+            assert!(received.insert(offset, chunk).is_none());
+            let available = ctx.buffer_semaphore.available_permits();
+            let held = cap
+                .checked_sub(available)
+                .expect("buffer capacity exceeded its cap");
+            assert!(held <= cap);
+        }
+        assert_eq!(received.len(), chunks.len());
+        let actual: Vec<u8> = received
+            .into_values()
+            .flat_map(|chunk| chunk.to_vec())
+            .collect();
+        assert_eq!(actual, expected);
         // After full consumption the semaphore is back to capacity.
         assert_eq!(ctx.buffer_semaphore.available_permits(), cap);
     }
