@@ -6,9 +6,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use shardline_index::ResourceLockKey;
-use sqlx::{
-    PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection, query, query_scalar,
-};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection, query_scalar};
 
 use crate::ServerError;
 
@@ -291,11 +289,22 @@ pub(crate) async fn acquire_postgres_resources_exclusive(
     connection.close_on_drop();
     let mut fences = Vec::new();
     for key in ordered_resources(keys) {
-        query("SELECT pg_advisory_lock($1)")
-            .bind(resource_lock_key(&key))
-            .execute(&mut *connection)
-            .await
-            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+        // A backend blocked on a later lock may not read the termination
+        // message. Keep the backend responsive so cancelling a
+        // partial bundle closes the session and releases its earlier locks.
+        let mut retry_delay = Duration::from_millis(10);
+        loop {
+            let acquired = query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+                .bind(resource_lock_key(&key))
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+            if acquired {
+                break;
+            }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = retry_delay.saturating_mul(2).min(Duration::from_millis(50));
+        }
         let epoch = query_scalar::<_, i64>(
             "INSERT INTO shardline_resource_fences (domain, resource, epoch)
              VALUES ($1, $2, 1)
@@ -334,6 +343,8 @@ fn resource_lock_key(key: &ResourceLockKey) -> i64 {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use sqlx::query;
 
     use std::time::Duration;
 
@@ -565,8 +576,10 @@ mod tests {
         let first_pool = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
         let waiting_pool =
             crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
-        let a = ResourceLockKey::oci_repository("bundle-cancel", "a");
-        let b = ResourceLockKey::oci_repository("bundle-cancel", "b");
+        // A fresh domain makes the first fencing write an observable boundary.
+        let scope = format!("bundle-cancel-{}", std::process::id());
+        let a = ResourceLockKey::oci_repository(&scope, "a");
+        let b = ResourceLockKey::oci_repository(&scope, "b");
         let held = acquire_postgres_resource_exclusive(&first_pool, &b)
             .await
             .unwrap();
@@ -577,19 +590,36 @@ mod tests {
         let observer = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let owned = query_scalar::<_, bool>("SELECT NOT pg_try_advisory_lock($1)")
-                    .bind(resource_lock_key(&a))
-                    .fetch_one(&observer)
-                    .await
-                    .unwrap();
-                if owned {
+                // Cancel only after the first lock is owned and acquisition is
+                // waiting for the second: either a server-side wait, or an idle
+                // session between nonblocking attempts after its fencing write.
+                let waiting = query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM pg_locks AS locks
+                        JOIN pg_stat_activity AS activity USING (pid)
+                        WHERE locks.locktype = 'advisory' AND locks.granted
+                          AND locks.objsubid = 1
+                          AND locks.classid::bigint = (($1::bigint >> 32) & 4294967295)
+                          AND locks.objid::bigint = ($1::bigint & 4294967295)
+                          AND (activity.wait_event = 'advisory' OR (
+                              activity.state = 'idle'
+                              AND activity.query = 'SELECT pg_try_advisory_lock($1)'
+                              AND EXISTS (
+                                  SELECT 1 FROM shardline_resource_fences
+                                  WHERE domain = $2 AND resource = $3
+                              )
+                          ))
+                    )",
+                )
+                .bind(resource_lock_key(&a))
+                .bind(a.domain().as_str())
+                .bind(a.resource())
+                .fetch_one(&observer)
+                .await
+                .unwrap();
+                if waiting {
                     break;
                 }
-                query("SELECT pg_advisory_unlock($1)")
-                    .bind(resource_lock_key(&a))
-                    .execute(&observer)
-                    .await
-                    .unwrap();
                 tokio::task::yield_now().await;
             }
         })

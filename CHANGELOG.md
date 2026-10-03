@@ -46,6 +46,8 @@ memory growth and blocking work in large inventories and transfers.
 
 ### Fixed
 
+- Release partial PostgreSQL resource-lock bundles on cancellation while
+  another resource remains held, without waiting on a blocked server query.
 - Fixed repository isolation, Git tree and pack integrity, exact-head recovery, and
   concurrent ref publication.
   Strengthened conditional S3 and OCI updates, resumable completion recovery, upload
