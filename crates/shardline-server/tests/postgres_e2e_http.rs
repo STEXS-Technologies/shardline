@@ -801,19 +801,24 @@ async fn oci_upload_blob_oneshot(
     digest
 }
 
-fn oci_manifest_json(config_digest: &str, layer_digest: &str) -> String {
+fn oci_manifest_json(
+    config_digest: &str,
+    layer_digest: &str,
+    config_size: usize,
+    layer_size: usize,
+) -> String {
     serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": config_size,
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [
             {
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
+                "size": layer_size,
                 "digest": format!("sha256:{layer_digest}")
             }
         ]
@@ -832,7 +837,12 @@ async fn test_oci_manifest_push_and_get_by_tag() {
     let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
     let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
 
-    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+    let manifest_body = oci_manifest_json(
+        &config_digest,
+        &layer_digest,
+        config_data.len(),
+        layer_data.len(),
+    );
     let manifest_digest = oci_digest_hex(manifest_body.as_bytes());
 
     // PUT manifest by tag
@@ -895,7 +905,12 @@ async fn test_oci_manifest_get_by_digest() {
     let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
     let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
 
-    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+    let manifest_body = oci_manifest_json(
+        &config_digest,
+        &layer_digest,
+        config_data.len(),
+        layer_data.len(),
+    );
     let manifest_digest = oci_digest_hex(manifest_body.as_bytes());
 
     // Push manifest
@@ -938,7 +953,12 @@ async fn test_oci_tags_list() {
     let layer_data = b"tags-layer";
     let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
     let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
-    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+    let manifest_body = oci_manifest_json(
+        &config_digest,
+        &layer_digest,
+        config_data.len(),
+        layer_data.len(),
+    );
 
     let put_uri = format!("/v2/{repo}/manifests/{tag}");
     let put_req = axum::http::Request::builder()
@@ -2833,7 +2853,12 @@ async fn test_concurrent_oci_manifest_push_and_pull() {
     let layer_data = b"concurrent-layer-pg";
     let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
     let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
-    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+    let manifest_body = oci_manifest_json(
+        &config_digest,
+        &layer_digest,
+        config_data.len(),
+        layer_data.len(),
+    );
 
     // Push the manifest first
     let put_uri = format!("/v2/{repo}/manifests/{tag}");
@@ -2892,9 +2917,17 @@ async fn test_concurrent_oci_manifest_push_and_pull() {
     };
 
     let (r1, r2, r3) = tokio::join!(g1, g2, g3);
-    for (i, result) in [r1, r2, r3].iter().enumerate() {
-        let resp = result.as_ref().unwrap().as_ref().unwrap();
+    for (i, result) in [r1, r2, r3].into_iter().enumerate() {
+        let resp = result.unwrap().unwrap();
         assert_eq!(resp.status(), 200, "concurrent manifest GET {} failed", i);
+        let body = axum::body::to_bytes(resp.into_body(), manifest_body.len())
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            manifest_body.as_bytes(),
+            "concurrent manifest GET {i} must return the exact stored manifest"
+        );
     }
 }
 
@@ -4003,12 +4036,12 @@ async fn test_oci_tags_list_max_page_size() {
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": config_data.len(),
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [{
             "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-            "size": 0,
+            "size": layer_data.len(),
             "digest": format!("sha256:{layer_digest}")
         }]
     })

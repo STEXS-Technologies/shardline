@@ -26,9 +26,7 @@ use shardline_server::{
     oci_manifest_key, oci_manifest_media_type_key, serve_with_listener,
     test_fixtures::{single_chunk_xorb, single_file_shard},
 };
-use shardline_server_core::{
-    AuthProvider, AuthorizedRepository, LocalHmacProvider,
-};
+use shardline_server_core::{AuthProvider, AuthorizedRepository, LocalHmacProvider};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use support::{bearer_token, wait_for_health};
 
@@ -721,10 +719,12 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
         u64::MAX,
     )
     .map_err(|_e| ServerError::InvalidToken(shardline_protocol::TokenCodecError::InvalidFormat))?;
-    let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!")
-        .map_err(ServerError::from)?;
+    let provider =
+        LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").map_err(ServerError::from)?;
     let token = provider.mint_token(&claims).map_err(ServerError::from)?;
-    let ctx = provider.verify_verified(&token).map_err(ServerError::from)?;
+    let ctx = provider
+        .verify_verified(&token)
+        .map_err(ServerError::from)?;
     let capability = AuthorizedRepository::from_verified_context(ctx, TokenScope::Write)
         .map_err(|_e| ServerError::InsufficientScope)?;
     let lfs_key = lfs_object_key(&digest_hex, &capability)?;
@@ -1516,13 +1516,17 @@ async fn oci_frontend_index_manifest_round_trip_preserves_media_type()
     let read_token = scoped_token(TokenScope::Read, "team", "assets")?;
     let repository_scope = scoped_repository("team", "assets")?;
 
+    let config_a = br#"{"architecture":"amd64","os":"linux"}"#;
+    let config_b = br#"{"architecture":"arm64","os":"linux"}"#;
+    let config_a_digest = seed_oci_blob(&runtime, "team/assets", &repository_scope, config_a)?;
+    let config_b_digest = seed_oci_blob(&runtime, "team/assets", &repository_scope, config_b)?;
     let child_manifest_a = serde_json::to_vec(&json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "digest": format!("sha256:{}", "a".repeat(64)),
-            "size": 11,
+            "digest": format!("sha256:{config_a_digest}"),
+            "size": config_a.len(),
         },
         "layers": [],
     }))?;
@@ -1531,8 +1535,8 @@ async fn oci_frontend_index_manifest_round_trip_preserves_media_type()
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "digest": format!("sha256:{}", "b".repeat(64)),
-            "size": 12,
+            "digest": format!("sha256:{config_b_digest}"),
+            "size": config_b.len(),
         },
         "layers": [],
     }))?;
@@ -1557,7 +1561,7 @@ async fn oci_frontend_index_manifest_round_trip_preserves_media_type()
         "manifests": [{
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "digest": format!("sha256:{child_manifest_a_digest}"),
-            "size": 123,
+            "size": child_manifest_a.len(),
             "platform": {
                 "architecture": "amd64",
                 "os": "linux",
@@ -1565,7 +1569,7 @@ async fn oci_frontend_index_manifest_round_trip_preserves_media_type()
         }, {
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "digest": format!("sha256:{child_manifest_b_digest}"),
-            "size": 456,
+            "size": child_manifest_b.len(),
             "platform": {
                 "architecture": "arm64",
                 "os": "linux",

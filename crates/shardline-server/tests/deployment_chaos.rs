@@ -2778,8 +2778,8 @@ async fn s3_upload_part_deployment(
     upload_id: &str,
     part_number: u32,
     bytes: &[u8],
-) -> u16 {
-    reqwest::Client::new()
+) -> (u16, Option<String>) {
+    let response = reqwest::Client::new()
         .put(format!(
             "{base}/{BUCKET}/{key}?partNumber={part_number}&uploadId={upload_id}"
         ))
@@ -2789,9 +2789,14 @@ async fn s3_upload_part_deployment(
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .expect("s3 upload part")
-        .status()
-        .as_u16()
+        .expect("s3 upload part");
+    let status = response.status().as_u16();
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    (status, etag)
 }
 
 /// POSTs `?uploadId` to complete a multipart upload.
@@ -2800,17 +2805,17 @@ async fn s3_complete_multipart_deployment(
     token: &str,
     key: &str,
     upload_id: &str,
-    part_numbers: &[u32],
+    parts: &[(u32, &str)],
 ) -> u16 {
     let mut body = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n",
     );
-    for part in part_numbers {
+    for (part, etag) in parts {
         use std::fmt::Write;
         let _ = writeln!(
             body,
-            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>"
+            "  <Part><PartNumber>{part}</PartNumber><ETag>{etag}</ETag></Part>"
         );
     }
     body.push_str("</CompleteMultipartUpload>\n");
@@ -2946,14 +2951,14 @@ async fn drill_deploy_postgres_kill_mid_s3_multipart() {
     let part1_size = 6 * 1024 * 1024;
     let first_half = &full_content[..part1_size];
     let p1 = s3_upload_part_deployment(&base, &token, &key, &upload_id, 1, first_half).await;
-    assert_eq!(p1, 200, "s3 part 1 opens durable resumable session");
+    assert_eq!(p1.0, 200, "s3 part 1 opens durable resumable session");
 
     guard.stop(CONTAINER_POSTGRES).await;
 
     let rest = &full_content[part1_size..];
     let p2 = s3_upload_part_deployment(&base, &token, &key, &upload_id, 2, rest).await;
     assert!(
-        p2 >= 400,
+        p2.0 >= 400,
         "s3 part upload during postgres outage must fail (never 2xx)"
     );
     assert!(server.alive(), "server must stay alive after postgres kill");
@@ -2971,11 +2976,21 @@ async fn drill_deploy_postgres_kill_mid_s3_multipart() {
     let rest = &full_content[part1_size..];
     let p2_after = s3_upload_part_deployment(&base, &token, &key, &upload_id, 2, rest).await;
     assert_eq!(
-        p2_after, 200,
+        p2_after.0, 200,
         "s3 part 2 upload after postgres recovery must succeed"
     );
 
-    let complete = s3_complete_multipart_deployment(&base, &token, &key, &upload_id, &[1, 2]).await;
+    let complete = s3_complete_multipart_deployment(
+        &base,
+        &token,
+        &key,
+        &upload_id,
+        &[
+            (1, p1.1.as_deref().expect("part 1 ETag")),
+            (2, p2_after.1.as_deref().expect("part 2 ETag")),
+        ],
+    )
+    .await;
     assert_eq!(
         complete, 200,
         "s3 complete after postgres recovery must succeed"

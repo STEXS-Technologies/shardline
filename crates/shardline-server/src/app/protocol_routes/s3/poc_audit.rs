@@ -780,39 +780,28 @@ async fn poc_f10_global_session_lock_convoy() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
 
-    // CONTROL baseline: CreateMultipartUpload with no contention.
-    let t0 = std::time::Instant::now();
-    let _baseline_id = create_upload_id(&app, "convoy/control.bin").await;
-    let control_elapsed = t0.elapsed();
-
-    // Session A for the slow UploadPart.
+    // Healthy uncontended control, without a wall-clock performance assertion.
+    let baseline_id = create_upload_id(&app, "convoy/control.bin").await;
     let slow_key = "convoy/slow.bin";
     let upload_id_a = create_upload_id(&app, slow_key).await;
+    assert_ne!(baseline_id, upload_id_a);
 
-    // Slow body: 3 chunks with 120ms sleeps -> ~360ms of drain.
-    let slow_body = Body::from_stream(futures_util::stream::unfold(
-        (0_u32, upload_id_a.clone()),
-        |(i, _id)| async move {
-            if i >= 3 {
-                return None;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-            let chunk = vec![0x33_u8; 1024];
-            Some((
-                Ok::<_, std::io::Error>(axum::body::Bytes::from(chunk)),
-                (i + 1, _id),
-            ))
-        },
-    ));
-
-    // Spawn the slow UploadPart and give it a head start so it is mid-stream
-    // (holding only its per-session lock) before we time the competing
-    // CreateMultipartUpload.
+    // The first body poll proves UploadPart reached the drain loop. Hold it
+    // there until the unrelated session is created; a global lock spanning
+    // the body cannot pass this control regardless of scheduler speed.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let payload = axum::body::Bytes::from(vec![0x33_u8; 3072]);
+    let expected_etag = format!("\"{:x}\"", md5::Md5::digest(&payload));
+    let gated_body = Body::from_stream(futures_util::stream::once(async move {
+        entered_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        Ok::<_, std::io::Error>(payload)
+    }));
     let up_app = app.clone();
     let up_url = format!("/{BUCKET}/{slow_key}?partNumber=1&uploadId={upload_id_a}");
     let slow_task = tokio::spawn(async move {
         up_app
-            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -821,40 +810,43 @@ async fn poc_f10_global_session_lock_convoy() {
                         header::AUTHORIZATION,
                         sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
                     )
-                    .body(slow_body)
+                    .body(gated_body)
                     .unwrap(),
             )
             .await
             .unwrap()
-            .status()
     });
-    // Wait until the slow UploadPart is mid-stream.
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-
-    // Concurrent CreateMultipartUpload on a NEW key while the trickle part is
-    // still in flight: must NOT be blocked (the global lock is free; only the
-    // slow session's per-session lock is held).
-    let t1 = std::time::Instant::now();
-    let _unblocked_id = create_upload_id(&app, "convoy/unblocked.bin").await;
-    let contended_elapsed = t1.elapsed();
-
-    let slow_status = slow_task.await.unwrap();
-    assert_eq!(slow_status, StatusCode::OK, "slow UploadPart must succeed");
-
-    println!(
-        "F-10 delta (fixed): CreateMultipartUpload elapsed\n\
-         \x20 CONTROL (no contention) = {:?}\n\
-         \x20 FIXED   (behind slow UploadPart stream) = {:?}\n\
-         \x20 create not blocked by the trickle part (< 150ms) -> {}",
-        control_elapsed,
-        contended_elapsed,
-        contended_elapsed < std::time::Duration::from_millis(150)
-    );
+    // Timeouts only bound a deadlock or failed fixture; they do not compare
+    // request latency against an assumed sleep/scheduling interval.
+    let deadline = std::time::Duration::from_secs(10);
+    tokio::time::timeout(deadline, entered_rx)
+        .await
+        .expect("UploadPart must poll its gated body")
+        .unwrap();
     assert!(
-        contended_elapsed < std::time::Duration::from_millis(150),
-        "create must NOT be blocked behind the slow UploadPart: got {:?} \
-         (the slow body drains over ~360ms, so the global lock must not span the stream)",
-        contended_elapsed
+        !slow_task.is_finished(),
+        "part must remain blocked at the gate"
+    );
+    let unblocked_id =
+        tokio::time::timeout(deadline, create_upload_id(&app, "convoy/unblocked.bin"))
+            .await
+            .expect("unrelated session creation must complete before releasing the part body");
+    assert_ne!(unblocked_id, baseline_id);
+    assert_ne!(unblocked_id, upload_id_a);
+    assert!(
+        !slow_task.is_finished(),
+        "create must finish while the part body is gated"
+    );
+
+    release_tx.send(()).unwrap();
+    let response = tokio::time::timeout(deadline, slow_task)
+        .await
+        .expect("released UploadPart must finish")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "UploadPart must succeed");
+    assert_eq!(
+        response.headers().get(header::ETAG).unwrap(),
+        expected_etag.as_str()
     );
 }
 

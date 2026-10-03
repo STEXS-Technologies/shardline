@@ -190,12 +190,19 @@ fn count_chunk_files(root: &Path) -> usize {
     count_files_recursive(&root.join("chunks"))
 }
 
-fn part_file_size(root: &Path, upload_id: &str, part_number: u32) -> u64 {
-    let path = root
-        .join("s3-uploads")
-        .join(upload_id)
-        .join(format!("part-{part_number}"));
-    std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+// The one-part fault fixture keeps its body channel open, so the file with
+// bytes is the active anonymous staging file, not a published part-N version.
+fn active_part_staging_path(root: &Path, upload_id: &str) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(root.join("s3-uploads").join(upload_id))
+        .ok()?
+        .flatten()
+        .find(|entry| {
+            entry.file_name().to_string_lossy().starts_with(".tmp")
+                && entry
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        })
+        .map(|entry| entry.path())
 }
 
 fn session_dir_exists(root: &Path, upload_id: &str) -> bool {
@@ -1758,7 +1765,7 @@ async fn chaos_runner() {
                                             if tokio::time::Instant::now() >= deadline {
                                                 break;
                                             }
-                                            if part_file_size(&harness.root, &upload_id, 1) > 0 {
+                                            if active_part_staging_path(&harness.root, &upload_id).is_some() {
                                                 evidence = true;
                                             }
                                         }
@@ -1769,11 +1776,8 @@ async fn chaos_runner() {
                                     "chaos round {round}: no part-1 evidence before deadline"
                                 );
                                 // TRUNCATE the part file to half its size (rewrite).
-                                let part_path = harness
-                                    .root
-                                    .join("s3-uploads")
-                                    .join(&upload_id)
-                                    .join("part-1");
+                                let part_path = active_part_staging_path(&harness.root, &upload_id)
+                                    .expect("active partial multipart staging file");
                                 let full = std::fs::read(&part_path).unwrap();
                                 std::fs::write(&part_path, &full[..full.len() / 2]).unwrap();
                                 drop(tx);
