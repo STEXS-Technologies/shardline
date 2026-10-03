@@ -53,7 +53,13 @@ impl CliCommand {
             CliDefinitionCommand::Gc(gc_args)
                 if matches!(gc_args.command, Some(GcSubcommand::Schedule(_)))
         );
-        if let Some(env_path) = &definition.env_file
+        let env_file = definition.env_file.clone();
+        let config = definition.config.clone();
+        // Reject command-level validation errors before changing process state.
+        // Embedded callers can recover from a failed parse without inheriting
+        // its dotenv variables or selected configuration path.
+        let command = Self::try_from(definition)?;
+        if let Some(env_path) = &env_file
             && !gc_schedule_install
         {
             load_cli_env_file(env_path)?;
@@ -62,12 +68,12 @@ impl CliCommand {
         // Preserve the explicit path for every configuration-consuming command.
         // `load_server_config` consumes this native path before auto-detection.
         // Replace or clear an override left by an earlier in-process parse.
-        crate::config::set_cli_config_override(definition.config.clone());
+        crate::config::set_cli_config_override(config);
 
         // Load shardline.toml (--config or auto-detected) for direct
         // struct deserialization. The TOML values are applied via
         // load_server_config_from_env_with_toml later during config resolution.
-        Self::try_from(definition)
+        Ok(command)
     }
 
     /// Returns top-level help text.

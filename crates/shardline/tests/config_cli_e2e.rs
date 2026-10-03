@@ -479,3 +479,124 @@ fn shardline_binary() -> String {
     );
     binary.to_string_lossy().into_owned()
 }
+
+#[test]
+fn command_conversion_errors_preserve_embedded_configuration_state() {
+    const CHILD: &str = "SHARDLINE_TEST_COMMAND_STATE_RECOVERY";
+    if std::env::var_os(CHILD).is_none() {
+        let workspace = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "command_conversion_errors_preserve_embedded_configuration_state",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .current_dir(workspace.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated recovery test failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use shardline::{CliCommand, effective_root};
+    use std::ffi::OsString;
+    let workspace = tempfile::tempdir().unwrap();
+    let env_file = workspace.path().join("valid.env");
+    let invalid_config = workspace.path().join("invalid.toml");
+    let selected_root = workspace.path().join("selected-root");
+    fs::write(
+        &env_file,
+        format!("SHARDLINE_ROOT_DIR={selected_root:?}\nCLI_PARSE_STATE_MARKER=applied\n"),
+    )
+    .unwrap();
+    fs::write(&invalid_config, "[[[invalid TOML]]]").unwrap();
+    let before_root = effective_root(None).unwrap();
+    assert!(std::env::var_os("SHARDLINE_ROOT_DIR").is_none());
+    for (arguments, expected) in [
+        (
+            vec![
+                "db",
+                "migrate",
+                "repair",
+                "--operation-kind",
+                "S3Object",
+                "--operation-id",
+                "owned",
+            ],
+            "requires --confirm",
+        ),
+        (
+            vec![
+                "db",
+                "migrate",
+                "repair",
+                "--operation-kind",
+                "S3Object",
+                "--operation-id",
+                "",
+                "--confirm",
+            ],
+            "non-empty --operation-id",
+        ),
+        (
+            vec![
+                "db",
+                "migrate",
+                "repair",
+                "--operation-kind",
+                "Unknown",
+                "--operation-id",
+                "owned",
+                "--confirm",
+            ],
+            "supported --operation-kind",
+        ),
+        (vec!["bench", "--mode", "e2e"], "requires --storage-dir"),
+    ] {
+        let mut args = vec![
+            OsString::from("shardline"),
+            OsString::from("--env-file"),
+            env_file.as_os_str().to_owned(),
+            OsString::from("--config"),
+            invalid_config.as_os_str().to_owned(),
+        ];
+        args.extend(arguments.into_iter().map(OsString::from));
+        let error = CliCommand::parse(args).unwrap_err().to_string();
+        assert!(error.contains(expected), "expected {expected}: {error}");
+        assert!(std::env::var_os("SHARDLINE_ROOT_DIR").is_none());
+        assert!(std::env::var_os("CLI_PARSE_STATE_MARKER").is_none());
+        assert_eq!(effective_root(None).unwrap(), before_root);
+    }
+    // Successful parses still replace and clear the selected native path.
+    assert!(
+        CliCommand::parse([
+            OsString::from("shardline"),
+            OsString::from("--config"),
+            invalid_config.into_os_string(),
+            OsString::from("config"),
+            OsString::from("check")
+        ])
+        .is_ok()
+    );
+    assert!(effective_root(None).is_err());
+    assert!(CliCommand::parse(["shardline", "config", "check"]).is_ok());
+    assert_eq!(effective_root(None).unwrap(), before_root);
+    assert!(
+        CliCommand::parse([
+            OsString::from("shardline"),
+            OsString::from("--env-file"),
+            env_file.into_os_string(),
+            OsString::from("config"),
+            OsString::from("check")
+        ])
+        .is_ok()
+    );
+    assert_eq!(std::env::var("CLI_PARSE_STATE_MARKER").unwrap(), "applied");
+    assert_eq!(effective_root(None).unwrap(), selected_root);
+}
