@@ -14,6 +14,7 @@
 
 use std::{
     fs, io,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -30,6 +31,33 @@ pub const SHARDLINE_TOKEN_FILE_ENV: &str = "SHARDLINE_TOKEN_FILE";
 pub const SHARDLINE_CONFIG_ENV: &str = "SHARDLINE_CONFIG";
 /// Default config-file name relative to `$HOME/.config/shardline/`.
 pub const CONFIG_FILE_NAME: &str = "shardline.toml";
+
+// Match the token service's JSON response budget. Configs and credential files
+// are read with a streaming limit too, so growth after metadata inspection is safe.
+const MAX_LOCAL_CONFIG_BYTES: u64 = 1024 * 1024;
+
+fn read_config_text(path: &Path) -> io::Result<String> {
+    let file = fs::File::open(path)?;
+    let too_large = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "config or token file exceeds 1 MiB",
+        )
+    };
+    if file.metadata()?.len() > MAX_LOCAL_CONFIG_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_LOCAL_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_LOCAL_CONFIG_BYTES {
+        return Err(too_large());
+    }
+    // Keep only the UTF-8 position error; FromUtf8Error retains the credential
+    // bytes and would disclose them through Debug formatting of the I/O error.
+    String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
+}
 
 /// A resolved credential for a Shardline Xet frontend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +208,7 @@ impl SdxConfig {
         if explicit && !resolved.is_file() {
             return Err(SdxConfigError::InvalidPath(resolved.display().to_string()));
         }
-        let contents = match fs::read_to_string(&resolved) {
+        let contents = match read_config_text(&resolved) {
             Ok(contents) => contents,
             Err(source) if source.kind() == io::ErrorKind::NotFound && !explicit => {
                 return Ok(None);
@@ -266,9 +294,10 @@ impl SdxConfig {
 ///
 /// # Errors
 ///
-/// Returns an [`std::io::Error`] when the file cannot be read.
+/// Returns an [`std::io::Error`] when the file cannot be read, is not UTF-8,
+/// or exceeds 1 MiB.
 pub fn read_token_file(path: &Path) -> Result<String, io::Error> {
-    let contents = fs::read_to_string(path)?;
+    let contents = read_config_text(path)?;
     Ok(contents.trim().to_owned())
 }
 
@@ -463,6 +492,35 @@ mod tests {
     fn read_token_file_missing_file_errors() {
         let result = read_token_file(Path::new("/nonexistent/shardline-token"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn local_credential_and_config_reads_enforce_byte_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input");
+        let limit = usize::try_from(super::MAX_LOCAL_CONFIG_BYTES).unwrap();
+        std::fs::write(&path, "x".repeat(limit)).unwrap();
+        assert_eq!(read_token_file(&path).unwrap().len(), limit);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(super::MAX_LOCAL_CONFIG_BYTES + 1).unwrap();
+        assert_eq!(
+            read_token_file(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(matches!(
+            SdxConfig::load(Some(&path)),
+            Err(SdxConfigError::Io { .. })
+        ));
+        std::fs::write(&path, [0xff]).unwrap();
+        let error = read_token_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<std::str::Utf8Error>()
+                .is_some()
+        );
     }
 
     // ── M6a: shardline.toml parsing ────────────────────────────────────────
