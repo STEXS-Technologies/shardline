@@ -21,12 +21,14 @@ use crate::{
 };
 
 pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
-    tracing_subscriber::fmt()
+    // Embedders may already own the process-wide subscriber, and this public
+    // entry point can be called more than once. Keep their subscriber in place.
+    let _initialization = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .init();
+        .try_init();
 
     let args: Vec<OsString> = args.collect();
     if let Some(xet_args) = xet_args(&args) {
