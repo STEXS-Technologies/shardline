@@ -626,7 +626,7 @@ impl InventoryEntry for ProviderRepositoryState {
 fn verify_sqlite_intent_evidence(
     transaction: &Transaction<'_>,
     intent: &UploadIntent,
-) -> Result<(), LocalIndexStoreError> {
+) -> Result<LifecycleEvent, LocalIndexStoreError> {
     let event = super::helpers::load_latest_verified_event_json(
         transaction,
         shardline_reliability::OperationKind::Upload,
@@ -647,7 +647,8 @@ fn verify_sqlite_intent_evidence(
         intent.object_hash(),
         intent.state(),
     )
-    .map_err(LocalIndexStoreError::Reliability)
+    .map_err(LocalIndexStoreError::Reliability)?;
+    Ok(event)
 }
 
 impl ReconstructionStore for LocalIndexStore {
@@ -2006,21 +2007,27 @@ impl UploadIntentStore for super::LocalIndexStore {
                 ],
             )?;
             if inserted == 0 {
-                let matches_identity = transaction.query_row(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM shardline_upload_intents
-                        WHERE intent_id = ?1 AND object_key = ?2 AND object_hash = ?3
-                          AND object_length = ?4
-                     )",
-                    rusqlite::params![
-                        intent.intent_id(),
-                        intent.object_key(),
-                        intent.object_hash(),
-                        object_length,
-                    ],
-                    |row| row.get::<_, bool>(0),
+                let durable_intent = transaction.query_row(
+                    "SELECT intent_id, object_key, object_hash, object_length, state,
+                            created_at_unix_seconds, updated_at_unix_seconds
+                     FROM shardline_upload_intents WHERE intent_id = ?1",
+                    rusqlite::params![intent.intent_id()],
+                    |row| {
+                        let state_text: String = row.get(4)?;
+                        let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+                            rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_text}"), rusqlite::types::Type::Text)
+                        })?;
+                        Ok(UploadIntent::from_parts(row.get(0)?, row.get(1)?, row.get(2)?,
+                            row.get::<_, i64>(3)? as u64, state,
+                            Duration::from_secs(row.get::<_, i64>(5)? as u64),
+                            Duration::from_secs(row.get::<_, i64>(6)? as u64)))
+                    },
                 )?;
-                if !matches_identity {
+                if !durable_intent.has_same_identity(&intent) {
+                    return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+                }
+                let event = verify_sqlite_intent_evidence(&transaction, &durable_intent)?;
+                if event.operation.tenant != tenant || event.operation.repository != repository {
                     return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
                 }
             } else {
@@ -3680,6 +3687,83 @@ mod tests {
             stored_event.operation.tenant == "tenant-a"
                 && stored_event.operation.repository == "repo-a"
         }));
+    }
+
+    #[test]
+    fn sqlite_duplicate_intent_validates_scope_and_durable_state() {
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "duplicate-scope".into(),
+            "objects/scope".into(),
+            "a".repeat(64),
+            42,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+            .unwrap();
+        runtime
+            .block_on(store.transition_intent(intent.intent_id(), UploadIntentState::Storing))
+            .unwrap();
+        let before = runtime
+            .block_on(store.reliability_events(intent.intent_id()))
+            .unwrap();
+        runtime
+            .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+            .unwrap();
+        assert!(matches!(
+            runtime.block_on(store.create_intent_scoped(&intent, "tenant-b", "repo-b")),
+            Err(LocalIndexStoreError::UploadIntentConflict(_))
+        ));
+        assert_eq!(
+            runtime
+                .block_on(store.intent_by_id(intent.intent_id()))
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        assert_eq!(
+            runtime
+                .block_on(store.reliability_events(intent.intent_id()))
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn sqlite_duplicate_intent_rejects_corrupt_evidence_without_repair() {
+        for corruption in [
+            "UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_id = ?1",
+            "UPDATE shardline_reliability_events SET merkle_commit_json = json_set(merkle_commit_json, '$.body.next_state_root', 'sha256:0000000000000000000000000000000000000000000000000000000000000000') WHERE operation_id = ?1",
+            "UPDATE shardline_reliability_events SET event_json = json_set(event_json, '$.operation.repository', 'forged-repository') WHERE operation_id = ?1",
+            "UPDATE shardline_upload_intents SET state = 'storing' WHERE intent_id = ?1",
+        ] {
+            let store = make_store();
+            let intent = UploadIntent::new(
+                "corrupt-duplicate".into(),
+                "objects/corrupt".into(),
+                "a".repeat(64),
+                42,
+            );
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime
+                .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+                .unwrap();
+            let connection = store.open_connection().unwrap();
+            connection
+                .execute(corruption, [intent.intent_id()])
+                .unwrap();
+            let before: (String, Option<String>) = connection.query_row("SELECT event_json, merkle_commit_json FROM shardline_reliability_events WHERE operation_id = ?1", [intent.intent_id()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            assert!(
+                runtime
+                    .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+                    .is_err(),
+                "{corruption}"
+            );
+            let after: (String, Option<String>) = connection.query_row("SELECT event_json, merkle_commit_json FROM shardline_reliability_events WHERE operation_id = ?1", [intent.intent_id()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            assert_eq!(before, after);
+        }
     }
 
     #[test]
