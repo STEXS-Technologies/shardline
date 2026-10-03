@@ -10,8 +10,6 @@ use std::{
 
 #[cfg(not(unix))]
 use std::io::Write;
-#[cfg(not(unix))]
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -535,16 +533,10 @@ impl Drop for LocalTemporaryFile {
 
 #[cfg(not(unix))]
 fn write_temporary_file(path: &Path, bytes: &[u8]) -> io::Result<LocalTemporaryFile> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().ok_or_else(invalid_local_path_error)?;
+    let file_name = path.file_name().ok_or_else(invalid_local_path_error)?;
     loop {
-        let pid = std::process::id();
-        let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let now_nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let temporary_path = path.with_extension(format!("tmp-{pid}-{seq}-{now_nanos}"));
+        let temporary_path = parent.join(crate::temporary_file_name(file_name));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -850,6 +842,29 @@ mod tests {
         let result = put_bytes_if_absent(&root, &path, b"data");
         assert!(matches!(result, Ok(PutBytesIfAbsentOutcome::Inserted)));
         assert!(path.exists());
+    }
+
+    #[test]
+    fn maximum_byte_length_names_publish_replace_and_preserve_duplicate() {
+        for name in ["a".repeat(255), format!("{}x", "é".repeat(127))] {
+            assert_eq!(name.len(), 255);
+            let sandbox = tempfile::tempdir().unwrap();
+            let path = sandbox.path().join(name);
+            super::write_bytes_atomically(sandbox.path(), &path, b"first").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"first");
+            super::write_bytes_atomically(sandbox.path(), &path, b"replacement").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+            assert!(matches!(
+                super::put_bytes_if_absent(sandbox.path(), &path, b"replacement").unwrap(),
+                PutBytesIfAbsentOutcome::AlreadyExists
+            ));
+            let mismatch = super::put_bytes_if_absent(sandbox.path(), &path, b"loser")
+                .err()
+                .expect("different bytes must not replace the winner");
+            assert_eq!(mismatch.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+            assert_eq!(std::fs::read_dir(sandbox.path()).unwrap().count(), 1);
+        }
     }
 
     // ── write_bytes_atomically ────────────────────────────────────────

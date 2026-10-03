@@ -1378,6 +1378,48 @@ mod tests {
     }
 
     #[test]
+    fn generated_temporary_names_preserve_managed_reaping_boundaries() {
+        let hash = SIDECAR_TEMP_TEST_HASH;
+        let managed = [
+            format!("aa/{hash}"),
+            format!("xorbs/default/aa/{hash}.xorb"),
+            format!("shards/aa/{hash}.shard"),
+            format!("_xorb_chunks/aa/{hash}"),
+            LAST_GC_CLOCK_ANCHOR_KEY.to_owned(),
+            crate::quarantine::GC_CLOCK_BOOT_OBSERVATION_KEY.to_owned(),
+        ];
+        let generated_key = |base: &str| {
+            let (parent, file_name) = base.rsplit_once('/').unwrap();
+            let name = shardline_storage::temporary_file_name(std::ffi::OsStr::new(file_name));
+            ObjectKey::parse(&format!("{parent}/{}", name.to_str().unwrap())).unwrap()
+        };
+        for base in managed {
+            assert!(
+                temporary_artifact_unix_nanos(&generated_key(&base), &[ServerFrontend::Xet])
+                    .is_some(),
+                "generated managed temporary name must remain reapable: {base}"
+            );
+            assert!(
+                temporary_artifact_unix_nanos(
+                    &ObjectKey::parse(&base).unwrap(),
+                    &[ServerFrontend::Xet]
+                )
+                .is_none()
+            );
+        }
+        for base in [
+            format!("protocols/s3/scope/{hash}"),
+            format!("protocols/s3/scope/{}", "n".repeat(255)),
+        ] {
+            assert!(
+                temporary_artifact_unix_nanos(&generated_key(&base), &[ServerFrontend::Xet])
+                    .is_none(),
+                "user object temporary names must remain ineligible: {base}"
+            );
+        }
+    }
+
+    #[test]
     fn boot_observation_sidecar_reaps_only_stranded_temporary_artifacts() {
         let now = 2_000_000_000;
         let old_nanos = u128::from(now - 7200_u64) * 1_000_000_000;
