@@ -268,6 +268,197 @@ fn db_migration_validates_toml_and_preserves_url_precedence_and_interpolation() 
     assert!(String::from_utf8_lossy(&malformed.stderr).contains("TOML parse error"));
 }
 
+#[test]
+fn dotenv_preflight_preserves_state_and_native_semantics() {
+    const CHILD: &str = "SHARDLINE_TEST_DOTENV_PREFLIGHT";
+    if std::env::var_os(CHILD).is_none() {
+        let workspace = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dotenv_preflight_preserves_state_and_native_semantics",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .env("CLI_ENV_EXISTING", "from-process")
+            .current_dir(workspace.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated dotenv test failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    use shardline::{CliCommand, effective_root};
+    let workspace = tempfile::tempdir().unwrap();
+    let env_file = workspace.path().join("selected.env");
+    let parse = || {
+        CliCommand::parse([
+            std::ffi::OsString::from("shardline"),
+            std::ffi::OsString::from("--env-file"),
+            env_file.as_os_str().to_owned(),
+            std::ffi::OsString::from("config"),
+            std::ffi::OsString::from("check"),
+        ])
+    };
+    let before_root = effective_root(None).unwrap();
+    let before_env = std::env::var_os("SHARDLINE_ROOT_DIR");
+    fs::write(
+        &env_file,
+        format!(
+            "SHARDLINE_ROOT_DIR={:?}\nCLI_ENV_PARTIAL=from-malformed\nnot a valid dotenv line =\n",
+            workspace.path().join("partial-root")
+        ),
+    )
+    .unwrap();
+    assert!(
+        parse()
+            .unwrap_err()
+            .to_string()
+            .contains("failed to load env file")
+    );
+    assert_eq!(std::env::var_os("SHARDLINE_ROOT_DIR"), before_env);
+    assert!(std::env::var_os("CLI_ENV_PARTIAL").is_none());
+    assert_eq!(effective_root(None).unwrap(), before_root);
+
+    fs::write(
+        &env_file,
+        b"CLI_ENV_PARTIAL=from-malformed\nCLI_ENV_BAD=secret\0value\n",
+    )
+    .unwrap();
+    let nul_error = parse().unwrap_err().to_string();
+    assert!(nul_error.contains("NUL bytes"));
+    assert!(!nul_error.contains("secret"));
+    assert!(std::env::var_os("CLI_ENV_PARTIAL").is_none());
+    assert!(std::env::var_os("CLI_ENV_BAD").is_none());
+    assert_eq!(effective_root(None).unwrap(), before_root);
+
+    let healthy_root = workspace.path().join("healthy-root");
+    fs::write(
+        &env_file,
+        format!(
+            "CLI_ENV_EXISTING=from-file\nCLI_ENV_DUPLICATE=first\nCLI_ENV_DUPLICATE=second\nCLI_ENV_REFERENCE=${{CLI_ENV_DUPLICATE}}\nCLI_ENV_EARLIER=source\nCLI_ENV_INTERPOLATED=${{CLI_ENV_EARLIER}}/suffix\nCLI_ENV_EXISTING_REF=${{CLI_ENV_EXISTING}}\nCLI_ENV_LITERAL='literal-$NAME'\nSHARDLINE_ROOT_DIR={healthy_root:?}\n"
+        ),
+    )
+    .unwrap();
+    assert!(parse().is_ok());
+    for (name, expected) in [
+        ("CLI_ENV_EXISTING", "from-process"),
+        ("CLI_ENV_DUPLICATE", "first"),
+        ("CLI_ENV_REFERENCE", "first"),
+        ("CLI_ENV_INTERPOLATED", "source/suffix"),
+        ("CLI_ENV_EXISTING_REF", "from-process"),
+        ("CLI_ENV_LITERAL", "literal-$NAME"),
+    ] {
+        assert_eq!(std::env::var(name).unwrap(), expected);
+    }
+    assert_eq!(effective_root(None).unwrap(), healthy_root);
+}
+
+#[test]
+fn dotenv_lookup_preserves_native_finder_behavior() {
+    const CASE: &str = "SHARDLINE_TEST_DOTENV_LOOKUP_CASE";
+    const ROOT: &str = "SHARDLINE_TEST_DOTENV_LOOKUP_ROOT";
+    let Some(case) = std::env::var_os(CASE) else {
+        #[cfg(unix)]
+        let cases = [
+            "parent",
+            "nearest",
+            "directory",
+            "absolute",
+            "native",
+            "metadata-error",
+        ];
+        #[cfg(not(unix))]
+        let cases = ["parent", "nearest", "directory", "absolute"];
+        for case in cases {
+            let workspace = tempfile::tempdir().unwrap();
+            let nested = workspace.path().join("child").join("grandchild");
+            fs::create_dir_all(&nested).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "dotenv_lookup_preserves_native_finder_behavior",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env(CASE, case)
+                .env(ROOT, workspace.path())
+                .current_dir(nested)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated dotenv lookup {case} failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    use shardline::CliCommand;
+    use std::ffi::OsString;
+    let root = std::path::PathBuf::from(std::env::var_os(ROOT).unwrap());
+    let nested = std::env::current_dir().unwrap();
+    fs::write(root.join("selected.env"), "CLI_ENV_LOOKUP=parent\n").unwrap();
+    let mut selected = std::path::PathBuf::from("selected.env");
+    let expected = match case.to_str().unwrap() {
+        "parent" => "parent",
+        "nearest" | "directory" | "absolute" => {
+            fs::write(root.join("child/selected.env"), "CLI_ENV_LOOKUP=nearest\n").unwrap();
+            if case == "directory" {
+                fs::create_dir(nested.join("selected.env")).unwrap();
+            }
+            if case == "absolute" {
+                selected = root.join("selected.env");
+                "parent"
+            } else {
+                "nearest"
+            }
+        }
+        #[cfg(unix)]
+        "native" => {
+            use std::os::unix::ffi::OsStringExt;
+            selected = OsString::from_vec(b"native-\xff.env".to_vec()).into();
+            fs::write(root.join(&selected), "CLI_ENV_LOOKUP=native\n").unwrap();
+            "native"
+        }
+        #[cfg(unix)]
+        "metadata-error" => {
+            fs::create_dir(root.join("blocked")).unwrap();
+            fs::write(
+                root.join("blocked/selected.env"),
+                "CLI_ENV_LOOKUP=ancestor\n",
+            )
+            .unwrap();
+            fs::write(nested.join("blocked"), "not a directory").unwrap();
+            selected = "blocked/selected.env".into();
+            "error"
+        }
+        _ => "",
+    };
+    assert!(!expected.is_empty(), "unknown lookup test case");
+    let result = CliCommand::parse([
+        OsString::from("shardline"),
+        OsString::from("--env-file"),
+        selected.into_os_string(),
+        OsString::from("config"),
+        OsString::from("check"),
+    ]);
+    if expected == "error" {
+        assert!(result.is_err());
+        assert!(std::env::var_os("CLI_ENV_LOOKUP").is_none());
+    } else {
+        assert!(result.is_ok());
+        assert_eq!(std::env::var("CLI_ENV_LOOKUP").unwrap(), expected);
+    }
+}
+
 fn shardline_binary() -> String {
     if let Ok(path) = var("CARGO_BIN_EXE_shardline") {
         return path;
