@@ -237,8 +237,9 @@ impl TreeStore for PostgresIndexStore {
             query(
                 "DELETE FROM shardline_tree_entries
                  WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4
-                   AND (path = $5 OR substr(path, 1, length($5) + 1) = $5 || '/')",
+                   AND (path = $5 OR (path ~>=~ ($5 || '/') AND path ~<~ ($5 || '0')))",
             )
+            .persistent(false)
             .bind(&key.provider)
             .bind(&key.owner)
             .bind(&key.repo)
@@ -281,7 +282,7 @@ impl TreeStore for PostgresIndexStore {
         if !prefix.is_empty() {
             write!(
                 sql,
-                " AND (path = ${index} OR substr(path, 1, length(${index}) + 1) = ${index} || '/')"
+                " AND (path = ${index} OR (path ~>=~ (${index} || '/') AND path ~<~ (${index} || '0')))"
             )
             .map_err(|e| PostgresMetadataStoreError::IntegerOutOfRange(e.to_string()))?;
             index = index.saturating_add(1);
@@ -303,7 +304,10 @@ impl TreeStore for PostgresIndexStore {
             .bind(&key.repo)
             .bind(&key.revision);
         if !prefix.is_empty() {
-            q = q.bind(prefix);
+            // A prefix-specific custom plan can select the pattern index for a
+            // narrow subtree and the ordered primary index for a broad one.
+            // Avoid caching a generic plan after repeated broad-prefix scans.
+            q = q.persistent(false).bind(prefix);
         }
         if let Some(cursor) = cursor {
             q = q.bind(cursor);
@@ -573,6 +577,206 @@ mod tests {
             file_id: "ab".repeat(32),
             size_bytes: 123,
             updated_at_unix_seconds: 1000,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_tree_prefix_bounds_preserve_native_pagination_and_scope() {
+        for collation in ["C", "en-x-icu"] {
+            let Some(pool) = connect_postgres().await else {
+                assert!(
+                    std::env::var("DATABASE_URL").is_err()
+                        && std::env::var("SHARDLINE_INDEX_POSTGRES_URL").is_err(),
+                    "configured PostgreSQL fixture must connect and create its isolated schema"
+                );
+                eprintln!("skipping: no DATABASE_URL");
+                return;
+            };
+            let available: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_collation WHERE collname = $1)")
+                    .bind(collation)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("collation lookup");
+            if !available {
+                pool.close().await;
+                continue;
+            }
+            // The collation name comes from the fixed list above, before any
+            // statements returning tree rows have been prepared.
+            query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE shardline_tree_entries ALTER COLUMN path TYPE text COLLATE \"{collation}\""
+            )))
+            .execute(&pool)
+            .await
+            .expect("set fixture collation");
+            let store = PostgresIndexStore::new(pool.clone());
+            let key = TreeKey::new("GitHub", "team_%", "repo+mixed", "main");
+            for path in [
+                "",
+                "/child",
+                "A",
+                "a",
+                "é",
+                "e\u{301}",
+                "Σ",
+                "ζ",
+                "ζ/child",
+                "ζ0",
+                "literal%",
+                "literal%/child",
+                "literalX/child",
+                "literal_",
+                "literal_/child",
+                "literalZ/child",
+                "dir",
+                "dir/child",
+                "dir/é",
+                "dir/e\u{301}",
+                "dir0",
+                "dir-other",
+                "\u{10ffff}/child",
+            ] {
+                let mut row = entry("main", path);
+                row.provider.clone_from(&key.provider);
+                row.owner.clone_from(&key.owner);
+                row.repo.clone_from(&key.repo);
+                TreeStore::upsert_tree_entry(&store, &row)
+                    .await
+                    .expect("insert");
+                for field in 0..4 {
+                    let mut unrelated = row.clone();
+                    match field {
+                        0 => unrelated.provider.push('x'),
+                        1 => unrelated.owner.push('x'),
+                        2 => unrelated.repo.push('x'),
+                        _ => unrelated.revision.push('x'),
+                    }
+                    TreeStore::upsert_tree_entry(&store, &unrelated)
+                        .await
+                        .expect("insert unrelated scope");
+                }
+            }
+            for prefix in [
+                "",
+                "dir",
+                "literal%",
+                "literal_",
+                "ζ",
+                "\u{10ffff}",
+                "missing",
+            ] {
+                // The original predicate and native ORDER BY are the oracle.
+                let expected: Vec<String> = sqlx::query_scalar(
+                    "SELECT path FROM shardline_tree_entries
+                     WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4
+                       AND ($5 = '' OR path = $5 OR substr(path, 1, length($5) + 1) = $5 || '/')
+                     ORDER BY path",
+                )
+                .bind(&key.provider)
+                .bind(&key.owner)
+                .bind(&key.repo)
+                .bind(&key.revision)
+                .bind(prefix)
+                .fetch_all(&pool)
+                .await
+                .expect("original predicate");
+                for limit in [1, 3, 100] {
+                    let mut cursor = None;
+                    let mut actual = Vec::new();
+                    loop {
+                        let page =
+                            TreeStore::scan_tree(&store, &key, prefix, cursor.as_deref(), limit)
+                                .await
+                                .expect("prefix page");
+                        if page.is_empty() {
+                            break;
+                        }
+                        cursor = page.last().map(|row| row.path.clone());
+                        actual.extend(page.into_iter().map(|row| row.path));
+                        assert!(actual.len() <= expected.len(), "pagination must advance");
+                    }
+                    assert_eq!(
+                        actual, expected,
+                        "collation={collation} prefix={prefix:?} limit={limit}"
+                    );
+                }
+            }
+            assert!(
+                TreeStore::scan_tree(&store, &key, "dir", None, 0)
+                    .await
+                    .expect("zero limit")
+                    .is_empty()
+            );
+            // Recursive deletion uses the same literal, segment-aware bounds.
+            // Deleting the exact node first must leave its descendants intact.
+            assert_eq!(
+                TreeStore::delete_tree_entries(&store, &key, "dir", false)
+                    .await
+                    .expect("exact deletion"),
+                1
+            );
+            for prefix in ["dir", "literal%", "literal_", "ζ", "\u{10ffff}", ""] {
+                let expected: Vec<String> = sqlx::query_scalar(
+                    "SELECT path FROM shardline_tree_entries
+                     WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4
+                       AND (path = $5 OR substr(path, 1, length($5) + 1) = $5 || '/')
+                     ORDER BY path",
+                )
+                .bind(&key.provider)
+                .bind(&key.owner)
+                .bind(&key.repo)
+                .bind(&key.revision)
+                .bind(prefix)
+                .fetch_all(&pool)
+                .await
+                .expect("original delete predicate");
+                let total_before: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM shardline_tree_entries")
+                        .fetch_one(&pool)
+                        .await
+                        .expect("count before");
+                assert_eq!(
+                    TreeStore::delete_tree_entries(&store, &key, prefix, true)
+                        .await
+                        .expect("recursive deletion"),
+                    u64::try_from(expected.len()).unwrap()
+                );
+                let total_after: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM shardline_tree_entries")
+                        .fetch_one(&pool)
+                        .await
+                        .expect("count after");
+                assert_eq!(
+                    total_before - total_after,
+                    i64::try_from(expected.len()).unwrap()
+                );
+                for path in expected {
+                    assert!(
+                        TreeStore::tree_entry(&store, &key, &path)
+                            .await
+                            .expect("deleted lookup")
+                            .is_none()
+                    );
+                }
+            }
+            // Adjacent siblings and all four differing scope components survive.
+            for path in [
+                "dir0",
+                "dir-other",
+                "literalX/child",
+                "literalZ/child",
+                "ζ0",
+            ] {
+                assert!(
+                    TreeStore::tree_entry(&store, &key, path)
+                        .await
+                        .expect("sibling lookup")
+                        .is_some()
+                );
+            }
+            eprintln!("tree prefix scan/delete controls completed collation={collation}");
+            pool.close().await;
         }
     }
 

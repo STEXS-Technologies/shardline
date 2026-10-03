@@ -205,7 +205,7 @@ pub use reconstruction_cache::{
 };
 pub use retention_runtime::{
     MetadataWriteBarrier, acquire_metadata_write_barrier, release_retention_hold,
-    set_retention_hold,
+    set_retention_hold, set_retention_hold_with,
 };
 pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
