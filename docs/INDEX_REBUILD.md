@@ -26,6 +26,16 @@ inside Postgres-backed metadata while using the configured object-store adapter 
 retained shard inventory.
 Local deployments use the resolved state root for local metadata.
 
+The command holds the deployment's exclusive maintenance barrier for the entire
+scan and repair. Coordinated uploads and other maintenance wait until rebuild
+finishes; rebuild waits for writers already holding the shared barrier. Plan a
+write pause for large rebuilds. All nodes must use the same local state root or
+PostgreSQL database and support this coordination protocol.
+
+Library callers of `run_index_rebuild_with_stores` must provide exclusive access
+to the supplied stores for the entire operation. This generic adapter function
+cannot acquire a deployment barrier itself.
+
 The command exits with:
 
 - `0` when rebuild completed without non-fatal issues

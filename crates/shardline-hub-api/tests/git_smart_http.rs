@@ -39,7 +39,7 @@ fn create_repo_and_commit(
     repo_type: &str,
     ns: &str,
     repo: &str,
-    files: Vec<HubFileEntry>,
+    mut files: Vec<HubFileEntry>,
     message: &str,
 ) -> String {
     let state = test.state();
@@ -47,10 +47,33 @@ fn create_repo_and_commit(
     let rt = HubRepoType::parse_str(repo_type).unwrap();
     let _ = state.store.create_repo(rt, &repo_id, false);
     let parent_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
-    let files_hash = format!("{:016x}", files.len());
-    let commit_sha =
-        shardline_index::hub::HubRepo::compute_commit_sha(parent_sha, message, &files_hash)
+    for file in &mut files {
+        if !file.is_lfs {
+            let content = format!("real inline content for {}", file.path).into_bytes();
+            file.sha = blake3::hash(&content).to_hex().to_string();
+            file.size = content.len() as u64;
+            let key = shardline_storage::ObjectKey::parse(&format!(
+                "protocols/lfs/global/objects/{}",
+                file.sha
+            ))
             .unwrap();
+            let integrity = shardline_storage::ObjectIntegrity::new(
+                shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&content).as_bytes()),
+                file.size,
+            );
+            state
+                .object_store
+                .put_if_absent(
+                    &key,
+                    shardline_storage::ObjectBody::from_slice(&content),
+                    &integrity,
+                )
+                .unwrap();
+        }
+    }
+    let commit_sha = blake3::hash(format!("{repo_id}:{message}:{}", files.len()).as_bytes())
+        .to_hex()
+        .to_string();
     state
         .store
         .store_files(&commit_sha, &files)
@@ -194,8 +217,9 @@ async fn info_refs_upload_pack_empty_repo() {
     let body = collect_body_bytes(response).await;
     let body_str = String::from_utf8(body).unwrap();
     assert!(body_str.contains("# service=git-upload-pack"));
-    // Empty repo should advertise capabilities
-    assert!(body_str.contains("capabilities^{}"));
+    // The initial empty-tree Hub revision is a genuine Git commit.
+    assert!(body_str.contains("HEAD\0"));
+    assert!(!body_str.contains("HEAD capabilities^{}"));
     assert!(body_str.contains("side-band-64k"));
 }
 
@@ -228,10 +252,13 @@ async fn info_refs_upload_pack_with_refs() {
 
     let body = collect_body_bytes(response).await;
     let body_str = String::from_utf8(body).unwrap();
-    assert!(body_str.contains(&commit_sha));
+    assert!(
+        !body_str.contains(&commit_sha),
+        "Hub IDs must not be advertised as Git SHAs"
+    );
     assert!(body_str.contains("refs/heads/main"));
     assert!(body_str.contains("HEAD"));
-    assert!(body_str.contains("capabilities^{}"));
+    assert!(!body_str.contains("capabilities^{}"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -295,8 +322,24 @@ async fn upload_pack_empty_repo() {
         "msg",
     );
 
-    let want_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
-    let req_body = build_upload_pack_request(want_sha);
+    let discovery = test
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/models/test-{uid}/upload-empty/info/refs?service=git-upload-pack"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = collect_body_bytes(discovery).await;
+    let service_length =
+        usize::from_str_radix(std::str::from_utf8(&body[..4]).unwrap(), 16).unwrap();
+    let lines = pktline::decode_lines(&body[service_length + 4..]);
+    let advertised = String::from_utf8(lines[0].clone()).unwrap();
+    let req_body = build_upload_pack_request(advertised.split_whitespace().next().unwrap());
 
     let response = test
         .app()
@@ -333,7 +376,7 @@ async fn upload_pack_empty_repo() {
 async fn upload_pack_with_files() {
     let test = setup();
     let uid = std::process::id();
-    let commit_sha = create_repo_and_commit(
+    let _commit_sha = create_repo_and_commit(
         &test,
         "models",
         &format!("test-{uid}"),
@@ -355,7 +398,28 @@ async fn upload_pack_with_files() {
         "Add files",
     );
 
-    let req_body = build_upload_pack_request(&commit_sha);
+    let discovery = test
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/models/test-{uid}/{}/info/refs?service=git-upload-pack",
+                    "upload-files"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let lines = pktline::decode_lines(
+        &collect_body_bytes(discovery)
+            .await
+            .into_iter()
+            .skip(34)
+            .collect::<Vec<_>>(),
+    );
+    let advertised = String::from_utf8(lines[0].clone()).unwrap();
+    let req_body = build_upload_pack_request(advertised.split_whitespace().next().unwrap());
 
     let response = test
         .app()
@@ -393,7 +457,7 @@ async fn upload_pack_with_files() {
 async fn upload_pack_with_lfs_files() {
     let test = setup();
     let uid = std::process::id();
-    let commit_sha = create_repo_and_commit(
+    let _commit_sha = create_repo_and_commit(
         &test,
         "models",
         &format!("test-{uid}"),
@@ -415,7 +479,27 @@ async fn upload_pack_with_lfs_files() {
         "Add LFS file",
     );
 
-    let req_body = build_upload_pack_request(&commit_sha);
+    let discovery = test
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/models/test-{uid}/upload-lfs/info/refs?service=git-upload-pack"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let lines = pktline::decode_lines(
+        &collect_body_bytes(discovery)
+            .await
+            .into_iter()
+            .skip(34)
+            .collect::<Vec<_>>(),
+    );
+    let advertised = String::from_utf8(lines[0].clone()).unwrap();
+    let req_body = build_upload_pack_request(advertised.split_whitespace().next().unwrap());
 
     let response = test
         .app()
@@ -508,8 +592,8 @@ async fn receive_pack_push() {
 
     let body = collect_body_bytes(response).await;
     let body_str = String::from_utf8(body).unwrap();
-    assert!(body_str.contains("unpack ok"));
-    // Pushes are rejected because Git object storage is not implemented.
+    assert!(body_str.contains("unpack failed"));
+    // A new, unknown commit requires an actual valid pack.
     assert!(
         body_str.contains("ng refs/heads/main"),
         "expected push rejection, got: {body_str}"
@@ -1066,9 +1150,13 @@ async fn receive_pack_stores_lfs_objects() {
     );
 
     // Build a commit containing an LFS pointer blob.
-    let lfs_oid = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let lfs_pointer =
-        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{lfs_oid}\nsize 1234\n");
+    use sha2::Digest;
+    let payload = b"actual LFS payload";
+    let lfs_oid = hex::encode(sha2::Sha256::digest(payload));
+    let lfs_pointer = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{lfs_oid}\nsize {}\n",
+        payload.len()
+    );
 
     let lfs_blob = create_blob_object(lfs_pointer.as_bytes());
     let lfs_blob_sha = lfs_blob.sha1();
@@ -1092,7 +1180,13 @@ async fn receive_pack_stores_lfs_objects() {
     );
     let commit_sha = commit.sha1();
 
-    let objects = vec![lfs_blob, readme_blob, tree, commit];
+    let objects = vec![
+        lfs_blob,
+        create_blob_object(payload),
+        readme_blob,
+        tree,
+        commit,
+    ];
     let null_sha = "0000000000000000000000000000000000000000";
     let body = build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects, &commit_sha);
 
@@ -1133,15 +1227,7 @@ async fn receive_pack_stores_lfs_objects() {
     let range_end = meta.length().saturating_sub(1);
     let range = shardline_protocol::ByteRange::new(0, range_end).unwrap();
     let data = state.object_store.read_range(&key, range).unwrap();
-    let data_str = String::from_utf8_lossy(&data);
-    assert!(
-        data_str.contains("version https://git-lfs.github.com/spec/v1"),
-        "stored LFS object should be the pointer blob content: {data_str}"
-    );
-    assert!(
-        data_str.contains(lfs_oid),
-        "stored LFS object should contain the OID: {data_str}"
-    );
+    assert_eq!(data, payload);
 }
 
 // ---- Pack parsing helper ----

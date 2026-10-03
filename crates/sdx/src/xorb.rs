@@ -14,13 +14,15 @@
 //! ByteGrouping4LZ4 / chunk deserialization is **not reimplemented**; the
 //! pinned `xet-core-structures` crate owns the format (plan §4.1 / §11 Q3).
 
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 
 use bytes::Bytes;
 use thiserror::Error;
 use xet_core_structures::error::CoreError;
 use xet_core_structures::merklehash::MerkleHash;
-use xet_core_structures::xorb_object::deserialize_chunks;
+use xet_core_structures::xorb_object::{
+    XORB_CHUNK_HEADER_LENGTH, deserialize_chunks, deserialize_chunks_to_writer, parse_chunk_header,
+};
 
 use crate::hash::compute_chunk_hash;
 
@@ -99,6 +101,61 @@ impl XorbReader {
         })
     }
 
+    /// Decodes within a buffer reservation, checking upstream chunk headers
+    /// before decompressing and bounding the decoder's output writer as well.
+    pub(crate) fn decode_chunk_data_bounded(
+        &self,
+        limit: usize,
+    ) -> Result<DecodedChunkData, XorbError> {
+        let mut position = 0usize;
+        let mut decoded_size = 0usize;
+        let mut chunk_count = 0usize;
+        while position < self.bytes.len() {
+            chunk_count = chunk_count.saturating_add(1);
+            if chunk_count > 8192 {
+                return Err(XorbError::InconsistentChunkOffsets);
+            }
+            let header_end = position
+                .checked_add(XORB_CHUNK_HEADER_LENGTH)
+                .ok_or(XorbError::InconsistentChunkOffsets)?;
+            let header_bytes = self
+                .bytes
+                .get(position..header_end)
+                .ok_or(XorbError::InconsistentChunkOffsets)?;
+            let header = parse_chunk_header(
+                header_bytes
+                    .try_into()
+                    .map_err(|_error| XorbError::InconsistentChunkOffsets)?,
+            )?;
+            decoded_size = decoded_size
+                .checked_add(header.get_uncompressed_length() as usize)
+                .filter(|size| *size <= limit)
+                .ok_or_else(|| {
+                    XorbError::Format(CoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "decoded xorb exceeds buffer reservation",
+                    )))
+                })?;
+            position = header_end
+                .checked_add(header.get_compressed_length() as usize)
+                .filter(|end| *end <= self.bytes.len())
+                .ok_or(XorbError::InconsistentChunkOffsets)?;
+        }
+        let mut writer = BoundedChunkWriter {
+            data: Vec::with_capacity(decoded_size),
+            limit: decoded_size,
+        };
+        let (_, offsets) =
+            deserialize_chunks_to_writer(&mut Cursor::new(self.bytes.as_slice()), &mut writer)?;
+        Ok(DecodedChunkData {
+            data: Bytes::from(writer.data),
+            chunk_offsets: offsets
+                .into_iter()
+                .map(|offset| usize::try_from(offset).unwrap_or(usize::MAX))
+                .collect(),
+        })
+    }
+
     /// Decodes every chunk in the serialized payload, in order.
     ///
     /// Each chunk is decompressed and its data hash computed. Chunk headers are
@@ -133,10 +190,62 @@ impl XorbReader {
     }
 }
 
+struct BoundedChunkWriter {
+    data: Vec<u8>,
+    limit: usize,
+}
+
+impl Write for BoundedChunkWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self
+            .data
+            .len()
+            .checked_add(bytes.len())
+            .is_none_or(|size| size > self.limit)
+        {
+            return Err(std::io::Error::other(
+                "decoded xorb exceeds buffer reservation",
+            ));
+        }
+        self.data
+            .try_reserve_exact(bytes.len())
+            .map_err(std::io::Error::other)?;
+        self.data.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use xet_core_structures::merklehash::MerkleHash;
     use xet_core_structures::xorb_object::{CompressionScheme, serialize_chunk};
+
+    #[test]
+    fn bounded_decode_rejects_declared_output_before_decompression() {
+        let mut payload = Vec::new();
+        serialize_chunk(&vec![7u8; 4096], &mut payload, CompressionScheme::LZ4).unwrap();
+        let reader = super::XorbReader::new(payload);
+        assert!(matches!(
+            reader.decode_chunk_data_bounded(8),
+            Err(super::XorbError::Format(_))
+        ));
+        let decoded = reader.decode_chunk_data_bounded(4096).unwrap();
+        assert_eq!(decoded.data.as_ref(), vec![7u8; 4096]);
+    }
+
+    #[test]
+    fn bounded_decode_limits_zero_length_chunk_metadata() {
+        let one = [0u8; 8];
+        let payload = one.repeat(8193);
+        assert!(matches!(
+            super::XorbReader::new(payload).decode_chunk_data_bounded(1),
+            Err(super::XorbError::InconsistentChunkOffsets)
+        ));
+    }
 
     use super::{DecodedChunk, XorbError, XorbReader};
     use crate::hash::compute_chunk_hash;

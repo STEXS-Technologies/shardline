@@ -161,15 +161,13 @@ pub(super) async fn handle_provider_webhook(
     // them at the production boundary; rename takes old+new identities in
     // canonical order so pushes to either name cannot interleave with the
     // copy/delete/state-migration sequence and two renames cannot deadlock.
-    let mut repository_guards = Vec::new();
-    for key in provider_event_lock_resources(&event) {
-        repository_guards.push(
-            state
-                .backend
-                .acquire_resource_write_lock(state.config.root_dir(), &key)
-                .await?,
-        );
-    }
+    let mut repository_guards = state
+        .backend
+        .acquire_resource_write_locks(
+            state.config.root_dir(),
+            &provider_event_lock_resources(&event),
+        )
+        .await?;
     let start = Instant::now();
     let outcome = match &state.backend {
         // Reuse the server's own Postgres record/index stores (their pool is
@@ -195,10 +193,13 @@ pub(super) async fn handle_provider_webhook(
                 .iter()
                 .map(|guard| {
                     guard
-                        .postgres_fence()
+                        .postgres_fences()
                         .ok_or(ServerError::StaleResourceFence)
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
             let connection = repository_guards
                 .first_mut()
                 .and_then(|guard| guard.postgres_connection_mut())

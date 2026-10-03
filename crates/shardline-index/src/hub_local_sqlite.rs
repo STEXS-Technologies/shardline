@@ -5,8 +5,10 @@ use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 
 use crate::{
     hub::{
-        HubFileEntry, HubRef, HubRepo, HubRepoType, HubRevision, HubStore, HubWebhook,
-        canonical_ref_name,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
+        HubRefPublicationMode, HubRefUpdateOutcome, HubRepo, HubRepoSearchOptions, HubRepoType,
+        HubRevision, HubStore, HubTreePage, HubTreePageEntry, HubTreePageOptions, HubWebhook,
+        HubWebhookCreateOutcome, canonical_ref_name, hub_tree_requires_recovery,
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
@@ -209,49 +211,62 @@ impl HubStore for LocalIndexStore {
         name_prefix: &str,
         limit: usize,
     ) -> Result<Vec<HubRepo>, Self::Error> {
+        self.search_repos_with_options(
+            repo_type,
+            name_prefix,
+            limit,
+            &HubRepoSearchOptions::default(),
+        )
+    }
+
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Self::Error> {
         let conn = open_hub_connection(self.root())?;
         let pattern = format!("{}%", escape_like(name_prefix));
-        let mut repos = Vec::new();
-        if let Some(rt) = repo_type {
-            let rt_str = rt.as_str();
-            let mut stmt = conn.prepare(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                 FROM shardline_hub_repos
-                 WHERE repo_id LIKE ?1 AND repo_type = ?2
-                 ORDER BY repo_id LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(params![pattern, rt_str, limit as i64], |row| {
-                let repo_type_str: String = row.get(1)?;
-                let parsed_repo_type = HubRepoType::parse_str(&repo_type_str)
-                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(repo_type_str.clone()))?;
-                Ok(HubRepo {
-                    repo_id: row.get(0)?,
-                    repo_type: parsed_repo_type,
-                    private: row.get::<_, i64>(2)? != 0,
-                    default_branch: row.get(3)?,
-                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?)
-                        .map_err(|e| sqlite_store_error(&e))?,
-                    updated_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                        .map_err(|e| sqlite_store_error(&e))?,
-                })
-            })?;
-            for row in rows {
-                repos.push(row?);
-            }
+        let upper = crate::hub::prefix_successor(name_prefix);
+        let upper_predicate = if upper.is_some() {
+            "repo_id < ?7"
         } else {
-            let mut stmt = conn.prepare(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                 FROM shardline_hub_repos
-                 WHERE repo_id LIKE ?1
-                 ORDER BY repo_id LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![pattern, limit as i64], |row| {
-                let repo_type_str: String = row.get(1)?;
-                let parsed_repo_type = HubRepoType::parse_str(&repo_type_str)
-                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(repo_type_str.clone()))?;
+            "?7 IS NULL"
+        };
+        let type_predicate = if repo_type.is_some() {
+            "repo_type = ?2"
+        } else {
+            "?2 IS NULL"
+        };
+        let sql = format!(
+            "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
+             FROM shardline_hub_repos
+             WHERE repo_id >= ?6 AND {upper_predicate}
+               AND repo_id LIKE ?1 ESCAPE '\\'
+               AND {type_predicate}
+               AND (?3 IS NULL OR private = 0 OR repo_id = ?3)
+               AND (?4 IS NULL OR substr(repo_id, 1, length(?4) + 1) = ?4 || '/')
+             ORDER BY {} LIMIT ?5", options.order.sql(),
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                pattern,
+                repo_type.map(HubRepoType::as_str),
+                options.caller_repo_id,
+                options.author,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                name_prefix,
+                upper
+            ],
+            |row| {
+                let rt_str: String = row.get(1)?;
+                let parsed_type = HubRepoType::parse_str(&rt_str)
+                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
                 Ok(HubRepo {
                     repo_id: row.get(0)?,
-                    repo_type: parsed_repo_type,
+                    repo_type: parsed_type,
                     private: row.get::<_, i64>(2)? != 0,
                     default_branch: row.get(3)?,
                     created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?)
@@ -259,11 +274,9 @@ impl HubStore for LocalIndexStore {
                     updated_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
                         .map_err(|e| sqlite_store_error(&e))?,
                 })
-            })?;
-            for row in rows {
-                repos.push(row?);
-            }
-        }
+            },
+        )?;
+        let repos = rows.collect::<Result<Vec<_>, _>>()?;
         verify_hub_repo_heads(self.root(), &repos)?;
         Ok(repos)
     }
@@ -276,101 +289,81 @@ impl HubStore for LocalIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error> {
-        let ref_name = canonical_ref_name(ref_name);
-        let root = self.root().to_owned();
-        let repo_id = repo_id.to_owned();
-        let parent_sha = parent_sha.map(ToOwned::to_owned);
-        let new_sha = new_sha.to_owned();
-        let ref_name = ref_name.to_owned();
-        let message = message.to_owned();
-        retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
-            let tx = conn.transaction()?;
-            let current_ref: Option<String> = tx
-                .query_row(
-                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
-                    params![repo_id, ref_name],
-                    |row| row.get(0),
-                )
-                .optional()?;
-
-            // Optimistic concurrency check
-            if let Some(parent) = parent_sha.as_deref() {
-                match current_ref.as_deref() {
-                    Some(current) if current != parent => {
-                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
-                    }
-                    None => {
-                        let parent_exists: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
-                        params![repo_id, parent],
-                        |row| row.get(0),
-                    )?;
-                        if !parent_exists {
-                            return Err(rusqlite::Error::QueryReturnedNoRows.into());
-                        }
-                    }
-                    _ => {}
-                }
+        match self.publish_hub_revision(
+            repo_id,
+            parent_sha,
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::Upsert,
+        )? {
+            HubRefCreateOutcome::Created(revision) => Ok(revision),
+            HubRefCreateOutcome::AlreadyExists | HubRefCreateOutcome::Unsupported => {
+                Err(rusqlite::Error::QueryReturnedNoRows.into())
             }
+        }
+    }
+    fn update_revision_if_current(
+        &self,
+        repo_id: &str,
+        expected_sha: &str,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        match self.publish_hub_revision(
+            repo_id,
+            Some(expected_sha),
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::UpdateOnly,
+        )? {
+            HubRefCreateOutcome::Created(revision) => Ok(HubRefUpdateOutcome::Updated(revision)),
+            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
+            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
+        }
+    }
 
-            let now = unix_now_seconds_lossy();
-
-            if ref_name == "main" {
-                tx.execute(
-                "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
-                 WHERE repo_id = ?3",
-                params![new_sha, u64_to_i64(now)?, repo_id],
-            )?;
-            }
-
-            // Insert revision
-            tx.execute(
-            "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![repo_id, ref_name, new_sha, parent_sha, message, u64_to_i64(now)?],
-        )?;
-            tx.execute(
-                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, ?2, ?3)
-             ON CONFLICT(repo_id, ref_name) DO UPDATE SET sha = excluded.sha",
-                params![repo_id, ref_name, new_sha],
-            )?;
-            let before = hub_ref_snapshot(&repo_id, &ref_name, current_ref.clone())?;
-            let after = hub_ref_snapshot(&repo_id, &ref_name, Some(new_sha.clone()))?;
-            let (stored_evidence, evidence_was_missing) =
-                current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?;
-            let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
-            if evidence_was_missing {
-                for event in evidence.events() {
-                    persist_hub_ref_evidence(&tx, event)?;
-                }
-            } else if let Some(event) = evidence.events().last() {
-                persist_hub_ref_evidence(&tx, event)?;
-            }
-
-            tx.commit()?;
-
-            Ok(HubRevision {
-                repo_id: repo_id.clone(),
-                ref_name: ref_name.clone(),
-                sha: new_sha.clone(),
-                parent_sha: parent_sha.clone(),
-                message: Some(message.clone()),
-                created_at_unix_seconds: now,
-            })
-        })
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Self::Error> {
+        self.publish_hub_revision(
+            repo_id,
+            parent_sha,
+            new_sha,
+            ref_name,
+            message,
+            HubRefPublicationMode::CreateOnly,
+        )
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
+        Ok(self
+            .list_refs_bounded(repo_id, usize::MAX)?
+            .unwrap_or_default())
+    }
+
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRef>>, Self::Error> {
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let root = self.root().to_owned();
         retry_sqlite_busy(|| {
             let mut conn = open_hub_connection_rw(&root)?;
             let tx = conn.transaction()?;
             let refs = {
                 let mut stmt = tx.prepare(
-                "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = ?1 ORDER BY ref_name",
+                "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = ?1 ORDER BY ref_name LIMIT ?2",
             )?;
-                let rows = stmt.query_map(params![repo_id], |row| {
+                let rows = stmt.query_map(params![repo_id, query_limit], |row| {
                     Ok(HubRef {
                         repo_id: row.get(0)?,
                         ref_name: row.get(1)?,
@@ -379,6 +372,9 @@ impl HubStore for LocalIndexStore {
                 })?;
                 rows.collect::<Result<Vec<_>, _>>()?
             };
+            if refs.len() > limit {
+                return Ok(None);
+            }
             let evidence_refs = refs
                 .iter()
                 .map(|reference| {
@@ -392,7 +388,7 @@ impl HubStore for LocalIndexStore {
             verify_hub_ref_evidence_batch(&tx, &evidence_refs)
                 .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
             tx.commit()?;
-            Ok(refs)
+            Ok(Some(refs))
         })
     }
 
@@ -441,12 +437,23 @@ impl HubStore for LocalIndexStore {
     }
 
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
+        Ok(self
+            .list_revisions_bounded(repo_id, usize::MAX)?
+            .unwrap_or_default())
+    }
+
+    fn list_revisions_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRevision>>, Self::Error> {
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let conn = open_hub_connection(self.root())?;
         let mut stmt = conn.prepare(
             "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
-             FROM shardline_hub_revisions WHERE repo_id = ?1 ORDER BY created_at_unix_seconds DESC, rowid DESC",
+             FROM shardline_hub_revisions WHERE repo_id = ?1 ORDER BY created_at_unix_seconds DESC, rowid DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![repo_id], |row| {
+        let rows = stmt.query_map(params![repo_id, query_limit], |row| {
             Ok(HubRevision {
                 repo_id: row.get(0)?,
                 ref_name: row.get(1)?,
@@ -461,7 +468,7 @@ impl HubStore for LocalIndexStore {
         for row in rows {
             revisions.push(row?);
         }
-        Ok(revisions)
+        Ok((revisions.len() <= limit).then_some(revisions))
     }
 
     fn resolve_revision(
@@ -520,6 +527,16 @@ impl HubStore for LocalIndexStore {
     }
 
     fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
+        if hub_tree_requires_recovery(commit_sha)
+            || (commit_sha == EMPTY_HUB_REVISION && !files.is_empty())
+        {
+            return Err(LocalIndexStoreError::HubTreeRecoveryRequired(
+                commit_sha.to_owned(),
+            ));
+        }
+        if commit_sha == EMPTY_HUB_REVISION {
+            return Ok(());
+        }
         let root = self.root().to_owned();
         let commit_sha = commit_sha.to_owned();
         let files = files.to_owned();
@@ -547,12 +564,35 @@ impl HubStore for LocalIndexStore {
     }
 
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
+        self.get_files_bounded(commit_sha, HUB_TREE_READ_CEILING)?
+            .ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(
+                    "Hub tree exceeds the 100000-entry metadata read ceiling".to_owned(),
+                )
+                .into()
+            })
+    }
+
+    fn get_files_bounded(
+        &self,
+        commit_sha: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubFileEntry>>, Self::Error> {
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        if commit_sha == EMPTY_HUB_REVISION {
+            return Ok(Some(Vec::new()));
+        }
+        if hub_tree_requires_recovery(commit_sha) {
+            return Err(LocalIndexStoreError::HubTreeRecoveryRequired(
+                commit_sha.to_owned(),
+            ));
+        }
         let conn = open_hub_connection(self.root())?;
         let mut stmt = conn.prepare(
             "SELECT path, size, sha, is_lfs FROM shardline_hub_file_entries
-             WHERE commit_sha = ?1 ORDER BY path",
+             WHERE commit_sha = ?1 ORDER BY path LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![commit_sha], |row| {
+        let rows = stmt.query_map(params![commit_sha, query_limit], |row| {
             Ok(HubFileEntry {
                 path: row.get(0)?,
                 size: i64_to_u64(row.get::<_, i64>(1)?).map_err(|e| sqlite_store_error(&e))?,
@@ -564,7 +604,120 @@ impl HubStore for LocalIndexStore {
         for row in rows {
             entries.push(row?);
         }
-        Ok(entries)
+        Ok((entries.len() <= limit).then_some(entries))
+    }
+
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<Option<HubTreePage>, Self::Error> {
+        if commit_sha == EMPTY_HUB_REVISION {
+            return Ok(Some(HubTreePage::from_entries(
+                Vec::new(),
+                options.page_limit(),
+            )));
+        }
+        if hub_tree_requires_recovery(commit_sha) {
+            return Err(LocalIndexStoreError::HubTreeRecoveryRequired(
+                commit_sha.to_owned(),
+            ));
+        }
+        let mut connection = open_hub_connection(self.root())?;
+        let transaction = connection.transaction()?;
+        let count: i64 = transaction.query_row(
+            "SELECT count(*) FROM (SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=?1 LIMIT 100001)",
+            params![commit_sha], |row| row.get(0))?;
+        if count > i64::try_from(HUB_TREE_READ_CEILING).unwrap_or(i64::MAX) {
+            return Ok(None);
+        }
+        let prefix = options.prefix();
+        let upper = (!options.path.is_empty()).then(|| format!("{}0", options.path));
+        let query_limit = i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
+        let mut entries = Vec::new();
+        if options.recursive {
+            let cursor = options
+                .cursor
+                .as_ref()
+                .map(|cursor| format!("{prefix}{cursor}"));
+            let lower = cursor.as_ref().unwrap_or(&prefix);
+            let comparison = if cursor.is_some() { ">" } else { ">=" };
+            let upper_clause = if upper.is_some() { "AND path<?3" } else { "" };
+            let cursor_clause = if cursor.is_some() {
+                "AND EXISTS(SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path=?4 AND path<>?6)"
+            } else {
+                ""
+            };
+            let sql = format!("SELECT path,size,sha,is_lfs FROM shardline_hub_file_entries
+                WHERE commit_sha=?1 AND path{comparison}?2 AND path<>?6 {upper_clause} {cursor_clause}
+                ORDER BY path LIMIT ?5");
+            let mut statement = transaction.prepare(&sql)?;
+            let rows = statement.query_map(
+                params![commit_sha, lower, upper, cursor, query_limit, prefix],
+                |row| {
+                    let full_path: String = row.get(0)?;
+                    Ok(HubTreePageEntry::File(HubFileEntry {
+                        path: full_path
+                            .strip_prefix(&prefix)
+                            .unwrap_or(&full_path)
+                            .to_owned(),
+                        size: i64_to_u64(row.get(1)?)
+                            .map_err(|error| sqlite_store_error(&error))?,
+                        sha: row.get(2)?,
+                        is_lfs: row.get::<_, i64>(3)? != 0,
+                    }))
+                },
+            )?;
+            for row in rows {
+                entries.push(row?);
+            }
+        } else {
+            let prefix_start =
+                i64::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i64::MAX);
+            let mut statement = transaction.prepare(
+                "WITH filtered AS (SELECT substr(path,?4) AS relative,size,sha,is_lfs
+                   FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path>=?2 AND (?3 IS NULL OR path<?3)),
+                 entries AS (SELECT DISTINCT 0 AS kind,substr(relative,1,instr(relative,'/')-1) AS path,
+                   NULL AS size,NULL AS sha,NULL AS is_lfs FROM filtered WHERE instr(relative,'/')>0
+                   UNION ALL SELECT 1,relative,size,sha,is_lfs FROM filtered WHERE instr(relative,'/')=0),
+                 cursor_kind AS (SELECT min(kind) AS kind FROM entries WHERE path=?5)
+                 SELECT kind,path,size,sha,is_lfs FROM entries
+                 WHERE ?5 IS NULL OR kind>(SELECT kind FROM cursor_kind)
+                    OR (kind=(SELECT kind FROM cursor_kind) AND path>?5)
+                 ORDER BY kind,path LIMIT ?6")?;
+            let rows = statement.query_map(
+                params![
+                    commit_sha,
+                    prefix,
+                    upper,
+                    prefix_start,
+                    options.cursor,
+                    query_limit
+                ],
+                |row| {
+                    let path: String = row.get(1)?;
+                    if row.get::<_, i64>(0)? == 0 {
+                        Ok(HubTreePageEntry::Directory { path })
+                    } else {
+                        Ok(HubTreePageEntry::File(HubFileEntry {
+                            path,
+                            size: i64_to_u64(row.get(2)?)
+                                .map_err(|error| sqlite_store_error(&error))?,
+                            sha: row.get(3)?,
+                            is_lfs: row.get::<_, i64>(4)? != 0,
+                        }))
+                    }
+                },
+            )?;
+            for row in rows {
+                entries.push(row?);
+            }
+        }
+        transaction.commit()?;
+        Ok(Some(HubTreePage::from_entries(
+            entries,
+            options.page_limit(),
+        )))
     }
 
     fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error> {
@@ -572,7 +725,7 @@ impl HubStore for LocalIndexStore {
         let repo_id = repo_id.to_owned();
         retry_sqlite_busy(|| {
             let mut conn = open_hub_connection_rw(&root)?;
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let ref_names = {
                 let mut statement =
                     tx.prepare("SELECT ref_name FROM shardline_hub_refs WHERE repo_id = ?1")?;
@@ -591,7 +744,7 @@ impl HubStore for LocalIndexStore {
                 )?;
             }
             tx.execute(
-                "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1)",
+                "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1) AND LENGTH(commit_sha) <> 16 AND NOT EXISTS (SELECT 1 FROM shardline_hub_revisions other WHERE other.sha = shardline_hub_file_entries.commit_sha AND other.repo_id <> ?1)",
                 params![repo_id],
             )?;
             tx.execute(
@@ -615,6 +768,47 @@ impl HubStore for LocalIndexStore {
         })
     }
 
+    fn create_webhook_bounded(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        limit: usize,
+    ) -> Result<HubWebhookCreateOutcome, Self::Error> {
+        let now = unix_now_seconds_lossy();
+        let query_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(self.root())?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let repo_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM shardline_hub_repos WHERE repo_id = ?1)",
+                params![repo_id],
+                |row| row.get(0),
+            )?;
+            if !repo_exists {
+                return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            }
+            let duplicate: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM shardline_hub_webhooks WHERE repo_id = ?1 AND url = ?2)",
+                params![repo_id, url], |row| row.get(0),
+            )?;
+            if duplicate {
+                return Ok(HubWebhookCreateOutcome::Duplicate);
+            }
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM (SELECT 1 FROM shardline_hub_webhooks WHERE repo_id = ?1 LIMIT ?2)",
+                params![repo_id, query_limit], |row| row.get(0),
+            )?;
+            if i64_to_u64(count)? >= u64::try_from(limit).unwrap_or(u64::MAX) {
+                return Ok(HubWebhookCreateOutcome::LimitReached);
+            }
+            let webhook = insert_hub_webhook(&tx, repo_id, url, events, secret, now)?;
+            tx.commit()?;
+            Ok(HubWebhookCreateOutcome::Created(webhook))
+        })
+    }
+
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -622,34 +816,7 @@ impl HubStore for LocalIndexStore {
         events: &[String],
         secret: Option<&str>,
     ) -> Result<HubWebhook, Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let now = unix_now_seconds_lossy();
-        let counter: u64 = {
-            let row: Option<u64> = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM shardline_hub_webhooks WHERE repo_id = ?1",
-                    params![repo_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            row.unwrap_or(0)
-        };
-        let id = format!("wh-{}-{}", now, counter);
-        let events_str = events.join(",");
-        conn.execute(
-            "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
-            params![id, repo_id, url, events_str, secret, u64_to_i64(now)?],
-        )?;
-        Ok(HubWebhook {
-            id,
-            repo_id: repo_id.to_owned(),
-            url: url.to_owned(),
-            events: events.to_vec(),
-            secret: secret.map(SecretString::from_secret),
-            active: true,
-            created_at_unix_seconds: now,
-        })
+        self.create_webhook_at(repo_id, url, events, secret, unix_now_seconds_lossy())
     }
 
     fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error> {
@@ -746,6 +913,162 @@ fn escape_like(value: &str) -> String {
         .replace('%', "\\%")
 }
 
+fn insert_hub_webhook(
+    conn: &Connection,
+    repo_id: &str,
+    url: &str,
+    events: &[String],
+    secret: Option<&str>,
+    now: u64,
+) -> Result<HubWebhook, LocalIndexStoreError> {
+    let events_str = events.join(",");
+    // IDs share a global primary key. Generate independent opaque values in
+    // the insertion rather than deriving uniqueness from a repository's
+    // mutable row count or the wall clock.
+    let id: String = conn.query_row(
+            "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
+             VALUES ('wh-' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, 1, ?5)
+             RETURNING id",
+            params![repo_id, url, events_str, secret, u64_to_i64(now)?],
+            |row| row.get(0),
+        )?;
+    Ok(HubWebhook {
+        id,
+        repo_id: repo_id.to_owned(),
+        url: url.to_owned(),
+        events: events.to_vec(),
+        secret: secret.map(SecretString::from_secret),
+        active: true,
+        created_at_unix_seconds: now,
+    })
+}
+
+impl LocalIndexStore {
+    fn create_webhook_at(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+        now: u64,
+    ) -> Result<HubWebhook, LocalIndexStoreError> {
+        let conn = open_hub_connection_rw(self.root())?;
+        insert_hub_webhook(&conn, repo_id, url, events, secret, now)
+    }
+    fn publish_hub_revision(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+        mode: HubRefPublicationMode,
+    ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
+        let ref_name = canonical_ref_name(ref_name);
+        let root = self.root().to_owned();
+        let repo_id = repo_id.to_owned();
+        let parent_sha = parent_sha.map(ToOwned::to_owned);
+        let new_sha = new_sha.to_owned();
+        let ref_name = ref_name.to_owned();
+        let message = message.to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current_ref: Option<String> = tx
+                .query_row(
+                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
+                    params![repo_id, ref_name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            if matches!(mode, HubRefPublicationMode::CreateOnly) && current_ref.is_some() {
+                return Ok(HubRefCreateOutcome::AlreadyExists);
+            }
+
+            // Strict updates never reinterpret a deleted ref as branch creation.
+            if matches!(mode, HubRefPublicationMode::UpdateOnly)
+                && (parent_sha.is_none() || current_ref.as_deref() != parent_sha.as_deref())
+            {
+                return Ok(HubRefCreateOutcome::AlreadyExists);
+            }
+
+            // Optimistic concurrency check
+            if let Some(parent) = parent_sha.as_deref() {
+                match current_ref.as_deref() {
+                    Some(current) if current != parent => {
+                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                    }
+                    None => {
+                        let parent_exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
+                        params![repo_id, parent],
+                        |row| row.get(0),
+                    )?;
+                        if !parent_exists {
+                            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let now = unix_now_seconds_lossy();
+
+            if ref_name == "main" {
+                tx.execute(
+                "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
+                 WHERE repo_id = ?3",
+                params![new_sha, u64_to_i64(now)?, repo_id],
+            )?;
+            }
+
+            // Insert revision
+            tx.execute(
+            "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(repo_id, sha) DO NOTHING",
+            params![repo_id, ref_name, new_sha, parent_sha, message, u64_to_i64(now)?],
+        )?;
+            tx.execute(
+                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, ?2, ?3)
+             ON CONFLICT(repo_id, ref_name) DO UPDATE SET sha = excluded.sha",
+                params![repo_id, ref_name, new_sha],
+            )?;
+            let before = hub_ref_snapshot(&repo_id, &ref_name, current_ref.clone())?;
+            let after = hub_ref_snapshot(&repo_id, &ref_name, Some(new_sha.clone()))?;
+            let (stored_evidence, evidence_was_missing) =
+                current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?;
+            let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
+            if evidence_was_missing {
+                for event in evidence.events() {
+                    persist_hub_ref_evidence(&tx, event)?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                persist_hub_ref_evidence(&tx, event)?;
+            }
+
+            let revision = tx.query_row(
+                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+                 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2",
+                params![repo_id, new_sha],
+                |row| {
+                    Ok(HubRevision {
+                        repo_id: row.get(0)?,
+                        ref_name: row.get(1)?,
+                        sha: row.get(2)?,
+                        parent_sha: row.get(3)?,
+                        message: row.get(4)?,
+                        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
+                            .map_err(|error| sqlite_store_error(&error))?,
+                    })
+                },
+            )?;
+            tx.commit()?;
+            Ok(HubRefCreateOutcome::Created(revision))
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1530,7 +1853,7 @@ mod tests {
         assert_eq!(revs.len(), 1);
         let initial_sha = revs[0].sha.clone();
 
-        // Store files at initial commit
+        // The shared initial tree must stay empty
         let files = vec![
             HubFileEntry {
                 path: "README.md".into(),
@@ -1545,13 +1868,16 @@ mod tests {
                 is_lfs: true,
             },
         ];
-        store.store_files(&initial_sha, &files).unwrap();
+        assert!(store.store_files(&initial_sha, &files).is_err());
 
         // Second commit
         let new_sha = "abc123def456";
         store
             .create_revision("org/llm", Some(&initial_sha), new_sha, "main", "add model")
             .unwrap();
+
+        store.store_files(new_sha, &files).unwrap();
+        assert_eq!(store.get_files(new_sha).unwrap(), files);
 
         // Verify HEAD updated
         let repo = store.get_repo("org/llm").unwrap().unwrap();
@@ -2190,7 +2516,7 @@ mod tests {
             .create_repo(HubRepoType::Model, "org/model", false)
             .unwrap();
 
-        // Store files for the initial commit
+        // The shared initial tree must reject nonempty entries
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
         let files = vec![HubFileEntry {
             path: "README.md".into(),
@@ -2198,7 +2524,7 @@ mod tests {
             sha: "sha_readme".into(),
             is_lfs: false,
         }];
-        store.store_files(initial_sha, &files).unwrap();
+        assert!(store.store_files(initial_sha, &files).is_err());
 
         // Create a second commit with files
         store
@@ -2231,7 +2557,7 @@ mod tests {
         // Verify everything exists before delete
         assert!(store.get_repo("org/model").unwrap().is_some());
         assert_eq!(store.list_revisions("org/model").unwrap().len(), 2);
-        assert_eq!(store.get_files(initial_sha).unwrap().len(), 1);
+        assert!(store.get_files(initial_sha).unwrap().is_empty());
         assert_eq!(store.get_files("sha2").unwrap().len(), 1);
         assert_eq!(store.list_webhooks("org/model").unwrap().len(), 1);
 
@@ -2314,5 +2640,214 @@ mod tests {
         let files = store.get_files(commit_sha).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "model.safetensors");
+    }
+    #[test]
+    fn strict_updates_reject_absent_deleted_and_moved_refs_without_revision_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(temp.path().to_owned()).unwrap();
+        let repo = "owner/strict";
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        store
+            .create_revision(repo, Some(EMPTY_HUB_REVISION), "old", "selected", "old")
+            .unwrap();
+        let before = store.list_revisions(repo).unwrap().len();
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "old", "missing-new", "missing", "missing")
+                .unwrap(),
+            HubRefUpdateOutcome::Conflict
+        ));
+        assert_eq!(store.list_revisions(repo).unwrap().len(), before);
+        store.delete_ref(repo, "selected", "old").unwrap();
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "old", "deleted-new", "selected", "deleted")
+                .unwrap(),
+            HubRefUpdateOutcome::Conflict
+        ));
+        assert!(
+            !store
+                .list_refs(repo)
+                .unwrap()
+                .iter()
+                .any(|r| r.ref_name == "selected")
+        );
+        assert_eq!(store.list_revisions(repo).unwrap().len(), before);
+        // Historical-parent branch creation remains intentional and supported.
+        store
+            .create_revision(repo, Some("old"), "moved", "selected", "branch")
+            .unwrap();
+        let before = store.list_revisions(repo).unwrap().len();
+        assert!(matches!(
+            store
+                .update_revision_if_current(
+                    repo,
+                    "old",
+                    "stale-new",
+                    "refs/heads/selected",
+                    "stale"
+                )
+                .unwrap(),
+            HubRefUpdateOutcome::Conflict
+        ));
+        assert_eq!(store.list_revisions(repo).unwrap().len(), before);
+        assert!(matches!(
+            store
+                .update_revision_if_current(repo, "moved", "new", "refs/heads/selected", "update")
+                .unwrap(),
+            HubRefUpdateOutcome::Updated(_)
+        ));
+        assert!(
+            store
+                .list_refs(repo)
+                .unwrap()
+                .iter()
+                .any(|r| r.ref_name == "selected" && r.sha == "new")
+        );
+    }
+    #[test]
+    fn webhook_ids_are_unique_across_repositories_at_the_same_second() {
+        let (_temp, store) = make_store();
+        for repo in ["owner/first", "owner/second"] {
+            store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        }
+        let first = store
+            .create_webhook_at(
+                "owner/first",
+                "https://example.com/first",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        let second = store
+            .create_webhook_at(
+                "owner/second",
+                "https://example.com/second",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.created_at_unix_seconds, 123);
+        assert_eq!(second.created_at_unix_seconds, 123);
+        assert_eq!(store.list_webhooks("owner/first").unwrap().len(), 1);
+        assert_eq!(store.list_webhooks("owner/second").unwrap().len(), 1);
+        // A webhook ID from another repository cannot mutate this binding.
+        store.delete_webhook("owner/second", &first.id).unwrap();
+        assert_eq!(store.list_webhooks("owner/first").unwrap().len(), 1);
+        assert_eq!(store.list_webhooks("owner/second").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn webhook_ids_survive_delete_and_recreate_at_the_same_second() {
+        let (_temp, store) = make_store();
+        let repo = "owner/churn";
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        let first = store
+            .create_webhook_at(
+                repo,
+                "https://example.com/first",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        let second = store
+            .create_webhook_at(
+                repo,
+                "https://example.com/second",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        store.delete_webhook(repo, &first.id).unwrap();
+        let third = store
+            .create_webhook_at(
+                repo,
+                "https://example.com/third",
+                &["push".into()],
+                None,
+                123,
+            )
+            .unwrap();
+        assert_ne!(third.id, first.id);
+        assert_ne!(third.id, second.id);
+        store.delete_webhook(repo, &first.id).unwrap();
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn webhook_ids_are_unique_for_concurrent_creations_at_the_same_second() {
+        let (_temp, store) = make_store();
+        let repo = "owner/concurrent";
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        // Spawn every worker before joining: lazy iteration would wait on the
+        // first thread while the remaining barrier participants never start.
+        #[allow(clippy::needless_collect)]
+        let workers: Vec<_> = (0..8)
+            .map(|index| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.create_webhook_at(
+                        repo,
+                        &format!("https://example.com/{index}"),
+                        &["push".into()],
+                        None,
+                        123,
+                    )
+                })
+            })
+            .collect();
+        let ids: std::collections::BTreeSet<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap().unwrap().id)
+            .collect();
+        assert_eq!(ids.len(), 8);
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn webhook_creation_preserves_legacy_ids_and_timestamp_failure_is_typed() {
+        let (_temp, store) = make_store();
+        let repo = "owner/legacy";
+        store.create_repo(HubRepoType::Model, repo, true).unwrap();
+        let conn = open_hub_connection_rw(store.root()).unwrap();
+        conn.execute("INSERT INTO shardline_hub_webhooks (id,repo_id,url,events,active,created_at_unix_seconds) VALUES ('wh-123-0',?1,'https://example.com/legacy','push',1,123)",params![repo]).unwrap();
+        let new = store
+            .create_webhook_at(repo, "https://example.com/new", &["push".into()], None, 123)
+            .unwrap();
+        assert_ne!(new.id, "wh-123-0");
+        store
+            .update_webhook_secret(repo, "wh-123-0", Some("new-secret"))
+            .unwrap();
+        let hooks = store.list_webhooks(repo).unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert!(hooks.iter().any(|hook| hook.id == "wh-123-0"
+            && hook.secret.as_ref().map(SecretString::expose_secret) == Some("new-secret")));
+        assert!(
+            store
+                .create_webhook_at(
+                    repo,
+                    "https://example.com/invalid-time",
+                    &["push".into()],
+                    None,
+                    u64::MAX
+                )
+                .is_err()
+        );
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 2);
+        store.delete_webhook(repo, "wh-123-0").unwrap();
+        assert_eq!(store.list_webhooks(repo).unwrap().len(), 1);
+    }
+    #[test]
+    fn sqlite_atomic_webhook_registration_handles_boundary_and_concurrency() {
+        let (_temp, store) = make_store();
+        crate::hub::assert_atomic_webhook_registration(&store);
     }
 }

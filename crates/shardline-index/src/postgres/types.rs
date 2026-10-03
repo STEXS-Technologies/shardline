@@ -106,6 +106,11 @@ pub enum PostgresMetadataStoreError {
     /// Postgres access failed.
     #[error("postgres metadata store operation failed")]
     Sqlx(#[source] Box<SqlxError>),
+    /// A legacy Hub tree has no trustworthy repository and complete-tree identity.
+    #[error(
+        "Hub revision {0} requires recovery from an authoritative tree; run shardline repair hub-tree --state-file PATH"
+    )]
+    HubTreeRecoveryRequired(String),
     /// JSON serialization or deserialization failed.
     #[error("postgres metadata json operation failed")]
     Json(#[from] JsonError),

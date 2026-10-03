@@ -49,11 +49,16 @@ pub(crate) async fn preupload(
         .get_files(&commit_sha)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
 
+    let existing_paths: std::collections::HashSet<&str> = existing_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+
     let result: Vec<PreuploadResult> = request
         .files
         .into_iter()
         .map(|f| PreuploadResult {
-            exists: existing_files.iter().any(|ef| ef.path == f.path),
+            exists: existing_paths.contains(f.path.as_str()),
             path: f.path,
             upload_mode: "regular".to_owned(),
             should_ignore: false,
@@ -147,8 +152,13 @@ pub(crate) async fn apply_commit(
         tracing::error!(error = %e, parent_sha, "get_files failed during commit");
         HubApiError::CasError(e.to_string())
     })?;
-    let mut files: Vec<HubFileEntry> = existing_files;
-    let mut file_hashes = Vec::new();
+    // Built-in metadata stores enforce unique paths. Apply instructions in
+    // order without scanning the entire parent tree for every replacement or
+    // deletion; canonical ordering is restored before computing identity.
+    let mut files: std::collections::HashMap<String, HubFileEntry> = existing_files
+        .into_iter()
+        .map(|file| (file.path.clone(), file))
+        .collect();
 
     for instruction in &parsed.instructions {
         match instruction {
@@ -175,48 +185,86 @@ pub(crate) async fn apply_commit(
                     .put_if_absent(&key, body, &integrity)
                     .map_err(|e| HubApiError::CasError(e.to_string()))?;
 
-                files.retain(|f| f.path != *path);
-                files.push(HubFileEntry {
-                    path: path.clone(),
-                    size,
-                    sha: sha.clone(),
-                    is_lfs: false,
-                });
-                file_hashes.push(sha);
+                files.insert(
+                    path.clone(),
+                    HubFileEntry {
+                        path: path.clone(),
+                        size,
+                        sha: sha.clone(),
+                        is_lfs: false,
+                    },
+                );
             }
             CommitInstruction::LfsPointer { path, oid, size } => {
                 commit::validate_lfs_oid(oid).map_err(|e| {
                     tracing::error!(error = %e, oid, path, "invalid LFS OID");
                     HubApiError::PathValidation(format!("invalid LFS OID: {e}"))
                 })?;
-                files.retain(|f| f.path != *path);
-                files.push(HubFileEntry {
-                    path: path.clone(),
-                    size: *size,
-                    sha: oid.clone(),
-                    is_lfs: true,
-                });
-                file_hashes.push(oid.clone());
+                files.insert(
+                    path.clone(),
+                    HubFileEntry {
+                        path: path.clone(),
+                        size: *size,
+                        sha: oid.clone(),
+                        is_lfs: true,
+                    },
+                );
             }
             CommitInstruction::Delete { path } => {
-                files.retain(|f| f.path != *path);
+                files.remove(path);
             }
         }
     }
 
-    let files_hash = {
-        let mut h = blake3::Hasher::new();
-        for fh in &file_hashes {
-            h.update(fh.as_bytes());
-        }
-        hex::encode(h.finalize().as_bytes())
-    };
-    let commit_sha =
-        shardline_index::hub::HubRepo::compute_commit_sha(parent_sha, &parsed.message, &files_hash)
-            .map_err(|e| {
-                tracing::error!(error = %e, "compute_commit_sha failed");
-                HubApiError::CasError(e.to_string())
+    let mut files: Vec<HubFileEntry> = files.into_values().collect();
+
+    // Do not acknowledge a revision that the existing metadata read ceiling
+    // would immediately make unreadable. Check the final tree so a delete/add
+    // replacement at the ceiling remains valid.
+    if files.len() > shardline_index::hub::HUB_TREE_READ_CEILING {
+        return Err(HubApiError::PathValidation(format!(
+            "Hub tree exceeds the {}-entry metadata read ceiling",
+            shardline_index::hub::HUB_TREE_READ_CEILING,
+        )));
+    }
+
+    // A Hub revision must also be representable as a Git tree. Check every
+    // ancestor against the complete final path set: adjacent sorted paths are
+    // insufficient when a sibling such as x-foo lies between x and x/a.
+    let paths: std::collections::HashSet<&str> =
+        files.iter().map(|file| file.path.as_str()).collect();
+    for file in &files {
+        for (separator, _) in file.path.match_indices('/') {
+            let ancestor = file.path.get(..separator).ok_or_else(|| {
+                HubApiError::PathValidation("invalid file path boundary".to_owned())
             })?;
+            if paths.contains(ancestor) {
+                return Err(HubApiError::PathValidation(format!(
+                    "file/directory path conflict: {ancestor} is an ancestor of {}",
+                    file.path,
+                )));
+            }
+        }
+    }
+
+    // File metadata is indexed globally by commit SHA. Bind that identity to
+    // the repository and the complete resulting tree, including paths and
+    // deletions, rather than just the contents supplied by this request.
+    // Canonical ordering and JSON field boundaries make equivalent trees
+    // stable without allowing concatenation or instruction-order collisions.
+    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    let tree: Vec<_> = files
+        .iter()
+        .map(|file| (&file.path, file.size, &file.sha, file.is_lfs))
+        .collect();
+    let identity = serde_json::to_vec(&(
+        "shardline-hub-ndjson-commit-v2",
+        repo_id,
+        parent_sha,
+        &parsed.message,
+        tree,
+    ))?;
+    let commit_sha = blake3::hash(&identity).to_hex().to_string();
 
     // HUB-008: Orphan cleanup trade-off.
     //

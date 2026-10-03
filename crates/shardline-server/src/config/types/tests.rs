@@ -2919,3 +2919,74 @@ fn validate_runtime_requirements_rejects_non_power_of_two_chunk_size() {
         Err(ServerConfigError::ChunkSizeNotPowerOfTwo)
     ));
 }
+
+#[test]
+fn runtime_chunk_size_validation_matches_supported_cdc_interval() {
+    let config = ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "http://localhost:8080".into(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure);
+    for size in [1, 2, 64, 127] {
+        assert!(matches!(
+            config
+                .clone()
+                .with_chunk_size(NonZeroUsize::new(size).unwrap())
+                .validate_runtime_requirements(),
+            Err(ServerConfigError::ChunkSizeTooSmall)
+        ));
+    }
+    for size in [(1 << 30) + 1, 1 << 31, 1usize << (usize::BITS - 1)] {
+        assert!(matches!(
+            config
+                .clone()
+                .with_chunk_size(NonZeroUsize::new(size).unwrap())
+                .validate_runtime_requirements(),
+            Err(ServerConfigError::ChunkSizeTooLarge)
+        ));
+    }
+    for size in [129, 64000] {
+        assert!(matches!(
+            config
+                .clone()
+                .with_chunk_size(NonZeroUsize::new(size).unwrap())
+                .validate_runtime_requirements(),
+            Err(ServerConfigError::ChunkSizeNotPowerOfTwo)
+        ));
+    }
+    for exponent in 7..=30 {
+        config
+            .clone()
+            .with_chunk_size(NonZeroUsize::new(1 << exponent).unwrap())
+            .validate_runtime_requirements()
+            .unwrap();
+    }
+}
+
+#[test]
+fn session_ttl_validation_checks_timestamp_representation_boundaries() {
+    let now = 1_700_000_000;
+    let latest = chrono::DateTime::<chrono::Utc>::MAX_UTC
+        .timestamp()
+        .unsigned_abs();
+    let maximum = latest - now;
+    assert!(
+        config::validate_session_ttl_at("test", NonZeroU64::new(maximum).unwrap(), now).is_ok()
+    );
+    for seconds in [maximum + 1, i64::MAX as u64, u64::MAX] {
+        assert!(
+            matches!(config::validate_session_ttl_at("test", NonZeroU64::new(seconds).unwrap(), now), Err(ServerConfigError::SessionTtlOutOfRange { name: "test", seconds: rejected, maximum: limit }) if rejected == seconds && limit == maximum)
+        );
+    }
+    assert!(matches!(
+        config::validate_session_ttl_at("test", NonZeroU64::MIN, u64::MAX),
+        Err(ServerConfigError::SessionTtlOutOfRange { maximum: 0, .. })
+    ));
+    assert!(matches!(
+        config::validate_session_ttl_at("test", NonZeroU64::MIN, latest),
+        Err(ServerConfigError::SessionTtlOutOfRange { maximum: 0, .. })
+    ));
+    assert!(config::validate_session_ttl_at("test", NonZeroU64::MIN, latest - 1).is_ok());
+}

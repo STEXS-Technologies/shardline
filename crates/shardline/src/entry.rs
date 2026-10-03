@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use serde_json::to_string_pretty;
@@ -10,22 +11,24 @@ use shardline_server::serve;
 
 use crate::{
     BenchConfig, BenchMode, CliCommand, GcScheduleInstallOptions, MINIMUM_GC_RETENTION_SECONDS,
-    install_gc_schedule, load_runtime_server_config, local_output::print_error_chain,
-    local_path::resolve_root, mint_admin_token_for_provider_from_sources, print_hold_list_summary,
-    print_hold_summary, render_completion, render_manpage, report_output, run_backup_manifest,
-    run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc, run_health_check,
-    run_hold_list, run_hold_release, run_hold_set, run_index_rebuild, run_ingest_bench,
-    run_lfs_evidence_repair, run_lifecycle_repair, run_local_db_migration, run_providerless_setup,
-    run_repair, run_storage_migration, uninstall_gc_schedule, write_output_bytes,
+    load_runtime_server_config, local_output::write_error_chain, local_path::resolve_root,
+    mint_admin_token_for_provider_from_sources, render_completion, render_manpage, report_output,
+    run_backup_manifest, run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc,
+    run_health_check, run_hold_list, run_hold_release, run_hold_set, run_index_rebuild,
+    run_ingest_bench, run_lfs_evidence_repair, run_lifecycle_repair, run_local_db_migration,
+    run_providerless_setup, run_repair, run_storage_migration, uninstall_gc_schedule,
+    write_output_bytes,
 };
 
 pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
-    tracing_subscriber::fmt()
+    // Embedders may already own the process-wide subscriber, and this public
+    // entry point can be called more than once. Keep their subscriber in place.
+    let _initialization = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .init();
+        .try_init();
 
     let args: Vec<OsString> = args.collect();
     if let Some(xet_args) = xet_args(&args) {
@@ -34,14 +37,11 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
 
     match CliCommand::parse(args) {
         Ok(CliCommand::ProviderlessSetup) => match run_providerless_setup(None) {
-            Ok(report) => {
-                report.print_summary();
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                print_error_chain(&error);
-                ExitCode::from(2)
-            }
+            Ok(report) => output_status(
+                report.write_summary(&mut io::stdout().lock()),
+                ExitCode::SUCCESS,
+            ),
+            Err(error) => error_chain_status(&error, ExitCode::from(2)),
         },
         Ok(CliCommand::Serve { role, frontends }) => match load_runtime_server_config(None) {
             Ok(config) => {
@@ -56,56 +56,40 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                             config = updated;
                         }
                         Err(error) => {
-                            print_error_chain(&error);
-                            return ExitCode::from(2);
+                            return error_chain_status(&error, ExitCode::from(2));
                         }
                     }
                 }
                 match serve(config).await {
                     Ok(()) => ExitCode::SUCCESS,
-                    Err(error) => {
-                        print_error_chain(&error);
-                        ExitCode::FAILURE
-                    }
+                    Err(error) => error_chain_status(&error, ExitCode::FAILURE),
                 }
             }
-            Err(error) => {
-                print_error_chain(&error);
-                ExitCode::from(2)
-            }
+            Err(error) => error_chain_status(&error, ExitCode::from(2)),
         },
         Ok(CliCommand::ConfigCheck) => match run_config_check_from_env().await {
-            Ok(report) => {
-                report_output::print_config_check_summary(&report);
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                print_error_chain(&error);
-                ExitCode::from(2)
-            }
+            Ok(report) => output_status(
+                report_output::write_config_check_summary(&mut io::stdout().lock(), &report),
+                ExitCode::SUCCESS,
+            ),
+            Err(error) => error_chain_status(&error, ExitCode::from(2)),
         },
         Ok(CliCommand::DbMigrate {
             database_url,
             command,
         }) => match run_db_migration(database_url.as_ref().map(|r| r.as_str()), command).await {
-            Ok(report) => {
-                report_output::print_database_migration_summary(&report);
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                print_error_chain(&error);
-                ExitCode::from(2)
-            }
+            Ok(report) => output_status(
+                report_output::write_database_migration_summary(&mut io::stdout().lock(), &report),
+                ExitCode::SUCCESS,
+            ),
+            Err(error) => error_chain_status(&error, ExitCode::from(2)),
         },
         Ok(CliCommand::DbMigrateLocalUp { root }) => match run_local_db_migration(&root) {
-            Ok(()) => {
-                println!("local SQLite migrations applied: {}", root.display());
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                print_error_chain(&error);
-                ExitCode::from(2)
-            }
+            Ok(()) => stdout_text(format_args!(
+                "local SQLite migrations applied: {}\n",
+                root.display()
+            )),
+            Err(error) => error_chain_status(&error, ExitCode::from(2)),
         },
         Ok(CliCommand::AdminToken {
             auth_provider,
@@ -131,64 +115,71 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                     repository,
                     ttl_seconds,
                 ) {
-                    Ok(token) => {
-                        println!("{token}");
-                        ExitCode::SUCCESS
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        ExitCode::from(2)
-                    }
+                    Ok(token) => stdout_text(format_args!("{token}\n")),
+                    Err(error) => report_output_error(&error),
                 }
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
+        Ok(CliCommand::RepairHubTree { root, state_file }) => {
+            match crate::run_hub_tree_repair(root.as_deref(), &state_file).await {
+                Ok(revision) => stdout_text(format_args!("recovered Hub revision: {revision}\n")),
+                Err(error) => error_chain_status(&error, ExitCode::from(2)),
+            }
+        }
         Ok(CliCommand::Fsck { root }) => match run_fsck(root.as_deref()).await {
             Ok(report) => {
                 let root = match resolve_root(root.as_deref()) {
                     Ok(path) => path,
                     Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::from(2);
+                        return report_output_error(&error);
                     }
                 };
-                report_output::print_fsck_cli_summary(&report, &root);
+                if let Err(error) =
+                    report_output::write_fsck_cli_summary(&mut io::stdout().lock(), &report, &root)
+                {
+                    return report_output_error(&error);
+                }
                 if report.is_clean() {
                     ExitCode::SUCCESS
                 } else {
-                    report_output::print_fsck_issues(&report);
+                    if let Err(error) =
+                        report_output::write_fsck_issues(&mut io::stderr().lock(), &report)
+                    {
+                        return report_output_error(&error);
+                    }
                     ExitCode::FAILURE
                 }
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::IndexRebuild { root }) => match run_index_rebuild(root.as_deref()).await {
             Ok(report) => {
                 let root = match resolve_root(root.as_deref()) {
                     Ok(path) => path,
                     Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::from(2);
+                        return report_output_error(&error);
                     }
                 };
-                report_output::print_index_rebuild_cli_summary(&report, &root);
+                if let Err(error) = report_output::write_index_rebuild_cli_summary(
+                    &mut io::stdout().lock(),
+                    &report,
+                    &root,
+                ) {
+                    return report_output_error(&error);
+                }
                 if report.is_clean() {
                     ExitCode::SUCCESS
                 } else {
-                    report_output::print_index_rebuild_issues(&report);
+                    if let Err(error) =
+                        report_output::write_index_rebuild_issues(&mut io::stderr().lock(), &report)
+                    {
+                        return report_output_error(&error);
+                    }
                     ExitCode::FAILURE
                 }
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::Repair {
             root,
@@ -198,22 +189,26 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                 let root = match resolve_root(root.as_deref()) {
                     Ok(path) => path,
                     Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::from(2);
+                        return report_output_error(&error);
                     }
                 };
-                report.print_cli_summary(&root, webhook_retention_seconds);
+                if let Err(error) = report.write_cli_summary(
+                    &mut io::stdout().lock(),
+                    &root,
+                    webhook_retention_seconds,
+                ) {
+                    return report_output_error(&error);
+                }
                 if report.index_rebuild.is_clean() && report.fsck.is_clean() {
                     ExitCode::SUCCESS
                 } else {
-                    report.print_issues();
+                    if let Err(error) = report.write_issues(&mut io::stderr().lock()) {
+                        return report_output_error(&error);
+                    }
                     ExitCode::FAILURE
                 }
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::RepairLifecycle {
             root,
@@ -223,32 +218,28 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                 let root = match resolve_root(root.as_deref()) {
                     Ok(path) => path,
                     Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::from(2);
+                        return report_output_error(&error);
                     }
                 };
-                report_output::print_lifecycle_repair_cli_summary(
-                    &report,
-                    &root,
-                    webhook_retention_seconds,
-                );
-                ExitCode::SUCCESS
+                output_status(
+                    report_output::write_lifecycle_repair_cli_summary(
+                        &mut io::stdout().lock(),
+                        &report,
+                        &root,
+                        webhook_retention_seconds,
+                    ),
+                    ExitCode::SUCCESS,
+                )
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::RepairLfsEvidence { root, state_file }) => {
             match run_lfs_evidence_repair(root.as_deref(), &state_file) {
-                Ok(()) => {
-                    println!("lfs evidence repair completed: {}", state_file.display());
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    print_error_chain(&error);
-                    ExitCode::from(2)
-                }
+                Ok(()) => stdout_text(format_args!(
+                    "lfs evidence repair completed: {}\n",
+                    state_file.display()
+                )),
+                Err(error) => error_chain_status(&error, ExitCode::from(2)),
             }
         }
         Ok(CliCommand::BackupManifest { root, output }) => {
@@ -257,17 +248,20 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                     let root = match resolve_root(root.as_deref()) {
                         Ok(path) => path,
                         Err(error) => {
-                            eprintln!("{error}");
-                            return ExitCode::from(2);
+                            return report_output_error(&error);
                         }
                     };
-                    report_output::print_backup_manifest_cli_summary(&report, &root, &output);
+                    if let Err(error) = report_output::write_backup_manifest_cli_summary(
+                        &mut io::stdout().lock(),
+                        &report,
+                        &root,
+                        &output,
+                    ) {
+                        return report_output_error(&error);
+                    }
                     ExitCode::SUCCESS
                 }
-                Err(error) => {
-                    eprintln!("{error}");
-                    ExitCode::from(2)
-                }
+                Err(error) => report_output_error(&error),
             }
         }
         Ok(CliCommand::StorageMigrate {
@@ -285,14 +279,11 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             prefix,
             dry_run,
         ) {
-            Ok(report) => {
-                report_output::print_storage_migration_summary(&report);
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                print_error_chain(&error);
-                ExitCode::from(2)
-            }
+            Ok(report) => output_status(
+                report_output::write_storage_migration_summary(&mut io::stdout().lock(), &report),
+                ExitCode::SUCCESS,
+            ),
+            Err(error) => error_chain_status(&error, ExitCode::from(2)),
         },
         Ok(CliCommand::Gc {
             root,
@@ -317,25 +308,24 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                     let root = match resolve_root(root.as_deref()) {
                         Ok(path) => path,
                         Err(error) => {
-                            eprintln!("{error}");
-                            return ExitCode::from(2);
+                            return report_output_error(&error);
                         }
                     };
-                    report_output::print_local_gc_cli_summary(
-                        &report,
-                        gc_mode_name(mark, sweep),
-                        &root,
-                        retention_seconds,
-                        mark,
-                        retention_report.as_deref(),
-                        orphan_inventory.as_deref(),
-                    );
-                    ExitCode::SUCCESS
+                    output_status(
+                        report_output::write_local_gc_cli_summary(
+                            &mut io::stdout().lock(),
+                            &report,
+                            gc_mode_name(mark, sweep),
+                            &root,
+                            retention_seconds,
+                            mark,
+                            retention_report.as_deref(),
+                            orphan_inventory.as_deref(),
+                        ),
+                        ExitCode::SUCCESS,
+                    )
                 }
-                Err(error) => {
-                    eprintln!("{error}");
-                    ExitCode::from(2)
-                }
+                Err(error) => report_output_error(&error),
             }
         }
         Ok(CliCommand::GcScheduleInstall {
@@ -349,39 +339,36 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             user,
             group,
             dry_run,
-        }) => match install_gc_schedule(&GcScheduleInstallOptions {
-            output_dir,
-            unit_prefix,
-            calendar,
-            retention_seconds,
-            binary_path,
-            env_file,
-            working_directory,
-            user,
-            group,
-            dry_run,
-        }) {
-            Ok(report) => {
-                report.print_summary();
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+        }) => match crate::gc_schedule::install_gc_schedule_with_writer(
+            &mut io::stdout().lock(),
+            &GcScheduleInstallOptions {
+                output_dir,
+                unit_prefix,
+                calendar,
+                retention_seconds,
+                binary_path,
+                env_file,
+                working_directory,
+                user,
+                group,
+                dry_run,
+            },
+        ) {
+            Ok(report) => output_status(
+                report.write_summary(&mut io::stdout().lock()),
+                ExitCode::SUCCESS,
+            ),
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::GcScheduleUninstall {
             output_dir,
             unit_prefix,
         }) => match uninstall_gc_schedule(&output_dir, &unit_prefix) {
-            Ok(report) => {
-                report.print_summary();
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Ok(report) => output_status(
+                report.write_summary(&mut io::stdout().lock()),
+                ExitCode::SUCCESS,
+            ),
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::HoldSet {
             root,
@@ -393,18 +380,17 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                 let root = match resolve_root(root.as_deref()) {
                     Ok(path) => path,
                     Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::from(2);
+                        return report_output_error(&error);
                     }
                 };
-                println!("root: {}", root.display());
-                print_hold_summary(&hold);
-                ExitCode::SUCCESS
+                let mut stdout = io::stdout().lock();
+                output_status(
+                    writeln!(stdout, "root: {}", root.display())
+                        .and_then(|()| crate::hold::write_hold_summary(&mut stdout, &hold)),
+                    ExitCode::SUCCESS,
+                )
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::HoldList { root, active_only }) => {
             match run_hold_list(root.as_deref(), active_only).await {
@@ -412,17 +398,20 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                     let root = match resolve_root(root.as_deref()) {
                         Ok(path) => path,
                         Err(error) => {
-                            eprintln!("{error}");
-                            return ExitCode::from(2);
+                            return report_output_error(&error);
                         }
                     };
-                    print_hold_list_summary(&root, active_only, &holds);
-                    ExitCode::SUCCESS
+                    output_status(
+                        crate::hold::write_hold_list_summary(
+                            &mut io::stdout().lock(),
+                            &root,
+                            active_only,
+                            &holds,
+                        ),
+                        ExitCode::SUCCESS,
+                    )
                 }
-                Err(error) => {
-                    eprintln!("{error}");
-                    ExitCode::from(2)
-                }
+                Err(error) => report_output_error(&error),
             }
         }
         Ok(CliCommand::HoldRelease { root, object_key }) => {
@@ -431,19 +420,15 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                     let root = match resolve_root(root.as_deref()) {
                         Ok(path) => path,
                         Err(error) => {
-                            eprintln!("{error}");
-                            return ExitCode::from(2);
+                            return report_output_error(&error);
                         }
                     };
-                    println!("root: {}", root.display());
-                    println!("object_key: {object_key}");
-                    println!("released: {released}");
-                    ExitCode::SUCCESS
+                    stdout_text(format_args!(
+                        "root: {}\nobject_key: {object_key}\nreleased: {released}\n",
+                        root.display()
+                    ))
                 }
-                Err(error) => {
-                    eprintln!("{error}");
-                    ExitCode::from(2)
-                }
+                Err(error) => report_output_error(&error),
             }
         }
         Ok(CliCommand::Bench {
@@ -461,8 +446,7 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         }) => match mode {
             BenchMode::EndToEnd => {
                 let Some(storage_dir) = storage_dir.as_deref() else {
-                    eprintln!("missing argument: --storage-dir");
-                    return ExitCode::from(2);
+                    return report_output_error(&"missing argument: --storage-dir");
                 };
                 let config = BenchConfig {
                     deployment_target,
@@ -478,24 +462,17 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                     Ok(report) => {
                         if json {
                             match to_string_pretty(&report) {
-                                Ok(value) => {
-                                    println!("{value}");
-                                    ExitCode::SUCCESS
-                                }
-                                Err(error) => {
-                                    eprintln!("{error}");
-                                    ExitCode::from(2)
-                                }
+                                Ok(value) => stdout_text(format_args!("{value}\n")),
+                                Err(error) => report_output_error(&error),
                             }
                         } else {
-                            report.print_summary();
-                            ExitCode::SUCCESS
+                            output_status(
+                                report.write_summary(&mut io::stdout().lock()),
+                                ExitCode::SUCCESS,
+                            )
                         }
                     }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        ExitCode::from(2)
-                    }
+                    Err(error) => report_output_error(&error),
                 }
             }
             BenchMode::Ingest => {
@@ -513,87 +490,87 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                     Ok(report) => {
                         if json {
                             match to_string_pretty(&report) {
-                                Ok(value) => {
-                                    println!("{value}");
-                                    ExitCode::SUCCESS
-                                }
-                                Err(error) => {
-                                    eprintln!("{error}");
-                                    ExitCode::from(2)
-                                }
+                                Ok(value) => stdout_text(format_args!("{value}\n")),
+                                Err(error) => report_output_error(&error),
                             }
                         } else {
-                            report.print_summary();
-                            ExitCode::SUCCESS
+                            output_status(
+                                report.write_summary(&mut io::stdout().lock()),
+                                ExitCode::SUCCESS,
+                            )
                         }
                     }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        ExitCode::from(2)
-                    }
+                    Err(error) => report_output_error(&error),
                 }
             }
         },
         Ok(CliCommand::Health { server_url }) => match run_health_check(&server_url).await {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::Completion { shell, output }) => match render_completion(shell) {
             Ok(rendered) => output.map_or_else(
-                || {
-                    print!("{rendered}");
-                    ExitCode::SUCCESS
-                },
+                || stdout_text(format_args!("{rendered}")),
                 |path| match write_output_bytes(&path, rendered.as_bytes(), false) {
-                    Ok(()) => {
-                        println!("output: {}", path.display());
-                        ExitCode::SUCCESS
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        ExitCode::from(2)
-                    }
+                    Ok(()) => stdout_text(format_args!("output: {}\n", path.display())),
+                    Err(error) => report_output_error(&error),
                 },
             ),
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::Manpage { output }) => match render_manpage() {
             Ok(rendered) => output.map_or_else(
-                || {
-                    print!("{rendered}");
-                    ExitCode::SUCCESS
-                },
+                || stdout_text(format_args!("{rendered}")),
                 |path| match write_output_bytes(&path, rendered.as_bytes(), false) {
-                    Ok(()) => {
-                        println!("output: {}", path.display());
-                        ExitCode::SUCCESS
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        ExitCode::from(2)
-                    }
+                    Ok(()) => stdout_text(format_args!("output: {}\n", path.display())),
+                    Err(error) => report_output_error(&error),
                 },
             ),
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
-        Err(error) if error.is_help() => {
-            print!("{error}");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint!("{error}");
-            ExitCode::from(2)
-        }
+        Err(error) if error.is_help() => stdout_text(format_args!("{error}")),
+        Err(error) => diagnostic_text(format_args!("{error}"), ExitCode::from(2)),
     }
+}
+
+fn stdout_text(arguments: std::fmt::Arguments<'_>) -> ExitCode {
+    let mut stdout = io::stdout().lock();
+    output_status(write_text(&mut stdout, arguments), ExitCode::SUCCESS)
+}
+
+fn write_text(
+    writer: &mut (impl Write + ?Sized),
+    arguments: std::fmt::Arguments<'_>,
+) -> io::Result<()> {
+    writer.write_fmt(arguments)?;
+    writer.flush()
+}
+
+fn output_status(result: io::Result<()>, success: ExitCode) -> ExitCode {
+    match result {
+        Ok(()) => success,
+        Err(error) => report_output_error(&error),
+    }
+}
+
+fn diagnostic_text(arguments: std::fmt::Arguments<'_>, status: ExitCode) -> ExitCode {
+    let mut stderr = io::stderr().lock();
+    diagnostic_status(write_text(&mut stderr, arguments), status)
+}
+
+fn diagnostic_status(result: io::Result<()>, status: ExitCode) -> ExitCode {
+    match result {
+        Ok(()) => status,
+        Err(_write_error) => ExitCode::from(2),
+    }
+}
+
+fn error_chain_status(error: &dyn std::error::Error, status: ExitCode) -> ExitCode {
+    diagnostic_status(write_error_chain(&mut io::stderr().lock(), error), status)
+}
+
+fn report_output_error(error: &impl std::fmt::Display) -> ExitCode {
+    diagnostic_text(format_args!("{error}\n"), ExitCode::from(2))
 }
 
 const fn gc_mode_name(mark: bool, sweep: bool) -> &'static str {
@@ -671,5 +648,62 @@ mod tests {
     #[test]
     fn gc_mode_name_mark_and_sweep() {
         assert_eq!(gc_mode_name(true, true), "mark-and-sweep");
+    }
+    struct FailingTextWriter {
+        fail_write: bool,
+        error_kind: std::io::ErrorKind,
+        bytes: Vec<u8>,
+    }
+
+    impl std::io::Write for FailingTextWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                return Err(std::io::Error::from(self.error_kind));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(self.error_kind))
+        }
+    }
+
+    #[test]
+    fn text_output_propagates_write_and_delayed_flush_errors_including_broken_pipe() {
+        for error_kind in [
+            std::io::ErrorKind::StorageFull,
+            std::io::ErrorKind::BrokenPipe,
+        ] {
+            for fail_write in [true, false] {
+                let mut writer = FailingTextWriter {
+                    fail_write,
+                    error_kind,
+                    bytes: Vec::new(),
+                };
+                let error =
+                    super::write_text(&mut writer, format_args!("help text\n")).unwrap_err();
+                assert_eq!(error.kind(), error_kind);
+                assert_eq!(writer.bytes.is_empty(), fail_write);
+                assert_eq!(
+                    super::diagnostic_status(Err(error), std::process::ExitCode::FAILURE),
+                    std::process::ExitCode::from(2)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_status_preserves_semantic_exit_codes_when_output_succeeds() {
+        for status in [
+            std::process::ExitCode::SUCCESS,
+            std::process::ExitCode::FAILURE,
+            std::process::ExitCode::from(2),
+        ] {
+            assert_eq!(super::diagnostic_status(Ok(()), status), status);
+        }
+        let mut output = Vec::new();
+        super::write_text(&mut output, format_args!("help text without extra newline")).unwrap();
+        assert_eq!(output, b"help text without extra newline");
     }
 }

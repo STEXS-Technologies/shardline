@@ -155,7 +155,8 @@ pub(crate) async fn materialize_object_to_file(
 
 /// Builds a sequential reader over durable S3-resumable parts without a
 /// pod-local assembly file. The database-fenced part descriptors remain the
-/// source of truth; each ranged read is bounded to its recorded length.
+/// source of truth; each ranged read is bounded to its recorded length and
+/// checked against the content digest in its immutable staging key.
 ///
 /// Local deployments return `None` so their filesystem-backed staging path is
 /// preserved. The caller must retain its completion/session guards while the
@@ -168,28 +169,108 @@ pub(crate) async fn s3_resumable_parts_reader(
         return Ok(None);
     };
     let store = store.clone();
-    let ranges = parts
-        .iter()
-        .filter(|part| part.size_bytes() > 0)
-        .map(|part| {
-            let key =
-                ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
-            let end = part
-                .size_bytes()
-                .checked_sub(1)
-                .ok_or(ServerError::Overflow)?;
-            let range = ByteRange::new(0, end).map_err(|_error| ServerError::Overflow)?;
-            Ok((key, range))
-        })
-        .collect::<Result<Vec<_>, ServerError>>()?;
-    let stream = stream::iter(ranges)
-        .then(move |(key, range)| {
+    let parts = parts.to_vec();
+    let readers = stream::iter(parts)
+        .then(move |part| {
             let store = store.clone();
-            async move { store.stream_range(&key, range).await }
+            async move {
+                let key = ObjectKey::parse(part.staging_key())
+                    .map_err(|_error| ServerError::InvalidPath)?;
+                let reader = if part.size_bytes() == 0 {
+                    RequestBodyReader::from_bytes(Bytes::new())
+                } else {
+                    let end = part
+                        .size_bytes()
+                        .checked_sub(1)
+                        .ok_or(ServerError::Overflow)?;
+                    let range = ByteRange::new(0, end).map_err(|_error| ServerError::Overflow)?;
+                    RequestBodyReader::from_stream(
+                        store
+                            .stream_range(&key, range)
+                            .await?
+                            .map_err(ServerError::from),
+                    )
+                };
+                verified_s3_part_stream(reader, &part)
+            }
         })
-        .try_flatten()
-        .map_err(ServerError::from);
-    Ok(Some(RequestBodyReader::from_stream(stream)))
+        .try_flatten();
+    Ok(Some(RequestBodyReader::from_stream(readers)))
+}
+
+/// Validates each durable S3 part while consuming its materialized file. Hash
+/// failures reach the ingestor before it can publish any object metadata.
+pub(crate) fn local_s3_resumable_parts_reader(
+    files: Vec<tokio::fs::File>,
+    parts: &[ResumableSessionPart],
+    chunk_size: usize,
+) -> Result<RequestBodyReader, ServerError> {
+    if files.len() != parts.len() {
+        return Err(ServerError::InvalidPath);
+    }
+    let streams = stream::iter(files.into_iter().zip(parts.to_vec()))
+        .map(move |(file, part)| {
+            verified_s3_part_stream(
+                RequestBodyReader::from_reader_chain(vec![file], chunk_size),
+                &part,
+            )
+        })
+        .try_flatten();
+    Ok(RequestBodyReader::from_stream(streams))
+}
+
+// Verification is per part, including EOF, rather than over the concatenation:
+// a corrupt stored part must not become a newly acknowledged object with a new
+// content hash. Only one transport chunk and one hasher are retained at a time.
+fn verified_s3_part_stream(
+    reader: RequestBodyReader,
+    part: &ResumableSessionPart,
+) -> Result<
+    impl futures_util::Stream<Item = Result<Bytes, ServerError>> + Send + 'static + use<>,
+    ServerError,
+> {
+    let digest = part
+        .staging_key()
+        .rsplit('/')
+        .next()
+        .ok_or(ServerError::ObjectStore(
+            ObjectStoreError::StoredHashMismatch,
+        ))?;
+    let expected_hash = ShardlineHash::parse_hex(digest)
+        .map_err(|_error| ServerError::ObjectStore(ObjectStoreError::StoredHashMismatch))?;
+    let expected_length = part.size_bytes();
+    Ok(stream::try_unfold(
+        (reader, blake3::Hasher::new(), 0_u64),
+        move |(mut reader, mut hasher, mut length)| async move {
+            match reader.next_bytes().await? {
+                Some(bytes) => {
+                    length = length
+                        .checked_add(u64::try_from(bytes.len())?)
+                        .ok_or(ServerError::Overflow)?;
+                    if length > expected_length {
+                        return Err(ServerError::ObjectStore(
+                            ObjectStoreError::StoredLengthMismatch,
+                        ));
+                    }
+                    hasher.update(&bytes);
+                    Ok(Some((bytes, (reader, hasher, length))))
+                }
+                None => {
+                    if length != expected_length {
+                        return Err(ServerError::ObjectStore(
+                            ObjectStoreError::StoredLengthMismatch,
+                        ));
+                    }
+                    if ShardlineHash::from_bytes(*hasher.finalize().as_bytes()) != expected_hash {
+                        return Err(ServerError::ObjectStore(
+                            ObjectStoreError::StoredHashMismatch,
+                        ));
+                    }
+                    Ok(None)
+                }
+            }
+        },
+    ))
 }
 
 /// Streams durable LFS PATCH ranges directly from S3, including zero-filled
@@ -754,6 +835,196 @@ mod tests {
     use crate::chunk_store::chunk_object_key;
     use crate::error::ObjectStoreError;
     use crate::object_store::ServerObjectStore;
+
+    #[tokio::test]
+    async fn durable_s3_parts_reject_same_length_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(root.path()).unwrap();
+        let expected = b"original";
+        let key = ObjectKey::parse(&format!(
+            "staging/resumable/s3/upload/1/{}",
+            blake3::hash(expected).to_hex()
+        ))
+        .unwrap();
+        let path = root.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"tampered").unwrap();
+        let destination = root.path().join("assembled-part");
+        super::materialize_object_to_file(&store, &key, 8, &destination)
+            .await
+            .unwrap();
+        let file = tokio::fs::File::open(destination).await.unwrap();
+        let part = shardline_index::ResumableSessionPart::new(
+            std::num::NonZeroU64::MIN,
+            std::num::NonZeroU64::MIN,
+            key.as_str().to_owned(),
+            8,
+            None,
+        );
+        let mut reader = super::local_s3_resumable_parts_reader(vec![file], &[part], 3).unwrap();
+        let mut outcome = Ok(());
+        loop {
+            match reader.next_bytes().await {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(error) => {
+                    outcome = Err(error);
+                    break;
+                }
+            }
+        }
+        assert!(matches!(
+            outcome,
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredHashMismatch
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_s3_remote_parts_verify_digest_before_successful_eof() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mock = MockServer::start().await;
+        let config =
+            shardline_storage::S3ObjectStoreConfig::new("bucket".into(), "us-east-1".into())
+                .with_endpoint(Some(mock.uri()))
+                .with_allow_http(true)
+                .with_credentials(
+                    Some(shardline_protocol::SecretString::new("key".into())),
+                    Some(shardline_protocol::SecretString::new("secret".into())),
+                    None,
+                );
+        let store = ServerObjectStore::S3(shardline_storage::S3ObjectStore::new(config).unwrap());
+        let key = format!(
+            "staging/resumable/s3/upload/1/{}",
+            blake3::hash(b"original").to_hex()
+        );
+        Mock::given(method("GET"))
+            .and(path(format!("/bucket/{key}")))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-7/8")
+                    .set_body_bytes(b"tampered".to_vec()),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let part = shardline_index::ResumableSessionPart::new(
+            std::num::NonZeroU64::MIN,
+            std::num::NonZeroU64::MIN,
+            key,
+            8,
+            None,
+        );
+        let mut reader = super::s3_resumable_parts_reader(&store, &[part])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reader.next_bytes().await.unwrap().unwrap().as_ref(),
+            b"tampered"
+        );
+        assert!(matches!(
+            reader.next_bytes().await,
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredHashMismatch
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_s3_part_verification_checks_valid_empty_and_short_parts() {
+        use crate::upload_ingest::RequestBodyReader;
+        use futures_util::StreamExt;
+        let part = |bytes: &[u8], size| {
+            shardline_index::ResumableSessionPart::new(
+                std::num::NonZeroU64::MIN,
+                std::num::NonZeroU64::MIN,
+                format!(
+                    "staging/resumable/s3/upload/1/{}",
+                    blake3::hash(bytes).to_hex()
+                ),
+                size,
+                None,
+            )
+        };
+        for bytes in [b"".as_slice(), b"correct".as_slice()] {
+            let mut stream = Box::pin(
+                super::verified_s3_part_stream(
+                    RequestBodyReader::from_bytes(bytes::Bytes::copy_from_slice(bytes)),
+                    &part(bytes, bytes.len() as u64),
+                )
+                .unwrap(),
+            );
+            let mut output = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                output.extend_from_slice(&chunk.unwrap());
+            }
+            assert_eq!(output, bytes);
+        }
+        let mut stream = Box::pin(
+            super::verified_s3_part_stream(
+                RequestBodyReader::from_bytes(bytes::Bytes::new()),
+                &part(b"nonempty", 0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(stream.next().await.unwrap().unwrap(), bytes::Bytes::new());
+        assert!(matches!(
+            stream.next().await.unwrap(),
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredHashMismatch
+            ))
+        ));
+        let mut stream = Box::pin(
+            super::verified_s3_part_stream(
+                RequestBodyReader::from_bytes(bytes::Bytes::from_static(b"short")),
+                &part(b"short", 6),
+            )
+            .unwrap(),
+        );
+        assert!(stream.next().await.unwrap().is_ok());
+        assert!(matches!(
+            stream.next().await.unwrap(),
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_s3_local_parts_preserve_order_across_verified_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        let mut parts = Vec::new();
+        for (index, bytes) in [b"first".as_slice(), b"".as_slice(), b"last".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let path = root.path().join(index.to_string());
+            tokio::fs::write(&path, bytes).await.unwrap();
+            files.push(tokio::fs::File::open(path).await.unwrap());
+            parts.push(shardline_index::ResumableSessionPart::new(
+                std::num::NonZeroU64::new(index as u64 + 1).unwrap(),
+                std::num::NonZeroU64::MIN,
+                format!(
+                    "staging/resumable/s3/upload/{index}/{}",
+                    blake3::hash(bytes).to_hex()
+                ),
+                bytes.len() as u64,
+                None,
+            ));
+        }
+        let mut reader = super::local_s3_resumable_parts_reader(files, &parts, 2).unwrap();
+        let mut output = Vec::new();
+        while let Some(bytes) = reader.next_bytes().await.unwrap() {
+            output.extend_from_slice(&bytes);
+        }
+        assert_eq!(output, b"firstlast");
+    }
 
     #[test]
     fn local_object_read_rejects_growth_after_length_validation_without_retaining_growth_bytes() {

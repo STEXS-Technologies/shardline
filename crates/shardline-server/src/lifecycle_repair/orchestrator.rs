@@ -36,6 +36,7 @@ pub async fn run_lifecycle_repair(
     config: ServerConfig,
     options: LifecycleRepairOptions,
 ) -> Result<LifecycleRepairReport, ServerError> {
+    let _barrier = crate::acquire_metadata_write_barrier(&config).await?;
     let object_store = object_store_from_config(&config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
@@ -74,6 +75,7 @@ pub async fn run_local_lifecycle_repair(
     root: PathBuf,
     options: LifecycleRepairOptions,
 ) -> Result<LifecycleRepairReport, ServerError> {
+    let _barrier = crate::maintenance_barrier::acquire_local_shared(&root).await?;
     let object_store = ServerObjectStore::local(root.join("chunks"))?;
     let index_store = LocalIndexStore::open(root.clone());
     let record_store = LocalRecordStore::open(root);
@@ -166,7 +168,7 @@ where
         match classify_retention_hold_repair_action(
             hold.release_after_unix_seconds(),
             hold.held_at_unix_seconds(),
-            object_store.metadata(hold.object_key())?.is_some(),
+            true, // Hold validity is independent of current object existence.
             now_unix_seconds,
         ) {
             RetentionHoldRepairAction::Keep => {

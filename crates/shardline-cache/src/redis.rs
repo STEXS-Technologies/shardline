@@ -2,6 +2,7 @@ use std::{
     fmt,
     future::Future,
     num::NonZeroU64,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -91,6 +92,7 @@ impl fmt::Debug for RedisTlsConfig {
 /// Redis-backed reconstruction cache adapter.
 pub struct RedisReconstructionCache {
     client: redis::Client,
+    connection: Arc<tokio::sync::OnceCell<redis::aio::ConnectionManager>>,
     ttl_seconds: NonZeroU64,
     operation_timeout: Duration,
 }
@@ -99,6 +101,7 @@ impl Clone for RedisReconstructionCache {
     fn clone(&self) -> Self {
         Self {
             client: self.client.clone(),
+            connection: Arc::clone(&self.connection),
             ttl_seconds: self.ttl_seconds,
             operation_timeout: self.operation_timeout,
         }
@@ -121,7 +124,7 @@ impl RedisReconstructionCache {
     ///
     /// # Errors
     ///
-    /// Returns [`ReconstructionCacheError`] when the URL is empty or invalid.
+    /// Returns [`ReconstructionCacheError`] when the URL is empty or invalid, or the TTL exceeds Redis's expiration range.
     pub fn new(redis_url: &str, ttl_seconds: NonZeroU64) -> Result<Self, ReconstructionCacheError> {
         Self::new_with_tls_and_timeout(
             redis_url,
@@ -139,7 +142,7 @@ impl RedisReconstructionCache {
     ///
     /// # Errors
     ///
-    /// Returns [`ReconstructionCacheError`] when the URL or TLS material is invalid.
+    /// Returns [`ReconstructionCacheError`] when the URL or TLS material is invalid, or the TTL exceeds Redis's expiration range.
     pub fn new_with_tls(
         redis_url: &str,
         ttl_seconds: NonZeroU64,
@@ -162,7 +165,7 @@ impl RedisReconstructionCache {
     /// # Errors
     ///
     /// Returns [`ReconstructionCacheError`] when the URL or TLS material is invalid or
-    /// when `operation_timeout` is zero.
+    /// when `operation_timeout` is zero or the TTL exceeds Redis's expiration range.
     pub fn new_with_tls_and_timeout(
         redis_url: &str,
         ttl_seconds: NonZeroU64,
@@ -172,6 +175,7 @@ impl RedisReconstructionCache {
         if redis_url.trim().is_empty() {
             return Err(ReconstructionCacheError::EmptyRedisUrl);
         }
+        validate_expiration(ttl_seconds, 0, 0)?;
         if operation_timeout.is_zero() {
             return Err(ReconstructionCacheError::InvalidRedisOperationTimeout);
         }
@@ -188,19 +192,28 @@ impl RedisReconstructionCache {
 
         Ok(Self {
             client,
+            connection: Arc::new(tokio::sync::OnceCell::new()),
             ttl_seconds,
             operation_timeout,
         })
     }
 
-    /// Returns a new multiplexed async connection from the client pool.
-    ///
-    /// The underlying `redis::Client` manages connection pooling internally,
-    /// so this is cheap to call per-operation.
+    /// Reuses a lazily initialized connection manager shared by adapter clones.
+    /// The manager reconnects after transport failures; outer operation bounds
+    /// also cover initialization and waiting for a reconnect.
     async fn get_connection(
         &self,
-    ) -> Result<redis::aio::MultiplexedConnection, ReconstructionCacheError> {
-        Ok(self.client.get_multiplexed_async_connection().await?)
+    ) -> Result<redis::aio::ConnectionManager, ReconstructionCacheError> {
+        let connection = self
+            .connection
+            .get_or_try_init(|| async {
+                let config = redis::aio::ConnectionManagerConfig::new()
+                    .set_connection_timeout(Some(self.operation_timeout))
+                    .set_response_timeout(Some(self.operation_timeout));
+                self.client.get_connection_manager_with_config(config).await
+            })
+            .await?;
+        Ok(connection.clone())
     }
 
     async fn with_operation_timeout<T, Operation>(
@@ -252,7 +265,7 @@ impl RedisReconstructionCache {
     }
 
     async fn compare_delete_loading(
-        connection: &mut redis::aio::MultiplexedConnection,
+        connection: &mut redis::aio::ConnectionManager,
         loading_key: &str,
         token: &str,
     ) -> Result<bool, ReconstructionCacheError> {
@@ -280,6 +293,9 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
             self.with_operation_timeout(async {
                 let mut connection = self.get_connection().await?;
                 let _pong: String = redis::cmd("PING").query_async(&mut connection).await?;
+                let (seconds, micros): (u64, u64) =
+                    redis::cmd("TIME").query_async(&mut connection).await?;
+                validate_expiration(self.ttl_seconds, seconds, micros)?;
                 Ok(())
             })
             .await
@@ -364,8 +380,9 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
                 let mut connection = self.get_connection().await?;
                 let ttl_seconds = self.ttl_seconds.get();
                 let _: () = connection
-                    .set_ex(Self::redis_key(key), payload.to_vec(), ttl_seconds)
-                    .await?;
+                    .set_ex(Self::redis_key(key), payload, ttl_seconds)
+                    .await
+                    .map_err(expiration_error)?;
                 Ok(())
             })
             .await
@@ -380,7 +397,7 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
     ) -> ReconstructionCacheFuture<'operation, ()> {
         Box::pin(async move {
             let Some(token) = reservation.owner_token() else {
-                return self.put(key, payload).await;
+                return Err(ReconstructionCacheError::LostLoadingReservation);
             };
             let redis_key = Self::redis_key(key);
             let loading_key = Self::loading_key(&redis_key);
@@ -398,7 +415,8 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
                 .arg(payload)
                 .arg(ttl_seconds)
                 .invoke_async(&mut connection)
-                .await?;
+                .await
+                .map_err(expiration_error)?;
                 if published == 0 {
                     return Err(ReconstructionCacheError::LostLoadingReservation);
                 }
@@ -430,7 +448,7 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         Box::pin(async move {
             let redis_key = Self::redis_key(key);
             let Some(token) = reservation.owner_token() else {
-                return self.delete(key).await;
+                return Ok(false);
             };
             let loading_key = Self::loading_key(&redis_key);
             self.with_operation_timeout(async {
@@ -489,12 +507,12 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         };
         let redis_key = Self::redis_key(key);
         let loading_key = Self::loading_key(&redis_key);
-        let client = self.client.clone();
+        let cache = self.clone();
         let operation_timeout = self.operation_timeout;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let release = async {
-                    let mut connection = client.get_multiplexed_async_connection().await?;
+                    let mut connection = cache.get_connection().await?;
                     let _deleted = RedisReconstructionCache::compare_delete_loading(
                         &mut connection,
                         &loading_key,
@@ -506,6 +524,35 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
                 let _ignored = tokio::time::timeout(operation_timeout, release).await;
             });
         }
+    }
+}
+
+fn validate_expiration(
+    ttl: NonZeroU64,
+    server_seconds: u64,
+    server_micros: u64,
+) -> Result<(), ReconstructionCacheError> {
+    let expiration_ms = u128::from(ttl.get())
+        .saturating_mul(1_000)
+        .saturating_add(u128::from(server_seconds).saturating_mul(1_000))
+        .saturating_add(u128::from(server_micros) / 1_000);
+    if expiration_ms > u128::from(u64::MAX / 2) {
+        return Err(ReconstructionCacheError::InvalidRedisTtl);
+    }
+    Ok(())
+}
+
+fn expiration_error(error: redis::RedisError) -> ReconstructionCacheError {
+    // Redis validates relative expiration atomically before changing the value.
+    // A near-limit TTL can cease to fit between ready() and the later write.
+    if error.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError)
+        && error
+            .detail()
+            .is_some_and(|detail| detail.starts_with("invalid expire time in "))
+    {
+        ReconstructionCacheError::InvalidRedisTtl
+    } else {
+        ReconstructionCacheError::Redis(error)
     }
 }
 
@@ -522,6 +569,194 @@ mod tests {
     use super::{RECONSTRUCTION_CACHE_PREFIX, RedisReconstructionCache, RedisTlsConfig};
     use crate::{AsyncReconstructionCache, ReconstructionCacheKey};
     use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretBytes};
+
+    #[test]
+    fn redis_ttl_validation_preserves_exact_server_time_boundary() {
+        let ttl = NonZeroU64::MIN;
+        let last_valid_time = u64::MAX / 2 - 1_000;
+        assert!(
+            super::validate_expiration(
+                ttl,
+                last_valid_time / 1_000,
+                (last_valid_time % 1_000) * 1_000
+            )
+            .is_ok()
+        );
+        let invalid_time = last_valid_time + 1;
+        assert!(matches!(
+            super::validate_expiration(ttl, invalid_time / 1_000, (invalid_time % 1_000) * 1_000),
+            Err(crate::ReconstructionCacheError::InvalidRedisTtl)
+        ));
+        assert!(matches!(
+            super::validate_expiration(ttl, u64::MAX, u64::MAX),
+            Err(crate::ReconstructionCacheError::InvalidRedisTtl)
+        ));
+    }
+
+    #[test]
+    fn redis_constructor_rejects_fundamentally_unrepresentable_ttl() {
+        for seconds in [u64::MAX, (u64::MAX / 2) / 1_000 + 1] {
+            assert!(matches!(
+                RedisReconstructionCache::new(
+                    "redis://localhost",
+                    NonZeroU64::new(seconds).unwrap_or(NonZeroU64::MIN)
+                ),
+                Err(crate::ReconstructionCacheError::InvalidRedisTtl)
+            ));
+        }
+        assert!(
+            RedisReconstructionCache::new(
+                "redis://localhost",
+                NonZeroU64::new((u64::MAX / 2) / 1_000).unwrap_or(NonZeroU64::MIN)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn redis_expiration_error_mapping_preserves_unrelated_server_errors() {
+        for detail in [
+            "invalid expire time in 'setex' command",
+            "invalid expire time in 'set' command script: example",
+        ] {
+            let error = redis::RedisError::from((
+                redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+                "response",
+                detail.to_owned(),
+            ));
+            assert!(matches!(
+                super::expiration_error(error),
+                crate::ReconstructionCacheError::InvalidRedisTtl
+            ));
+        }
+        let error = redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "response",
+            "unrelated server failure".to_owned(),
+        ));
+        assert!(matches!(
+            super::expiration_error(error),
+            crate::ReconstructionCacheError::Redis(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn redis_ownerless_reserved_mutations_do_not_fall_back_to_raw_commands() {
+        let cache = RedisReconstructionCache::new("redis://127.0.0.1:9", NonZeroU64::MIN);
+        let Ok(cache) = cache else {
+            return;
+        };
+        let key = ReconstructionCacheKey::latest("ownerless", None);
+        let token = crate::ReconstructionCacheReservation::default();
+        assert!(matches!(
+            cache.put_reserved(&key, b"wrong", &token).await,
+            Err(crate::ReconstructionCacheError::LostLoadingReservation)
+        ));
+        assert!(matches!(
+            cache.delete_reserved(&key, &token).await,
+            Ok(false)
+        ));
+    }
+
+    #[tokio::test]
+    async fn redis_clones_reuse_one_live_connection_when_url_is_available() {
+        let Ok(url) = env_var("STEXS_REDIS_CACHE_TEST_URL") else {
+            return;
+        };
+        let cache = RedisReconstructionCache::new(&url, NonZeroU64::MIN);
+        assert!(cache.is_ok());
+        let Ok(cache) = cache else {
+            return;
+        };
+        let original = cache.get_connection().await;
+        assert!(original.is_ok());
+        let Ok(mut original) = original else {
+            return;
+        };
+        let original_id: u64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut original)
+            .await
+            .unwrap_or_default();
+        assert_ne!(original_id, 0);
+        for _ in 0..16 {
+            let cloned = cache.clone().get_connection().await;
+            assert!(cloned.is_ok());
+            let Ok(mut cloned) = cloned else {
+                return;
+            };
+            let id: u64 = redis::cmd("CLIENT")
+                .arg("ID")
+                .query_async(&mut cloned)
+                .await
+                .unwrap_or_default();
+            assert_eq!(id, original_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn redis_manager_recovers_after_its_own_connection_is_closed() {
+        let Ok(url) = env_var("STEXS_REDIS_CACHE_TEST_URL") else {
+            return;
+        };
+        let cache = RedisReconstructionCache::new(&url, NonZeroU64::MIN);
+        assert!(cache.is_ok());
+        let Ok(cache) = cache else {
+            return;
+        };
+        let original = cache.get_connection().await;
+        assert!(original.is_ok());
+        let Ok(mut original) = original else {
+            return;
+        };
+        let old_id: u64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut original)
+            .await
+            .unwrap_or_default();
+        assert_ne!(old_id, 0);
+        // Close only this test's managed connection, through a separate controller.
+        let controller = redis::Client::open(url);
+        assert!(controller.is_ok());
+        let Ok(controller_client) = controller else {
+            return;
+        };
+        let connection = controller_client.get_multiplexed_async_connection().await;
+        assert!(connection.is_ok());
+        let Ok(mut controller_connection) = connection else {
+            return;
+        };
+        let killed: u64 = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("ID")
+            .arg(old_id)
+            .query_async(&mut controller_connection)
+            .await
+            .unwrap_or_default();
+        assert_eq!(killed, 1);
+        let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if cache.ready().await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(recovered.is_ok());
+        let reconnected = cache.clone().get_connection().await;
+        assert!(reconnected.is_ok());
+        let Ok(mut reconnected) = reconnected else {
+            return;
+        };
+        let new_id: u64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut reconnected)
+            .await
+            .unwrap_or_default();
+        assert_ne!(new_id, 0);
+        assert_ne!(new_id, old_id);
+    }
 
     #[test]
     fn redis_cache_debug_redacts_connection_url() {

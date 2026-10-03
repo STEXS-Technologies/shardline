@@ -43,8 +43,11 @@ use crate::error::TransferError;
 /// Semantics: `max_attempts` is the number of **retries** (so 5 retries → up to
 /// 6 requests), `base_delay` is the initial exponential-backoff delay, and
 /// `max_duration` caps a single backoff wait. Jitter multiplies each backoff by
-/// a factor in [0.5, 1.5). `honor_retry_after` makes a 429/503/504 response's
-/// `Retry-After` header override the computed backoff. `retry_on_429` can be
+/// a factor in [0.5, 1.5), rounded down to nanoseconds and capped at
+/// `max_duration` after jitter. For computed backoff, zero base or maximum
+/// duration gives an immediate retry. Honored `Retry-After` overrides the base
+/// delay. `honor_retry_after` makes a 429/503/504 response's
+/// `Retry-After` delay-seconds or HTTP-date override the computed backoff. `retry_on_429` can be
 /// disabled to fail fast on 429 (dedup queries, mirroring upstream
 /// `with_429_no_retry()`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,27 +309,32 @@ impl RetryContext {
 
     /// Computes the sleep before the next retry attempt, honoring a response
     /// `Retry-After` header when enabled (sdx delta).
-    #[allow(clippy::float_arithmetic)] // jittered exponential backoff is float by design.
     fn backoff_delay(&self, attempt: u32, error: &TransferError) -> Duration {
         if self.policy.honor_retry_after
             && let Some(retry_after) = error.retry_after()
         {
             return retry_after.min(self.policy.max_duration);
         }
-        let base_ms = self
+        let exponential = self
             .policy
             .base_delay
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        let exp_ms = base_ms.saturating_mul(1u64 << attempt.min(16));
-        let capped_ms = exp_ms.min(self.policy.max_duration.as_millis() as u64);
-        let ms = if self.policy.jitter {
-            (capped_ms as f64 * jitter_factor(attempt)) as u64
-        } else {
-            capped_ms
-        };
-        Duration::from_millis(ms)
+            .saturating_mul(1u32 << attempt.min(16));
+        let capped = exponential.min(self.policy.max_duration);
+        if !self.policy.jitter {
+            return capped;
+        }
+        // Duration has at most u64::MAX seconds. Nanoseconds times a factor
+        // below 1500 fit in u128; saturation also makes that bound explicit.
+        // Integer thousandths preserve the deterministic jitter distribution
+        // without quantizing submillisecond durations or losing float precision.
+        let jittered_nanos = capped
+            .as_nanos()
+            .saturating_mul(u128::from(jitter_per_mille(attempt)))
+            / 1000;
+        let nanos = jittered_nanos.min(self.policy.max_duration.as_nanos());
+        let seconds = u64::try_from(nanos / 1_000_000_000).unwrap_or(u64::MAX);
+        let subsecond = u32::try_from(nanos % 1_000_000_000).unwrap_or(999_999_999);
+        Duration::new(seconds, subsecond)
     }
 }
 
@@ -349,14 +357,18 @@ fn is_retryable(error: &TransferError, retry_on_429: bool) -> bool {
     }
 }
 
-/// Deterministic pseudo-random jitter factor in [0.5, 1.5).
-#[allow(clippy::float_arithmetic)] // jitter multiplier is float by design.
-fn jitter_factor(attempt: u32) -> f64 {
+/// Deterministic jitter in integer thousandths, in [500, 1500).
+fn jitter_per_mille(attempt: u32) -> u32 {
     let x = u64::from(attempt)
         .wrapping_mul(2_654_435_761)
         .wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let unit = (x % 1000) as f64 / 1000.0;
-    0.5 + unit
+    u32::try_from(x % 1000).unwrap_or(0).saturating_add(500)
+}
+
+#[cfg(test)]
+#[allow(clippy::float_arithmetic)] // Human-readable distribution checks only.
+fn jitter_factor(attempt: u32) -> f64 {
+    f64::from(jitter_per_mille(attempt)) / 1000.0
 }
 
 #[cfg(test)]
@@ -368,6 +380,130 @@ mod tests {
 
     use super::{RetryContext, RetryMarkers, RetryPolicy, RetryScope, is_retryable, jitter_factor};
     use crate::error::TransferError;
+
+    fn transient_error() -> TransferError {
+        TransferError::HttpStatus {
+            status: 503,
+            message: String::new(),
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn backoff_preserves_submillisecond_duration_and_growth_limit() {
+        for base in [Duration::from_micros(500), Duration::from_micros(1500)] {
+            let ctx = retry_context(
+                RetryPolicy::new()
+                    .with_base_delay(base)
+                    .with_max_duration(Duration::MAX)
+                    .with_jitter(false),
+                None,
+            );
+            assert_eq!(ctx.backoff_delay(0, &transient_error()), base);
+            assert_eq!(
+                ctx.backoff_delay(1, &transient_error()),
+                base.saturating_mul(2)
+            );
+            assert_eq!(
+                ctx.backoff_delay(16, &transient_error()),
+                ctx.backoff_delay(u32::MAX, &transient_error())
+            );
+        }
+    }
+
+    #[test]
+    fn final_jittered_backoff_never_exceeds_configured_cap() {
+        let maximum = Duration::from_millis(200);
+        let ctx = retry_context(
+            RetryPolicy::new()
+                .with_base_delay(Duration::from_secs(10))
+                .with_max_duration(maximum),
+            None,
+        );
+        assert_eq!(ctx.backoff_delay(3, &transient_error()), maximum);
+        assert_eq!(
+            ctx.backoff_delay(0, &transient_error()),
+            Duration::from_millis(197)
+        );
+        for attempt in 0..200 {
+            assert!(ctx.backoff_delay(attempt, &transient_error()) <= maximum);
+        }
+    }
+
+    #[test]
+    fn huge_duration_caps_do_not_wrap_or_panic() {
+        for maximum in [
+            Duration::MAX,
+            Duration::from_millis(u64::MAX).saturating_add(Duration::from_millis(1)),
+        ] {
+            let ctx = retry_context(
+                RetryPolicy::new()
+                    .with_base_delay(Duration::from_millis(100))
+                    .with_max_duration(maximum)
+                    .with_jitter(false),
+                None,
+            );
+            assert_eq!(
+                ctx.backoff_delay(0, &transient_error()),
+                Duration::from_millis(100)
+            );
+            let ctx = retry_context(
+                RetryPolicy::new()
+                    .with_base_delay(Duration::MAX)
+                    .with_max_duration(maximum),
+                None,
+            );
+            for attempt in 0..20 {
+                assert!(ctx.backoff_delay(attempt, &transient_error()) <= maximum);
+            }
+        }
+    }
+
+    #[test]
+    fn nanosecond_rounding_zero_and_retry_after_controls() {
+        let error = transient_error();
+        let ctx = retry_context(
+            RetryPolicy::new()
+                .with_base_delay(Duration::from_nanos(1))
+                .with_max_duration(Duration::from_secs(1)),
+            None,
+        );
+        assert_eq!(ctx.backoff_delay(0, &error), Duration::ZERO);
+        assert_eq!(ctx.backoff_delay(3, &error), Duration::from_nanos(10));
+        for policy in [
+            RetryPolicy::new().with_base_delay(Duration::ZERO),
+            RetryPolicy::new().with_max_duration(Duration::ZERO),
+        ] {
+            let ctx = retry_context(policy, None);
+            assert_eq!(ctx.backoff_delay(0, &error), Duration::ZERO);
+        }
+        let capped = Duration::from_micros(500);
+        let ctx = retry_context(RetryPolicy::new().with_max_duration(capped), None);
+        for seconds in [0, 1, u64::MAX] {
+            let error = TransferError::HttpStatus {
+                status: 503,
+                message: String::new(),
+                retry_after: Some(seconds),
+            };
+            assert_eq!(
+                ctx.backoff_delay(3, &error),
+                Duration::from_secs(seconds).min(capped)
+            );
+        }
+        let ctx = retry_context(
+            RetryPolicy::new()
+                .with_base_delay(Duration::from_millis(7))
+                .with_jitter(false)
+                .with_honor_retry_after(false),
+            None,
+        );
+        let error = TransferError::HttpStatus {
+            status: 503,
+            message: String::new(),
+            retry_after: Some(100),
+        };
+        assert_eq!(ctx.backoff_delay(0, &error), Duration::from_millis(7));
+    }
 
     #[test]
     fn default_policy_matches_reference_defaults() {

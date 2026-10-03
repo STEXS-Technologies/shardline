@@ -82,7 +82,9 @@ access-key and Bearer auth forms.
 | `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
-| Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete; `412 PreconditionFailed` on mismatch (`404 NoSuchKey` when `If-Match` targets a missing object) |
+| Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
+| Copy source conditions | CopyObject evaluates `x-amz-copy-source-if-match` / `if-none-match` and `if-modified-since` / `if-unmodified-since` against validators from the same pinned source version. Tag conditions take precedence over corresponding date conditions. Legacy sources lacking validators fail closed for concrete conditions; wildcard conditions still use known source existence. |
+| Conditional ranges | GetObject honors one matching strong `If-Range` ETag; stale, weak, malformed, repeated or date validators return the entire representation (`200`). Date validators are conservatively ignored because the route does not have a strong date validator. |
 | `ListBuckets` | service-level `GET /`; lists the caller's single `{owner}.{name}` bucket |
 
 ### Planned (near-term follow-up)
@@ -113,8 +115,27 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
 - **SigV4 signature is not verified** — the access key *is* the credential;
   production requires TLS.
 - **Bucket names** are `{owner}.{name}`; owners containing `.` are not addressable.
-- **`Content-MD5`** is accepted but not verified (integrity comes from the content
-  address).
+- **`Content-MD5`** is optional and verified when supplied on PutObject,
+  UploadPart, CompleteMultipartUpload and DeleteObjects. It must be one
+  canonical base64 encoding of a 16-byte digest; malformed or repeated fields
+  return `400 InvalidDigest`, and a payload mismatch returns `400 BadDigest`
+  before publication or deletion. Upload checks hash the decoded payload,
+  including AWS chunked uploads, with constant memory.
+- **Multipart part identity** is the quoted MD5 of that part's bytes.
+  Completion accepts that MD5 with or without the surrounding quotes and requires
+  the identity returned by the successful UploadPart for every selected part,
+  in ascending order; missing, stale or incorrect tags
+  return `400 InvalidPart` and leave the session retryable. Local replacement
+  parts use immutable content-addressed files and an atomic metadata pointer
+  publication, so failed body reads, checksums or publication cannot truncate
+  previously acknowledged bytes. Logical byte/file quotas count the committed
+  parts; replacement staging temporarily retains both versions within the
+  configured per-part body ceiling.
+- **Legacy in-flight multipart uploads** retain readable session metadata,
+  but old opaque `uploadid-partnumber` tags cannot identify acknowledged
+  content. Re-upload those parts to obtain content ETags before completing
+  them. Previously overwritten or missing bytes require verified restoration;
+  the server cannot infer their original content.
 - **Multipart part size minimums** follow S3 (5 MiB for all but the final part);
   the part-size ceiling (`SHARDLINE_S3_MAX_PART_BYTES`) and the per-session /
   aggregate byte quotas are configurable.
@@ -238,3 +259,5 @@ environment.
 > table in the configured index store (SQLite or Postgres). The table name is an
 > implementation detail; operators and user documentation refer to it as the S3
 > listing index.
+
+`UploadPartCopy` is unsupported and returns `501 NotImplemented` before reading the body or changing the part. Multipart operations require exactly their supported recognized operation selectors; conflicting or repeated selectors are rejected before mutation. Unrecognized extension query fields remain ignored. `CopyObject` requires one valid `x-amz-copy-source` header; malformed or repeated fields return `400 InvalidArgument` and preserve the destination.

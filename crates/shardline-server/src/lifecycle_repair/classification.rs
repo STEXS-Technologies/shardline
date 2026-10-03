@@ -22,7 +22,7 @@ pub(crate) const fn classify_quarantine_repair_action(
 pub(crate) const fn classify_retention_hold_repair_action(
     release_after_unix_seconds: Option<u64>,
     _held_at_unix_seconds: u64,
-    object_exists: bool,
+    _object_exists: bool,
     now_unix_seconds: u64,
 ) -> RetentionHoldRepairAction {
     if let Some(release_after_unix_seconds) = release_after_unix_seconds
@@ -30,13 +30,9 @@ pub(crate) const fn classify_retention_hold_repair_action(
     {
         return RetentionHoldRepairAction::DeleteExpired;
     }
-    // Only delete time-bounded holds for missing objects. Permanent holds
-    // (release_after = None) are NEVER removed by lifecycle repair — they
-    // require explicit operator intervention, preventing transient metadata
-    // backend hiccups from silently dropping operator-placed protection.
-    if !object_exists && release_after_unix_seconds.is_some() {
-        return RetentionHoldRepairAction::DeleteMissing;
-    }
+    // The object-existence input is ignored for compatibility with callers.
+    // Both finite and permanent holds may protect keys whose bytes arrive later.
+    // Only expiry or explicit release ends that protection.
     RetentionHoldRepairAction::Keep
 }
 

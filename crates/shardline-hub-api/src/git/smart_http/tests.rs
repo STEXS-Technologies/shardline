@@ -17,7 +17,7 @@ use super::upload_pack::{
     parse_haves, parse_wants,
 };
 use super::*;
-use crate::git::pack::{GitObject, ObjectType, PackError, apply_delta};
+use crate::git::pack::{GitObject, ObjectType, apply_delta};
 use crate::git::pktline;
 use crate::routes::HubState;
 use axum::extract::{Path, Query, State};
@@ -126,7 +126,7 @@ fn find_lfs_blob_canonical_pointer_matches_by_sha1() {
     // Canonical pointer blob (matches `build_lfs_pointer_blob` output).
     let pointer = build_lfs_pointer_blob(&file.sha, file.size);
     let content_obj = crate::git::pack::create_blob_object(content);
-    let objects = vec![pointer.clone(), content_obj];
+    let objects = vec![pointer, content_obj];
     let mut sha_to_obj: std::collections::HashMap<[u8; 20], &GitObject> =
         std::collections::HashMap::new();
     for obj in &objects {
@@ -134,8 +134,8 @@ fn find_lfs_blob_canonical_pointer_matches_by_sha1() {
     }
     let content_by_sha256 = build_content_index(&objects);
     let found = find_lfs_blob(&file, &sha_to_obj, &content_by_sha256);
-    // The canonical pointer is matched by its git SHA1 fast path.
-    assert_eq!(found.unwrap().sha1(), pointer.sha1());
+    // LFS resolution must return the content, never the pointer bytes.
+    assert_eq!(found.unwrap().data, content);
 }
 
 #[test]
@@ -552,7 +552,7 @@ fn is_valid_refname_with_dotdot() {
 // --- collect_refs dedup/HEAD logic tests ---
 
 /// Helper to create a temporary HubState backed by SQLite.
-fn make_hub_state() -> (tempfile::TempDir, HubState) {
+pub(super) fn make_hub_state() -> (tempfile::TempDir, HubState) {
     use shardline_index::LocalIndexStore;
     use shardline_index::hub::BoxedHubStore;
 
@@ -981,20 +981,17 @@ fn parse_lfs_pointer_field_extra_whitespace() {
 
 #[test]
 fn parse_pack_data_empty_input() {
-    let objects = parse_pack_data(b"").unwrap();
-    assert!(objects.is_empty());
+    assert!(parse_pack_data(b"").is_err());
 }
 
 #[test]
 fn parse_pack_data_too_short() {
-    let objects = parse_pack_data(b"PACK").unwrap();
-    assert!(objects.is_empty());
+    assert!(parse_pack_data(b"PACK").is_err());
 }
 
 #[test]
 fn parse_pack_data_no_pack_magic() {
-    let objects = parse_pack_data(b"NOTAPACKFILE").unwrap();
-    assert!(objects.is_empty());
+    assert!(parse_pack_data(b"NOTAPACKFILE").is_err());
 }
 
 #[test]
@@ -1002,8 +999,7 @@ fn parse_pack_data_unsupported_version() {
     let mut data = b"PACK".to_vec();
     data.extend_from_slice(&3u32.to_be_bytes()); // version 3 (unsupported)
     data.extend_from_slice(&0u32.to_be_bytes());
-    let objects = parse_pack_data(&data).unwrap();
-    assert!(objects.is_empty());
+    assert!(parse_pack_data(&data).is_err());
 }
 
 // --- parse_pack_data truncated pack (F-deep-2.5) ---
@@ -1174,14 +1170,7 @@ fn parse_pack_data_shift_overflow_detected() {
     }
     // Try to parse - should detect shift >= 64
     let result = parse_pack_data(&data);
-    // The parser may either return empty (if it breaks early) or return an error
-    assert!(result.is_ok() || matches!(result, Err(PackError::ShiftOverflow)));
-    if let Ok(objects) = result {
-        assert!(
-            objects.is_empty(),
-            "expected empty objects on shift overflow"
-        );
-    }
+    assert!(result.is_err());
 }
 
 // --- decompress_zlib with real data ---
@@ -1258,9 +1247,9 @@ fn parse_commit_object_not_utf8() {
 // --- walk_git_tree with invalid/non-standard entries ---
 
 #[test]
-fn walk_git_tree_skips_symlinks_and_submodules() {
+fn walk_git_tree_rejects_symlinks_and_submodules() {
     // Build a tree with a symlink (120000) and a submodule (160000) entry
-    // These should be skipped, returning only the regular file.
+    // Reject unsupported types rather than silently losing Hub metadata.
     let file_blob = crate::git::pack::create_blob_object(b"content");
     let file_sha = file_blob.sha1();
 
@@ -1282,9 +1271,7 @@ fn walk_git_tree_skips_symlinks_and_submodules() {
     let objects: std::collections::HashMap<[u8; 20], &crate::git::pack::GitObject> =
         owned.iter().map(|o| (o.sha1(), o)).collect();
 
-    let entries = walk_git_tree(&tree_sha, &objects, "").unwrap();
-    assert_eq!(entries.len(), 1, "should only find the regular file");
-    assert_eq!(entries[0].path, "f");
+    assert!(walk_git_tree(&tree_sha, &objects, "").is_err());
 }
 
 #[test]
@@ -1505,6 +1492,7 @@ fn parse_pack_data_ofs_delta_two_objects() {
     pack.extend_from_slice(&base_compressed);
 
     // Object 2: OFS_DELTA (type=6), size delta
+    let delta_start = pack.len();
     let delta_size = delta.len();
     if delta_size <= 0x0f {
         pack.push((6 << 4) | delta_size as u8);
@@ -1522,10 +1510,14 @@ fn parse_pack_data_ofs_delta_two_objects() {
             pack.push(byte);
         }
     }
-    // OFS_DELTA offset: negative offset of 1 (the base object is 1 before this one)
-    // Offset 1 → single byte: 0x01 (MSB clear, value=1)
-    pack.push(0x01);
+    // OFS_DELTA measures bytes between object headers, not object count.
+    let byte_distance = u8::try_from(delta_start - 12).unwrap();
+    assert!(byte_distance < 128);
+    pack.push(byte_distance);
     pack.extend_from_slice(&delta_compressed);
+    use sha1::{Digest, Sha1};
+    let checksum = Sha1::digest(&pack);
+    pack.extend_from_slice(&checksum);
 
     let objects = parse_pack_data(&pack).unwrap();
     assert_eq!(objects.len(), 2, "should parse both objects");
@@ -1644,7 +1636,7 @@ fn parse_receive_pack_request_skips_empty_lines() {
 // --- receive_pack error paths ---
 
 #[tokio::test]
-async fn upload_pack_empty_refs_returns_empty_pack() {
+async fn upload_pack_rejects_unowned_want() {
     let (_tmp, state) = make_hub_state();
     let body = pktline::encode_line("want 0000000000000000000000000000000000000000\n")
         .unwrap()
@@ -1656,7 +1648,10 @@ async fn upload_pack_empty_refs_returns_empty_pack() {
         axum::body::Body::from(body),
     )
     .await;
-    assert!(result.is_ok(), "upload_pack should succeed: {result:?}");
+    assert!(
+        matches!(result, Err(crate::error::HubApiError::BadRequest(_))),
+        "unowned wants must be rejected: {result:?}"
+    );
 }
 
 // --- decompress_zlib error on garbage input ---

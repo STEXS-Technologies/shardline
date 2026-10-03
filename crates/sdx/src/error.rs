@@ -42,7 +42,7 @@ pub enum TransferError {
     TooManyRequests {
         /// Error message from the response body, when present.
         message: String,
-        /// `Retry-After` delta-seconds from the response, when present.
+        /// Normalized `Retry-After` delay in seconds (numeric or HTTP-date).
         retry_after: Option<u64>,
     },
     /// Some other non-success status (including 5xx).
@@ -52,7 +52,7 @@ pub enum TransferError {
         status: u16,
         /// Error message from the response body, when present.
         message: String,
-        /// `Retry-After` delta-seconds from the response, when present.
+        /// Normalized `Retry-After` delay in seconds (numeric or HTTP-date).
         retry_after: Option<u64>,
     },
     /// Transport-level failure (connect, DNS, timeout, TLS, ...).

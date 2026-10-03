@@ -8,6 +8,72 @@ use crate::{
     RetentionHold, StoredObjectId, TreeStore, WebhookDelivery,
 };
 
+// Fetch one bounded batch per blocking task. Borrowed visitors run after the
+// task completes, leaving even a single-worker blocking pool free for reentry.
+async fn visit_inventory<Entry, Visitor, VisitorError>(
+    store: LocalIndexStore,
+    mut visitor: Visitor,
+) -> Result<(), VisitorError>
+where
+    Entry: super::index_store::InventoryEntry,
+    Visitor: FnMut(Entry) -> Result<(), VisitorError>,
+    LocalIndexStoreError: Into<VisitorError>,
+    VisitorError: Send,
+{
+    let reservation = super::index_store::reserve_async_cursor().map_err(Into::into)?;
+    let mut scan = tokio::task::spawn_blocking(move || {
+        super::index_store::InventoryScan::<Entry>::open(&store, Some(reservation))
+    })
+    .await
+    .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
+    .map_err(Into::into)?
+    .map_err(Into::into)?;
+    for phase in 0..6 {
+        if (phase == 1 && !Entry::PREVALIDATE_SNAPSHOTS)
+            || ((2..=4).contains(&phase) && !Entry::HAS_EVIDENCE)
+        {
+            continue;
+        }
+        scan.rewind();
+        loop {
+            let (next, batch) = tokio::task::spawn_blocking(move || match scan.next_batch(phase) {
+                Ok(batch) => Ok((scan, batch)),
+                Err(error) => {
+                    scan.abort();
+                    Err(error)
+                }
+            })
+            .await
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
+            .map_err(Into::into)?
+            .map_err(Into::into)?;
+            scan = next;
+            if batch.is_empty() {
+                break;
+            }
+            if phase == 5 {
+                for entry in batch {
+                    if let Err(error) = visitor(entry) {
+                        tokio::task::spawn_blocking(move || scan.abort())
+                            .await
+                            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
+                            .map_err(Into::into)?;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+    tokio::task::spawn_blocking(move || scan.finish())
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
+        .map_err(Into::into)?
+        .map_err(Into::into)
+}
+
+/// SQLite async inventory traversal admits at most 64 active or closing
+/// cursors. Additional traversals return `Io(WouldBlock)` immediately; this
+/// includes nested traversal at capacity. Retry after another traversal closes.
 impl AsyncIndexStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
 
@@ -52,6 +118,19 @@ impl AsyncIndexStore for LocalIndexStore {
             .await
             .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
         })
+    }
+
+    fn visit_reconstruction_file_ids<'operation, Visitor, VisitorError>(
+        &'operation self,
+        visitor: Visitor,
+    ) -> IndexStoreFuture<'operation, (), VisitorError>
+    where
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(FileId) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        let store = self.clone();
+        Box::pin(async move { visit_inventory::<FileId, _, _>(store, visitor).await })
     }
 
     fn delete_reconstruction<'operation>(
@@ -154,12 +233,7 @@ impl AsyncIndexStore for LocalIndexStore {
         VisitorError: Send + 'operation,
     {
         let store = self.clone();
-        let mut visitor = visitor;
-        Box::pin(async move {
-            tokio::task::block_in_place(move || {
-                DedupeStore::visit_dedupe_shard_mappings(&store, &mut visitor)
-            })
-        })
+        Box::pin(async move { visit_inventory::<DedupeShardMapping, _, _>(store, visitor).await })
     }
 
     fn upsert_dedupe_shard_mapping<'operation>(
@@ -243,12 +317,7 @@ impl AsyncIndexStore for LocalIndexStore {
         VisitorError: Send + 'operation,
     {
         let store = self.clone();
-        let mut visitor = visitor;
-        Box::pin(async move {
-            tokio::task::block_in_place(move || {
-                LifecycleStore::visit_quarantine_candidates(&store, &mut visitor)
-            })
-        })
+        Box::pin(async move { visit_inventory::<QuarantineCandidate, _, _>(store, visitor).await })
     }
 
     fn upsert_quarantine_candidate<'operation>(
@@ -313,12 +382,7 @@ impl AsyncIndexStore for LocalIndexStore {
         VisitorError: Send + 'operation,
     {
         let store = self.clone();
-        let mut visitor = visitor;
-        Box::pin(async move {
-            tokio::task::block_in_place(move || {
-                LifecycleStore::visit_retention_holds(&store, &mut visitor)
-            })
-        })
+        Box::pin(async move { visit_inventory::<RetentionHold, _, _>(store, visitor).await })
     }
 
     fn upsert_retention_hold<'operation>(
@@ -385,12 +449,7 @@ impl AsyncIndexStore for LocalIndexStore {
         VisitorError: Send + 'operation,
     {
         let store = self.clone();
-        let mut visitor = visitor;
-        Box::pin(async move {
-            tokio::task::block_in_place(move || {
-                LifecycleStore::visit_webhook_deliveries(&store, &mut visitor)
-            })
-        })
+        Box::pin(async move { visit_inventory::<WebhookDelivery, _, _>(store, visitor).await })
     }
 
     fn delete_webhook_delivery<'operation>(
@@ -463,12 +522,9 @@ impl AsyncIndexStore for LocalIndexStore {
         VisitorError: Send + 'operation,
     {
         let store = self.clone();
-        let mut visitor = visitor;
-        Box::pin(async move {
-            tokio::task::block_in_place(move || {
-                LifecycleStore::visit_provider_repository_states(&store, &mut visitor)
-            })
-        })
+        Box::pin(
+            async move { visit_inventory::<ProviderRepositoryState, _, _>(store, visitor).await },
+        )
     }
 
     fn upsert_provider_repository_state<'operation>(
@@ -946,5 +1002,143 @@ mod tests {
             .await
             .expect("lookup should succeed");
         assert!(loaded.is_none());
+    }
+    #[test]
+    fn streaming_inventory_current_thread_single_worker_reentry_snapshot_and_abort() {
+        let store = make_store();
+        for i in 0..super::super::index_store::INVENTORY_BATCH_SIZE + 1 {
+            LifecycleStore::upsert_retention_hold(
+                &store,
+                &RetentionHold::new(
+                    ObjectKey::parse(&format!("stream/{i:04}")).unwrap(),
+                    "keep".into(),
+                    1,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut visited = Vec::new();
+            AsyncIndexStore::visit_retention_holds(&store, |hold| {
+                if visited.is_empty() {
+                    let writer = store.clone();
+                    let handle = tokio::runtime::Handle::current();
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let added = RetentionHold::new(ObjectKey::parse("stream/zz-new").unwrap(), "new".into(), 1, None).unwrap();
+                        sender.send(handle.block_on(AsyncIndexStore::upsert_retention_hold(&writer, &added))).unwrap();
+                    });
+                    receiver.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap();
+                    // Independent public reads remain usable while the visitor
+                    // retains its older snapshot.
+                    assert!(LifecycleStore::retention_hold(&store, &ObjectKey::parse("stream/zz-new").unwrap()).unwrap().is_some());
+                }
+                visited.push(hold.object_key().as_str().to_owned());
+                Ok::<_, LocalIndexStoreError>(())
+            }).await.unwrap();
+            assert_eq!(visited.len(), super::super::index_store::INVENTORY_BATCH_SIZE + 1);
+            assert!(!visited.iter().any(|key| key == "stream/zz-new"));
+            let mut calls = 0;
+            let error = AsyncIndexStore::visit_retention_holds(&store, |_| {
+                calls += 1;
+                Err::<(), _>(LocalIndexStoreError::InvalidRecordKind)
+            }).await.unwrap_err();
+            assert!(matches!(error, LocalIndexStoreError::InvalidRecordKind));
+            assert_eq!(calls, 1);
+            let checkpoint = store.open_connection().unwrap().query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0)).unwrap();
+            assert_eq!(checkpoint, 0);
+            // Cancellation after the first callback must not retain a reader or
+            // a blocking worker waiting on a producer/consumer channel.
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let mut signal = Some(sender);
+            let mut future = AsyncIndexStore::visit_retention_holds(&store, |_| {
+                if let Some(sender) = signal.take() { sender.send(()).unwrap(); }
+                Ok::<_, LocalIndexStoreError>(())
+            });
+            tokio::select! { result = &mut future => panic!("visitor ended before cancellation: {result:?}"), result = receiver => result.unwrap() }
+            drop(future);
+            AsyncIndexStore::list_retention_holds(&store).await.unwrap();
+            let checkpoint = store.open_connection().unwrap().query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0)).unwrap();
+            assert_eq!(checkpoint, 0);
+        });
+    }
+
+    #[test]
+    fn streaming_inventory_all_async_visitors_support_current_thread() {
+        let store = make_store();
+        let key = ObjectKey::parse("current-thread/object").unwrap();
+        let hash = ShardlineHash::from_bytes([3; 32]);
+        store
+            .insert_reconstruction(&FileId::new(hash), &FileReconstruction::new(vec![]))
+            .unwrap();
+        store
+            .upsert_dedupe_shard_mapping(&DedupeShardMapping::new(hash, key.clone()))
+            .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(
+            &store,
+            &QuarantineCandidate::new(key.clone(), 10, 1, 2).unwrap(),
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(
+            &store,
+            &RetentionHold::new(key, "keep".into(), 1, None).unwrap(),
+        )
+        .unwrap();
+        LifecycleStore::record_webhook_delivery(
+            &store,
+            &WebhookDelivery::new(
+                RepositoryProvider::GitHub,
+                "o".into(),
+                "r".into(),
+                "d".into(),
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        LifecycleStore::upsert_provider_repository_state(
+            &store,
+            &ProviderRepositoryState::new(
+                RepositoryProvider::GitHub,
+                "o".into(),
+                "r".into(),
+                Some(1),
+                None,
+                None,
+            ),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            macro_rules! check {
+                ($visit:ident) => {{
+                    let mut calls = 0;
+                    AsyncIndexStore::$visit(&store, |_| {
+                        calls += 1;
+                        Ok::<_, LocalIndexStoreError>(())
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(calls, 1);
+                }};
+            }
+            check!(visit_reconstruction_file_ids);
+            check!(visit_dedupe_shard_mappings);
+            check!(visit_quarantine_candidates);
+            check!(visit_retention_holds);
+            check!(visit_webhook_deliveries);
+            check!(visit_provider_repository_states);
+        });
     }
 }

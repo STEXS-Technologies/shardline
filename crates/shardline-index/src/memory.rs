@@ -24,8 +24,9 @@ use crate::{
     AsyncIndexStore, DedupeShardMapping, DedupeStore, FileId, FileReconstruction, FileRecord,
     IndexStoreFuture, LifecycleStore, ProviderRepositoryState, QuarantineCandidate,
     ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepoKey,
-    RepositoryRecordScope, RetentionHold, RevisionRecord, StoredObjectId, StoredRecord, TreeEntry,
-    TreeEntryOutcome, TreeKey, TreeStore, WebhookDelivery, XorbId,
+    RepositoryRecordScope, RetentionHold, RevisionCreationOutcome, RevisionRecord, StoredObjectId,
+    StoredRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeRegistrationOutcome, TreeStore,
+    WebhookDelivery, XorbId,
     provider_evidence::snapshot_from_state,
     upload_intent::{
         UploadIntent, UploadIntentConflictError, UploadIntentState, UploadIntentStore,
@@ -774,28 +775,37 @@ impl UploadIntentStore for MemoryIndexStore {
         // `Created` intent over a concurrent caller's already-advanced intent
         // would reset its durable state and corrupt the upload lifecycle.
         let mut state = self.lock_state()?;
-        match state.upload_intents.entry(intent.intent_id().to_owned()) {
-            std::collections::hash_map::Entry::Occupied(existing) => {
-                if !existing.get().has_same_identity(intent) {
-                    return Err(UploadIntentConflictError::new(intent.intent_id()).into());
-                }
+        if let Some(existing) = state.upload_intents.get(intent.intent_id()) {
+            if !existing.has_same_identity(intent) {
+                return Err(UploadIntentConflictError::new(intent.intent_id()).into());
             }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let created_event = upload_lifecycle_event(
-                    tenant,
-                    repository,
-                    intent.intent_id(),
-                    intent.object_key(),
-                    intent.object_hash(),
-                    shardline_reliability::UploadLifecycleState::Created,
-                    shardline_reliability::UploadLifecycleState::Created,
-                )
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-                entry.insert(intent.clone());
-                state
-                    .reliability_events
-                    .insert(intent.intent_id().to_owned(), vec![created_event]);
+            verify_memory_intent_evidence(&state, existing)?;
+            let events = state
+                .reliability_events
+                .get(intent.intent_id())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let (stored_tenant, stored_repository) = upload_lifecycle_identity(events);
+            if stored_tenant != tenant || stored_repository != repository {
+                return Err(UploadIntentConflictError::new(intent.intent_id()).into());
             }
+        } else {
+            let created_event = upload_lifecycle_event(
+                tenant,
+                repository,
+                intent.intent_id(),
+                intent.object_key(),
+                intent.object_hash(),
+                shardline_reliability::UploadLifecycleState::Created,
+                shardline_reliability::UploadLifecycleState::Created,
+            )
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            state
+                .upload_intents
+                .insert(intent.intent_id().to_owned(), intent.clone());
+            state
+                .reliability_events
+                .insert(intent.intent_id().to_owned(), vec![created_event]);
         }
         Ok(())
     }
@@ -887,10 +897,13 @@ impl UploadIntentStore for MemoryIndexStore {
                 "reliability event has no authoritative upload intent".into(),
             ));
         };
-        let events = state
+        // Validate a candidate before publishing it: a rejected event must not
+        // change the authoritative journal or poison subsequent reads.
+        let mut events = state
             .reliability_events
-            .entry(event.operation.operation_id.clone())
-            .or_default();
+            .get(&event.operation.operation_id)
+            .cloned()
+            .unwrap_or_default();
         if let Some(existing) = events
             .iter()
             .find(|existing| existing.sequence == event.sequence)
@@ -904,9 +917,9 @@ impl UploadIntentStore for MemoryIndexStore {
         }
         events.push(event.clone());
         events.sort_by_key(|stored_event| stored_event.sequence);
-        let (tenant, repository) = upload_lifecycle_identity(events);
+        let (tenant, repository) = upload_lifecycle_identity(&events);
         verify_upload_lifecycle_events(
-            events,
+            &events,
             tenant,
             repository,
             intent.intent_id(),
@@ -915,6 +928,9 @@ impl UploadIntentStore for MemoryIndexStore {
             intent.state(),
         )
         .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state
+            .reliability_events
+            .insert(event.operation.operation_id.clone(), events);
         Ok(())
     }
 
@@ -1141,6 +1157,75 @@ impl AsyncIndexStore for MemoryIndexStore {
 impl TreeStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
+    async fn register_tree_entry(
+        &self,
+        entry: &TreeEntry,
+        max_revisions: usize,
+        max_tree_entries: usize,
+    ) -> Result<TreeRegistrationOutcome, Self::Error> {
+        let mut state = self.lock_state()?;
+        let rev = RevisionRecord {
+            provider: entry.provider.clone(),
+            owner: entry.owner.clone(),
+            repo: entry.repo.clone(),
+            revision: entry.revision.clone(),
+            created_at_unix_seconds: entry.updated_at_unix_seconds,
+            updated_at_unix_seconds: entry.updated_at_unix_seconds,
+        };
+        let revision_key = MemoryRevisionKey::from_record(&rev);
+        let count_revisions = state
+            .revisions
+            .keys()
+            .filter(|k| {
+                k.provider == entry.provider && k.owner == entry.owner && k.repo == entry.repo
+            })
+            .count();
+        let count_entries = state
+            .tree_entries
+            .keys()
+            .filter(|k| {
+                k.provider == entry.provider && k.owner == entry.owner && k.repo == entry.repo
+            })
+            .count();
+        if (count_revisions >= max_revisions && !state.revisions.contains_key(&revision_key))
+            || count_entries >= max_tree_entries
+        {
+            return Ok(TreeRegistrationOutcome::LimitExceeded);
+        }
+        state
+            .revisions
+            .entry(revision_key)
+            .and_modify(|r| r.updated_at_unix_seconds = rev.updated_at_unix_seconds)
+            .or_insert(rev);
+        let key = MemoryTreeKey::from_entry(entry);
+        let created = state.tree_entries.insert(key, entry.clone()).is_none();
+        Ok(TreeRegistrationOutcome::Registered(TreeEntryOutcome {
+            created,
+        }))
+    }
+
+    async fn create_revision_bounded(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<RevisionCreationOutcome, Self::Error> {
+        let mut state = self.lock_state()?;
+        let key = MemoryRevisionKey::from_record(rev);
+        if state.revisions.contains_key(&key) {
+            return Ok(RevisionCreationOutcome::AlreadyExists);
+        }
+        let count = state
+            .revisions
+            .keys()
+            .filter(|k| k.provider == rev.provider && k.owner == rev.owner && k.repo == rev.repo)
+            .count();
+        if count >= max_revisions {
+            return Ok(RevisionCreationOutcome::LimitExceeded);
+        }
+        state.revisions.insert(key, rev.clone());
+        Ok(RevisionCreationOutcome::Created)
+    }
+
     async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
         let key = MemoryTreeKey::from_entry(entry);
         let mut state = self.lock_state()?;
@@ -1233,7 +1318,11 @@ impl TreeStore for MemoryIndexStore {
         let key = MemoryRevisionKey::from_record(rev);
         let mut state = self.lock_state()?;
         let existed = state.revisions.contains_key(&key);
-        state.revisions.insert(key, rev.clone());
+        state
+            .revisions
+            .entry(key)
+            .and_modify(|r| r.updated_at_unix_seconds = rev.updated_at_unix_seconds)
+            .or_insert_with(|| rev.clone());
         Ok(!existed)
     }
 
@@ -2068,6 +2157,136 @@ mod tests {
         assert!(events.iter().all(|event| {
             event.operation.tenant == "tenant-memory" && event.operation.repository == "repo-memory"
         }));
+    }
+
+    #[tokio::test]
+    async fn memory_duplicate_intent_validates_scope_and_evidence() {
+        let store = MemoryIndexStore::new();
+        let intent = UploadIntent::new(
+            "memory-duplicate".into(),
+            "objects/scope".into(),
+            "a".repeat(64),
+            42,
+        );
+        store
+            .create_intent_scoped(&intent, "tenant-a", "repo-a")
+            .await
+            .unwrap();
+        store
+            .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+            .await
+            .unwrap();
+        let before = store.reliability_events(intent.intent_id()).await.unwrap();
+        store
+            .create_intent_scoped(&intent, "tenant-a", "repo-a")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .create_intent_scoped(&intent, "tenant-b", "repo-b")
+                .await,
+            Err(MemoryIndexStoreError::UploadIntentConflict(_))
+        ));
+        assert_eq!(
+            store
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        assert_eq!(
+            store.reliability_events(intent.intent_id()).await.unwrap(),
+            before
+        );
+        store
+            .lock_state()
+            .unwrap()
+            .reliability_events
+            .get_mut(intent.intent_id())
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .operation
+            .repository = "forged-repository".into();
+        assert!(
+            store
+                .create_intent_scoped(&intent, "tenant-a", "repo-a")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_rejected_reliability_event_preserves_intent_and_recovery() {
+        for target_state in [UploadIntentState::Storing, UploadIntentState::Failed] {
+            let intent = UploadIntent::new(
+                format!("memory-rejected-{target_state:?}"),
+                "objects/rejected".into(),
+                "a".repeat(64),
+                42,
+            );
+            let donor = MemoryIndexStore::new();
+            donor
+                .create_intent_scoped(&intent, "tenant-a", "repo-a")
+                .await
+                .unwrap();
+            donor
+                .transition_intent(intent.intent_id(), target_state)
+                .await
+                .unwrap();
+            let donor_events = donor.reliability_events(intent.intent_id()).await.unwrap();
+            let event = donor_events.last().unwrap();
+            let store = MemoryIndexStore::new();
+            store
+                .create_intent_scoped(&intent, "tenant-a", "repo-a")
+                .await
+                .unwrap();
+            let before = store.reliability_events(intent.intent_id()).await.unwrap();
+            store
+                .record_reliability_event(before.first().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                store.reliability_events(intent.intent_id()).await.unwrap(),
+                before
+            );
+            assert!(store.record_reliability_event(event).await.is_err());
+            assert_eq!(
+                store.reliability_events(intent.intent_id()).await.unwrap(),
+                before
+            );
+            assert_eq!(
+                store
+                    .intent_by_id(intent.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                UploadIntentState::Created
+            );
+            assert!(
+                store
+                    .transition_intent(intent.intent_id(), target_state)
+                    .await
+                    .unwrap()
+            );
+            store.record_reliability_event(event).await.unwrap();
+            assert_eq!(
+                store.reliability_events(intent.intent_id()).await.unwrap(),
+                donor_events
+            );
+            assert_eq!(
+                store
+                    .intent_by_id(intent.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                target_state
+            );
+        }
     }
 
     #[test]

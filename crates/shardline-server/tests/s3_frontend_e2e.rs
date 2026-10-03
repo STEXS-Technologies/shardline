@@ -26,7 +26,7 @@
     clippy::unnecessary_map_or
 )]
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::{collections::HashMap, num::NonZeroUsize, sync::Mutex, time::Duration};
 
 use reqwest::header::{self, HeaderValue};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
@@ -166,6 +166,7 @@ impl Auth {
 struct S3Client {
     http: reqwest::Client,
     base_url: String,
+    part_etags: Mutex<HashMap<(String, u32), String>>,
 }
 
 impl S3Client {
@@ -173,6 +174,7 @@ impl S3Client {
         Self {
             http: reqwest::Client::new(),
             base_url: server.base_url.clone(),
+            part_etags: Mutex::new(HashMap::new()),
         }
     }
 
@@ -283,7 +285,8 @@ impl S3Client {
         body: Vec<u8>,
         auth: &Auth,
     ) -> reqwest::Response {
-        self.http
+        let response = self
+            .http
             .put(self.url(&format!(
                 "/{bucket}/{key}?partNumber={part_number}&uploadId={upload_id}"
             )))
@@ -292,7 +295,21 @@ impl S3Client {
             .body(body)
             .send()
             .await
-            .unwrap()
+            .unwrap();
+        if response.status().is_success() {
+            let etag = response
+                .headers()
+                .get(header::ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            self.part_etags
+                .lock()
+                .unwrap()
+                .insert((upload_id.to_owned(), part_number), etag);
+        }
+        response
     }
 
     async fn complete_multipart(
@@ -303,7 +320,7 @@ impl S3Client {
         part_numbers: &[u32],
         auth: &Auth,
     ) -> reqwest::Response {
-        let body = complete_body(upload_id, part_numbers);
+        let body = complete_body(upload_id, part_numbers, &self.part_etags.lock().unwrap());
         self.http
             .post(self.url(&format!("/{bucket}/{key}?uploadId={upload_id}")))
             .header(header::AUTHORIZATION, auth.header_value())
@@ -325,14 +342,21 @@ fn extract_tag(xml: &str, tag: &str) -> String {
 }
 
 /// Builds a minimal `CompleteMultipartUpload` request body.
-fn complete_body(upload_id: &str, part_numbers: &[u32]) -> String {
+fn complete_body(
+    upload_id: &str,
+    part_numbers: &[u32],
+    etags: &HashMap<(String, u32), String>,
+) -> String {
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n",
     );
     for part in part_numbers {
+        let etag = etags
+            .get(&(upload_id.to_owned(), *part))
+            .expect("completion must echo the successful UploadPart response ETag");
         xml.push_str(&format!(
-            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>\n"
+            "  <Part><PartNumber>{part}</PartNumber><ETag>{etag}</ETag></Part>\n"
         ));
     }
     xml.push_str("</CompleteMultipartUpload>\n");

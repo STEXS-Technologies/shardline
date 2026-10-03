@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS shardline_hub_repos_search_prefix_idx;

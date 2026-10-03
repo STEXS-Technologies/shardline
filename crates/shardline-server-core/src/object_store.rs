@@ -199,8 +199,9 @@ impl AsyncObjectStore for ServerObjectStore {
 
 impl ServerObjectStore {
     /// Materializes an object into an unlinked temporary file using bounded
-    /// range reads. This is for random-access parsers (xorb/shard formats),
-    /// not for HTTP delivery; callers must stream the resulting file onward.
+    /// memory and a single streaming GET for S3. This is for random-access
+    /// parsers (xorb/shard formats), not for HTTP delivery; callers must stream
+    /// the resulting file onward.
     ///
     /// # Errors
     ///
@@ -216,41 +217,25 @@ impl ServerObjectStore {
             return Ok(output);
         }
 
-        if let Self::Local(store) = self {
-            let mut input = store.open_object_file(object_key)?;
-            let actual = input.metadata()?.len();
-            if actual != length {
-                return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+        match self {
+            Self::Local(store) => {
+                let mut input = store.open_object_file(object_key)?;
+                let actual = input.metadata()?.len();
+                if actual != length {
+                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+                }
+                std::io::copy(&mut input, output.as_file_mut())
+                    .map_err(ServerObjectStoreError::Io)?;
             }
-            std::io::copy(&mut input, output.as_file_mut()).map_err(ServerObjectStoreError::Io)?;
-            return Ok(output);
-        }
-
-        const CHUNK_BYTES: u64 = 1024 * 1024;
-        let mut offset = 0_u64;
-        while offset < length {
-            let end_exclusive = offset
-                .checked_add(CHUNK_BYTES)
-                .ok_or(ServerObjectStoreError::Overflow)?
-                .min(length);
-            let end = end_exclusive
-                .checked_sub(1)
-                .ok_or(ServerObjectStoreError::Overflow)?;
-            let range =
-                ByteRange::new(offset, end).map_err(|_error| ServerObjectStoreError::Overflow)?;
-            let bytes = ObjectStore::read_range(self, object_key, range)?;
-            let expected_u64 = end
-                .checked_sub(offset)
-                .and_then(|value| value.checked_add(1))
-                .ok_or(ServerObjectStoreError::Overflow)?;
-            let expected =
-                usize::try_from(expected_u64).map_err(|_error| ServerObjectStoreError::Overflow)?;
-            if bytes.len() != expected {
-                return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+            Self::S3(store) => {
+                let end = length
+                    .checked_sub(1)
+                    .ok_or(ServerObjectStoreError::Overflow)?;
+                let range =
+                    ByteRange::new(0, end).map_err(|_error| ServerObjectStoreError::Overflow)?;
+                store.copy_range_to_file(object_key, range, output.as_file_mut())?;
             }
-            std::io::Write::write_all(output.as_file_mut(), &bytes)
-                .map_err(ServerObjectStoreError::Io)?;
-            offset = end_exclusive;
+            Self::Blackhole => return Err(ServerObjectStoreError::NotFound),
         }
         Ok(output)
     }

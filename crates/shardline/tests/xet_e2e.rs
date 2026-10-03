@@ -158,6 +158,23 @@ async fn wait_ready(base_url: &str) {
 /// Auth flags appended to every xet invocation.
 const AUTH: [&str; 4] = ["--api-key", BOOTSTRAP_KEY, "--subject", SUBJECT];
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sync_push_updates_same_size_content() {
+    let server = TestServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("model.bin");
+    std::fs::write(&local, b"before").unwrap();
+    let remote = server.url("");
+    let (_, stderr, ok) = xet(&["sync", dir.path().to_str().unwrap(), &remote]);
+    assert!(ok, "first sync failed: {stderr}");
+    std::fs::write(&local, b"AFTER!").unwrap();
+    let (_, stderr, ok) = xet(&["sync", dir.path().to_str().unwrap(), &remote]);
+    assert!(ok, "second sync failed: {stderr}");
+    let (stdout, stderr, ok) = xet(&["cat", &server.url("model.bin")]);
+    assert!(ok, "cat failed: {stderr}");
+    assert_eq!(stdout.as_bytes(), b"AFTER!");
+}
+
 /// Runs the shardline binary with the `xet` escape hatch and the given args,
 /// returning (stdout, stderr, status).
 fn xet(args: &[&str]) -> (String, String, bool) {
@@ -213,6 +230,23 @@ async fn sdx_cp_ls_cat_info_rm_branch_round_trip() {
     let (stdout, stderr, ok) = xet(&["cp", &remote, out.to_str().unwrap()]);
     assert!(ok, "cp download failed: {stderr}\nstdout: {stdout}");
     assert_eq!(std::fs::read(&out).unwrap(), content);
+
+    #[cfg(unix)]
+    {
+        let valuable = sandbox.path().join("valuable");
+        std::fs::write(&valuable, b"original").unwrap();
+        let linked = sandbox.path().join("linked-download");
+        std::fs::hard_link(&valuable, &linked).unwrap();
+        let (_, stderr, ok) = xet(&["cp", &remote, linked.to_str().unwrap()]);
+        assert!(ok, "hard-link download failed: {stderr}");
+        assert_eq!(std::fs::read(&valuable).unwrap(), b"original");
+        assert_eq!(std::fs::read(&linked).unwrap(), content);
+        let symlinked = sandbox.path().join("symlink-download");
+        std::os::unix::fs::symlink(&valuable, &symlinked).unwrap();
+        let (_, _, ok) = xet(&["cp", &remote, symlinked.to_str().unwrap()]);
+        assert!(!ok);
+        assert_eq!(std::fs::read(&valuable).unwrap(), b"original");
+    }
 
     // `rm` deregisters the path; `ls` no longer lists it.
     let (stdout, stderr, ok) = xet(&["rm", &remote]);

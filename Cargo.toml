@@ -2,13 +2,12 @@
 resolver = "3"
 members = ["crates/*"]
 
-# Duplicate dependency note:
-# - hashbrown: 3 versions (0.14, 0.15, 0.17) — pinned by xet ecosystem crates (xet-client, xet-data)
-#   at different versions; cannot be unified without upstream changes.
-# - hashlink, cfg-if, core-foundation, itertools, webpki-roots, whoami, rand: 2 versions each —
-#   transitive deps from xet-client 1.5.x and other third-party crates pin incompatible versions.
-# - reqwest: duplicate (0.12 workspace, 0.13 pinned by xet-client 1.5.2) — NOT FIXABLE.
-# - getrandom: duplicate (0.3 workspace, older via xet ecosystem) — NOT FIXABLE.
+# Duplicate dependency note (resolved lockfile):
+# - hashbrown: 0.15, 0.16, 0.17; itertools: 0.10, 0.14, 0.15.
+# - cfg-if, core-foundation, rand: two versions each.
+# - reqwest: 0.12 workspace and 0.13 via xet-client 1.5.2.
+# - getrandom: 0.2, 0.3, 0.4 via incompatible third-party dependency constraints.
+# - syn: 2 and 3; async-trait uses syn 3 while other derive macros use syn 2.
 
 [workspace.package]
 version = "1.11.2"
@@ -23,13 +22,14 @@ aes-gcm = "0.10"
 arrow-array = "57.3.0"
 arrow-json = "57.3.0"
 arrow-schema = "57.3.0"
-async-trait = "0.1"
+async-trait = "0.1.92"
 dotenvy = "0.15"
 toml = "0.8"
 axum = "0.8.8"
 base64 = "0.22"
 blake3 = "1.8.3"
 bytes = "1.10.1"
+httpdate = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = "4.5.60"
 clap_complete = "4.5.59"
@@ -56,7 +56,7 @@ parquet = { version = "57.3.0", default-features = false, features = [
 redis = "1.0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 reqwest = { version = "0.12.28", default-features = false }
-rusqlite = "0.32"
+rusqlite = "0.39"
 serde = "1.0"
 serde_json = "1.0"
 sha1 = "0.10"
@@ -87,7 +87,7 @@ shardline-vcs = { version = "1.11.2", path = "crates/shardline-vcs" }
 shardline-xet-adapter = { version = "1.11.2", path = "crates/shardline-xet-adapter" }
 shardline-xet-core = { version = "1.11.2", path = "crates/shardline-xet-core" }
 sdx = { version = "1.11.2", path = "crates/sdx" }
-sqlx = { version = "0.8.6", default-features = false }
+sqlx = { version = "0.9", default-features = false }
 subtle = { version = "2.6", default-features = false }
 tempfile = "3.15"
 thiserror = { version = "2.0.18", default-features = false }
@@ -96,7 +96,7 @@ url = "2.5"
 xet-client = "1.5.1"
 xet-core-structures = "1.5.1"
 xet-data = "1.5.1"
-xet-runtime = "1.5.1"
+xet-runtime = "=1.5.2"
 prometheus = { version = "0.14", default-features = false }
 tower = "0.5"
 tower-http = { version = "0.6", default-features = false }

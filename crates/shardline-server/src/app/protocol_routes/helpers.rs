@@ -8,6 +8,7 @@ use shardline_protocol::{ByteRange, parse_http_byte_range};
 
 use crate::{ServerError, metrics};
 
+use super::super::reconstruction_helpers::single_range_header;
 use super::{AppState, byte_range_stream_response, full_byte_stream_response};
 
 pub(crate) async fn direct_object_response(
@@ -71,7 +72,12 @@ pub(crate) async fn direct_object_response_from_snapshot(
             .headers_mut()
             .insert("Docker-Content-Digest", digest_value);
     }
-    metrics::record_download(protocol, total_length, 0.0, true);
+    // Count the payload selected for this response before its body is polled.
+    // This is not a count of bytes acknowledged by the client.
+    let selected_length = range
+        .map_or(Some(total_length), |range| range.len())
+        .ok_or(ServerError::Overflow)?;
+    metrics::record_download(protocol, selected_length, 0.0, true);
     Ok(response)
 }
 
@@ -79,7 +85,14 @@ fn parse_optional_range(
     headers: &HeaderMap,
     total_length: u64,
 ) -> Result<Option<ByteRange>, ServerError> {
-    let Some(range) = headers.get(axum::http::header::RANGE) else {
+    // These direct-object responses expose neither ETag nor Last-Modified.
+    // There is therefore no current validator that can strongly match an
+    // If-Range condition. RFC 9110 section 13.1.5 requires the complete
+    // representation when that condition is false, before parsing Range.
+    if headers.contains_key(axum::http::header::IF_RANGE) {
+        return Ok(None);
+    }
+    let Some(range) = single_range_header(headers, axum::http::header::RANGE)? else {
         return Ok(None);
     };
     let range = range
@@ -92,7 +105,11 @@ fn parse_optional_range(
 pub(crate) fn parse_upload_content_range(value: &str) -> Result<ByteRange, ServerError> {
     let value = value.trim();
     let value = value.strip_prefix("bytes ").unwrap_or(value);
-    let value = value.split_once('/').map_or(value, |(range, _rest)| range);
+    // Docker upload ranges use bare start-end. Retain that form, while
+    // validating the optional complete length instead of discarding it.
+    let (value, complete_length) = value
+        .split_once('/')
+        .map_or((value, None), |(range, total)| (range, Some(total)));
     let Some((start, end)) = value.split_once('-') else {
         return Err(ServerError::InvalidRangeHeader);
     };
@@ -102,6 +119,19 @@ pub(crate) fn parse_upload_content_range(value: &str) -> Result<ByteRange, Serve
     let end = end
         .parse::<u64>()
         .map_err(|_error| ServerError::InvalidRangeHeader)?;
+    if let Some(total) = complete_length
+        && total != "*"
+    {
+        if total.is_empty() || !total.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ServerError::InvalidRangeHeader);
+        }
+        let total = total
+            .parse::<u64>()
+            .map_err(|_error| ServerError::InvalidRangeHeader)?;
+        if total <= end {
+            return Err(ServerError::InvalidRangeHeader);
+        }
+    }
     ByteRange::new(start, end).map_err(|_error| ServerError::InvalidRangeHeader)
 }
 
@@ -159,6 +189,180 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn direct_object_http_if_range_without_validator_returns_full_representation() {
+        use std::num::NonZeroUsize;
+
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode, header},
+        };
+        use sha2::{Digest, Sha256};
+        use tower::ServiceExt;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let config = crate::ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:0".to_owned(),
+            root.path().to_path_buf(),
+            NonZeroUsize::new(65536).unwrap(),
+        )
+        .with_server_frontends([crate::ServerFrontend::Lfs, crate::ServerFrontend::BazelHttp])
+        .unwrap();
+        let app = crate::app::router(config).await.unwrap();
+        let content = b"full representation for conditional resume";
+        let digest = hex::encode(Sha256::digest(content));
+        for uri in [
+            format!("/v1/lfs/objects/{digest}"),
+            format!("/v1/bazel/cache/cas/{digest}"),
+            format!("/v1/bazel/cache/ac/{digest}"),
+            format!("/v1/bazel/{digest}"),
+        ] {
+            let uploaded = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(&uri)
+                        .body(Body::from(content.as_slice()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                uploaded.status().is_success(),
+                "{uri}: {}",
+                uploaded.status()
+            );
+
+            let ranged = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::RANGE, "bytes=5-9")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                axum::body::to_bytes(ranged.into_body(), 1024)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                &content[5..10]
+            );
+
+            for fields in [
+                ["bytes=0-1", "bytes=2-3"],
+                ["bytes=2-3", "bytes=0-1"],
+                ["bytes=0-1", "invalid"],
+                ["invalid", "bytes=0-1"],
+                ["bytes=0-1", "bytes=0-1"],
+            ] {
+                for method in ["GET", "HEAD"] {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(method)
+                                .uri(&uri)
+                                .header(header::RANGE, fields[0])
+                                .header(header::RANGE, fields[1])
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        if method == "HEAD" {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::BAD_REQUEST
+                        },
+                        "{uri}: {method}, {fields:?}"
+                    );
+                    if method == "HEAD" {
+                        assert_eq!(
+                            response.headers()[header::CONTENT_LENGTH],
+                            content.len().to_string()
+                        );
+                        assert!(
+                            axum::body::to_bytes(response.into_body(), 1024)
+                                .await
+                                .unwrap()
+                                .is_empty()
+                        );
+                    }
+                }
+                let fallback = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(&uri)
+                            .header(header::RANGE, fields[0])
+                            .header(header::RANGE, fields[1])
+                            .header(header::IF_RANGE, "\"stale\"")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(fallback.status(), StatusCode::OK);
+                assert_eq!(
+                    axum::body::to_bytes(fallback.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    content
+                );
+            }
+
+            for validator in [
+                "\"stale-object\"",
+                "W/\"stale-object\"",
+                "Wed, 21 Oct 2015 07:28:00 GMT",
+            ] {
+                // A false If-Range also suppresses malformed/unsatisfiable
+                // ranges; parsing those first would incorrectly return 416.
+                for range in ["bytes=5-9", "bytes=999999-", "bytes=bad-range"] {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri(&uri)
+                                .header(header::RANGE, range)
+                                .header(header::IF_RANGE, validator)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{uri}: {validator}, {range}"
+                    );
+                    assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+                    assert_eq!(
+                        response.headers()[header::CONTENT_LENGTH],
+                        content.len().to_string()
+                    );
+                    assert_eq!(
+                        axum::body::to_bytes(response.into_body(), 1024)
+                            .await
+                            .unwrap()
+                            .as_ref(),
+                        content
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn parse_optional_range_returns_none_when_header_absent() {
         let headers = HeaderMap::new();
@@ -210,6 +414,43 @@ mod tests {
         let range = parse_upload_content_range("bytes 20-29/*").unwrap();
         assert_eq!(range.start(), 20);
         assert_eq!(range.end_inclusive(), 29);
+    }
+
+    #[test]
+    fn parse_upload_content_range_validates_complete_length() {
+        for value in [
+            "0-4",
+            "bytes 0-4",
+            "0-4/5",
+            "bytes 0-4/5",
+            "0-4/*",
+            "bytes 0-4/*",
+        ] {
+            let range = parse_upload_content_range(value).unwrap();
+            assert_eq!((range.start(), range.end_inclusive()), (0, 4), "{value}");
+        }
+        for value in [
+            "bytes 0-4/0",
+            "bytes 0-4/4",
+            "bytes 0-4/",
+            "bytes 0-4/not-a-number",
+            "bytes 0-4/5/garbage",
+            "bytes 0-4/*/garbage",
+            "bytes 0-4/+5",
+            "bytes 0-4/-5",
+            "bytes 0-4/5.0",
+            "bytes 0-4/18446744073709551616",
+            "0-4/0",
+            "0-4/4",
+        ] {
+            assert!(
+                matches!(
+                    parse_upload_content_range(value),
+                    Err(ServerError::InvalidRangeHeader)
+                ),
+                "{value}"
+            );
+        }
     }
 
     #[test]

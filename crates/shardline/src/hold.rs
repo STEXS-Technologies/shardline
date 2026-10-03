@@ -5,7 +5,7 @@ use shardline_index::{
     PostgresMetadataStoreError, RetentionHold, RetentionHoldError,
 };
 use shardline_protocol::unix_now_seconds_lossy;
-use shardline_server::ServerConfigError;
+use shardline_server::{ServerConfigError, ServerError};
 use shardline_storage::{ObjectKey, ObjectKeyError};
 use sqlx::{Error as SqlxError, postgres::PgPoolOptions};
 use thiserror::Error;
@@ -13,35 +13,70 @@ use thiserror::Error;
 use crate::config::load_server_config;
 
 pub fn print_hold_summary(hold: &RetentionHold) {
-    println!("object_key: {}", hold.object_key().as_str());
-    println!("reason: {}", hold.reason());
-    println!("held_at_unix_seconds: {}", hold.held_at_unix_seconds());
+    let _result = write_hold_summary(&mut std::io::stdout().lock(), hold);
+}
+
+/// Writes the report and flushes the destination.
+///
+/// # Errors
+/// Returns the first write or flush error.
+pub fn write_hold_summary<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    hold: &RetentionHold,
+) -> std::io::Result<()> {
+    writeln!(writer, "object_key: {}", hold.object_key().as_str())?;
+    writeln!(writer, "reason: {}", hold.reason())?;
+    writeln!(
+        writer,
+        "held_at_unix_seconds: {}",
+        hold.held_at_unix_seconds()
+    )?;
     match hold.release_after_unix_seconds() {
-        Some(value) => println!("release_after_unix_seconds: {value}"),
-        None => println!("release_after_unix_seconds: none"),
+        Some(value) => writeln!(writer, "release_after_unix_seconds: {value}")?,
+        None => writeln!(writer, "release_after_unix_seconds: none")?,
     }
+    writer.flush()
 }
 
 pub fn print_hold_list_summary(root: &Path, active_only: bool, holds: &[RetentionHold]) {
-    println!("root: {}", root.display());
-    println!("active_only: {active_only}");
-    println!("hold_count: {}", holds.len());
+    let _result = write_hold_list_summary(&mut std::io::stdout().lock(), root, active_only, holds);
+}
+
+/// Writes the report and flushes the destination.
+///
+/// # Errors
+/// Returns the first write or flush error.
+pub fn write_hold_list_summary<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    root: &Path,
+    active_only: bool,
+    holds: &[RetentionHold],
+) -> std::io::Result<()> {
+    writeln!(writer, "root: {}", root.display())?;
+    writeln!(writer, "active_only: {active_only}")?;
+    writeln!(writer, "hold_count: {}", holds.len())?;
     for (index, hold) in holds.iter().enumerate() {
-        println!("hold[{index}].object_key: {}", hold.object_key().as_str());
-        println!("hold[{index}].reason: {}", hold.reason());
-        println!(
+        writeln!(
+            writer,
+            "hold[{index}].object_key: {}",
+            hold.object_key().as_str()
+        )?;
+        writeln!(writer, "hold[{index}].reason: {}", hold.reason())?;
+        writeln!(
+            writer,
             "hold[{index}].held_at_unix_seconds: {}",
             hold.held_at_unix_seconds()
-        );
+        )?;
         match hold.release_after_unix_seconds() {
             Some(value) => {
-                println!("hold[{index}].release_after_unix_seconds: {value}");
+                writeln!(writer, "hold[{index}].release_after_unix_seconds: {value}")?;
             }
             None => {
-                println!("hold[{index}].release_after_unix_seconds: none");
+                writeln!(writer, "hold[{index}].release_after_unix_seconds: none")?;
             }
         }
     }
+    writer.flush()
 }
 
 /// Retention-hold runtime failure.
@@ -65,9 +100,21 @@ pub enum HoldRuntimeError {
     /// Postgres pool configuration failed.
     #[error("postgres metadata connection failed")]
     Sqlx(Box<SqlxError>),
+    /// Coordinated retention mutation failed.
+    #[error(transparent)]
+    Server(Box<ServerError>),
     /// Timestamp arithmetic overflowed.
     #[error("retention hold timestamp overflowed")]
     Overflow,
+    /// A positive relative TTL expired while the metadata mutation was waiting.
+    #[error("retention hold expired before acknowledgement")]
+    Expired,
+}
+
+impl From<ServerError> for HoldRuntimeError {
+    fn from(value: ServerError) -> Self {
+        Self::Server(Box::new(value))
+    }
 }
 
 impl From<SqlxError> for HoldRuntimeError {
@@ -90,29 +137,28 @@ pub async fn run_hold_set(
 ) -> Result<RetentionHold, HoldRuntimeError> {
     let config = load_server_config(root, None)?;
     let object_key = ObjectKey::parse(object_key)?;
-    let held_at_unix_seconds = unix_now_seconds_lossy();
-    let release_after_unix_seconds = ttl_seconds
-        .map(|ttl| {
-            held_at_unix_seconds
-                .checked_add(ttl)
-                .ok_or(HoldRuntimeError::Overflow)
-        })
-        .transpose()?;
-    let hold = RetentionHold::new(
-        object_key,
-        reason.to_owned(),
-        held_at_unix_seconds,
-        release_after_unix_seconds,
-    )?;
-
-    if let Some(index_postgres_url) = config.index_postgres_url() {
-        let store = postgres_index_store(index_postgres_url)?;
-        store.upsert_retention_hold(&hold).await?;
-        return Ok(hold);
+    let hold = shardline_server::set_retention_hold_with(&config, || {
+        let held_at_unix_seconds = unix_now_seconds_lossy();
+        let release_after_unix_seconds = ttl_seconds
+            .map(|ttl| {
+                held_at_unix_seconds
+                    .checked_add(ttl)
+                    .ok_or(HoldRuntimeError::Overflow)
+            })
+            .transpose()?;
+        RetentionHold::new(
+            object_key,
+            reason.to_owned(),
+            held_at_unix_seconds,
+            release_after_unix_seconds,
+        )
+        .map_err(HoldRuntimeError::from)
+    })
+    .await?;
+    if ttl_seconds.is_some_and(|ttl| ttl > 0) && !hold.is_active_at(unix_now_seconds_lossy()) {
+        // Keep the expired row: deleting it could remove a concurrent replacement hold.
+        return Err(HoldRuntimeError::Expired);
     }
-
-    let store = LocalIndexStore::new(config.root_dir().to_path_buf())?;
-    LifecycleStore::upsert_retention_hold(&store, &hold)?;
     Ok(hold)
 }
 
@@ -155,16 +201,9 @@ pub async fn run_hold_release(
     let config = load_server_config(root, None)?;
     let object_key = ObjectKey::parse(object_key)?;
 
-    if let Some(index_postgres_url) = config.index_postgres_url() {
-        let store = postgres_index_store(index_postgres_url)?;
-        return store
-            .delete_retention_hold(&object_key)
-            .await
-            .map_err(Into::into);
-    }
-
-    let store = LocalIndexStore::new(config.root_dir().to_path_buf())?;
-    LifecycleStore::delete_retention_hold(&store, &object_key).map_err(Into::into)
+    shardline_server::release_retention_hold(&config, &object_key)
+        .await
+        .map_err(|error| HoldRuntimeError::Server(Box::new(error)))
 }
 
 fn postgres_index_store(index_postgres_url: &str) -> Result<PostgresIndexStore, HoldRuntimeError> {
@@ -482,5 +521,216 @@ mod tests {
         let err = HoldRuntimeError::Config(ServerConfigError::InvalidServerRole);
         let debug = format!("{err:?}");
         assert!(debug.contains("Config("));
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_hold_set_waits_for_gc_before_acknowledging() {
+        let storage = tempfile::tempdir().unwrap();
+        let barrier = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(storage.path().join(".gc-write-barrier.lock"))
+            .unwrap();
+        barrier.lock().unwrap();
+        let root = storage.path().to_path_buf();
+        let mut setter = tokio::spawn(async move {
+            run_hold_set(Some(&root), "retention/cli-race", "GC coordination", None).await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut setter)
+                .await
+                .is_err()
+        );
+        let index = LocalIndexStore::new(storage.path().to_path_buf()).unwrap();
+        let key = ObjectKey::parse("retention/cli-race").unwrap();
+        assert!(
+            LifecycleStore::retention_hold(&index, &key)
+                .unwrap()
+                .is_none()
+        );
+        drop(barrier);
+        let held = tokio::time::timeout(std::time::Duration::from_secs(2), setter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            LifecycleStore::retention_hold(&index, &key).unwrap(),
+            Some(held)
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relative_ttl_starts_after_gc_barrier_and_zero_ttl_stays_expired() {
+        let root = tempfile::tempdir().unwrap();
+        let barrier = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.path().join(".gc-write-barrier.lock"))
+            .unwrap();
+        barrier.lock().unwrap();
+        let path = root.path().to_path_buf();
+        let mut setter = tokio::spawn(async move {
+            run_hold_set(
+                Some(&path),
+                "retention/ttl-after-gc",
+                "relative TTL",
+                Some(2),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), &mut setter)
+                .await
+                .is_err()
+        );
+        let unlocked_at = unix_now_seconds_lossy();
+        drop(barrier);
+        let hold = setter.await.unwrap().unwrap();
+        assert!(hold.held_at_unix_seconds() >= unlocked_at);
+        assert_eq!(
+            hold.release_after_unix_seconds(),
+            Some(hold.held_at_unix_seconds() + 2)
+        );
+        assert!(hold.is_active_at(unix_now_seconds_lossy()));
+        let zero = run_hold_set(Some(root.path()), "retention/zero", "zero TTL", Some(0))
+            .await
+            .unwrap();
+        assert_eq!(
+            zero.release_after_unix_seconds(),
+            Some(zero.held_at_unix_seconds())
+        );
+        assert!(!zero.is_active_at(unix_now_seconds_lossy()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn positive_ttl_expired_by_sqlite_wait_returns_typed_error_without_deleting_row() {
+        let root = tempfile::tempdir().unwrap();
+        let index = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
+        let writer = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // Establish that warmed store setup completes with the same writer held:
+        // the subsequent wait is in the mutation after the hold factory runs.
+        let warm_path = root.path().to_path_buf();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                tokio::task::spawn_blocking(move || LocalIndexStore::new(warm_path))
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+        );
+
+        let path = root.path().to_path_buf();
+        let mut setter = tokio::spawn(async move {
+            run_hold_set(
+                Some(&path),
+                "retention/expired-write",
+                "slow metadata",
+                Some(1),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut setter)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+        writer.execute_batch("COMMIT").unwrap();
+        assert!(matches!(
+            setter.await.unwrap(),
+            Err(HoldRuntimeError::Expired)
+        ));
+        let key = ObjectKey::parse("retention/expired-write").unwrap();
+        let stored = LifecycleStore::retention_hold(&index, &key)
+            .unwrap()
+            .unwrap();
+        assert!(!stored.is_active_at(unix_now_seconds_lossy()));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod output_test_support {
+    use std::io::{self, Write};
+
+    struct FaultWriter {
+        remaining: usize,
+        fail_flush: bool,
+    }
+    impl Write for FaultWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_flush {
+                return Ok(bytes.len());
+            }
+            if self.remaining == 0 {
+                return Err(io::Error::from_raw_os_error(28));
+            }
+            let length = bytes.len().min(self.remaining);
+            self.remaining = self.remaining.saturating_sub(length);
+            Ok(length)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn assert_writer_errors(mut write: impl FnMut(&mut dyn Write) -> io::Result<()>) {
+        let mut partial = FaultWriter {
+            remaining: 7,
+            fail_flush: false,
+        };
+        assert!(matches!(write(&mut partial), Err(error) if error.raw_os_error() == Some(28)));
+        let mut flush = FaultWriter {
+            remaining: 0,
+            fail_flush: true,
+        };
+        assert!(
+            matches!(write(&mut flush), Err(error) if error.kind() == io::ErrorKind::BrokenPipe && error.to_string() == "flush failure")
+        );
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+    #[test]
+    fn hold_writers_preserve_text_and_propagate_write_and_flush_errors() {
+        let hold = RetentionHold::new(
+            ObjectKey::parse("future/key").expect("key"),
+            "reason".to_owned(),
+            10,
+            Some(20),
+        )
+        .expect("hold");
+        let mut bytes = Vec::new();
+        write_hold_summary(&mut bytes, &hold).expect("summary");
+        assert_eq!(bytes, b"object_key: future/key\nreason: reason\nheld_at_unix_seconds: 10\nrelease_after_unix_seconds: 20\n");
+        output_test_support::assert_writer_errors(|writer| write_hold_summary(writer, &hold));
+        output_test_support::assert_writer_errors(|writer| {
+            write_hold_list_summary(
+                writer,
+                Path::new("/root"),
+                true,
+                std::slice::from_ref(&hold),
+            )
+        });
+        bytes.clear();
+        write_hold_list_summary(
+            &mut bytes,
+            Path::new("/root"),
+            true,
+            std::slice::from_ref(&hold),
+        )
+        .expect("list");
+        assert_eq!(bytes, b"root: /root\nactive_only: true\nhold_count: 1\nhold[0].object_key: future/key\nhold[0].reason: reason\nhold[0].held_at_unix_seconds: 10\nhold[0].release_after_unix_seconds: 20\n");
     }
 }

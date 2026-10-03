@@ -129,7 +129,12 @@ pub async fn run_gc_diagnostics(
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
         let _gc_barrier = if options.mark || options.sweep {
-            Some(maintenance_barrier::acquire_postgres_exclusive(&pool).await?)
+            Some(
+                maintenance_barrier::acquire_postgres_exclusive(
+                    &maintenance_barrier::postgres_coordination_pool(index_postgres_url)?,
+                )
+                .await?,
+            )
         } else {
             None
         };

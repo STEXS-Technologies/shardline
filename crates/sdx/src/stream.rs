@@ -12,10 +12,13 @@
 //!   **spawned at construction, paused, and auto-starts on the first**
 //!   `next()`/`blocking_next()` (mirror `download_stream_handle.rs`); dropping
 //!   the stream cancels promptly via the shared run state.
-//! - [`BufferSemaphore`] is the **byte-denominated memory bound** (mirror
+//! - [`BufferSemaphore`] bounds **internally retained decoded payloads** (mirror
 //!   `xet-runtime` `AdjustableSemaphore` + `reconstruction_download_buffer`):
-//!   every in-flight term carries a byte-permit (`acquire_many(term_size)`)
-//!   released **only after the consumer consumed those bytes**.
+//!   each fetched block carries its complete decoded-byte reservation until
+//!   its last queued term is delivered or cancelled. Returned `Bytes` retained
+//!   by the caller belong to the caller's memory budget. Encoded HTTP bodies,
+//!   reconstruction metadata, offset tables, and queued term counts have
+//!   separate finite limits.
 //! - [`DataWriter`] (mirror `data_writer.rs`) with `SequentialWriter` and
 //!   `UnorderedWriter`; `reconstruct_to_writer` runs any `std::io::Write`
 //!   sink on a background thread.
@@ -25,7 +28,7 @@
 //!   max_reconstruction_fetch_size]` (estimator-driven, not fixed).
 //! - The on-disk chunk cache ([`crate::cache`], M2b2) is checked on every xorb
 //!   block fetch **before** the download permit / network; successful fetches
-//!   are stored back (best-effort, spawned). Cached data still counts against
+//!   are stored back (best-effort, within the admitted fetch). Cached data still counts against
 //!   the buffer semaphore while in flight — the cache is a disk copy, not a
 //!   memory bypass.
 //!
@@ -46,7 +49,7 @@
 //! [`DownloadStream::next`] there. `blocking_next()` is compiled only on
 //! non-wasm targets (wasm has no multi-thread runtime).
 
-use std::collections::{BTreeMap, HashMap, VecDeque, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::io::{IoSlice, Write};
 use std::ops::Range;
@@ -59,9 +62,10 @@ use shardline_xet_adapter::{ReconstructionFetchInfo, ReconstructionMultiRangeFet
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use xet_core_structures::ExpWeightedMovingAvg;
-use xet_core_structures::merklehash::MerkleHash;
+// Keep the compatible upstream runtime constraint active for SDK consumers.
+use xet_runtime as _;
 
 use crate::{
     auth::TokenService,
@@ -95,6 +99,11 @@ pub const DEFAULT_TARGET_BLOCK_COMPLETION_TIME_SECS: f64 = 900.0;
 pub const DEFAULT_COMPLETION_RATE_ESTIMATOR_HALF_LIFE: f64 = 4.0;
 /// Default fixed CAS connection-permit count (adaptive controller is M4).
 pub const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 4;
+
+const MAX_BUFFERED_TERMS: usize = 128;
+// Small fetch groups limit wire/decode transients and allocator retention;
+// the independent term cap still collapses malicious one-byte descriptions.
+const MAX_COALESCED_BLOCK_BYTES: u64 = 512 * 1024;
 
 /// Tunable prefetch/buffer limits for the streaming download pipeline.
 ///
@@ -195,6 +204,30 @@ pub(crate) fn global_blocking_runtime() -> Result<Arc<tokio::runtime::Runtime>, 
     }
 }
 
+/// Drive a borrowed download future on the SDK runtime without nesting Tokio
+/// runtimes on the calling thread. The SDK's workers drive reconstruction even
+/// while a current-thread caller's executor is blocked.
+#[cfg(not(target_family = "wasm"))]
+fn block_on_download<F, T>(runtime: &tokio::runtime::Runtime, future: F) -> Result<T, SdxError>
+where
+    F: Future<Output = Result<T, SdxError>> + Send,
+    T: Send,
+{
+    if tokio::runtime::Handle::try_current().is_err() {
+        return runtime.block_on(future);
+    }
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("sdx-download-bridge".to_owned())
+            .spawn_scoped(scope, || runtime.block_on(future))
+            .map_err(SdxError::Io)?
+            .join()
+            .map_err(|_panic_payload| {
+                SdxError::StreamInternal("download bridge thread panicked".to_owned())
+            })?
+    })
+}
+
 // ============================================================================
 // Byte-denominated buffer semaphore
 // ============================================================================
@@ -207,9 +240,10 @@ pub(crate) fn global_blocking_runtime() -> Result<Arc<tokio::runtime::Runtime>, 
 /// download entry, `decrement_permits_to_target` via an exit guard). Permit
 /// decreases are resolved lazily as issued permits drop.
 ///
-/// Permit counts are **bytes**. Every in-flight reconstruction term acquires
-/// `term_size` permits that are released only after the consumer consumed the
-/// term's bytes, so in-flight buffered bytes never exceed the capacity.
+/// Permit counts are **bytes**. Streaming reconstruction reserves complete
+/// decoded blocks. The reservation remains held until all internally queued
+/// slices of that block have been delivered or cancelled; a small term cannot
+/// hide a much larger retained backing allocation.
 ///
 /// Internally, permits are scaled by a power-of-two `basis` so the logical
 /// count (up to the 8 GiB default limit) fits within tokio's `u32` per-acquire
@@ -233,6 +267,10 @@ pub struct BufferPermit {
     permit: Option<OwnedSemaphorePermit>,
     num_physical_permits: u32,
     parent: Arc<BufferSemaphore>,
+    // Internal term-count admission and backing-block ownership. Zero-byte
+    // permits can carry these through the existing public writer interface.
+    _term_slot: Option<OwnedSemaphorePermit>,
+    _backing_block: Option<Arc<XorbBlock>>,
 }
 
 impl BufferSemaphore {
@@ -297,6 +335,8 @@ impl BufferSemaphore {
             permit: Some(permit),
             num_physical_permits: physical,
             parent: self.clone(),
+            _term_slot: None,
+            _backing_block: None,
         })
     }
 
@@ -365,6 +405,8 @@ impl BufferSemaphore {
             permit: None,
             num_physical_permits: u32::try_from(to_hold).unwrap_or(u32::MAX),
             parent: self.clone(),
+            _term_slot: None,
+            _backing_block: None,
         })
     }
 
@@ -385,6 +427,19 @@ impl BufferSemaphore {
 }
 
 impl BufferPermit {
+    const fn for_term(
+        parent: Arc<BufferSemaphore>,
+        slot: OwnedSemaphorePermit,
+        block: Arc<XorbBlock>,
+    ) -> Self {
+        Self {
+            permit: None,
+            num_physical_permits: 0,
+            parent,
+            _term_slot: Some(slot),
+            _backing_block: Some(block),
+        }
+    }
     /// The number of byte-permits held by this permit.
     #[must_use]
     pub fn num_permits(&self) -> u64 {
@@ -410,6 +465,8 @@ impl BufferPermit {
                 permit,
                 num_physical_permits: physical_n,
                 parent: self.parent.clone(),
+                _term_slot: None,
+                _backing_block: None,
             })
         } else {
             None
@@ -444,7 +501,7 @@ impl Drop for BufferPermit {
 /// Adds up to `n`, clamped at `max_value`; returns the amount actually added.
 fn attempt_add(counter: &AtomicU64, n: u64, max_value: u64) -> u64 {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             if current >= max_value {
                 None
             } else {
@@ -463,7 +520,7 @@ fn attempt_add(counter: &AtomicU64, n: u64, max_value: u64) -> u64 {
 /// subtracted.
 fn attempt_sub(counter: &AtomicU64, n: u64, min_value: u64) -> u64 {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             if current <= min_value {
                 None
             } else {
@@ -482,6 +539,10 @@ struct ExitGuard<F: FnOnce()>(Option<F>);
 impl<F: FnOnce()> ExitGuard<F> {
     const fn new(f: F) -> Self {
         Self(Some(f))
+    }
+
+    fn disarm(&mut self) {
+        drop(self.0.take());
     }
 }
 
@@ -554,16 +615,19 @@ impl RunState {
     /// Returns the stored error, if any, and clears it (the stream reports it
     /// once at an item boundary).
     pub(crate) fn check_error(&self) -> Result<(), SdxError> {
-        if self.has_error.load(Ordering::Acquire) {
-            let mut guard = self
-                .stored_error
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let error = guard.take().unwrap_or_else(|| {
-                SdxError::StreamInternal("unknown error occurred in background task".to_owned())
-            });
+        let mut guard = self.stored_error.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(error) = guard.take() {
             self.has_error.store(false, Ordering::Release);
             return Err(error);
+        }
+        Ok(())
+    }
+
+    // Background tasks must leave the typed first error for the consumer.
+    // Taking and re-publishing it creates a gap where cancellation looks clean.
+    fn check_background_error(&self) -> Result<(), SdxError> {
+        if let Some(message) = self.error_message() {
+            return Err(SdxError::StreamInternal(message));
         }
         Ok(())
     }
@@ -571,7 +635,7 @@ impl RunState {
     /// Checks errors first (so error-triggered cancellation returns the
     /// underlying error), then cancellation.
     pub(crate) fn check_run_state(&self) -> Result<(), RunError> {
-        if let Err(error) = self.check_error() {
+        if let Err(error) = self.check_background_error() {
             return Err(RunError::Error(error));
         }
         if self.cancellation_token.is_cancelled() {
@@ -720,7 +784,7 @@ impl SyncWriterThread {
                     let data = match receiver.blocking_recv() {
                         Ok(data) => data,
                         Err(_) => {
-                            self.run_state.check_error()?;
+                            self.run_state.check_background_error()?;
                             return Err(SdxError::StreamInternal(
                                 "data sender was dropped before sending data".to_owned(),
                             ));
@@ -735,7 +799,7 @@ impl SyncWriterThread {
                             Ok(None)
                         }
                         Err(oneshot::error::TryRecvError::Closed) => {
-                            self.run_state.check_error()?;
+                            self.run_state.check_background_error()?;
                             Err(SdxError::StreamInternal(
                                 "data sender was dropped before sending data".to_owned(),
                             ))
@@ -751,19 +815,42 @@ impl SyncWriterThread {
         }
     }
 
-    /// Runs the non-vectorized writer loop: `write_all` per term, then `flush`.
+    /// Writes each term completely while checking cancellation between writes.
     fn run(mut self, mut writer: impl Write) -> Result<(), SdxError> {
         while let Some((data, permit)) = self.next_write(true)? {
-            let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-            writer.write_all(&data).map_err(SdxError::Io)?;
-            self.bytes_written.fetch_add(len, Ordering::Relaxed);
+            let mut remaining = data.as_ref();
+            while !remaining.is_empty() {
+                self.run_state.check_background_error()?;
+                if self.run_state.is_cancelled() {
+                    return Ok(());
+                }
+                let written = match writer.write(remaining) {
+                    Ok(0) => return Err(SdxError::Io(std::io::ErrorKind::WriteZero.into())),
+                    Ok(written) => written,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(SdxError::Io(error)),
+                };
+                remaining = remaining.get(written..).ok_or_else(|| {
+                    SdxError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "writer returned an invalid byte count",
+                    ))
+                })?;
+                self.bytes_written.fetch_add(
+                    u64::try_from(written).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+            }
             // The buffer permit is released only after the data is written.
             drop(permit);
             if self.finished {
                 break;
             }
         }
-        writer.flush().map_err(SdxError::Io)?;
+        self.run_state.check_background_error()?;
+        if !self.run_state.is_cancelled() {
+            writer.flush().map_err(SdxError::Io)?;
+        }
         Ok(())
     }
 
@@ -773,6 +860,10 @@ impl SyncWriterThread {
     fn run_vectorized(mut self, mut writer: impl Write) -> Result<(), SdxError> {
         let mut pending_writes: VecDeque<PendingWrite> = VecDeque::new();
         while !self.finished || !pending_writes.is_empty() {
+            self.run_state.check_background_error()?;
+            if self.run_state.is_cancelled() {
+                return Ok(());
+            }
             if pending_writes.is_empty() {
                 let Some(write) = self.next_write(true)? else {
                     break;
@@ -787,6 +878,10 @@ impl SyncWriterThread {
                 .take(WRITEV_MAX_SLICE)
                 .map(|(data, _)| IoSlice::new(data))
                 .collect();
+            self.run_state.check_background_error()?;
+            if self.run_state.is_cancelled() {
+                return Ok(());
+            }
             let written = match writer.write_vectored(&io_slices) {
                 Ok(0) if !io_slices.is_empty() => {
                     return Err(SdxError::StreamInternal(
@@ -818,7 +913,10 @@ impl SyncWriterThread {
                 }
             }
         }
-        writer.flush().map_err(SdxError::Io)?;
+        self.run_state.check_background_error()?;
+        if !self.run_state.is_cancelled() {
+            writer.flush().map_err(SdxError::Io)?;
+        }
         Ok(())
     }
 }
@@ -855,7 +953,7 @@ impl DataWriter for SequentialWriter {
         permit: Option<BufferPermit>,
         data_future: DataFuture,
     ) -> Result<(), SdxError> {
-        self.run_state.check_error()?;
+        self.run_state.check_background_error()?;
         while let Some(result) = self.active_tasks.try_join_next() {
             result.map_err(|error| SdxError::TaskJoin(error.to_string()))??;
         }
@@ -879,7 +977,7 @@ impl DataWriter for SequentialWriter {
             .send(SequentialRetrievalItem::Data { receiver, permit })
             .is_err()
         {
-            self.run_state.check_error()?;
+            self.run_state.check_background_error()?;
             return Err(SdxError::StreamInternal(
                 "background writer channel closed".to_owned(),
             ));
@@ -888,7 +986,7 @@ impl DataWriter for SequentialWriter {
         let run_state = self.run_state.clone();
         let task = async move {
             let result = async {
-                run_state.check_error()?;
+                run_state.check_background_error()?;
                 let data = data_future.await?;
                 if u64::try_from(data.len()).unwrap_or(u64::MAX) != expected_size {
                     return Err(SdxError::StreamInternal(format!(
@@ -896,15 +994,17 @@ impl DataWriter for SequentialWriter {
                         data.len()
                     )));
                 }
-                if sender.send(data).is_err() {
-                    run_state.check_error()?;
-                    return Err(SdxError::StreamInternal(
-                        "failed to send data: receiver dropped".to_owned(),
-                    ));
-                }
-                Ok(())
+                Ok(data)
             }
             .await;
+            // Keep the oneshot sender alive until the real failure is stored;
+            // otherwise the consumer can observe a closed sender first.
+            let result = match result {
+                Ok(data) => sender.send(data).map_err(|_data| {
+                    SdxError::StreamInternal("failed to send data: receiver dropped".to_owned())
+                }),
+                Err(error) => Err(error),
+            };
             if let Err(error) = result {
                 // `SdxError` is not `Clone`, so store the real error in the run
                 // state (first error wins) and surface a generic marker through
@@ -923,15 +1023,14 @@ impl DataWriter for SequentialWriter {
     }
 
     async fn finish(mut self: Box<Self>) -> Result<u64, SdxError> {
-        self.run_state.check_error()?;
+        self.run_state.check_background_error()?;
         if self.finished {
             return Err(SdxError::StreamInternal(
                 "writer has already finished".to_owned(),
             ));
         }
-        self.finished = true;
         if self.sender.send(SequentialRetrievalItem::Finish).is_err() {
-            self.run_state.check_error()?;
+            self.run_state.check_background_error()?;
             return Err(SdxError::StreamInternal(
                 "background writer channel closed".to_owned(),
             ));
@@ -945,18 +1044,20 @@ impl DataWriter for SequentialWriter {
                 handle.await.map_err(|error| {
                     SdxError::StreamInternal(format!("background writer task failed: {error}"))
                 })?;
-                self.run_state.check_error()?;
+                self.run_state.check_background_error()?;
                 let actual_bytes = self.bytes_written.load(Ordering::Relaxed);
                 if actual_bytes != expected_bytes {
                     return Err(SdxError::StreamInternal(format!(
                         "bytes written mismatch: expected {expected_bytes} bytes, wrote {actual_bytes} bytes"
                     )));
                 }
+                self.finished = true;
                 Ok(actual_bytes)
             }
             None => {
                 // Streaming mode: no background writer thread; the consumer
                 // (DownloadStream) reads items directly from the channel.
+                self.finished = true;
                 Ok(expected_bytes)
             }
         }
@@ -1092,7 +1193,7 @@ impl DataWriter for UnorderedWriter {
         permit: Option<BufferPermit>,
         data_future: DataFuture,
     ) -> Result<(), SdxError> {
-        self.run_state.check_error()?;
+        self.run_state.check_background_error()?;
         while let Some(result) = self.task_set.try_join_next() {
             self.total_bytes_sent = self
                 .total_bytes_sent
@@ -1117,7 +1218,7 @@ impl DataWriter for UnorderedWriter {
 
         self.task_set.spawn(async move {
             let result = async {
-                run_state.check_error()?;
+                run_state.check_background_error()?;
                 let data = data_future.await?;
                 if u64::try_from(data.len()).unwrap_or(u64::MAX) != expected_size {
                     return Err(SdxError::StreamInternal(format!(
@@ -1158,7 +1259,7 @@ impl DataWriter for UnorderedWriter {
             if completed_bytes > 0 {
                 Ok(completed_bytes)
             } else {
-                run_state.check_error()?;
+                run_state.check_background_error()?;
                 Ok(0)
             }
         });
@@ -1167,7 +1268,7 @@ impl DataWriter for UnorderedWriter {
     }
 
     async fn finish(mut self: Box<Self>) -> Result<u64, SdxError> {
-        self.run_state.check_error()?;
+        self.run_state.check_background_error()?;
         while let Some(result) = self.task_set.join_next().await {
             self.total_bytes_sent = self
                 .total_bytes_sent
@@ -1221,6 +1322,8 @@ pub(crate) struct FileTerm {
     /// Flattened index into the xorb block's `chunk_offsets` for this term's
     /// starting chunk.
     pub xorb_block_start_index: usize,
+    xorb_block_end_index: usize,
+    unpacked_length: u64,
     /// Byte offset into the first chunk of the block, non-zero only for the
     /// first term when the query range starts mid-chunk.
     pub offset_into_first_range: u64,
@@ -1235,6 +1338,7 @@ pub(crate) struct XorbBlockData {
     pub chunk_offsets: Vec<(usize, usize)>,
     /// The concatenated decompressed chunk data for this block.
     pub data: Bytes,
+    _buffer_permit: BufferPermit,
 }
 
 /// A downloadable xorb byte range, with data cached for sharing across terms.
@@ -1249,16 +1353,76 @@ pub(crate) struct XorbBlock {
     pub bytes: ByteRange,
     /// Cached decoded data; the first term to request it triggers the fetch.
     pub data: OnceCell<Arc<XorbBlockData>>,
+    decoded_budget: u64,
+    reservation: Mutex<Option<BufferPermit>>,
+    reservation_started: AtomicBool,
+    #[cfg(test)]
+    publication_gate: Option<Arc<PublicationGate>>,
+}
+
+#[cfg(test)]
+struct PublicationGate {
+    ready: Mutex<Option<oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 impl XorbBlock {
+    #[cfg(test)]
+    fn wait_for_publication(&self) -> Result<(), SdxError> {
+        if let Some(gate) = &self.publication_gate {
+            let sender = gate
+                .ready
+                .lock()
+                .map_err(|error| SdxError::StreamInternal(error.to_string()))?
+                .take();
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+                gate.release
+                    .lock()
+                    .map_err(|error| SdxError::StreamInternal(error.to_string()))?
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|error| SdxError::StreamInternal(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn reserve(
+        &self,
+        ctx: &StreamContext,
+        seed: &mut Option<BufferPermit>,
+    ) -> Result<(), SdxError> {
+        if self.data.get().is_some() || self.reservation_started.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self.decoded_budget > ctx.buffer_semaphore.total_permits() {
+            return Err(SdxError::StreamInternal(
+                "xorb decoded size exceeds download buffer capacity".to_owned(),
+            ));
+        }
+        let permit = match seed
+            .as_mut()
+            .and_then(|reserved| reserved.split(self.decoded_budget))
+        {
+            Some(permit) => permit,
+            None => {
+                *seed = None;
+                ctx.buffer_semaphore
+                    .acquire_many(self.decoded_budget)
+                    .await?
+            }
+        };
+        *self.reservation.lock().unwrap_or_else(|p| p.into_inner()) = Some(permit);
+        self.reservation_started.store(true, Ordering::Release);
+        Ok(())
+    }
     /// Retrieves (or reuses) the decoded block data, checking the on-disk
     /// chunk cache first and fetching from the CAS on a miss under a download
     /// permit.
     ///
     /// On a cache hit the download permit is never acquired and no network
     /// request is issued; successful ranged fetches are stored back to the
-    /// cache best-effort (spawned, failures ignored).
+    /// cache best-effort within the admitted fetch (failures ignored).
     ///
     /// # Errors
     ///
@@ -1271,12 +1435,35 @@ impl XorbBlock {
     ) -> Result<Arc<XorbBlockData>, SdxError> {
         self.data
             .get_or_try_init(|| async {
+                // The reconstruction producer reserves blocks in output order;
+                // this also supports direct block retrieval in internal tests.
+                self.reserve(ctx, &mut None).await?;
+                // Reset failed or cancelled initialization, but keep successful
+                // ownership asserted until OnceCell publishes the returned value.
+                let mut reservation_reset = ExitGuard::new(|| {
+                    self.reservation_started.store(false, Ordering::Release);
+                });
+                let buffer_permit = self
+                    .reservation
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                    .ok_or_else(|| {
+                        SdxError::StreamInternal("xorb buffer reservation missing".to_owned())
+                    })?;
                 // M2b2: check the on-disk chunk cache before acquiring the
                 // download permit / hitting the CAS (key: xorb hash + exact
                 // chunk range, mirror `xet-data-1.5.4` `xorb_block.rs`).
                 if let Some(cache) = &ctx.chunk_cache
-                    && let Some(cached) = cache.get(&self.hash, self.chunk_range).await?
+                    && let Some(cached) = cache
+                        .get_bounded(&self.hash, self.chunk_range, self.decoded_budget)
+                        .await?
                 {
+                    if u64::try_from(cached.data.len()).unwrap_or(u64::MAX) > self.decoded_budget {
+                        return Err(SdxError::StreamInternal(
+                            "cached xorb exceeds buffer reservation".to_owned(),
+                        ));
+                    }
                     let base = usize::try_from(self.chunk_range.0).unwrap_or(usize::MAX);
                     let chunk_offsets = cached
                         .chunk_offsets
@@ -1289,10 +1476,16 @@ impl XorbBlock {
                             )
                         })
                         .collect();
-                    return Ok(Arc::new(XorbBlockData {
+                    let block_data = Arc::new(XorbBlockData {
                         chunk_offsets,
                         data: cached.data,
-                    }));
+                        _buffer_permit: buffer_permit,
+                    });
+                    reservation_reset.disarm();
+                    drop(reservation_reset);
+                    #[cfg(test)]
+                    self.wait_for_publication()?;
+                    return Ok(block_data);
                 }
                 let _download_permit =
                     ctx.download_permits
@@ -1310,13 +1503,44 @@ impl XorbBlock {
                 let ranged = retry
                     .run(token.to_owned(), move |tok| {
                         let url = url.clone();
-                        async move { ctx.transfer.fetch_xorb_range(&url, &tok, bytes).await }
+                        async move {
+                            ctx.transfer
+                                .fetch_xorb_range_bounded(&url, &tok, bytes)
+                                .await
+                        }
                     })
                     .await?;
                 ctx.xorb_fetch_count.fetch_add(1, Ordering::Relaxed);
-                let chunk_data = XorbReader::new(ranged.data).decode_chunk_data()?;
-                // Best-effort async cache put (mirror upstream `xorb_block.rs`
-                // `tokio::spawn` + warn); failures must not fail the download.
+                // Chunk indices belong to this exact serialized byte range.
+                // A server that ignores Range must not relabel its first chunk
+                // as the requested starting chunk.
+                if ranged.served_range != self.bytes {
+                    return Err(SdxError::Transfer(TransferError::InvalidResponse(format!(
+                        "xorb served range {:?} does not match requested range {:?}",
+                        ranged.served_range, self.bytes
+                    ))));
+                }
+                let chunk_data = XorbReader::new(ranged.data).decode_chunk_data_bounded(
+                    usize::try_from(self.decoded_budget).unwrap_or(usize::MAX),
+                )?;
+                let expected_chunks = self
+                    .chunk_range
+                    .1
+                    .checked_sub(self.chunk_range.0)
+                    .ok_or_else(|| {
+                        SdxError::StreamInternal("inverted xorb chunk range".to_owned())
+                    })?;
+                let actual_chunks = u64::try_from(chunk_data.chunk_offsets.len().saturating_sub(1))
+                    .unwrap_or(u64::MAX);
+                if actual_chunks != expected_chunks {
+                    return Err(SdxError::FetchChunkCountMismatch {
+                        url: self.url.clone(),
+                        expected: expected_chunks,
+                        actual: actual_chunks,
+                    });
+                }
+                // Await the best-effort cache write inside this admitted fetch;
+                // failures must not fail the download.
                 if let Some(cache) = &ctx.chunk_cache {
                     let cache = cache.clone();
                     let hash = self.hash.clone();
@@ -1327,9 +1551,10 @@ impl XorbBlock {
                         .iter()
                         .map(|offset| u32::try_from(*offset).unwrap_or(u32::MAX))
                         .collect::<Vec<u32>>();
-                    tokio::spawn(async move {
-                        drop(cache.put(&hash, chunk_range, &chunk_offsets, &data).await);
-                    });
+                    // Keep cache work within this admitted fetch. A detached
+                    // put otherwise retains decoded bytes after its reservation
+                    // has returned and creates unbounded background tasks.
+                    drop(cache.put(&hash, chunk_range, &chunk_offsets, &data).await);
                 }
                 let start_chunk = self.chunk_range.0;
                 let base = usize::try_from(start_chunk).unwrap_or(usize::MAX);
@@ -1339,10 +1564,16 @@ impl XorbBlock {
                     .enumerate()
                     .map(|(index, offset)| (base.saturating_add(index), *offset))
                     .collect();
-                Ok(Arc::new(XorbBlockData {
+                let block_data = Arc::new(XorbBlockData {
                     chunk_offsets,
                     data: chunk_data.data,
-                }))
+                    _buffer_permit: buffer_permit,
+                });
+                reservation_reset.disarm();
+                drop(reservation_reset);
+                #[cfg(test)]
+                self.wait_for_publication()?;
+                Ok(block_data)
             })
             .await
             .cloned()
@@ -1367,6 +1598,20 @@ impl FileTerm {
                     self.xorb_block_start_index
                 ))
             })?;
+        let (_, end_byte_offset) = block_data
+            .chunk_offsets
+            .get(self.xorb_block_end_index)
+            .copied()
+            .ok_or_else(|| {
+                SdxError::StreamInternal("term ending chunk offset missing".to_owned())
+            })?;
+        if u64::try_from(end_byte_offset.saturating_sub(start_byte_offset)).unwrap_or(u64::MAX)
+            != self.unpacked_length
+        {
+            return Err(SdxError::StreamInternal(
+                "term unpacked length disagrees with decoded chunks".to_owned(),
+            ));
+        }
         let start = start_byte_offset
             .checked_add(usize::try_from(self.offset_into_first_range).unwrap_or(usize::MAX))
             .ok_or_else(|| SdxError::StreamInternal("term start offset overflow".to_owned()))?;
@@ -1405,13 +1650,9 @@ impl FileTerm {
         let xorb_block = self.xorb_block.clone();
         let token = token.to_owned();
         let ctx = ctx.clone();
-        let task = tokio::task::spawn(async move {
+        Ok(Box::pin(async move {
             let block_data = xorb_block.retrieve_data(&ctx, &token).await?;
             file_term.extract_bytes(&block_data)
-        });
-        Ok(Box::pin(async move {
-            task.await
-                .map_err(|error| SdxError::TaskJoin(error.to_string()))?
         }))
     }
 }
@@ -1425,7 +1666,7 @@ pub(crate) struct TermBlock {
 }
 
 /// A normalized fetch descriptor for one xorb byte range.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct XorbDescriptor {
     url: String,
     bytes: ByteRange,
@@ -1508,16 +1749,22 @@ async fn fetch_term_block(
         Err(SdxError::Transfer(TransferError::RangeNotSatisfiable(_))) => return Ok(None),
         Err(error) => return Err(error),
     };
-    normalize_block(response, query_range.start, query_range.end)
+    normalize_block(
+        response,
+        query_range.start,
+        query_range.end,
+        ctx.buffer_semaphore.total_permits(),
+    )
 }
 
-/// Normalizes a raw reconstruction response into file terms sharing deduplicated
-/// xorb blocks (dedup map `(xorb_hash, first_chunk_start) → XorbBlock`, mirror
-/// `xet-data-1.5.4` `reconstruction_terms/file_term.rs`).
+/// Resolves descriptors once, then groups only consecutive output terms.
+/// Far-apart reuse receives a fresh block: caching it across intervening blocks
+/// would pin its byte reservation and could prevent the next block progressing.
 fn normalize_block(
     response: ReconstructionResponse,
     query_start: u64,
     query_end: u64,
+    buffer_capacity: u64,
 ) -> Result<Option<TermBlock>, SdxError> {
     let (offset_into_first_range, terms, descriptors) = match response {
         ReconstructionResponse::V2(resp) => (
@@ -1534,17 +1781,12 @@ fn normalize_block(
     if terms.is_empty() {
         return Ok(None);
     }
-    // Index fetch descriptors per xorb hash (sorted by chunk start) so the
-    // per-term lookup below is O(log n) rather than the O(n) linear scan that
-    // would otherwise make large term blocks (e.g. 32k terms × 16k descriptors)
-    // take tens of seconds.
     let mut descriptor_index: HashMap<String, Vec<XorbDescriptor>> = HashMap::new();
-    let mut xorb_blocks: Vec<Arc<XorbBlock>> = Vec::new();
-    let mut xorb_index: HashMap<(MerkleHash, u64), usize> = HashMap::new();
-    let mut file_terms = Vec::with_capacity(terms.len());
+    let mut groups: Vec<FetchGroup> = Vec::new();
     let mut current_offset = query_start;
+    let merge_limit = buffer_capacity.min(MAX_COALESCED_BLOCK_BYTES);
     for (term_index, term) in terms.iter().enumerate() {
-        let xorb_hash = parse_xet_hash_hex(&term.hash)?;
+        parse_xet_hash_hex(&term.hash)?;
         let sorted = descriptor_index
             .entry(term.hash.clone())
             .or_insert_with(|| {
@@ -1552,35 +1794,31 @@ fn normalize_block(
                 list.sort_by_key(|descriptor| descriptor.chunks.0);
                 list
             });
-        // The covering descriptor is the one with the largest `chunks.0 <=
-        // term.range.start` that also reaches `term.range.end` (mirror the
-        // previous linear `.find` semantics).
         let position = sorted.partition_point(|descriptor| descriptor.chunks.0 <= term.range.start);
-        let descriptor = match position.checked_sub(1).and_then(|index| sorted.get(index)) {
-            Some(descriptor) if descriptor.chunks.1 >= term.range.end => descriptor.clone(),
-            _ => {
-                return Err(SdxError::MissingFetchInfo {
-                    term_index,
-                    hash: term.hash.clone(),
-                });
-            }
+        let descriptor = position
+            .checked_sub(1)
+            .and_then(|index| sorted.get(index))
+            .filter(|descriptor| descriptor.chunks.1 >= term.range.end)
+            .cloned()
+            .ok_or_else(|| SdxError::MissingFetchInfo {
+                term_index,
+                hash: term.hash.clone(),
+            })?;
+        let exact = descriptor.chunks == (term.range.start, term.range.end);
+        let budget = if exact {
+            term.unpacked_length
+        } else {
+            buffer_capacity.min(64 * 1024 * 1024)
         };
-        let block_index = match xorb_index.entry((xorb_hash, descriptor.chunks.0)) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                let index = xorb_blocks.len();
-                xorb_blocks.push(Arc::new(XorbBlock {
-                    hash: term.hash.clone(),
-                    chunk_range: descriptor.chunks,
-                    url: descriptor.url.clone(),
-                    bytes: descriptor.bytes,
-                    data: OnceCell::new(),
-                }));
-                entry.insert(index);
-                index
-            }
-        };
-        // Only the first term can start mid-chunk (query range start offset).
+        if budget > buffer_capacity
+            || descriptor.bytes.start > descriptor.bytes.end
+            || descriptor.chunks.1.saturating_sub(descriptor.chunks.0) > 8192
+            || term.range.start >= term.range.end
+        {
+            return Err(SdxError::StreamInternal(
+                "invalid or oversized reconstruction fetch block".to_owned(),
+            ));
+        }
         let offset = if term_index == 0 {
             offset_into_first_range
         } else {
@@ -1593,28 +1831,116 @@ fn normalize_block(
                 actual: offset,
             });
         }
-        let term_byte_size = term.unpacked_length.saturating_sub(offset);
-        let block =
-            xorb_blocks
-                .get(block_index)
-                .cloned()
-                .ok_or_else(|| SdxError::MissingFetchInfo {
-                    term_index,
-                    hash: term.hash.clone(),
-                })?;
-        let start_chunk_index =
-            usize::try_from(term.range.start.saturating_sub(descriptor.chunks.0))
-                .unwrap_or(usize::MAX);
-        file_terms.push(FileTerm {
-            byte_range: current_offset..current_offset.saturating_add(term_byte_size),
-            xorb_block_start_index: start_chunk_index,
-            offset_into_first_range: offset,
-            xorb_block: block,
+        let term_size = term.unpacked_length.saturating_sub(offset);
+        let term_range = current_offset..current_offset.saturating_add(term_size);
+        current_offset = term_range.end;
+        let parsed = GroupTerm {
+            byte_range: term_range,
+            first_chunk: term.range.start,
+            end_chunk: term.range.end,
+            unpacked_length: term.unpacked_length,
+            offset,
+        };
+        if let Some(group) = groups.last_mut() {
+            if group.hash == term.hash && group.last_descriptor == descriptor {
+                // A descriptor may cover several terms or repeated output.
+                group.budget = group.budget.max(budget);
+                group.exact &= exact;
+                group.terms.push(parsed);
+                continue;
+            }
+            if group.hash == term.hash
+                && group.descriptor.url == descriptor.url
+                && group.descriptor.chunks.1 == descriptor.chunks.0
+                && group.descriptor.bytes.end.checked_add(1) == Some(descriptor.bytes.start)
+                && group.exact
+                && exact
+                && group.terms.len() < MAX_BUFFERED_TERMS
+                && group
+                    .budget
+                    .checked_add(budget)
+                    .is_some_and(|size| size <= merge_limit)
+            {
+                group.descriptor.chunks.1 = descriptor.chunks.1;
+                group.descriptor.bytes.end = descriptor.bytes.end;
+                group.budget = group.budget.saturating_add(budget);
+                group.last_descriptor = descriptor;
+                group.terms.push(parsed);
+                continue;
+            }
+        }
+        groups.push(FetchGroup {
+            hash: term.hash.clone(),
+            descriptor: descriptor.clone(),
+            last_descriptor: descriptor,
+            budget,
+            exact,
+            terms: vec![parsed],
         });
-        current_offset = current_offset.saturating_add(term_byte_size);
     }
-    // The last term may extend beyond the requested range when the query ends
-    // mid-chunk; trim it to the query boundary.
+    let mut file_terms = Vec::with_capacity(terms.len());
+    for group in groups {
+        // Original descriptors often cover multiple terms. When those terms
+        // cover the whole descriptor, reserve their actual declared total;
+        // otherwise use the bounded xorb maximum for a partial descriptor.
+        let budget = if group.exact {
+            group.budget
+        } else {
+            let mut covered = BTreeMap::new();
+            for term in &group.terms {
+                covered.insert(term.first_chunk, (term.end_chunk, term.unpacked_length));
+            }
+            let mut cursor = group.descriptor.chunks.0;
+            let mut length = 0u64;
+            for (start, (end, bytes)) in covered {
+                if start != cursor {
+                    break;
+                }
+                cursor = end;
+                length = length.checked_add(bytes).ok_or_else(|| {
+                    SdxError::StreamInternal("decoded block length overflow".to_owned())
+                })?;
+            }
+            if cursor == group.descriptor.chunks.1 {
+                length
+            } else {
+                group.budget
+            }
+        };
+        if budget > buffer_capacity {
+            return Err(SdxError::StreamInternal(
+                "decoded xorb exceeds download buffer capacity".to_owned(),
+            ));
+        }
+        let block = Arc::new(XorbBlock {
+            hash: group.hash,
+            chunk_range: group.descriptor.chunks,
+            url: group.descriptor.url,
+            bytes: group.descriptor.bytes,
+            data: OnceCell::new(),
+            decoded_budget: budget.max(1),
+            reservation: Mutex::new(None),
+            reservation_started: AtomicBool::new(false),
+            #[cfg(test)]
+            publication_gate: None,
+        });
+        for term in group.terms {
+            file_terms.push(FileTerm {
+                byte_range: term.byte_range,
+                xorb_block_start_index: usize::try_from(
+                    term.first_chunk.saturating_sub(block.chunk_range.0),
+                )
+                .unwrap_or(usize::MAX),
+                xorb_block_end_index: usize::try_from(
+                    term.end_chunk.saturating_sub(block.chunk_range.0),
+                )
+                .unwrap_or(usize::MAX),
+                unpacked_length: term.unpacked_length,
+                offset_into_first_range: term.offset,
+                xorb_block: block.clone(),
+            });
+        }
+    }
     if current_offset > query_end {
         let shrink = current_offset.saturating_sub(query_end);
         if let Some(last) = file_terms.last_mut() {
@@ -1626,6 +1952,23 @@ fn normalize_block(
         file_terms,
         actual_end: current_offset,
     }))
+}
+
+struct GroupTerm {
+    byte_range: Range<u64>,
+    first_chunk: u64,
+    end_chunk: u64,
+    unpacked_length: u64,
+    offset: u64,
+}
+
+struct FetchGroup {
+    hash: String,
+    descriptor: XorbDescriptor,
+    last_descriptor: XorbDescriptor,
+    budget: u64,
+    exact: bool,
+    terms: Vec<GroupTerm>,
 }
 
 // ============================================================================
@@ -1648,7 +1991,8 @@ struct ReconstructionTermManager {
     known_final_byte_position: Arc<AtomicU64>,
     prefetched_byte_position: u64,
     current_active_byte_position: u64,
-    prefetch_queue: VecDeque<JoinHandle<Result<Option<TermBlock>, SdxError>>>,
+    // A dropped queued or actively awaited handle cancels its HTTP work.
+    prefetch_queue: VecDeque<AbortOnDropHandle<Result<Option<TermBlock>, SdxError>>>,
     completion_rate_estimator: ExpWeightedMovingAvg,
 }
 
@@ -1808,7 +2152,8 @@ impl ReconstructionTermManager {
                 Err(error) => Err(error),
             }
         });
-        self.prefetch_queue.push_back(join_handle);
+        self.prefetch_queue
+            .push_back(AbortOnDropHandle::new(join_handle));
         Ok(())
     }
 }
@@ -1981,6 +2326,7 @@ impl FileReconstructor {
 
         // The range start offset: writer ranges are relative to this.
         let range_start_offset = requested_range.start;
+        let term_slots = Arc::new(Semaphore::new(MAX_BUFFERED_TERMS));
 
         // Outer loop: retrieve blocks of file terms, aborting promptly on
         // cancellation via `select!`.
@@ -2006,26 +2352,24 @@ impl FileReconstructor {
                     .end
                     .saturating_sub(file_term.byte_range.start);
 
-                // Split from the reserved (virtual) permit first so this
-                // download gets immediate access; fall back to the shared
-                // semaphore with prompt cancellation.
-                let buffer_permit = match seed_buffer_permit
-                    .as_mut()
-                    .and_then(|reserved| reserved.split(term_size))
-                {
-                    Some(permit) => permit,
-                    None => {
-                        seed_buffer_permit = None;
-                        tokio::select! {
-                            biased;
-                            () = run_state.cancelled() => {
-                                run_state.check_run_state()?;
-                                return Ok(0);
-                            }
-                            result = ctx.buffer_semaphore.acquire_many(term_size) => result?,
-                        }
-                    }
+                // Reserve the whole decoded allocation in output order. The
+                // term guard keeps its backing block alive until delivery,
+                // even when its own byte slice is much smaller than the block.
+                let slot = tokio::select! {
+                    biased;
+                    () = run_state.cancelled() => { run_state.check_run_state()?; return Ok(0); }
+                    result = term_slots.clone().acquire_owned() => result.map_err(|error| SdxError::StreamInternal(error.to_string()))?,
                 };
+                tokio::select! {
+                    biased;
+                    () = run_state.cancelled() => { run_state.check_run_state()?; return Ok(0); }
+                    result = file_term.xorb_block.reserve(&ctx, &mut seed_buffer_permit) => result?,
+                }
+                let buffer_permit = BufferPermit::for_term(
+                    ctx.buffer_semaphore.clone(),
+                    slot,
+                    file_term.xorb_block.clone(),
+                );
 
                 let data_future = file_term.get_data_task(&ctx, &token).await?;
                 let relative_start = file_term
@@ -2045,7 +2389,14 @@ impl FileReconstructor {
         }
 
         // Finish the writer and wait for all data to be delivered.
-        let bytes_written = data_writer.finish().await?;
+        let bytes_written = tokio::select! {
+            biased;
+            () = run_state.cancelled() => {
+                run_state.check_run_state()?;
+                return Ok(0);
+            }
+            result = data_writer.finish() => result?,
+        };
         Ok(bytes_written)
     }
 }
@@ -2053,6 +2404,11 @@ impl FileReconstructor {
 // ============================================================================
 // DownloadStream
 // ============================================================================
+
+struct PendingDownloadData {
+    receiver: oneshot::Receiver<Bytes>,
+    permit: Option<BufferPermit>,
+}
 
 /// A streaming download handle that yields data chunks as they are
 /// reconstructed (mirror `data_writer/download_stream.rs`).
@@ -2067,6 +2423,7 @@ impl FileReconstructor {
 /// surfaces on the call that would have returned the next chunk (or on the
 /// final `None`) via the shared run state.
 pub struct DownloadStream {
+    pending_data: Option<PendingDownloadData>,
     receiver: UnboundedReceiver<SequentialRetrievalItem>,
     finished: bool,
     run_state: Arc<RunState>,
@@ -2101,6 +2458,7 @@ impl DownloadStream {
         }
         Self {
             receiver,
+            pending_data: None,
             finished: false,
             run_state,
             start_signal: Some(start_signal),
@@ -2137,6 +2495,9 @@ impl DownloadStream {
     ///
     /// Returns `Ok(None)` when the download is complete or cancelled.
     ///
+    /// Dropping this future before it completes preserves any pending chunk
+    /// for the next call. Use [`cancel`](Self::cancel) to stop the download.
+    ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when a background reconstruction task failed.
@@ -2144,49 +2505,84 @@ impl DownloadStream {
         if self.finished {
             return Ok(None);
         }
+        if self.run_state.is_cancelled() {
+            let terminal = self.run_state.check_error();
+            self.cancel();
+            terminal?;
+            return Ok(None);
+        }
         self.ensure_started();
 
-        let item = if let Ok(item) = self.receiver.try_recv() {
-            Some(item)
-        } else {
-            tokio::select! {
-                biased;
-                recv = self.receiver.recv() => recv,
-                () = self.run_state.cancelled() => None,
-            }
-        };
-
-        match item {
-            Some(SequentialRetrievalItem::Data { receiver, permit }) => {
-                // The term's bytes may still be in flight (the data future is
-                // resolving the xorb fetch/decode), so awaiting the oneshot
-                // must race cancellation: a group/session abort has to surface
-                // as a prompt `Ok(None)` rather than hanging on the fetch
-                // (M2b2 stream-group abort semantics).
-                let data = tokio::select! {
+        if self.pending_data.is_none() {
+            let item = if let Ok(item) = self.receiver.try_recv() {
+                Some(item)
+            } else {
+                tokio::select! {
                     biased;
-                    data = receiver => match data {
-                        Ok(data) => data,
-                        Err(_) => {
-                            self.run_state.check_error()?;
-                            return Err(SdxError::StreamInternal(
-                                "data sender was dropped before sending data".to_owned(),
-                            ));
-                        }
-                    },
-                    () = self.run_state.cancelled() => {
-                        self.finished = true;
-                        return Ok(None);
-                    }
-                };
+                    recv = self.receiver.recv() => recv,
+                    () = self.run_state.cancelled() => None,
+                }
+            };
+            if self.run_state.is_cancelled() {
+                let terminal = self.run_state.check_error();
+                drop(item);
+                self.cancel();
+                terminal?;
+                return Ok(None);
+            }
+            match item {
+                Some(SequentialRetrievalItem::Data { receiver, permit }) => {
+                    self.pending_data = Some(PendingDownloadData { receiver, permit });
+                }
+                Some(SequentialRetrievalItem::Finish) | None => {
+                    self.finished = true;
+                    self.run_state.check_error()?;
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Keep the in-flight receiver and its buffer permit in the stream.
+        // Dropping a `next()` future (for example, on a timeout) must leave
+        // this term available for the consumer's next attempt.
+        let Some(pending) = self.pending_data.as_mut() else {
+            return Err(SdxError::StreamInternal(
+                "pending stream data is missing".to_owned(),
+            ));
+        };
+        let result = tokio::select! {
+            biased;
+            data = &mut pending.receiver => Some(data),
+            () = self.run_state.cancelled() => None,
+        };
+        if self.run_state.is_cancelled() {
+            let terminal = self.run_state.check_error();
+            self.cancel();
+            terminal?;
+            return Ok(None);
+        }
+        // A completed receiver cannot be polled again, and cancellation of
+        // the whole reconstruction must release its permit promptly.
+        if let Some(completed) = self.pending_data.take() {
+            drop(completed.permit);
+        }
+        match result {
+            Some(Ok(data)) => {
                 self.run_state
                     .report_bytes_written(u64::try_from(data.len()).unwrap_or(u64::MAX));
-                // The buffer permit is released only after the consumer has
-                // received these bytes.
-                drop(permit);
                 Ok(Some(data))
             }
-            Some(SequentialRetrievalItem::Finish) | None => {
+            Some(Err(_)) => {
+                self.run_state.check_error()?;
+                if self.run_state.is_cancelled() {
+                    self.finished = true;
+                    return Ok(None);
+                }
+                Err(SdxError::StreamInternal(
+                    "data sender was dropped before sending data".to_owned(),
+                ))
+            }
+            None => {
                 self.finished = true;
                 self.run_state.check_error()?;
                 Ok(None)
@@ -2215,7 +2611,7 @@ impl DownloadStream {
     #[cfg(not(target_family = "wasm"))]
     pub fn blocking_next(&mut self) -> Result<Option<Bytes>, SdxError> {
         let runtime = self.runtime.clone();
-        runtime.block_on(self.next())
+        block_on_download(&runtime, self.next())
     }
 
     /// Cancels the in-progress (or not-yet-started) download.
@@ -2226,6 +2622,10 @@ impl DownloadStream {
         self.cancel_reconstruction();
         drop(self.start_signal.take());
         self.receiver.close();
+        while let Ok(item) = self.receiver.try_recv() {
+            drop(item);
+        }
+        drop(self.pending_data.take());
         self.finished = true;
     }
 
@@ -2346,6 +2746,12 @@ impl UnorderedDownloadStream {
         if self.finished {
             return Ok(None);
         }
+        if self.run_state.is_cancelled() {
+            let terminal = self.run_state.check_error();
+            self.cancel();
+            terminal?;
+            return Ok(None);
+        }
         self.ensure_started();
 
         if let Ok(result) = self.receiver.try_recv() {
@@ -2359,6 +2765,12 @@ impl UnorderedDownloadStream {
         match next_item {
             Some(result) => self.process_term(result),
             None => {
+                if self.run_state.is_cancelled() {
+                    let terminal = self.run_state.check_error();
+                    self.cancel();
+                    terminal?;
+                    return Ok(None);
+                }
                 self.finished = true;
                 self.run_state.check_error()?;
                 Ok(None)
@@ -2382,13 +2794,20 @@ impl UnorderedDownloadStream {
     #[cfg(not(target_family = "wasm"))]
     pub fn blocking_next(&mut self) -> Result<Option<(u64, Bytes)>, SdxError> {
         let runtime = self.runtime.clone();
-        runtime.block_on(self.next())
+        block_on_download(&runtime, self.next())
     }
 
     fn process_term(
         &mut self,
         result: Result<CompletedTerm, SdxError>,
     ) -> Result<Option<(u64, Bytes)>, SdxError> {
+        if self.run_state.is_cancelled() {
+            drop(result);
+            let terminal = self.run_state.check_error();
+            self.cancel();
+            terminal?;
+            return Ok(None);
+        }
         let term = result?;
         let offset = term.byte_range.start;
         let data = term.data;
@@ -2408,6 +2827,9 @@ impl UnorderedDownloadStream {
         self.cancel_reconstruction();
         drop(self.start_signal.take());
         self.receiver.close();
+        while let Ok(item) = self.receiver.try_recv() {
+            drop(item);
+        }
         self.finished = true;
     }
 
@@ -2602,6 +3024,205 @@ mod tests {
             .await;
     }
 
+    /// Responds to actual arbitrary single-range HTTP requests. Coalescing
+    /// tests must check network behavior, rather than a copied normalizer.
+    async fn xorb_payload_mock(server: &MockServer, payload: Vec<u8>) {
+        Mock::given(method("GET"))
+            .and(path(format!("/transfer/xorb/default/{XORB_HASH}")))
+            .respond_with(move |request: &wiremock::Request| {
+                let range = request.headers.get("range").unwrap().to_str().unwrap();
+                let (start, end) = range
+                    .strip_prefix("bytes=")
+                    .unwrap()
+                    .split_once('-')
+                    .unwrap();
+                let start: usize = start.parse().unwrap();
+                let end: usize = end.parse().unwrap();
+                ResponseTemplate::new(206)
+                    .insert_header(
+                        "Content-Range",
+                        format!("bytes {start}-{end}/{}", payload.len()),
+                    )
+                    .set_body_bytes(payload[start..=end].to_vec())
+            })
+            .mount(server)
+            .await;
+    }
+
+    async fn adjacent_chunk_fixture(
+        server: &MockServer,
+        count: usize,
+        size: usize,
+        order: &[usize],
+        requested: Option<Range<u64>>,
+    ) -> Vec<u8> {
+        let chunks: Vec<Vec<u8>> = (0..count)
+            .map(|i| vec![u8::try_from(i % 251).unwrap(); size])
+            .collect();
+        let serialized_size = serialize_payload(&[&chunks[0]]).len();
+        let payload = serialize_payload(&chunks.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let expected: Vec<u8> = order
+            .iter()
+            .flat_map(|i| chunks[*i].iter().copied())
+            .collect();
+        let terms: serde_json::Value = order
+            .iter()
+            .map(
+                |i| json!({"hash": XORB_HASH,"unpacked_length":size,"range":{"start":i,"end":i.saturating_add(1)}}),
+            )
+            .collect();
+        let ranges: serde_json::Value = (0..count).map(|i| json!({"chunks":{"start":i,"end":i.saturating_add(1)},"bytes":{"start":i.saturating_mul(serialized_size),"end":i.saturating_add(1).saturating_mul(serialized_size).saturating_sub(1)}})).collect();
+        let start = requested.as_ref().map_or(0, |range| range.start);
+        let end = requested
+            .as_ref()
+            .map_or(4095, |range| range.end.saturating_sub(1));
+        reconstruction_mock(server,start,end,start,terms,json!({XORB_HASH:[{"url":format!("{}/transfer/xorb/default/{XORB_HASH}",server.uri()),"ranges":ranges}]})).await;
+        xorb_payload_mock(server, payload).await;
+        requested.map_or_else(
+            || expected.clone(),
+            |range| expected[range.start as usize..range.end as usize].to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn streaming_coalesces_actual_http_requests_with_partial_slices() {
+        let server = MockServer::start().await;
+        let range = 3..507;
+        let expected = adjacent_chunk_fixture(
+            &server,
+            64,
+            8,
+            &(0..64).collect::<Vec<_>>(),
+            Some(range.clone()),
+        )
+        .await;
+        let ctx = test_stream_context(&server, 256);
+        let (output, _) = tokio::time::timeout(
+            Duration::from_secs(3),
+            drain(make_stream(ctx.clone(), Some(range))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, expected);
+        let requests = server.received_requests().await.unwrap();
+        let fetches = requests
+            .iter()
+            .filter(|request| request.url.path().starts_with("/transfer/xorb/"))
+            .count();
+        assert_eq!(
+            fetches, 2,
+            "64 tiny descriptors should become two bounded block fetches"
+        );
+        assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 2);
+        assert_eq!(ctx.buffer_semaphore.available_permits(), 256);
+    }
+
+    #[tokio::test]
+    async fn streaming_gapped_and_repeated_ranges_do_not_pin_old_blocks() {
+        let server = MockServer::start().await;
+        let expected = adjacent_chunk_fixture(&server, 6, 8, &[0, 1, 4, 5, 0, 1], None).await;
+        let ctx = test_stream_context(&server, 16);
+        let (output, _) = tokio::time::timeout(
+            Duration::from_secs(3),
+            drain(make_stream(ctx.clone(), None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 3);
+        assert_eq!(ctx.buffer_semaphore.available_permits(), 16);
+    }
+
+    #[tokio::test]
+    async fn streaming_tiny_terms_bound_queued_work_until_consumer_advances() {
+        let server = MockServer::start().await;
+        let expected =
+            adjacent_chunk_fixture(&server, 512, 1, &(0..512).collect::<Vec<_>>(), None).await;
+        let ctx = test_stream_context(&server, 4096);
+        let mut stream = make_stream(ctx.clone(), None);
+        stream.start();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while stream
+                .run_state
+                .total_bytes_scheduled
+                .load(Ordering::Relaxed)
+                < MAX_BUFFERED_TERMS as u64
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            stream
+                .run_state
+                .total_bytes_scheduled
+                .load(Ordering::Relaxed),
+            MAX_BUFFERED_TERMS as u64
+        );
+        assert_eq!(
+            ctx.buffer_semaphore.total_permits() - ctx.buffer_semaphore.available_permits(),
+            128
+        );
+        let (output, _) = tokio::time::timeout(Duration::from_secs(3), drain(stream))
+            .await
+            .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 4);
+        // MockServer::drop synchronously polls a Tokio RwLock. A fully drained
+        // cooperative budget can defer its wake onto this same runtime, which
+        // cannot advance while Drop is blocking. Force that condition, then
+        // make only fixture teardown unconstrained.
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        assert!(!tokio::task::coop::has_budget_remaining());
+        tokio::task::unconstrained(async { drop(server) }).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_stream_releases_fetch_and_buffer_without_detached_tasks() {
+        let server = MockServer::start().await;
+        let payload = serialize_payload(&[b"payload"]);
+        reconstruction_mock(&server,0,4095,0,json!([{"hash":XORB_HASH,"unpacked_length":7,"range":{"start":0,"end":1}}]),
+            json!({XORB_HASH:[{"url":format!("{}/transfer/xorb/default/{XORB_HASH}",server.uri()),"ranges":[{"chunks":{"start":0,"end":1},"bytes":{"start":0,"end":payload.len()-1}}]}]})).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/transfer/xorb/default/{XORB_HASH}")))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header(
+                        "Content-Range",
+                        format!("bytes 0-{}/{}", payload.len() - 1, payload.len()),
+                    )
+                    .set_body_bytes(payload)
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+        let ctx = test_stream_context(&server, 128);
+        let mut stream = make_stream(ctx.clone(), None);
+        stream.start();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while ctx.download_permits.available_permits() == DEFAULT_DOWNLOAD_CONCURRENCY {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(stream);
+        tokio::time::timeout(Duration::from_millis(250), async {
+            while ctx.download_permits.available_permits() != DEFAULT_DOWNLOAD_CONCURRENCY
+                || ctx.buffer_semaphore.available_permits() != 128
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("cancelled stream left an untracked fetch holding permits");
+        assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 0);
+    }
+
     fn make_stream(ctx: StreamContext, range: Option<Range<u64>>) -> DownloadStream {
         let mut reconstructor =
             FileReconstructor::new(ctx, FILE_ID.to_owned(), READ_TOKEN.to_owned());
@@ -2732,6 +3353,20 @@ mod tests {
         state.cancelled().await;
     }
 
+    #[test]
+    fn background_checks_preserve_first_typed_error_for_consumer() {
+        let state = RunState::new(CancellationToken::new());
+        state.set_error(SdxError::Transfer(TransferError::InvalidResponse(
+            "original".to_owned(),
+        )));
+        assert!(state.check_background_error().is_err());
+        assert!(state.check_run_state().is_err());
+        assert!(
+            matches!(state.check_error(), Err(SdxError::Transfer(TransferError::InvalidResponse(message))) if message == "original")
+        );
+        assert!(state.check_error().is_ok());
+    }
+
     #[tokio::test]
     async fn run_state_cancel_returns_cancelled() {
         let state = RunState::new(CancellationToken::new());
@@ -2802,6 +3437,151 @@ mod tests {
             }
         }
         assert_eq!(&out, b"Hello World");
+    }
+
+    struct CooperativeSink {
+        always_interrupted: bool,
+        interrupt_once: bool,
+        permanent_error: bool,
+        flush_error: bool,
+        gate: Option<std::sync::mpsc::Receiver<()>>,
+        started: Option<oneshot::Sender<()>>,
+        dropped: Option<oneshot::Sender<()>>,
+        written: Arc<AtomicU64>,
+    }
+
+    impl Write for CooperativeSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                let _sent = started.send(());
+            }
+            if let Some(gate) = self.gate.take() {
+                gate.recv().map_err(std::io::Error::other)?;
+            }
+            if self.always_interrupted || std::mem::take(&mut self.interrupt_once) {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            if self.permanent_error {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "owned sink failure",
+                ));
+            }
+            let count = bytes.len().min(3);
+            self.written
+                .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.flush_error {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "owned flush failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for CooperativeSink {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _sent = dropped.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cooperative_writer_cancelled_finish_stops_retries_and_releases_permits() {
+        for vectorized in [false, true] {
+            for gated in [false, true] {
+                let state = RunState::new(CancellationToken::new());
+                let semaphore = Arc::new(BufferSemaphore::new(64, 64, 64));
+                let written = Arc::new(AtomicU64::new(0));
+                let (started_tx, started_rx) = oneshot::channel();
+                let (dropped_tx, dropped_rx) = oneshot::channel();
+                let (release_tx, gate_rx) = std::sync::mpsc::channel();
+                let sink = CooperativeSink {
+                    always_interrupted: !gated,
+                    interrupt_once: false,
+                    permanent_error: false,
+                    flush_error: false,
+                    gate: gated.then_some(gate_rx),
+                    started: Some(started_tx),
+                    dropped: Some(dropped_tx),
+                    written: written.clone(),
+                };
+                let mut writer = SequentialWriter::new(sink, vectorized, state.clone());
+                writer
+                    .set_next_term_data_source(
+                        0..64,
+                        Some(semaphore.acquire_many(64).await.unwrap()),
+                        immediate_future(Bytes::from(vec![7u8; 64])),
+                    )
+                    .await
+                    .unwrap();
+                let finishing = tokio::spawn(writer.finish());
+                tokio::time::timeout(Duration::from_secs(5), started_rx)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(semaphore.available_permits(), 0);
+                finishing.abort();
+                assert!(finishing.await.unwrap_err().is_cancelled());
+                assert!(state.is_cancelled());
+                if gated {
+                    release_tx.send(()).unwrap();
+                }
+                tokio::time::timeout(Duration::from_secs(5), dropped_rx)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(written.load(Ordering::Relaxed), if gated { 3 } else { 0 });
+                assert_eq!(semaphore.available_permits(), 64);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cooperative_writer_preserves_short_writes_interrupted_and_typed_errors() {
+        for vectorized in [false, true] {
+            for (permanent_error, flush_error) in [(false, false), (true, false), (false, true)] {
+                let state = RunState::new(CancellationToken::new());
+                let written = Arc::new(AtomicU64::new(0));
+                let sink = CooperativeSink {
+                    always_interrupted: false,
+                    interrupt_once: true,
+                    permanent_error,
+                    flush_error,
+                    gate: None,
+                    started: None,
+                    dropped: None,
+                    written: written.clone(),
+                };
+                let mut writer = SequentialWriter::new(sink, vectorized, state.clone());
+                writer
+                    .set_next_term_data_source(
+                        0..64,
+                        None,
+                        immediate_future(Bytes::from(vec![7u8; 64])),
+                    )
+                    .await
+                    .unwrap();
+                let result = writer.finish().await;
+                if permanent_error || flush_error {
+                    assert!(result.is_err());
+                    assert!(
+                        matches!(state.check_error(), Err(SdxError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe && error.to_string() == if permanent_error { "owned sink failure" } else { "owned flush failure" })
+                    );
+                } else {
+                    assert_eq!(result.unwrap(), 64);
+                    assert_eq!(written.load(Ordering::Relaxed), 64);
+                    assert!(!state.is_cancelled());
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -2944,13 +3724,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 3}, "bytes": {"start": 0, "end": 300}}
+                        {"chunks": {"start": 0, "end": 3}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 300, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let (out, _sizes) = drain(make_stream(ctx, None)).await;
@@ -2958,6 +3738,191 @@ mod tests {
         expected.extend_from_slice(&chunk_b);
         expected.extend_from_slice(&chunk_c);
         assert_eq!(out, expected);
+    }
+
+    async fn assert_reservation_retry_after_failed_init(cancel: bool) {
+        let server = MockServer::start().await;
+        let decoded = vec![7; 128];
+        let payload = serialize_payload(&[&decoded]);
+        let response = ResponseTemplate::new(206)
+            .insert_header(
+                "Content-Range",
+                format!(
+                    "bytes 0-{}/{}",
+                    payload.len().saturating_sub(1),
+                    payload.len()
+                ),
+            )
+            .set_body_bytes(vec![0; payload.len()]);
+        Mock::given(method("GET"))
+            .respond_with(if cancel {
+                response.set_delay(Duration::from_secs(5))
+            } else {
+                response
+            })
+            .mount(&server)
+            .await;
+        let mut ctx = test_stream_context(&server, 4096);
+        let block = Arc::new(XorbBlock {
+            hash: XORB_HASH.to_owned(),
+            chunk_range: (0, 1),
+            url: server.uri(),
+            bytes: ByteRange::new(0, (payload.len().saturating_sub(1)) as u64),
+            data: OnceCell::new(),
+            decoded_budget: 128,
+            reservation: Mutex::new(None),
+            reservation_started: AtomicBool::new(false),
+            publication_gate: None,
+        });
+        let loader_block = Arc::clone(&block);
+        let loader_context = ctx.clone();
+        let loader = tokio::spawn(async move {
+            loader_block
+                .retrieve_data(&loader_context, READ_TOKEN)
+                .await
+        });
+        if cancel {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if !server.received_requests().await.unwrap().is_empty() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(block.reservation_started.load(Ordering::Acquire));
+            assert_eq!(
+                ctx.buffer_semaphore.available_permits(),
+                ctx.buffer_semaphore.total_permits().saturating_sub(128)
+            );
+            loader.abort();
+            assert!(matches!(loader.await, Err(error) if error.is_cancelled()));
+        } else {
+            assert!(loader.await.unwrap().is_err());
+        }
+        assert!(block.data.get().is_none());
+        assert!(!block.reservation_started.load(Ordering::Acquire));
+        assert!(block.reservation.lock().unwrap().is_none());
+        assert_eq!(
+            ctx.buffer_semaphore.available_permits(),
+            ctx.buffer_semaphore.total_permits()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Arc::new(ChunkCache::new(directory.path(), 1024).unwrap());
+        cache
+            .put(XORB_HASH, (0, 1), &[0, 128], &decoded)
+            .await
+            .unwrap();
+        ctx.chunk_cache = Some(cache);
+        let data = block.clone().retrieve_data(&ctx, READ_TOKEN).await.unwrap();
+        assert_eq!(data.data.as_ref(), decoded.as_slice());
+        assert!(block.reservation_started.load(Ordering::Acquire));
+        assert_eq!(
+            ctx.buffer_semaphore.available_permits(),
+            ctx.buffer_semaphore.total_permits().saturating_sub(128)
+        );
+        drop(data);
+        drop(block);
+        assert_eq!(
+            ctx.buffer_semaphore.available_permits(),
+            ctx.buffer_semaphore.total_permits()
+        );
+    }
+
+    #[tokio::test]
+    async fn error_initialization_releases_reservation_and_allows_retry() {
+        assert_reservation_retry_after_failed_init(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_initialization_releases_reservation_and_allows_retry() {
+        assert_reservation_retry_after_failed_init(true).await;
+    }
+
+    async fn assert_reservation_publication(cache_hit: bool) {
+        let server = MockServer::start().await;
+        let decoded = vec![7; 128];
+        let payload = serialize_payload(&[&decoded]);
+        let mut ctx = test_stream_context(&server, 4096);
+        let directory = tempfile::tempdir().unwrap();
+        if cache_hit {
+            let cache = Arc::new(ChunkCache::new(directory.path(), 1024).unwrap());
+            cache
+                .put(XORB_HASH, (0, 1), &[0, 128], &decoded)
+                .await
+                .unwrap();
+            ctx.chunk_cache = Some(cache);
+        } else {
+            xorb_range_mock(
+                &server,
+                0,
+                (payload.len().saturating_sub(1)) as u64,
+                payload.clone(),
+            )
+            .await;
+        }
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let block = Arc::new(XorbBlock {
+            hash: XORB_HASH.to_owned(),
+            chunk_range: (0, 1),
+            url: format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+            bytes: ByteRange::new(0, (payload.len().saturating_sub(1)) as u64),
+            data: OnceCell::new(),
+            decoded_budget: 128,
+            reservation: Mutex::new(None),
+            reservation_started: AtomicBool::new(false),
+            publication_gate: Some(Arc::new(PublicationGate {
+                ready: Mutex::new(Some(ready_tx)),
+                release: Mutex::new(release_rx),
+            })),
+        });
+        block.reserve(&ctx, &mut None).await.unwrap();
+        let loader_block = Arc::clone(&block);
+        let loader_context = ctx.clone();
+        let loader = tokio::spawn(async move {
+            loader_block
+                .retrieve_data(&loader_context, READ_TOKEN)
+                .await
+        });
+        ready_rx.await.unwrap();
+        assert!(block.data.get().is_none());
+        block.reserve(&ctx, &mut None).await.unwrap();
+        let used = ctx
+            .buffer_semaphore
+            .total_permits()
+            .saturating_sub(ctx.buffer_semaphore.available_permits());
+        let unused_reservation = block.reservation.lock().unwrap().is_some();
+        release_tx.send(()).unwrap();
+        let data = loader.await.unwrap().unwrap();
+        assert_eq!(data.data.as_ref(), decoded.as_slice());
+        assert_eq!(
+            used, 128,
+            "one backing block must retain exactly one reservation before publication"
+        );
+        assert!(!unused_reservation);
+        assert_eq!(
+            ctx.xorb_fetch_count.load(Ordering::Relaxed),
+            u64::from(!cache_hit)
+        );
+        drop(data);
+        drop(block);
+        assert_eq!(
+            ctx.buffer_semaphore.available_permits(),
+            ctx.buffer_semaphore.total_permits()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_hit_reservation_publication_keeps_single_permit() {
+        assert_reservation_publication(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn network_reservation_publication_keeps_single_permit() {
+        assert_reservation_publication(false).await;
     }
 
     #[tokio::test]
@@ -2980,13 +3945,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 200, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let dir = tempfile::tempdir().unwrap();
         let cache =
@@ -3000,7 +3965,7 @@ mod tests {
         let (first, _) = drain(make_stream(ctx.clone(), None)).await;
         assert_eq!(first, expected);
         assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 1);
-        // The cache put is spawned best-effort; wait for it to land. Generous
+        // The cache put is best-effort; wait for it to land. Generous
         // budget (5 s) under slow instrumentation.
         for _ in 0..500 {
             if cache.entry_count().await.unwrap() == 1 {
@@ -3014,6 +3979,284 @@ mod tests {
         let (second, _) = drain(make_stream(ctx.clone(), None)).await;
         assert_eq!(second, expected);
         assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_xorb_rejects_full_body_for_nonzero_range() {
+        let server = MockServer::start().await;
+        let first = serialize_payload(&[b"AAAA"]);
+        let second = serialize_payload(&[b"BBBB"]);
+        let mut full = first.clone();
+        full.extend_from_slice(&second);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(full.clone()))
+            .mount(&server)
+            .await;
+        let block = Arc::new(XorbBlock {
+            hash: XORB_HASH.to_owned(),
+            chunk_range: (1, 2),
+            url: server.uri(),
+            bytes: ByteRange::new(first.len() as u64, full.len() as u64 - 1),
+            data: OnceCell::new(),
+            decoded_budget: 1_048_576,
+            reservation: Mutex::new(None),
+            reservation_started: AtomicBool::new(false),
+            #[cfg(test)]
+            publication_gate: None,
+        });
+        let result = block
+            .clone()
+            .retrieve_data(&test_stream_context(&server, 1_048_576), READ_TOKEN)
+            .await;
+        assert!(matches!(
+            result,
+            Err(SdxError::Transfer(TransferError::InvalidResponse(_)))
+        ));
+        assert!(block.data.get().is_none());
+    }
+
+    fn queued_download_stream(
+        receiver: UnboundedReceiver<SequentialRetrievalItem>,
+        run_state: Arc<RunState>,
+    ) -> DownloadStream {
+        DownloadStream {
+            receiver,
+            pending_data: None,
+            finished: false,
+            run_state,
+            start_signal: None,
+            #[cfg(not(target_family = "wasm"))]
+            runtime: test_runtime(),
+        }
+    }
+
+    #[tokio::test]
+    async fn timed_out_next_preserves_queued_and_active_data() {
+        let state = RunState::new(CancellationToken::new());
+        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
+        let (tx, rx) = unbounded_channel();
+        let mut stream = queued_download_stream(rx, state);
+        let deadline = std::time::Duration::from_millis(1);
+        // No item has been queued: cancelling the queue wait loses nothing.
+        assert!(tokio::time::timeout(deadline, stream.next()).await.is_err());
+        let (data_tx, data_rx) = oneshot::channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: Some(semaphore.acquire_many(1).await.unwrap()),
+        })
+        .unwrap();
+        tx.send(SequentialRetrievalItem::Finish).unwrap();
+        // The item is dequeued but its bytes have not arrived. Repeated
+        // consumer timeouts must retain both the item and its buffer permit.
+        for _ in 0..2 {
+            assert!(tokio::time::timeout(deadline, stream.next()).await.is_err());
+            assert_eq!(semaphore.available_permits(), 0);
+            assert!(!data_tx.is_closed());
+        }
+        let expected = Bytes::from_static(b"preserved download chunk");
+        data_tx.send(expected.clone()).unwrap();
+        assert_eq!(stream.next().await.unwrap(), Some(expected));
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(stream.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn timed_out_next_preserves_background_error() {
+        let state = RunState::new(CancellationToken::new());
+        let (tx, rx) = unbounded_channel();
+        let (data_tx, data_rx) = oneshot::channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: None,
+        })
+        .unwrap();
+        tx.send(SequentialRetrievalItem::Finish).unwrap();
+        let mut stream = queued_download_stream(rx, state.clone());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                .await
+                .is_err()
+        );
+        // A queued Finish cannot bypass the still-pending term while the
+        // producer has not yet published its failure.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                .await
+                .is_err()
+        );
+        state.set_error(SdxError::StreamInternal(
+            "delayed producer error".to_owned(),
+        ));
+        drop(data_tx);
+        assert!(
+            matches!(stream.next().await, Err(SdxError::StreamInternal(message))
+            if message == "delayed producer error")
+        );
+        assert!(stream.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_stream_releases_timed_out_pending_data() {
+        let state = RunState::new(CancellationToken::new());
+        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
+        let (tx, rx) = unbounded_channel();
+        let (data_tx, data_rx) = oneshot::channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: Some(semaphore.acquire_many(1).await.unwrap()),
+        })
+        .unwrap();
+        let mut stream = queued_download_stream(rx, state);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                .await
+                .is_err()
+        );
+        stream.cancel();
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(data_tx.is_closed());
+        assert!(stream.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_releases_timed_out_pending_data() {
+        let state = RunState::new(CancellationToken::new());
+        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
+        let (tx, rx) = unbounded_channel();
+        let (data_tx, data_rx) = oneshot::channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: Some(semaphore.acquire_many(1).await.unwrap()),
+        })
+        .unwrap();
+        let mut stream = queued_download_stream(rx, state);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                .await
+                .is_err()
+        );
+        drop(stream);
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(data_tx.is_closed());
+    }
+
+    #[tokio::test]
+    async fn cancelled_stream_with_closed_data_sender_finishes_cleanly() {
+        let state = RunState::new(CancellationToken::new());
+        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
+        let permit = semaphore.acquire_many(1).await.unwrap();
+        let (data_tx, data_rx) = oneshot::channel();
+        let (tx, rx) = unbounded_channel();
+        tx.send(SequentialRetrievalItem::Data {
+            receiver: data_rx,
+            permit: Some(permit),
+        })
+        .unwrap();
+        // Both select branches are ready: producer shutdown dropped the
+        // sender, and external cancellation was already requested.
+        state.cancel();
+        drop(data_tx);
+        let mut stream = DownloadStream {
+            receiver: rx,
+            pending_data: None,
+            finished: false,
+            run_state: state,
+            start_signal: None,
+            #[cfg(not(target_family = "wasm"))]
+            runtime: test_runtime(),
+        };
+        assert!(stream.next().await.unwrap().is_none());
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn download_stream_reports_incompatible_full_body_response() {
+        let server = MockServer::start().await;
+        let first = serialize_payload(&[b"AAAA"]);
+        let mut full = first.clone();
+        full.extend_from_slice(&serialize_payload(&[b"BBBB"]));
+        reconstruction_mock(&server, 0, 3, 0,
+            json!([{ "hash": XORB_HASH, "unpacked_length": 4, "range": {"start": 1, "end": 2}}]),
+            json!({XORB_HASH: [{ "url": format!("{}/xorb", server.uri()),
+                "ranges": [{"chunks": {"start": 1, "end": 2}, "bytes": {"start": first.len(), "end": full.len() - 1}}]
+            }]})).await;
+        Mock::given(method("GET"))
+            .and(path("/xorb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(full))
+            .mount(&server)
+            .await;
+        let mut stream = make_stream(test_stream_context(&server, 1_048_576), Some(0..4));
+        let result = stream.next().await;
+        assert!(
+            matches!(
+                result,
+                Err(SdxError::Transfer(TransferError::InvalidResponse(_)))
+            ),
+            "unexpected stream result: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_xorb_rejects_unexpected_chunk_count_before_caching() {
+        let server = MockServer::start().await;
+        let full = serialize_payload(&[b"AAAA", b"BBBB"]);
+        let range = ByteRange::new(0, full.len() as u64 - 1);
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header(
+                        "Content-Range",
+                        format!("bytes 0-{}/{}", range.end, full.len()),
+                    )
+                    .set_body_bytes(full),
+            )
+            .mount(&server)
+            .await;
+        let block = Arc::new(XorbBlock {
+            hash: XORB_HASH.to_owned(),
+            chunk_range: (1, 2),
+            url: server.uri(),
+            bytes: range,
+            data: OnceCell::new(),
+            decoded_budget: 1_048_576,
+            reservation: Mutex::new(None),
+            reservation_started: AtomicBool::new(false),
+            #[cfg(test)]
+            publication_gate: None,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            Arc::new(crate::cache::ChunkCache::new(dir.path().to_path_buf(), 1 << 20).unwrap());
+        let mut ctx = test_stream_context(&server, 1_048_576);
+        ctx.chunk_cache = Some(cache.clone());
+        let result = block.retrieve_data(&ctx, READ_TOKEN).await;
+        assert!(matches!(
+            result,
+            Err(SdxError::FetchChunkCountMismatch {
+                expected: 1,
+                actual: 2,
+                ..
+            })
+        ));
+        assert_eq!(cache.entry_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn download_stream_accepts_exact_full_body_response() {
+        let server = MockServer::start().await;
+        let payload = serialize_payload(&[b"AAAA", b"BBBB"]);
+        reconstruction_mock(&server, 0, 4095, 0,
+            json!([{ "hash": XORB_HASH, "unpacked_length": 8, "range": {"start": 0, "end": 2}}]),
+            json!({XORB_HASH: [{ "url": format!("{}/xorb", server.uri()),
+                "ranges": [{"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}]
+            }]})).await;
+        Mock::given(method("GET"))
+            .and(path("/xorb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload))
+            .mount(&server)
+            .await;
+        let (out, _) = drain(make_stream(test_stream_context(&server, 1_048_576), None)).await;
+        assert_eq!(out, b"AAAABBBB");
     }
 
     #[tokio::test]
@@ -3034,13 +4277,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 100, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let mut stream = make_stream(ctx, None);
@@ -3049,6 +4292,73 @@ mod tests {
         // EOF at the end.
         assert!(stream.next().await.unwrap().is_none());
         assert!(stream.next().await.unwrap().is_none());
+    }
+
+    async fn pending_prefetch_task() -> (
+        AbortOnDropHandle<Result<Option<TermBlock>, SdxError>>,
+        oneshot::Receiver<()>,
+    ) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _guard = ExitGuard::new(move || {
+                let _sent = dropped_tx.send(());
+            });
+            started_tx.send(()).unwrap();
+            std::future::pending::<Result<Option<TermBlock>, SdxError>>().await
+        });
+        started_rx.await.unwrap();
+        (AbortOnDropHandle::new(handle), dropped_rx)
+    }
+
+    #[tokio::test]
+    async fn dropping_term_manager_aborts_queued_prefetch() {
+        let server = MockServer::start().await;
+        let mut manager = ReconstructionTermManager::new(
+            test_stream_context(&server, 1_048_576),
+            FILE_ID.to_owned(),
+            READ_TOKEN.to_owned(),
+            0..0,
+        )
+        .await
+        .unwrap();
+        let (handle, dropped) = pending_prefetch_task().await;
+        manager.prefetch_queue.push_back(handle);
+        drop(manager);
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_next_file_terms_aborts_actively_popped_prefetch() {
+        let server = MockServer::start().await;
+        let mut manager = ReconstructionTermManager::new(
+            test_stream_context(&server, 1_048_576),
+            FILE_ID.to_owned(),
+            READ_TOKEN.to_owned(),
+            0..0,
+        )
+        .await
+        .unwrap();
+        let (handle, dropped) = pending_prefetch_task().await;
+        manager.prefetch_queue.push_back(handle);
+        let mut next = Box::pin(manager.next_file_terms());
+        std::future::poll_fn(|cx| {
+            assert!(next.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // Cancel the awaiting operation while keeping the manager alive:
+        // aborting only the remaining queue would miss this popped handle.
+        drop(next);
+        assert!(manager.prefetch_queue.is_empty());
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(manager);
     }
 
     #[tokio::test]
@@ -3081,17 +4391,158 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 100, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let (out, _sizes) = drain(make_stream(ctx, Some(16..64))).await;
         assert_eq!(out, chunk[16..64]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_retained_stream_discards_queue_and_releases_shared_budget() {
+        for unordered in [false, true] {
+            for mode in 0..4 {
+                let server = MockServer::start().await;
+                let chunk = vec![7u8; 64];
+                let payload = serialize_payload(&[&chunk]);
+                reconstruction_mock(
+                    &server,
+                    0,
+                    4095,
+                    0,
+                    json!([
+                        {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}},
+                        {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}}
+                    ]),
+                    json!({XORB_HASH: [{
+                        "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                        "ranges": [{"chunks": {"start": 0, "end": 1},
+                            "bytes": {"start": 0, "end": payload.len().saturating_sub(1)}}]
+                    }]}),
+                )
+                .await;
+                xorb_payload_mock(&server, payload).await;
+                let ctx = test_stream_context(&server, 64);
+                let state;
+                if unordered {
+                    let mut stream = make_unordered_stream(ctx.clone(), None);
+                    assert_eq!(stream.next().await.unwrap().unwrap().1, chunk);
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while stream.receiver.is_empty() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(ctx.buffer_semaphore.available_permits(), 0);
+                    state = stream.run_state.clone();
+                    match mode {
+                        1 => stream.cancel(),
+                        2 => state.cancel(),
+                        3 => state.set_error(SdxError::Transfer(TransferError::NotFound(
+                            "owned queued failure".to_owned(),
+                        ))),
+                        _ => {}
+                    }
+                    let result = stream.next().await;
+                    if mode == 0 {
+                        assert_eq!(result.unwrap().unwrap().1, chunk);
+                    } else if mode == 3 {
+                        assert!(
+                            matches!(result, Err(SdxError::Transfer(TransferError::NotFound(message)))
+                            if message == "owned queued failure")
+                        );
+                    } else {
+                        assert!(result.unwrap().is_none());
+                    }
+                    assert!(stream.next().await.unwrap().is_none());
+                    assert!(stream.receiver.is_empty());
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while ctx.buffer_semaphore.available_permits() != 64 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let mut sibling = make_unordered_stream(ctx.clone(), None);
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(5), sibling.next())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .unwrap()
+                            .1,
+                        chunk
+                    );
+                    assert_eq!(sibling.next().await.unwrap().unwrap().1, chunk);
+                    assert!(sibling.next().await.unwrap().is_none());
+                    // Keep the original handle alive throughout sibling recovery.
+                    assert!(stream.next().await.unwrap().is_none());
+                } else {
+                    let mut stream = make_stream(ctx.clone(), None);
+                    assert_eq!(stream.next().await.unwrap().unwrap(), chunk);
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while stream.receiver.is_empty() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(ctx.buffer_semaphore.available_permits(), 0);
+                    state = stream.run_state.clone();
+                    match mode {
+                        1 => stream.cancel(),
+                        2 => state.cancel(),
+                        3 => state.set_error(SdxError::Transfer(TransferError::NotFound(
+                            "owned queued failure".to_owned(),
+                        ))),
+                        _ => {}
+                    }
+                    let result = stream.next().await;
+                    if mode == 0 {
+                        assert_eq!(result.unwrap().unwrap(), chunk);
+                    } else if mode == 3 {
+                        assert!(
+                            matches!(result, Err(SdxError::Transfer(TransferError::NotFound(message)))
+                            if message == "owned queued failure")
+                        );
+                    } else {
+                        assert!(result.unwrap().is_none());
+                    }
+                    assert!(stream.next().await.unwrap().is_none());
+                    assert!(stream.receiver.is_empty());
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while ctx.buffer_semaphore.available_permits() != 64 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let mut sibling = make_stream(ctx.clone(), None);
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(5), sibling.next())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .unwrap(),
+                        chunk
+                    );
+                    assert_eq!(sibling.next().await.unwrap().unwrap(), chunk);
+                    assert!(sibling.next().await.unwrap().is_none());
+                    assert!(stream.next().await.unwrap().is_none());
+                }
+                assert_eq!(
+                    state.total_bytes_delivered(),
+                    if mode == 0 { 128 } else { 64 }
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -3100,7 +4551,7 @@ mod tests {
         // 32 chunks × 64 bytes = 2 KiB, with a 256-byte buffer cap: only a few
         // terms may be buffered at once, yet the stream must complete.
         let chunks: Vec<Vec<u8>> = (0..32u8).map(|i| vec![i; 64]).collect();
-        let _payload = serialize_payload(
+        let payload = serialize_payload(
             chunks
                 .iter()
                 .map(Vec::as_slice)
@@ -3119,11 +4570,12 @@ mod tests {
                 })
             })
             .collect();
+        let serialized_chunk_length = serialize_payload(&[chunks[0].as_slice()]).len() as u64;
         let ranges: serde_json::Value = (0..32u64)
             .map(|i| {
                 json!({
                     "chunks": {"start": i, "end": i + 1},
-                    "bytes": {"start": i * 100, "end": i * 100 + 99}
+                    "bytes": {"start": i * serialized_chunk_length, "end": (i + 1) * serialized_chunk_length - 1}
                 })
             })
             .collect();
@@ -3142,13 +4594,7 @@ mod tests {
             }),
         )
         .await;
-        // One mock per distinct (byte range) request.
-        for i in 0..32u64 {
-            let start = i * 100;
-            let end = start + 99;
-            let slice = serialize_payload(&[chunks[i as usize].as_slice()]);
-            xorb_range_mock(&server, start, end, slice).await;
-        }
+        xorb_payload_mock(&server, payload).await;
 
         let cap = 256u64;
         let ctx = test_stream_context(&server, cap);
@@ -3157,38 +4603,59 @@ mod tests {
         for chunk in &chunks {
             expected.extend_from_slice(chunk);
         }
-        let mut total = 0u64;
-        let mut peak_in_progress = 0u64;
-        // The byte-denominated semaphore is the actual memory bound: it caps the
-        // permits held by in-flight terms (acquired before a term is counted,
-        // released only when the consumer drains it). `bytes_in_progress` is a
-        // diagnostic counter sampled while the background pipeline runs. Under
-        // slow or instrumented execution a single sample can transiently read
-        // above `cap` between a term's permit acquisition and the consumer-side
-        // release — a measurement race, not an unbounded-buffer bug. Poll for a
-        // *sustained* overrun instead of failing on one instantaneous sample: a
-        // regression that buffers the whole file keeps `bytes_in_progress` above
-        // `cap` across every poll, while a transient race settles to `<= cap`
-        // within a few short polls (the fetch-window terms finish their sends
-        // and decrement the counter even though the consumer is not reading).
-        const QUIESCENCE_POLLS: u32 = 32;
-        while let Some((_offset, chunk)) = stream.next().await.unwrap() {
-            total = total.saturating_add(u64::try_from(chunk.len()).unwrap());
-            let mut poll = 0;
-            while stream.bytes_in_progress() > cap && poll < QUIESCENCE_POLLS {
-                // Yield so the writer's fetch/send tasks can decrement the counter.
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                poll = poll.saturating_add(1);
+        // Start without consuming: completed terms retain their backing block
+        // permits, so the producer must fill and then wait on this finite cap.
+        stream.start();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while ctx.buffer_semaphore.available_permits() != 0 || stream.receiver.is_empty() {
+                stream.run_state.check_background_error().unwrap();
+                tokio::task::yield_now().await;
             }
-            let settled = stream.bytes_in_progress();
-            peak_in_progress = peak_in_progress.max(settled);
-            assert!(
-                settled <= cap,
-                "in-flight bytes ({settled}) stayed above the {cap}-byte buffer cap across {QUIESCENCE_POLLS} quiescence polls"
-            );
+        })
+        .await
+        .expect("producer did not fill the buffer before consumption");
+        let peak_held = cap.saturating_sub(ctx.buffer_semaphore.available_permits());
+        assert_eq!(peak_held, cap);
+        assert!(peak_held > 0);
+
+        let initial = stream.receiver.try_recv().unwrap().unwrap();
+        {
+            let backing = initial
+                .permit
+                .as_ref()
+                .unwrap()
+                ._backing_block
+                .as_ref()
+                .unwrap();
+            let decoded = backing.data.get().unwrap();
+            let decoded_bytes = u64::try_from(decoded.data.len()).unwrap();
+            assert!(decoded_bytes > 0);
+            assert!(decoded_bytes <= decoded._buffer_permit.num_permits());
+            assert!(decoded._buffer_permit.num_permits() <= cap);
         }
-        assert_eq!(total, u64::try_from(expected.len()).unwrap());
-        assert!(peak_in_progress > 0);
+        // The completed item is still retained. A further reservation cannot
+        // succeed until consumption releases its backing block's capacity.
+        let mut waiting = Box::pin(ctx.buffer_semaphore.acquire_many(1));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        drop(waiting);
+
+        let mut received = std::collections::BTreeMap::new();
+        let (offset, chunk) = stream.process_term(Ok(initial)).unwrap().unwrap();
+        assert!(received.insert(offset, chunk).is_none());
+        while let Some((offset, chunk)) = stream.next().await.unwrap() {
+            assert!(received.insert(offset, chunk).is_none());
+            let available = ctx.buffer_semaphore.available_permits();
+            let held = cap
+                .checked_sub(available)
+                .expect("buffer capacity exceeded its cap");
+            assert!(held <= cap);
+        }
+        assert_eq!(received.len(), chunks.len());
+        let actual: Vec<u8> = received
+            .into_values()
+            .flat_map(|chunk| chunk.to_vec())
+            .collect();
+        assert_eq!(actual, expected);
         // After full consumption the semaphore is back to capacity.
         assert_eq!(ctx.buffer_semaphore.available_permits(), cap);
     }
@@ -3198,7 +4665,10 @@ mod tests {
         let server = MockServer::start().await;
         let chunk_a = vec![7u8; 64];
         let chunk_b = vec![9u8; 64];
-        let _payload = serialize_payload(&[&chunk_a, &chunk_b]);
+        let payload_a = serialize_payload(&[&chunk_a]);
+        let payload_b = serialize_payload(&[&chunk_b]);
+        let split = payload_a.len() as u64;
+        let final_byte = split + payload_b.len() as u64 - 1;
 
         reconstruction_mock(
             &server,
@@ -3213,15 +4683,16 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 99}},
-                        {"chunks": {"start": 1, "end": 2}, "bytes": {"start": 100, "end": 199}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": split - 1}},
+                        {"chunks": {"start": 1, "end": 2}, "bytes": {"start": split, "end": final_byte}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 99, serialize_payload(&[&chunk_a])).await;
-        xorb_range_mock(&server, 100, 199, serialize_payload(&[&chunk_b])).await;
+        let mut payload = payload_a;
+        payload.extend_from_slice(&payload_b);
+        xorb_payload_mock(&server, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let mut stream = make_unordered_stream(ctx, None);
@@ -3263,13 +4734,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 200, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let mut stream = make_stream(ctx, None);
@@ -3299,13 +4770,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 100, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let mut stream = make_stream(ctx, None);
@@ -3316,6 +4787,75 @@ mod tests {
         drop(stream);
         // Allow any in-flight task to observe the cancellation.
         tokio::task::yield_now().await;
+    }
+
+    async fn blocking_stream_fixture() -> (MockServer, StreamContext) {
+        let server = MockServer::start().await;
+        let payload = serialize_payload(&[&[5u8; 64]]);
+        let last_byte = u64::try_from(payload.len())
+            .unwrap()
+            .checked_sub(1)
+            .unwrap();
+        reconstruction_mock(
+            &server, 0, 4095, 0,
+            json!([{"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}}]),
+            json!({XORB_HASH: [{
+                "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                "ranges": [{"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": last_byte}}]
+            }]}),
+        ).await;
+        xorb_range_mock(&server, 0, last_byte, payload).await;
+        let context = test_stream_context(&server, 1_048_576);
+        (server, context)
+    }
+
+    async fn check_blocking_streams_inside_runtime() {
+        let (_server, context) = blocking_stream_fixture().await;
+        let mut ordered = make_stream(context.clone(), None);
+        let mut output = Vec::new();
+        while let Some(bytes) = ordered.blocking_next().unwrap() {
+            output.extend_from_slice(&bytes);
+        }
+        assert_eq!(output, vec![5u8; 64]);
+        assert!(ordered.blocking_next().unwrap().is_none());
+
+        let mut unordered = make_unordered_stream(context.clone(), None);
+        let (offset, bytes) = unordered.blocking_next().unwrap().unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(&bytes[..], &[5u8; 64]);
+        assert!(unordered.blocking_next().unwrap().is_none());
+
+        let mut ordered_cancelled = make_stream(context.clone(), None);
+        ordered_cancelled.cancel();
+        assert!(ordered_cancelled.blocking_next().unwrap().is_none());
+        let mut unordered_cancelled = make_unordered_stream(context, None);
+        unordered_cancelled.cancel();
+        assert!(unordered_cancelled.blocking_next().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_next_works_inside_current_thread_runtime() {
+        check_blocking_streams_inside_runtime().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_next_works_inside_multi_thread_runtime() {
+        check_blocking_streams_inside_runtime().await;
+    }
+
+    #[test]
+    fn unordered_blocking_next_works_from_plain_thread() {
+        let runtime = Runtime::new().unwrap();
+        let (server, mut stream) = runtime.block_on(async {
+            let (server, context) = blocking_stream_fixture().await;
+            (server, make_unordered_stream(context, None))
+        });
+        drop(runtime);
+        let (offset, bytes) = stream.blocking_next().unwrap().unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(&bytes[..], &[5u8; 64]);
+        assert!(stream.blocking_next().unwrap().is_none());
+        drop(server);
     }
 
     #[test]
@@ -3337,13 +4877,13 @@ mod tests {
                     XORB_HASH: [{
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                         "ranges": [
-                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                         ]
                     }]
                 }),
             )
             .await;
-            xorb_range_mock(&server, 0, 100, payload).await;
+            xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
             let ctx = test_stream_context(&server, 1_048_576);
             (server, make_stream(ctx, None))
         });
@@ -3381,7 +4921,7 @@ mod tests {
             XORB_HASH: [{
                 "url": format!("{}/transfer/xorb/default/{XORB_HASH}", full_server.uri()),
                 "ranges": [
-                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
                 ]
             }]
         });
@@ -3389,7 +4929,7 @@ mod tests {
             XORB_HASH: [{
                 "url": format!("{}/transfer/xorb/default/{XORB_HASH}", stream_server.uri()),
                 "ranges": [
-                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
                 ]
             }]
         });
@@ -3405,11 +4945,17 @@ mod tests {
             )))
             .mount(&full_server)
             .await;
-        xorb_range_mock(&full_server, 0, 200, payload.clone()).await;
+        xorb_range_mock(&full_server, 0, (payload.len() - 1) as u64, payload.clone()).await;
 
         // Streaming path uses the ranged request; map the prefetch range.
         reconstruction_mock(&stream_server, 0, 4095, 0, terms, stream_xorbs).await;
-        xorb_range_mock(&stream_server, 0, 200, payload.clone()).await;
+        xorb_range_mock(
+            &stream_server,
+            0,
+            (payload.len() - 1) as u64,
+            payload.clone(),
+        )
+        .await;
 
         let mut expected = chunk_a.clone();
         expected.extend_from_slice(&chunk_b);
@@ -3452,7 +4998,7 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),

@@ -16,6 +16,162 @@ use crate::{
     PutOutcome,
 };
 
+fn synchronous_runtime_fixture(endpoint: String) -> S3ObjectStore {
+    S3ObjectStore::new(
+        S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
+            .with_endpoint(Some(endpoint))
+            .with_allow_http(true)
+            .with_credentials(
+                Some(SecretString::from_secret("local-access")),
+                Some(SecretString::from_secret("local-secret")),
+                None,
+            ),
+    )
+    .unwrap()
+}
+
+#[test]
+fn synchronous_s3_zero_page_survives_runtime_changes() {
+    let prefix = ObjectPrefix::parse("chunks").unwrap();
+    let outside = synchronous_runtime_fixture("http://127.0.0.1:1".to_owned());
+    assert!(
+        outside
+            .list_flat_namespace_page(&prefix, None, 0)
+            .unwrap()
+            .is_empty()
+    );
+    for multi_thread in [false, true] {
+        let mut builder = if multi_thread {
+            tokio::runtime::Builder::new_multi_thread()
+        } else {
+            tokio::runtime::Builder::new_current_thread()
+        };
+        let runtime = builder.enable_all().build().unwrap();
+        let inside = runtime.block_on(async {
+            assert!(
+                outside
+                    .list_flat_namespace_page(&prefix, None, 0)
+                    .unwrap()
+                    .is_empty()
+            );
+            let store = synchronous_runtime_fixture("http://127.0.0.1:1".to_owned());
+            assert!(
+                store
+                    .list_flat_namespace_page(&prefix, None, 0)
+                    .unwrap()
+                    .is_empty()
+            );
+            store
+        });
+        drop(runtime);
+        assert!(
+            inside
+                .list_flat_namespace_page(&prefix, None, 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn synchronous_s3_contains_drives_io_in_current_thread_runtime() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            assert!(request.len() < 8192);
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        assert!(request.starts_with(b"HEAD "));
+        stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let store = synchronous_runtime_fixture(format!("http://{address}"));
+        assert!(
+            !ObjectStoreTrait::contains(&store, &ObjectKey::parse("chunks/missing").unwrap())
+                .unwrap()
+        );
+    });
+    server.join().unwrap();
+}
+
+#[test]
+fn synchronous_s3_listing_keeps_non_send_callbacks_on_caller_thread() {
+    use std::{
+        cell::RefCell,
+        io::{Read, Write},
+        rc::Rc,
+    };
+    for mode in 0..3 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 8192);
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(b"GET "));
+            let body = "<ListBucketResult><Name>assets</Name><Prefix>chunks</Prefix><IsTruncated>false</IsTruncated><Contents><Key>chunks/one</Key><LastModified>2026-10-03T00:00:00.000Z</LastModified><ETag>etag</ETag><Size>0</Size></Contents></ListBucketResult>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let visited = Rc::new(RefCell::new(Vec::new()));
+        let caller = std::thread::current().id();
+        let store = synchronous_runtime_fixture(format!("http://{address}"));
+        let visit = || {
+            ObjectStoreTrait::visit_prefix(
+                &store,
+                &ObjectPrefix::parse("chunks").unwrap(),
+                |entry| {
+                    assert_eq!(std::thread::current().id(), caller);
+                    visited.borrow_mut().push(entry.key().as_str().to_owned());
+                    Ok::<(), Box<dyn std::error::Error>>(())
+                },
+            )
+            .unwrap();
+        };
+        if mode == 0 {
+            visit();
+        } else {
+            let mut builder = if mode == 1 {
+                tokio::runtime::Builder::new_current_thread()
+            } else {
+                tokio::runtime::Builder::new_multi_thread()
+            };
+            builder.enable_all().build().unwrap().block_on(async {
+                visit();
+            });
+        }
+        assert_eq!(*visited.borrow(), vec!["chunks/one"]);
+        server.join().unwrap();
+    }
+}
+
 #[test]
 fn s3_config_normalizes_key_prefix() {
     let config = S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())

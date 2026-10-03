@@ -185,19 +185,23 @@ pub(crate) async fn load_postgres_latest_evidence_heads(
 }
 
 async fn verify_postgres_quarantine_evidence_batch(
-    store: &super::PostgresIndexStore,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     candidates: &[QuarantineCandidate],
+    verify_materialization: bool,
 ) -> Result<(), PostgresMetadataStoreError> {
     let operation_ids = candidates
         .iter()
         .map(|candidate| candidate.object_key().as_str().to_owned())
         .collect::<Vec<_>>();
     let heads = load_postgres_latest_evidence_heads(
-        &store.pool,
+        executor,
         OperationKind::GarbageCollection,
         &operation_ids,
     )
     .await?;
+    if !verify_materialization {
+        return Ok(());
+    }
     for (candidate, operation_id) in candidates.iter().zip(operation_ids) {
         let head = heads.get(&operation_id).ok_or_else(|| {
             PostgresMetadataStoreError::Reliability(
@@ -212,19 +216,20 @@ async fn verify_postgres_quarantine_evidence_batch(
 }
 
 async fn verify_postgres_retention_evidence_batch(
-    store: &super::PostgresIndexStore,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     holds: &[RetentionHold],
+    verify_materialization: bool,
 ) -> Result<(), PostgresMetadataStoreError> {
     let operation_ids = holds
         .iter()
         .map(|hold| hold.object_key().as_str().to_owned())
         .collect::<Vec<_>>();
-    let heads = load_postgres_latest_evidence_heads(
-        &store.pool,
-        OperationKind::RetentionHold,
-        &operation_ids,
-    )
-    .await?;
+    let heads =
+        load_postgres_latest_evidence_heads(executor, OperationKind::RetentionHold, &operation_ids)
+            .await?;
+    if !verify_materialization {
+        return Ok(());
+    }
     for (hold, operation_id) in holds.iter().zip(operation_ids) {
         let head = heads.get(&operation_id).ok_or_else(|| {
             PostgresMetadataStoreError::Reliability(
@@ -239,8 +244,9 @@ async fn verify_postgres_retention_evidence_batch(
 }
 
 async fn verify_postgres_webhook_evidence_batch(
-    store: &super::PostgresIndexStore,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     deliveries: &[WebhookDelivery],
+    verify_materialization: bool,
 ) -> Result<(), PostgresMetadataStoreError> {
     let mut operation_ids = Vec::with_capacity(deliveries.len().saturating_mul(2));
     let mut canonical_ids = Vec::with_capacity(deliveries.len());
@@ -260,11 +266,14 @@ async fn verify_postgres_webhook_evidence_batch(
     operation_ids.sort_unstable();
     operation_ids.dedup();
     let heads = load_postgres_latest_evidence_heads(
-        &store.pool,
+        executor,
         OperationKind::WebhookDelivery,
         &operation_ids,
     )
     .await?;
+    if !verify_materialization {
+        return Ok(());
+    }
     for (delivery, canonical_id) in deliveries.iter().zip(canonical_ids) {
         let head = heads
             .get(&canonical_id)
@@ -371,8 +380,9 @@ async fn verify_postgres_provider_evidence(
 }
 
 async fn verify_postgres_provider_evidence_batch(
-    store: &super::PostgresIndexStore,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     states: &[ProviderRepositoryState],
+    verify_materialization: bool,
 ) -> Result<(), PostgresMetadataStoreError> {
     if states.is_empty() {
         return Ok(());
@@ -389,12 +399,12 @@ async fn verify_postgres_provider_evidence_batch(
                 .map(|operation| operation.operation_id)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let heads = load_postgres_latest_evidence_heads(
-        &store.pool,
-        OperationKind::ProviderEvent,
-        &operation_ids,
-    )
-    .await?;
+    let heads =
+        load_postgres_latest_evidence_heads(executor, OperationKind::ProviderEvent, &operation_ids)
+            .await?;
+    if !verify_materialization {
+        return Ok(());
+    }
     for snapshot in snapshots {
         let operation_id = snapshot.evidence_operation()?.operation_id;
         let Some(head) = heads.get(&operation_id) else {
@@ -570,6 +580,58 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         })
     }
 
+    fn visit_reconstruction_file_ids<'operation, Visitor, VisitorError>(
+        &'operation self,
+        mut visitor: Visitor,
+    ) -> IndexStoreFuture<'operation, (), VisitorError>
+    where
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(FileId) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move {
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            for deliver in [false, true] {
+                let mut rows =
+                    query("SELECT file_id FROM shardline_file_reconstructions ORDER BY file_id")
+                        .fetch(&mut *transaction);
+                while let Some(row) = rows
+                    .try_next()
+                    .await
+                    .map_err(Self::Error::from)
+                    .map_err(Into::into)?
+                {
+                    let text: String = row
+                        .try_get("file_id")
+                        .map_err(Self::Error::from)
+                        .map_err(Into::into)?;
+                    let id = FileId::new(
+                        parse_xet_hash_hex(&text)
+                            .map_err(Self::Error::from)
+                            .map_err(Into::into)?,
+                    );
+                    if deliver {
+                        visitor(id)?;
+                    }
+                }
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)
+        })
+    }
     fn delete_reconstruction<'operation>(
         &'operation self,
         file_id: &'operation FileId,
@@ -804,7 +866,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .iter()
                 .map(quarantine_candidate_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
-            verify_postgres_quarantine_evidence_batch(self, &candidates).await?;
+            verify_postgres_quarantine_evidence_batch(&self.pool, &candidates, true).await?;
             Ok(candidates)
         })
     }
@@ -819,37 +881,75 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            let mut rows = query(
-                "SELECT object_key,
-                        observed_length,
-                        first_seen_unreachable_at_unix_seconds,
-                        delete_after_unix_seconds
-                 FROM shardline_quarantine_candidates
-                 ORDER BY object_key",
-            )
-            .fetch(&self.pool);
-
-            let mut candidates = Vec::new();
-            while let Some(row) = rows
-                .try_next()
+            let mut transaction = self
+                .pool
+                .begin()
                 .await
                 .map_err(Self::Error::from)
-                .map_err(Into::<VisitorError>::into)?
-            {
-                candidates.push(quarantine_candidate_from_row(&row).map_err(Into::into)?);
-            }
-
-            // This visitor feeds GC and repair directly. Verify every row at
-            // this boundary instead of relying on callers to have used the
-            // separately verified list API.
-            verify_postgres_quarantine_evidence_batch(self, &candidates)
+                .map_err(Into::into)?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
                 .await
-                .map_err(Into::<VisitorError>::into)?;
-            for candidate in candidates {
-                visitor(candidate)?;
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            // Validate all rows, snapshots, and heads before materialization checks
+            // and callbacks, using bounded pages from one coherent snapshot.
+            for phase in 0..5 {
+                let mut cursor: Option<String> = None;
+                loop {
+                    let mut request = if cursor.is_some() {
+                        query("SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds FROM shardline_quarantine_candidates
+                               WHERE object_key > $1 ORDER BY object_key LIMIT 256")
+                    } else {
+                        query(
+                            "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds FROM shardline_quarantine_candidates ORDER BY object_key LIMIT 256",
+                        )
+                    };
+                    if let Some(key) = &cursor {
+                        request = request.bind(key);
+                    }
+                    let rows = request
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(Self::Error::from)
+                        .map_err(Into::into)?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let mut entries = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let entry = quarantine_candidate_from_row(&row).map_err(Into::into)?;
+                        cursor = Some(entry.object_key().as_str().to_owned());
+                        entries.push(entry);
+                    }
+                    if phase == 1 {
+                        for entry in &entries {
+                            quarantine_snapshot(entry, QuarantineLifecycleState::Active)
+                                .and_then(|snapshot| {
+                                    snapshot.evidence_operation().map_err(Self::Error::from)
+                                })
+                                .map_err(Into::into)?;
+                        }
+                    } else if phase == 2 || phase == 3 {
+                        verify_postgres_quarantine_evidence_batch(
+                            &mut *transaction,
+                            &entries,
+                            phase == 3,
+                        )
+                        .await
+                        .map_err(Into::into)?;
+                    } else if phase == 4 {
+                        for entry in entries {
+                            visitor(entry)?;
+                        }
+                    }
+                }
             }
-
-            Ok(())
+            transaction
+                .commit()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)
         })
     }
 
@@ -1051,6 +1151,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         object_key: &'operation ObjectKey,
     ) -> IndexStoreFuture<'operation, Option<RetentionHold>, Self::Error> {
         Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await?;
             let row = query(
                 "SELECT object_key,
                         reason,
@@ -1060,22 +1164,28 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                  WHERE object_key = $1",
             )
             .bind(object_key.as_str())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await?;
 
             let hold = row.as_ref().map(retention_hold_from_row).transpose()?;
             if let Some(hold) = hold.as_ref() {
                 let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
                 let evidence =
-                    load_postgres_retention_evidence(&self.pool, object_key.as_str()).await?;
+                    load_postgres_retention_evidence(&mut *transaction, object_key.as_str())
+                        .await?;
                 verify_snapshot_evidence(&evidence, &snapshot)?;
             }
+            transaction.commit().await?;
             Ok(hold)
         })
     }
 
     fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error> {
         Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await?;
             let rows = query(
                 "SELECT object_key,
                         reason,
@@ -1084,14 +1194,15 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                  FROM shardline_retention_holds
                  ORDER BY object_key",
             )
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *transaction)
             .await?;
 
             let holds = rows
                 .iter()
                 .map(retention_hold_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
-            verify_postgres_retention_evidence_batch(self, &holds).await?;
+            verify_postgres_retention_evidence_batch(&mut *transaction, &holds, true).await?;
+            transaction.commit().await?;
             Ok(holds)
         })
     }
@@ -1106,33 +1217,75 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            let mut rows = query(
-                "SELECT object_key,
-                        reason,
-                        held_at_unix_seconds,
-                        release_after_unix_seconds
-                 FROM shardline_retention_holds
-                 ORDER BY object_key",
-            )
-            .fetch(&self.pool);
-
-            let mut holds = Vec::new();
-            while let Some(row) = rows
-                .try_next()
+            let mut transaction = self
+                .pool
+                .begin()
                 .await
                 .map_err(Self::Error::from)
-                .map_err(Into::<VisitorError>::into)?
-            {
-                holds.push(retention_hold_from_row(&row).map_err(Into::into)?);
-            }
-            verify_postgres_retention_evidence_batch(self, &holds)
+                .map_err(Into::into)?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
                 .await
-                .map_err(Into::<VisitorError>::into)?;
-            for hold in holds {
-                visitor(hold)?;
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            // Validate all rows, snapshots, and heads before materialization checks
+            // and callbacks, using bounded pages from one coherent snapshot.
+            for phase in 0..5 {
+                let mut cursor: Option<String> = None;
+                loop {
+                    let mut request = if cursor.is_some() {
+                        query("SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds FROM shardline_retention_holds
+                               WHERE object_key > $1 ORDER BY object_key LIMIT 256")
+                    } else {
+                        query(
+                            "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds FROM shardline_retention_holds ORDER BY object_key LIMIT 256",
+                        )
+                    };
+                    if let Some(key) = &cursor {
+                        request = request.bind(key);
+                    }
+                    let rows = request
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(Self::Error::from)
+                        .map_err(Into::into)?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let mut entries = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let entry = retention_hold_from_row(&row).map_err(Into::into)?;
+                        cursor = Some(entry.object_key().as_str().to_owned());
+                        entries.push(entry);
+                    }
+                    if phase == 1 {
+                        for entry in &entries {
+                            retention_snapshot(entry, RetentionHoldLifecycleState::Active)
+                                .and_then(|snapshot| {
+                                    snapshot.evidence_operation().map_err(Self::Error::from)
+                                })
+                                .map_err(Into::into)?;
+                        }
+                    } else if phase == 2 || phase == 3 {
+                        verify_postgres_retention_evidence_batch(
+                            &mut *transaction,
+                            &entries,
+                            phase == 3,
+                        )
+                        .await
+                        .map_err(Into::into)?;
+                    } else if phase == 4 {
+                        for entry in entries {
+                            visitor(entry)?;
+                        }
+                    }
+                }
             }
-
-            Ok(())
+            transaction
+                .commit()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)
         })
     }
 
@@ -1154,6 +1307,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
+            super::provider_mutation::lock_retention_hold(&mut transaction, object_key.as_str())
+                .await?;
             let row = query(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
                  FROM shardline_retention_holds WHERE object_key = $1
@@ -1194,6 +1349,11 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
+            super::provider_mutation::lock_retention_hold(
+                &mut transaction,
+                expected.object_key().as_str(),
+            )
+            .await?;
             let row = query(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
                  FROM shardline_retention_holds WHERE object_key = $1 FOR UPDATE",
@@ -1276,11 +1436,106 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .into_iter()
                 .map(|row| webhook_delivery_from_row(&row))
                 .collect::<Result<Vec<_>, _>>()?;
-            verify_postgres_webhook_evidence_batch(self, &deliveries).await?;
+            verify_postgres_webhook_evidence_batch(&self.pool, &deliveries, true).await?;
             Ok(deliveries)
         })
     }
 
+    fn visit_webhook_deliveries<'operation, Visitor, VisitorError>(
+        &'operation self,
+        mut visitor: Visitor,
+    ) -> IndexStoreFuture<'operation, (), VisitorError>
+    where
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(WebhookDelivery) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move {
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            // Preserve complete-row validation before evidence checks and any callbacks.
+            for phase in 0..5 {
+                let mut cursor: Option<[String; 4]> = None;
+                loop {
+                    let mut request = if cursor.is_some() {
+                        query("SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds FROM shardline_webhook_deliveries
+                        WHERE (provider, owner, repo, delivery_id) > ($1, $2, $3, $4)
+                        ORDER BY provider, owner, repo, delivery_id LIMIT 256")
+                    } else {
+                        query("SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds FROM shardline_webhook_deliveries
+                        ORDER BY provider, owner, repo, delivery_id LIMIT 256")
+                    };
+                    if let Some(key) = &cursor {
+                        for field in key {
+                            request = request.bind(field);
+                        }
+                    }
+                    let rows = request
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(Self::Error::from)
+                        .map_err(Into::into)?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let mut entries = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let entry = webhook_delivery_from_row(&row).map_err(Into::into)?;
+                        cursor = Some([
+                            row.try_get::<String, _>("provider")
+                                .map_err(Self::Error::from)
+                                .map_err(Into::into)?,
+                            row.try_get::<String, _>("owner")
+                                .map_err(Self::Error::from)
+                                .map_err(Into::into)?,
+                            row.try_get::<String, _>("repo")
+                                .map_err(Self::Error::from)
+                                .map_err(Into::into)?,
+                            row.try_get::<String, _>("delivery_id")
+                                .map_err(Self::Error::from)
+                                .map_err(Into::into)?,
+                        ]);
+                        entries.push(entry);
+                    }
+                    if phase == 1 {
+                        for entry in &entries {
+                            webhook_snapshot(entry, WebhookDeliveryLifecycleState::Processed)
+                                .and_then(|snapshot| {
+                                    snapshot.evidence_operation().map_err(Self::Error::from)
+                                })
+                                .map_err(Into::into)?;
+                        }
+                    } else if phase == 2 || phase == 3 {
+                        verify_postgres_webhook_evidence_batch(
+                            &mut *transaction,
+                            &entries,
+                            phase == 3,
+                        )
+                        .await
+                        .map_err(Into::into)?;
+                    } else if phase == 4 {
+                        for entry in entries {
+                            visitor(entry)?;
+                        }
+                    }
+                }
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)
+        })
+    }
     fn delete_webhook_delivery<'operation>(
         &'operation self,
         delivery: &'operation WebhookDelivery,
@@ -1526,11 +1781,102 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .into_iter()
                 .map(|row| provider_repository_state_from_row(&row))
                 .collect::<Result<Vec<_>, _>>()?;
-            verify_postgres_provider_evidence_batch(self, &states).await?;
+            verify_postgres_provider_evidence_batch(&self.pool, &states, true).await?;
             Ok(states)
         })
     }
 
+    fn visit_provider_repository_states<'operation, Visitor, VisitorError>(
+        &'operation self,
+        mut visitor: Visitor,
+    ) -> IndexStoreFuture<'operation, (), VisitorError>
+    where
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(ProviderRepositoryState) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move {
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            // Preserve complete-row validation before evidence checks and any callbacks.
+            for phase in 0..5 {
+                let mut cursor: Option<[String; 3]> = None;
+                loop {
+                    let mut request = if cursor.is_some() {
+                        query("SELECT provider, owner, repo, last_access_changed_at_unix_seconds, last_revision_pushed_at_unix_seconds, last_pushed_revision, last_cache_invalidated_at_unix_seconds, last_authorization_rechecked_at_unix_seconds, last_drift_checked_at_unix_seconds FROM shardline_provider_repository_states
+                        WHERE (provider, owner, repo) > ($1, $2, $3)
+                        ORDER BY provider, owner, repo LIMIT 256")
+                    } else {
+                        query("SELECT provider, owner, repo, last_access_changed_at_unix_seconds, last_revision_pushed_at_unix_seconds, last_pushed_revision, last_cache_invalidated_at_unix_seconds, last_authorization_rechecked_at_unix_seconds, last_drift_checked_at_unix_seconds FROM shardline_provider_repository_states
+                        ORDER BY provider, owner, repo LIMIT 256")
+                    };
+                    if let Some(key) = &cursor {
+                        for field in key {
+                            request = request.bind(field);
+                        }
+                    }
+                    let rows = request
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(Self::Error::from)
+                        .map_err(Into::into)?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let mut entries = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let entry = provider_repository_state_from_row(&row).map_err(Into::into)?;
+                        cursor = Some([
+                            row.try_get::<String, _>("provider")
+                                .map_err(Self::Error::from)
+                                .map_err(Into::into)?,
+                            row.try_get::<String, _>("owner")
+                                .map_err(Self::Error::from)
+                                .map_err(Into::into)?,
+                            row.try_get::<String, _>("repo")
+                                .map_err(Self::Error::from)
+                                .map_err(Into::into)?,
+                        ]);
+                        entries.push(entry);
+                    }
+                    if phase == 1 {
+                        for entry in &entries {
+                            crate::provider_evidence::snapshot_from_state(entry)
+                                .and_then(|snapshot| snapshot.evidence_operation())
+                                .map_err(Self::Error::from)
+                                .map_err(Into::into)?;
+                        }
+                    } else if phase == 2 || phase == 3 {
+                        verify_postgres_provider_evidence_batch(
+                            &mut *transaction,
+                            &entries,
+                            phase == 3,
+                        )
+                        .await
+                        .map_err(Into::into)?;
+                    } else if phase == 4 {
+                        for entry in entries {
+                            visitor(entry)?;
+                        }
+                    }
+                }
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)
+        })
+    }
     fn upsert_provider_repository_state<'operation>(
         &'operation self,
         state: &'operation ProviderRepositoryState,
@@ -1642,6 +1988,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
         tenant: &str,
         repository: &str,
     ) -> Result<(), Self::Error> {
+        let object_length = u64_to_i64(intent.object_length())?;
         let created_event = upload_lifecycle_event(
             tenant,
             repository,
@@ -1677,7 +2024,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(intent.intent_id())
         .bind(intent.object_key())
         .bind(intent.object_hash())
-        .bind(intent.object_length() as i64)
+        .bind(object_length)
         .bind(intent.state().as_str())
         .execute(&mut *transaction)
         .await?;
@@ -1696,16 +2043,16 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 existing.try_get("object_hash")?,
                 i64_to_u64(existing.try_get("object_length")?)?,
                 state,
-                std::time::Duration::from_secs(
+                std::time::Duration::from_secs(i64_to_u64(
                     existing
                         .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?
-                        .timestamp() as u64,
-                ),
-                std::time::Duration::from_secs(
+                        .timestamp(),
+                )?),
+                std::time::Duration::from_secs(i64_to_u64(
                     existing
                         .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")?
-                        .timestamp() as u64,
-                ),
+                        .timestamp(),
+                )?),
             );
             let event_rows = query(
                 "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
@@ -1747,6 +2094,11 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 }
                 let (stored_tenant, stored_repository) = upload_lifecycle_identity(&events);
                 if stored_tenant != tenant || stored_repository != repository {
+                    if stored_tenant != "shardline" || stored_repository != "default" {
+                        return Err(
+                            crate::UploadIntentConflictError::new(intent.intent_id()).into()
+                        );
+                    }
                     // Upload evidence predating repository-scoped identities was
                     // written with the compatibility `default` repository. The
                     // durable intent and its object identity are unchanged, so
@@ -1937,13 +2289,13 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 let state = UploadIntentState::parse(&state_str).ok_or_else(|| {
                     PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
                 })?;
-                let created_dur = std::time::Duration::from_secs(created.timestamp() as u64);
-                let updated_dur = std::time::Duration::from_secs(updated.timestamp() as u64);
+                let created_dur = std::time::Duration::from_secs(i64_to_u64(created.timestamp())?);
+                let updated_dur = std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?);
                 let intent = UploadIntent::from_parts(
                     id,
                     key,
                     hash,
-                    length as u64,
+                    i64_to_u64(length)?,
                     state,
                     created_dur,
                     updated_dur,
@@ -1979,10 +2331,10 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     id,
                     key,
                     hash,
-                    length as u64,
+                    i64_to_u64(length)?,
                     s,
-                    std::time::Duration::from_secs(created.timestamp() as u64),
-                    std::time::Duration::from_secs(updated.timestamp() as u64),
+                    std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
+                    std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
                 ))
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
@@ -2051,10 +2403,10 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     id,
                     key,
                     hash,
-                    length as u64,
+                    i64_to_u64(length)?,
                     s,
-                    std::time::Duration::from_secs(created.timestamp() as u64),
-                    std::time::Duration::from_secs(updated.timestamp() as u64),
+                    std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
+                    std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
                 ))
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
@@ -3475,6 +3827,238 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_timestamp_reads_and_retries_preserve_metadata() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let intent = UploadIntent::new(
+            "timestamp-boundaries".into(),
+            "objects/timestamps".into(),
+            "c".repeat(64),
+            42,
+        );
+        store.create_intent(&intent).await.unwrap();
+        let events_before: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events_before.len(), 1);
+        // PostgreSQL can represent historical timestamps that this unsigned
+        // public type cannot. Seed them as legacy/corrupt metadata, not via
+        // the adapter's public mutator.
+        for (created, updated) in [
+            (0_i32, 0_i32),
+            (1, 2),
+            (-1, 0),
+            (0, -1),
+            (-315_619_200, -315_619_200),
+        ] {
+            sqlx::query("UPDATE shardline_upload_intents SET created_at = to_timestamp($1::double precision), updated_at = to_timestamp($2::double precision) WHERE intent_id = $3")
+                .bind(f64::from(created)).bind(f64::from(updated)).bind(intent.intent_id()).execute(&pool).await.unwrap();
+            let before: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(intent.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let by_id = store.intent_by_id(intent.intent_id()).await;
+            let by_state = store.intents_by_state(UploadIntentState::Created).await;
+            let stale = store
+                .stale_intents(UploadIntentState::Created, Duration::ZERO)
+                .await;
+            let retry = store.create_intent(&intent).await;
+            if created < 0 || updated < 0 {
+                assert!(matches!(
+                    by_id,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+                assert!(matches!(
+                    by_state,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+                assert!(matches!(
+                    stale,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+                assert!(matches!(
+                    retry,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+            } else {
+                let mut loaded = by_state.unwrap();
+                loaded.extend(stale.unwrap());
+                loaded.push(by_id.unwrap().unwrap());
+                assert_eq!(loaded.len(), 3);
+                for value in loaded {
+                    assert_eq!(
+                        value.created_at().as_secs(),
+                        u64::try_from(created).unwrap()
+                    );
+                    assert_eq!(
+                        value.updated_at().as_secs(),
+                        u64::try_from(updated).unwrap()
+                    );
+                }
+                retry.unwrap();
+            }
+            let after: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(intent.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(before, after);
+            let events_after: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(events_before, events_after);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_length_boundaries_preserve_metadata_and_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let boundary = UploadIntent::new(
+            "length-boundary".into(),
+            "objects/boundary".into(),
+            "a".repeat(64),
+            i64::MAX as u64,
+        );
+        store.create_intent(&boundary).await.unwrap();
+        store.create_intent(&boundary).await.unwrap();
+        assert_eq!(
+            store
+                .intent_by_id(boundary.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .object_length(),
+            i64::MAX as u64
+        );
+        let before: serde_json::Value = sqlx::query_scalar(
+            "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+        )
+        .bind(boundary.intent_id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let events_before: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events_before.len(), 1);
+        for length in [i64::MAX as u64 + 1, u64::MAX] {
+            for id in ["fresh-oversized", boundary.intent_id()] {
+                let oversized =
+                    UploadIntent::new(id.into(), "objects/boundary".into(), "a".repeat(64), length);
+                assert!(matches!(
+                    store.create_intent(&oversized).await,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+            }
+            assert!(
+                store
+                    .intent_by_id("fresh-oversized")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let after: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(boundary.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(before, after);
+            let events_after: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(events_before, events_after);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_reads_reject_negative_lengths_without_repair() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let intent = UploadIntent::new(
+            "negative-length".into(),
+            "objects/negative".into(),
+            "b".repeat(64),
+            42,
+        );
+        store.create_intent(&intent).await.unwrap();
+        let events_before: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for length in [i64::MIN, -1] {
+            sqlx::query("UPDATE shardline_upload_intents SET object_length = $1, created_at = now() - interval '1 second' WHERE intent_id = $2")
+                .bind(length).bind(intent.intent_id()).execute(&pool).await.unwrap();
+            let before: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(intent.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(matches!(
+                store.intent_by_id(intent.intent_id()).await,
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+            ));
+            assert!(matches!(
+                store.intents_by_state(UploadIntentState::Created).await,
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+            ));
+            assert!(matches!(
+                store
+                    .stale_intents(UploadIntentState::Created, Duration::ZERO)
+                    .await,
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+            ));
+            let after: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(intent.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(before, after);
+            let events_after: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(events_before, events_after);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn pg_upload_intent_create_idempotent() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -3818,6 +4402,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn pg_duplicate_intent_rejects_nonlegacy_scope_rebind() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool);
+        let intent = UploadIntent::new(
+            "pg-nonlegacy-duplicate".into(),
+            "objects/scope".into(),
+            "a".repeat(64),
+            42,
+        );
+        store
+            .create_intent_scoped(&intent, "tenant-a", "repo-a")
+            .await
+            .unwrap();
+        store
+            .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+            .await
+            .unwrap();
+        let before = store.reliability_events(intent.intent_id()).await.unwrap();
+        store
+            .create_intent_scoped(&intent, "tenant-a", "repo-a")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .create_intent_scoped(&intent, "tenant-b", "repo-b")
+                .await,
+            Err(super::PostgresMetadataStoreError::UploadIntentConflict(_))
+        ));
+        assert_eq!(
+            store
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        assert_eq!(
+            store.reliability_events(intent.intent_id()).await.unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn pg_scoped_intent_migrates_valid_legacy_evidence_identity() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -3974,5 +4604,699 @@ mod tests {
             failed.iter().any(|i| i.intent_id() == "query-state-b"),
             "b should be in Failed"
         );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_bounded_gc_retention_visitors_keep_order_snapshot_and_validation() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        for i in 0..520 {
+            let key = shardline_storage::ObjectKey::parse(&format!("inventory/{i:04}")).unwrap();
+            store
+                .upsert_quarantine_candidate(
+                    &QuarantineCandidate::new(key.clone(), 4, 100, 200).unwrap(),
+                )
+                .await
+                .unwrap();
+            store
+                .upsert_retention_hold(
+                    &crate::RetentionHold::new(key, "retained".into(), 100, None).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        for quarantine in [false, true] {
+            let expected = if quarantine {
+                store
+                    .list_quarantine_candidates()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| entry.object_key().as_str().to_owned())
+                    .collect::<Vec<_>>()
+            } else {
+                store
+                    .list_retention_holds()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| entry.object_key().as_str().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            let mut visited = Vec::new();
+            let mut writer = Some(store.clone());
+            let mut callback = |key: String| {
+                if let Some(writer) = writer.take() {
+                    std::thread::spawn(move || {
+                        tokio::runtime::Runtime::new()
+                            .unwrap()
+                            .block_on(async move {
+                                let key =
+                                    shardline_storage::ObjectKey::parse("inventory/0519").unwrap();
+                                if quarantine {
+                                    writer
+                                        .upsert_quarantine_candidate(
+                                            &QuarantineCandidate::new(key, 5, 100, 200).unwrap(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                } else {
+                                    writer
+                                        .upsert_retention_hold(
+                                            &crate::RetentionHold::new(
+                                                key,
+                                                "changed".into(),
+                                                101,
+                                                None,
+                                            )
+                                            .unwrap(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                }
+                            })
+                    })
+                    .join()
+                    .unwrap();
+                }
+                visited.push(key);
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            };
+            if quarantine {
+                store
+                    .visit_quarantine_candidates(|entry| {
+                        assert_eq!(entry.observed_length(), 4);
+                        callback(entry.object_key().as_str().to_owned())
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                store
+                    .visit_retention_holds(|entry| {
+                        assert_eq!(entry.reason(), "retained");
+                        callback(entry.object_key().as_str().to_owned())
+                    })
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(visited, expected);
+            let invalid_sql = if quarantine {
+                "INSERT INTO shardline_quarantine_candidates VALUES ('zz/../invalid',4,100,200)"
+            } else {
+                "INSERT INTO shardline_retention_holds VALUES ('zz/../invalid','retained',100,NULL)"
+            };
+            sqlx::query(invalid_sql).execute(&pool).await.unwrap();
+            let mut callbacks = 0;
+            let result = if quarantine {
+                store
+                    .visit_quarantine_candidates(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            } else {
+                store
+                    .visit_retention_holds(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            };
+            assert!(matches!(
+                result,
+                Err(super::PostgresMetadataStoreError::ObjectKey(_))
+            ));
+            assert_eq!(callbacks, 0);
+            let table = if quarantine {
+                "shardline_quarantine_candidates"
+            } else {
+                "shardline_retention_holds"
+            };
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE object_key='zz/../invalid'"
+            )))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let sentinel = || {
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(
+                    "visitor sentinel".into(),
+                ))
+            };
+            let result = if quarantine {
+                store.visit_quarantine_candidates(|_| sentinel()).await
+            } else {
+                store.visit_retention_holds(|_| sentinel()).await
+            };
+            assert!(
+                matches!(result, Err(super::PostgresMetadataStoreError::IntegerOutOfRange(ref message)) if message == "visitor sentinel")
+            );
+            let kind = if quarantine {
+                "GarbageCollection"
+            } else {
+                "RetentionHold"
+            };
+            let row = sqlx::query("SELECT sequence, merkle_commit_json FROM shardline_reliability_events WHERE operation_kind=$1 AND operation_id='inventory/0519' ORDER BY sequence DESC LIMIT 1")
+                .bind(kind).fetch_one(&pool).await.unwrap();
+            let sequence: i64 = row.try_get("sequence").unwrap();
+            let commit: Option<serde_json::Value> = row.try_get("merkle_commit_json").unwrap();
+            // A late corrupt head must beat an early materialized mismatch.
+            let table = if quarantine {
+                "shardline_quarantine_candidates"
+            } else {
+                "shardline_retention_holds"
+            };
+            let column = if quarantine {
+                "observed_length"
+            } else {
+                "held_at_unix_seconds"
+            };
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET {column}={column}+1 WHERE object_key='inventory/0000'"
+            )))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json='{}'::jsonb WHERE operation_kind=$1 AND operation_id='inventory/0519' AND sequence=$2")
+                .bind(kind).bind(sequence).execute(&pool).await.unwrap();
+            let mut callbacks = 0;
+            let result = if quarantine {
+                store
+                    .visit_quarantine_candidates(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            } else {
+                store
+                    .visit_retention_holds(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            };
+            let list_error = if quarantine {
+                store.list_quarantine_candidates().await.unwrap_err()
+            } else {
+                store.list_retention_holds().await.unwrap_err()
+            };
+            assert!(matches!(
+                list_error,
+                super::PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::Serialize(_)
+                )
+            ));
+            assert!(matches!(
+                result,
+                Err(super::PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::Serialize(_)
+                ))
+            ));
+            assert_eq!(callbacks, 0);
+            sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json=$3 WHERE operation_kind=$1 AND operation_id='inventory/0519' AND sequence=$2")
+                .bind(kind).bind(sequence).bind(commit).execute(&pool).await.unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET {column}={column}-1 WHERE object_key='inventory/0000'"
+            )))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("DELETE FROM shardline_reliability_events WHERE operation_kind=$1 AND operation_id='inventory/0519'").bind(kind).execute(&pool).await.unwrap();
+            let mut callbacks = 0;
+            let result = if quarantine {
+                store
+                    .visit_quarantine_candidates(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            } else {
+                store
+                    .visit_retention_holds(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            };
+            assert!(matches!(
+                result,
+                Err(super::PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch
+                ))
+            ));
+            assert_eq!(callbacks, 0);
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_bounded_reconstruction_visitor_validates_before_callbacks_and_keeps_snapshot() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        sqlx::query("INSERT INTO shardline_file_reconstructions (file_id, terms) SELECT lpad(to_hex(i),64,'0'), '{\"terms\":[]}'::jsonb FROM generate_series(1,520) AS i")
+            .execute(&pool).await.unwrap();
+        let expected = store.list_reconstruction_file_ids().await.unwrap();
+        let mut visited = Vec::new();
+        store
+            .visit_reconstruction_file_ids(|id| {
+                visited.push(id);
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(visited, expected);
+        let stop = store
+            .visit_reconstruction_file_ids(|_| {
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(
+                    "visitor sentinel".into(),
+                ))
+            })
+            .await;
+        assert!(
+            matches!(stop, Err(super::PostgresMetadataStoreError::IntegerOutOfRange(ref message)) if message == "visitor sentinel")
+        );
+        sqlx::query("INSERT INTO shardline_file_reconstructions (file_id, terms) VALUES ('zz-invalid', '{\"terms\":[]}'::jsonb)").execute(&pool).await.unwrap();
+        let mut callbacks = 0;
+        let result = store
+            .visit_reconstruction_file_ids(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::HashParse(_))
+        ));
+        assert_eq!(callbacks, 0);
+        sqlx::query("DELETE FROM shardline_file_reconstructions WHERE file_id='zz-invalid'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut values = Vec::new();
+        let mut writer = Some(pool.clone());
+        store.visit_reconstruction_file_ids(|id| {
+            if let Some(pool) = writer.take() {
+                std::thread::spawn(move || tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                    sqlx::query("DELETE FROM shardline_file_reconstructions WHERE file_id=lpad(to_hex(520),64,'0')").execute(&pool).await.unwrap();
+                })).join().unwrap();
+            }
+            values.push(id); Ok::<(), super::PostgresMetadataStoreError>(())
+        }).await.unwrap();
+        assert_eq!(values, expected);
+        assert_eq!(
+            store.list_reconstruction_file_ids().await.unwrap().len(),
+            519
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_bounded_lifecycle_visitors_validate_all_pages_before_callbacks() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        for i in 0..520 {
+            let name = format!("repo-{i:04}");
+            let delivery = crate::WebhookDelivery::new(
+                RepositoryProvider::GitHub,
+                "visitor-team".into(),
+                name.clone(),
+                name.clone(),
+                100,
+            )
+            .unwrap();
+            store.record_webhook_delivery(&delivery).await.unwrap();
+            let state = ProviderRepositoryState::new(
+                RepositoryProvider::GitHub,
+                "visitor-team".into(),
+                name,
+                Some(100),
+                None,
+                None,
+            );
+            store
+                .upsert_provider_repository_state(&state)
+                .await
+                .unwrap();
+        }
+        let expected_deliveries = store.list_webhook_deliveries().await.unwrap();
+        let expected_states = store.list_provider_repository_states().await.unwrap();
+        let mut deliveries = Vec::new();
+        store
+            .visit_webhook_deliveries(|entry| {
+                deliveries.push(entry);
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(deliveries, expected_deliveries);
+        let mut states = Vec::new();
+        store
+            .visit_provider_repository_states(|entry| {
+                states.push(entry);
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(states, expected_states);
+        let result = store
+            .visit_webhook_deliveries(|_| {
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(
+                    "webhook sentinel".into(),
+                ))
+            })
+            .await;
+        assert!(
+            matches!(result,Err(super::PostgresMetadataStoreError::IntegerOutOfRange(ref message)) if message=="webhook sentinel")
+        );
+        let result = store
+            .visit_provider_repository_states(|_| {
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(
+                    "provider sentinel".into(),
+                ))
+            })
+            .await;
+        assert!(
+            matches!(result,Err(super::PostgresMetadataStoreError::IntegerOutOfRange(ref message)) if message=="provider sentinel")
+        );
+        let original_head: serde_json::Value = sqlx::query_scalar("SELECT merkle_commit_json FROM shardline_reliability_events WHERE operation_kind='ProviderEvent' AND operation_id='github:visitor-team:repo-0519' ORDER BY sequence DESC LIMIT 1").fetch_one(&pool).await.unwrap();
+        sqlx::query("UPDATE shardline_provider_repository_states SET last_access_changed_at_unix_seconds=99 WHERE repo='repo-0000'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json='{}'::jsonb WHERE operation_kind='ProviderEvent' AND operation_id='github:visitor-team:repo-0519'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE shardline_provider_repository_states SET provider='zz-invalid' WHERE repo='repo-0518'").execute(&pool).await.unwrap();
+        let mut callbacks = 0;
+        let parse_error = store
+            .visit_provider_repository_states(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            parse_error,
+            super::PostgresMetadataStoreError::InvalidRepoType(_)
+        ));
+        assert_eq!(callbacks, 0);
+        sqlx::query("UPDATE shardline_provider_repository_states SET provider='github' WHERE repo='repo-0518'").execute(&pool).await.unwrap();
+        sqlx::query(
+            "UPDATE shardline_webhook_deliveries SET provider='zz-invalid' WHERE repo='repo-0518'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut callbacks = 0;
+        let parse_error = store
+            .visit_webhook_deliveries(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            parse_error,
+            super::PostgresMetadataStoreError::WebhookDelivery(
+                crate::WebhookDeliveryError::InvalidProvider
+            )
+        ));
+        assert_eq!(callbacks, 0);
+        sqlx::query(
+            "UPDATE shardline_webhook_deliveries SET provider='github' WHERE repo='repo-0518'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let list_error = store.list_provider_repository_states().await.unwrap_err();
+        let mut callbacks = 0;
+        let visitor_error = store
+            .visit_provider_repository_states(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&list_error),
+            std::mem::discriminant(&visitor_error)
+        );
+        assert!(matches!(
+            list_error,
+            super::PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Serialize(_)
+            )
+        ));
+        assert!(matches!(
+            visitor_error,
+            super::PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Serialize(_)
+            )
+        ));
+        assert_eq!(callbacks, 0);
+        sqlx::query("UPDATE shardline_provider_repository_states SET last_access_changed_at_unix_seconds=100 WHERE repo='repo-0000'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json=$1 WHERE operation_kind='ProviderEvent' AND operation_id='github:visitor-team:repo-0519'").bind(original_head).execute(&pool).await.unwrap();
+        let mut writer = Some(pool.clone());
+        let mut snapshot_entries = Vec::new();
+        store.visit_provider_repository_states(|entry| {
+            if let Some(pool) = writer.take() {
+                std::thread::spawn(move || tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                    sqlx::query("UPDATE shardline_provider_repository_states SET last_access_changed_at_unix_seconds=101 WHERE repo='repo-0519'").execute(&pool).await.unwrap();
+                })).join().unwrap();
+            }
+            snapshot_entries.push(entry); Ok::<(), super::PostgresMetadataStoreError>(())
+        }).await.unwrap();
+        assert_eq!(snapshot_entries, expected_states);
+        let mut callbacks = 0;
+        let result = store
+            .visit_provider_repository_states(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::Reliability(_))
+        ));
+        assert_eq!(callbacks, 0);
+        sqlx::query("UPDATE shardline_provider_repository_states SET last_access_changed_at_unix_seconds=100 WHERE repo='repo-0519'").execute(&pool).await.unwrap();
+        let mut writer = Some(pool.clone());
+        let mut snapshot_entries = Vec::new();
+        store.visit_webhook_deliveries(|entry| {
+            if let Some(pool) = writer.take() {
+                std::thread::spawn(move || tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                    sqlx::query("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=101 WHERE repo='repo-0519'").execute(&pool).await.unwrap();
+                })).join().unwrap();
+            }
+            snapshot_entries.push(entry); Ok::<(), super::PostgresMetadataStoreError>(())
+        }).await.unwrap();
+        assert_eq!(snapshot_entries, expected_deliveries);
+        let mut callbacks = 0;
+        let result = store
+            .visit_webhook_deliveries(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::Reliability(_))
+        ));
+        assert_eq!(callbacks, 0);
+        sqlx::query("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=100 WHERE repo='repo-0519'").execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM shardline_reliability_events WHERE operation_kind='ProviderEvent' AND operation_id='github:visitor-team:repo-0519'").execute(&pool).await.unwrap();
+        let mut callbacks = 0;
+        let result = store
+            .visit_provider_repository_states(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::Reliability(_))
+        ));
+        assert_eq!(callbacks, 0);
+        sqlx::query("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=101 WHERE repo='repo-0519'").execute(&pool).await.unwrap();
+        let mut callbacks = 0;
+        let result = store
+            .visit_webhook_deliveries(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::Reliability(_))
+        ));
+        assert_eq!(callbacks, 0);
+        pool.close().await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_bounded_visitors_preserve_merkle_head_validation() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let delivery = crate::WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "head-team".into(),
+            "head-repo".into(),
+            "delivery".into(),
+            100,
+        )
+        .unwrap();
+        store.record_webhook_delivery(&delivery).await.unwrap();
+        for time in [100, 101] {
+            let state = ProviderRepositoryState::new(
+                RepositoryProvider::GitHub,
+                "head-team".into(),
+                "head-repo".into(),
+                Some(time),
+                None,
+                None,
+            );
+            store
+                .upsert_provider_repository_state(&state)
+                .await
+                .unwrap();
+        }
+        for kind in ["WebhookDelivery", "ProviderEvent"] {
+            let row=sqlx::query("SELECT operation_id,sequence,merkle_commit_json FROM shardline_reliability_events WHERE operation_kind=$1 ORDER BY sequence DESC LIMIT 1").bind(kind).fetch_one(&pool).await.unwrap();
+            let operation_id: String = row.try_get("operation_id").unwrap();
+            let sequence: i64 = row.try_get("sequence").unwrap();
+            let commit: Option<serde_json::Value> = row.try_get("merkle_commit_json").unwrap();
+            sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json='{}'::jsonb WHERE operation_kind=$1 AND operation_id=$2 AND sequence=$3").bind(kind).bind(&operation_id).bind(sequence).execute(&pool).await.unwrap();
+            let mut callbacks = 0;
+            let result = if kind == "WebhookDelivery" {
+                store
+                    .visit_webhook_deliveries(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            } else {
+                store
+                    .visit_provider_repository_states(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            };
+            assert!(
+                matches!(
+                    result,
+                    Err(super::PostgresMetadataStoreError::Reliability(_))
+                ) || matches!(result, Err(super::PostgresMetadataStoreError::Json(_)))
+            );
+            assert_eq!(callbacks, 0);
+            sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json=$4 WHERE operation_kind=$1 AND operation_id=$2 AND sequence=$3").bind(kind).bind(&operation_id).bind(sequence).bind(commit).execute(&pool).await.unwrap();
+        }
+        sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='ProviderEvent' AND sequence=1").execute(&pool).await.unwrap();
+        let mut callbacks = 0;
+        let result = store
+            .visit_provider_repository_states(|_| {
+                callbacks += 1;
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(callbacks, 0);
+        pool.close().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_retention_upserts_serialize_absent_rows_and_reads_keep_evidence_snapshot() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let key = shardline_storage::ObjectKey::parse("retention/concurrency").unwrap();
+        let gate = Arc::new(tokio::sync::Barrier::new(8));
+        let mut jobs = Vec::new();
+        for id in 0..8 {
+            let store = store.clone();
+            let key = key.clone();
+            let gate = gate.clone();
+            jobs.push(tokio::spawn(async move {
+                let hold =
+                    crate::RetentionHold::new(key, format!("writer-{id}"), 10, None).unwrap();
+                gate.wait().await;
+                store.upsert_retention_hold(&hold).await
+            }));
+        }
+        for job in jobs {
+            job.await.unwrap().unwrap();
+        }
+        let stale = store.retention_hold(&key).await.unwrap().unwrap();
+        let writer = store.clone();
+        let writer_key = key.clone();
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let writer_gate = gate.clone();
+        let writing = tokio::spawn(async move {
+            writer_gate.wait().await;
+            for id in 0..200 {
+                let hold = crate::RetentionHold::new(
+                    writer_key.clone(),
+                    format!("update-{id}"),
+                    20,
+                    Some(100),
+                )
+                .unwrap();
+                writer.upsert_retention_hold(&hold).await.unwrap();
+            }
+        });
+        gate.wait().await;
+        for _ in 0..200 {
+            assert!(store.retention_hold(&key).await.unwrap().is_some());
+            assert_eq!(store.list_retention_holds().await.unwrap().len(), 1);
+        }
+        writing.await.unwrap();
+        let current = store.retention_hold(&key).await.unwrap().unwrap();
+        assert_eq!(current.reason(), "update-199");
+        assert!(
+            !store
+                .delete_retention_hold_if_matches(&stale)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.retention_hold(&key).await.unwrap(),
+            Some(current.clone())
+        );
+        sqlx::query("UPDATE shardline_retention_holds SET reason='tampered' WHERE object_key=$1")
+            .bind(key.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for result in [
+            store.retention_hold(&key).await.map(|_| ()),
+            store.list_retention_holds().await.map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(super::PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::StateMismatch
+                ))
+            ));
+        }
+        sqlx::query("UPDATE shardline_retention_holds SET reason=$2 WHERE object_key=$1")
+            .bind(key.as_str())
+            .bind(current.reason())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .delete_retention_hold_if_matches(&current)
+                .await
+                .unwrap()
+        );
+        let recreated =
+            crate::RetentionHold::new(key.clone(), "recreated".into(), 30, None).unwrap();
+        store.upsert_retention_hold(&recreated).await.unwrap();
+        assert_eq!(store.retention_hold(&key).await.unwrap(), Some(recreated));
+        assert!(store.delete_retention_hold(&key).await.unwrap());
+        assert!(store.retention_hold(&key).await.unwrap().is_none());
+        pool.close().await;
     }
 }

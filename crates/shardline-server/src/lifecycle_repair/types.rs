@@ -79,6 +79,10 @@ pub(crate) enum QuarantineRepairAction {
 pub(crate) enum RetentionHoldRepairAction {
     Keep,
     DeleteExpired,
+    #[allow(
+        dead_code,
+        reason = "Retained repair action shape; future holds no longer require existing objects"
+    )]
     DeleteMissing,
 }
 

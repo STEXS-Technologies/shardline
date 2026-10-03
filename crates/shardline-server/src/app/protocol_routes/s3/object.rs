@@ -8,6 +8,7 @@
 //! record + direct object (crash-safe ordering).
 
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::Instant,
@@ -22,12 +23,14 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::{Stream, StreamExt, stream};
 use md5::{Digest, Md5};
 use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_s3_adapter::{
     CopyObjectResult, S3Error, S3SubResource, classify, etag_header, format_iso8601,
-    parse_copy_source, parse_s3_range, read_conditional_headers, require_s3_bucket_binding,
+    parse_content_md5, parse_copy_source, parse_s3_range, read_conditional_headers,
+    require_s3_bucket_binding,
 };
 use shardline_server_core::AuthorizedRepository;
 
@@ -61,45 +64,152 @@ const META_PREFIX: &str = "x-amz-meta-";
 // User metadata, ETag (MD5) helpers.
 // ---------------------------------------------------------------------------
 
-/// Captures `x-amz-meta-*` request headers as sorted `(name, value)` pairs,
-/// stripped of the prefix with names lowercased (S3 canonicalization).
-pub(super) fn capture_user_metadata(headers: &HeaderMap) -> Vec<(String, String)> {
-    let mut metadata: Vec<(String, String)> = headers
-        .iter()
-        .filter_map(|(name, value)| {
-            let suffix = name.as_str().strip_prefix(META_PREFIX)?;
-            let value = value.to_str().ok()?.to_owned();
-            Some((suffix.to_ascii_lowercase(), value))
-        })
-        .collect();
-    metadata.sort();
-    metadata
+/// Canonicalize user metadata, preserving the order of repeated field values.
+pub(super) fn capture_user_metadata(headers: &HeaderMap) -> Result<Vec<(String, String)>, S3Error> {
+    let mut metadata = Vec::new();
+    for name in headers.keys() {
+        let Some(suffix) = name.as_str().strip_prefix(META_PREFIX) else {
+            continue;
+        };
+        let mut values = Vec::new();
+        for value in headers.get_all(name) {
+            let text = std::str::from_utf8(value.as_bytes())
+                .map_err(|_error| S3Error::invalid_argument("Invalid UTF-8 user metadata"))?;
+            values.push(decode_metadata_value(text));
+        }
+        metadata.push((suffix.to_ascii_lowercase(), values.join(",")));
+    }
+    metadata.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(metadata)
+}
+
+/// Decode UTF-8 RFC2047 B/Q encoded words emitted by S3 REST clients.
+/// Other ASCII metadata (including unsupported or malformed encoded words) is
+/// retained verbatim, preserving existing accepted values without data loss.
+fn decode_metadata_value(value: &str) -> String {
+    decode_utf8_metadata_words(value).unwrap_or_else(|| value.to_owned())
+}
+
+fn decode_utf8_metadata_words(value: &str) -> Option<String> {
+    let mut remaining = value;
+    let mut decoded = String::new();
+    let mut previous_encoded = false;
+    while let Some(start) = remaining.find("=?") {
+        let (prefix, word) = remaining.split_at(start);
+        if !previous_encoded || !prefix.chars().all(char::is_whitespace) {
+            decoded.push_str(prefix);
+        }
+        let word = word.strip_prefix("=?")?;
+        let (charset, word) = word.split_once('?')?;
+        let (encoding, word) = word.split_once('?')?;
+        let (payload, tail) = word.split_once("?=")?;
+        if !charset.eq_ignore_ascii_case("UTF-8") {
+            return None;
+        }
+        let bytes = if encoding.eq_ignore_ascii_case("B") {
+            STANDARD.decode(payload).ok()?
+        } else if encoding.eq_ignore_ascii_case("Q") {
+            decode_metadata_q(payload)?
+        } else {
+            return None;
+        };
+        decoded.push_str(&String::from_utf8(bytes).ok()?);
+        remaining = tail;
+        previous_encoded = true;
+    }
+    decoded.push_str(remaining);
+    Some(decoded)
+}
+
+fn decode_metadata_q(payload: &str) -> Option<Vec<u8>> {
+    let mut decoded = Vec::new();
+    let mut bytes = payload.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'_' => decoded.push(b' '),
+            b'=' => {
+                let high = char::from(bytes.next()?).to_digit(16)?;
+                let low = char::from(bytes.next()?).to_digit(16)?;
+                decoded.push(u8::try_from(high.checked_mul(16)?.checked_add(low)?).ok()?);
+            }
+            byte if byte.is_ascii_graphic() && byte != b'?' => decoded.push(byte),
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
+/// Keep each RFC2047 word below 75 characters without splitting UTF-8 scalars.
+fn encode_metadata_value(value: &str) -> String {
+    if value.is_ascii() {
+        return value.to_owned();
+    }
+    let mut words = Vec::new();
+    let mut chunk = String::new();
+    for character in value.chars() {
+        if chunk.len().saturating_add(character.len_utf8()) > 45 {
+            words.push(format!("=?UTF-8?B?{}?=", STANDARD.encode(chunk.as_bytes())));
+            chunk.clear();
+        }
+        chunk.push(character);
+    }
+    if !chunk.is_empty() {
+        words.push(format!("=?UTF-8?B?{}?=", STANDARD.encode(chunk.as_bytes())));
+    }
+    words.join(" ")
 }
 
 /// The CopyObject `x-amz-metadata-directive` value.
 enum MetadataDirective {
-    /// Propagate the source object's user metadata (S3 default).
     Copy,
-    /// Overwrite the destination's metadata with `x-amz-meta-*` headers.
     Replace,
 }
 
-/// Resolves the CopyObject metadata directive; anything other than `REPLACE`
-/// (case-insensitive) is treated as `COPY`.
-fn metadata_directive(headers: &HeaderMap) -> MetadataDirective {
-    match headers
-        .get(&METADATA_DIRECTIVE)
-        .and_then(|value| value.to_str().ok())
-    {
-        Some(directive) if directive.eq_ignore_ascii_case("REPLACE") => MetadataDirective::Replace,
-        _ => MetadataDirective::Copy,
+/// Only an absent directive defaults to COPY; malformed singleton fields fail.
+fn metadata_directive(headers: &HeaderMap) -> Result<MetadataDirective, S3Error> {
+    let mut values = headers.get_all(&METADATA_DIRECTIVE).iter();
+    let Some(value) = values.next() else {
+        return Ok(MetadataDirective::Copy);
+    };
+    if values.next().is_some() {
+        return Err(S3Error::invalid_argument(
+            "Repeated x-amz-metadata-directive header",
+        ));
+    }
+    let directive = value
+        .to_str()
+        .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-metadata-directive header"))?;
+    if directive.eq_ignore_ascii_case("COPY") {
+        Ok(MetadataDirective::Copy)
+    } else if directive.eq_ignore_ascii_case("REPLACE") {
+        Ok(MetadataDirective::Replace)
+    } else {
+        Err(S3Error::invalid_argument(
+            "Invalid x-amz-metadata-directive header",
+        ))
     }
 }
 
-/// Inserts stored user metadata as `x-amz-meta-*` response headers.
+/// Combine legacy repeated stored names as well as newly canonicalized rows.
+/// Unicode is returned as a mail-safe UTF-8 encoded word. Unprintable metadata
+/// is suppressed and accounted for by x-amz-missing-meta, as documented by S3.
 fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) {
+    let mut combined: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for (name, value) in metadata {
-        let Ok(value) = HeaderValue::from_str(value) else {
+        combined
+            .entry(name.to_ascii_lowercase())
+            .or_default()
+            .push(value);
+    }
+    let mut missing = 0u64;
+    for (name, values) in combined {
+        let value = values.join(",");
+        if value.chars().any(char::is_control) {
+            missing = missing.saturating_add(1);
+            continue;
+        }
+        let value = encode_metadata_value(&value);
+        let Ok(value) = HeaderValue::from_str(&value) else {
             continue;
         };
         let Ok(header) = HeaderName::try_from(format!("{META_PREFIX}{name}")) else {
@@ -107,10 +217,15 @@ fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) 
         };
         response.headers_mut().insert(header, value);
     }
+    if missing > 0
+        && let Ok(value) = HeaderValue::from_str(&missing.to_string())
+    {
+        response.headers_mut().insert("x-amz-missing-meta", value);
+    }
 }
 
 /// Resolves the S3 listing-index row for an object (`None` when absent).
-async fn s3_object_entry(
+pub(super) async fn s3_object_entry(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
 ) -> Result<Option<S3ObjectEntry>, S3Error> {
@@ -182,6 +297,9 @@ pub(crate) async fn s3_put_object(
         }
     });
     if let (Some(part_number), Some(upload_id)) = (part_number, upload_id) {
+        if resources.len() != 2 || headers.contains_key(COPY_SOURCE) {
+            return Err(S3Error::not_implemented());
+        }
         return multipart::s3_upload_part(&state, &context, part_number, upload_id, &headers, body)
             .await;
     }
@@ -192,13 +310,18 @@ pub(crate) async fn s3_put_object(
     // `CopyObject` is a PUT with the `x-amz-copy-source` header (S3's COPY is
     // not a separate method): read the source within the caller's bucket and
     // write it to this key.
-    if let Some(copy_source) = headers
-        .get(COPY_SOURCE)
-        .and_then(|value| value.to_str().ok())
-    {
+    let mut copy_sources = headers.get_all(COPY_SOURCE).iter();
+    if let Some(copy_source) = copy_sources.next() {
+        if copy_sources.next().is_some() {
+            return Err(S3Error::invalid_argument("Repeated copy source header"));
+        }
+        let copy_source = copy_source
+            .to_str()
+            .map_err(|_error| S3Error::invalid_argument("Invalid copy source header"))?;
         return s3_copy_object(&state, auth.capability(), &context, copy_source, &headers).await;
     }
 
+    let expected_md5 = parse_content_md5(&headers)?;
     // Bodies larger than SHARDLINE_S3_MAX_PART_BYTES must use multipart.
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
         .map_err(|_error| S3Error::internal())?;
@@ -221,9 +344,8 @@ pub(crate) async fn s3_put_object(
     // ceiling by the decoder.
     let body = if aws_chunked::is_aws_chunked(&headers) {
         let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
-        if let Some(decoded) = aws_chunked::declared_decoded_content_length(&headers)
-            && decoded > max_bytes_u64
-        {
+        let decoded = aws_chunked::declared_decoded_content_length(&headers)?;
+        if decoded > max_bytes_u64 {
             return Err(S3Error {
                 code: "EntityTooLarge",
                 message: "Your proposed upload exceeds the maximum allowed object size".to_owned(),
@@ -233,9 +355,15 @@ pub(crate) async fn s3_put_object(
         RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(
             body,
             u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?,
+            Some(decoded),
         ))
     } else {
         body
+    };
+
+    let body = match expected_md5 {
+        Some(expected) => body.with_expected_md5(expected),
+        None => body,
     };
 
     // Conditional requests (If-Match / If-None-Match) are evaluated against
@@ -249,7 +377,7 @@ pub(crate) async fn s3_put_object(
     // Capture S3 user metadata (x-amz-meta-*) and compute the ETag (hex MD5 of
     // the object bytes) while the body streams — standard S3 semantics that
     // checksum-verifying clients (s3cmd, the AWS SDKs) depend on.
-    let user_metadata = capture_user_metadata(&headers);
+    let user_metadata = capture_user_metadata(&headers)?;
     let hasher = Arc::new(Mutex::new(Md5::new()));
     let body = body.with_md5_tee(hasher.clone());
 
@@ -288,6 +416,7 @@ async fn s3_copy_object(
     copy_source: &str,
     headers: &HeaderMap,
 ) -> Result<Response, S3Error> {
+    let directive = metadata_directive(headers)?;
     let source = parse_copy_source(copy_source)
         .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-copy-source header"))?;
     // The source must be inside the caller's bound bucket (which must equal the
@@ -328,6 +457,7 @@ async fn s3_copy_object(
         Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&source.key)),
         Err(error) => return Err(S3Error::from(error)),
     };
+    check_copy_source_preconditions(headers, &snapshot)?;
     if snapshot.total_bytes > max_bytes_u64 {
         return Err(S3Error {
             code: "EntityTooLarge",
@@ -340,8 +470,8 @@ async fn s3_copy_object(
     // — resolved from the SAME snapshot as the source bytes, so the copied
     // metadata always belongs to the copied content (F-79); REPLACE overrides
     // it with the x-amz-meta-* headers of this request.
-    let user_metadata = match metadata_directive(headers) {
-        MetadataDirective::Replace => capture_user_metadata(headers),
+    let user_metadata = match directive {
+        MetadataDirective::Replace => capture_user_metadata(headers)?,
         MetadataDirective::Copy => snapshot.user_metadata,
     };
 
@@ -389,6 +519,105 @@ async fn s3_copy_object(
         .into_response())
 }
 
+/// Source validators are checked against the exact snapshot whose bytes
+/// will be copied, so concurrent source publication cannot tear the check.
+fn check_copy_source_preconditions(
+    headers: &HeaderMap,
+    snapshot: &crate::backend::S3ObjectReadSnapshot,
+) -> Result<(), S3Error> {
+    let mut source_headers = HeaderMap::new();
+    for (source_name, target_name) in [
+        ("x-amz-copy-source-if-match", axum::http::header::IF_MATCH),
+        (
+            "x-amz-copy-source-if-none-match",
+            axum::http::header::IF_NONE_MATCH,
+        ),
+    ] {
+        for value in headers.get_all(source_name) {
+            // S3 copy-source validators also accept bare MD5 identities.
+            // Normalize only that spelling; keep HTTP tag-list validation
+            // and every repeated condition intact.
+            let bytes = value.as_bytes();
+            let normalized = if bytes.len() == 32 && bytes.iter().all(u8::is_ascii_hexdigit) {
+                let tag = value.to_str().map_err(|_error| {
+                    S3Error::invalid_argument("Invalid copy-source entity-tag header")
+                })?;
+                HeaderValue::from_str(&format!("\"{tag}\"")).map_err(|_error| {
+                    S3Error::invalid_argument("Invalid copy-source entity-tag header")
+                })?
+            } else {
+                value.clone()
+            };
+            source_headers.append(target_name.clone(), normalized);
+        }
+    }
+    let conditions = read_conditional_headers(&source_headers)
+        .map_err(|_error| S3Error::invalid_argument("Invalid copy-source entity-tag header"))?;
+    for condition in conditions {
+        // Snapshot resolution already proved source existence. A legacy
+        // source without an ETag cannot satisfy concrete tag predicates.
+        let satisfied = match &condition {
+            shardline_s3_adapter::ConditionalHeader::IfMatch(
+                shardline_s3_adapter::EntityTagSet::Any,
+            ) => true,
+            shardline_s3_adapter::ConditionalHeader::IfNoneMatch(
+                shardline_s3_adapter::EntityTagSet::Any,
+            ) => false,
+            shardline_s3_adapter::ConditionalHeader::IfMatch(_)
+            | shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_) => snapshot
+                .etag
+                .as_deref()
+                .is_some_and(|etag| condition.satisfied(Some(etag))),
+        };
+        if !satisfied {
+            return Err(S3Error::precondition_failed());
+        }
+    }
+    for (name, tag_header, unmodified) in [
+        (
+            "x-amz-copy-source-if-unmodified-since",
+            axum::http::header::IF_MATCH,
+            true,
+        ),
+        (
+            "x-amz-copy-source-if-modified-since",
+            axum::http::header::IF_NONE_MATCH,
+            false,
+        ),
+    ] {
+        let mut values = headers.get_all(name).iter();
+        let Some(value) = values.next() else {
+            continue;
+        };
+        if values.next().is_some() {
+            return Err(S3Error::invalid_argument(
+                "Repeated copy-source date header",
+            ));
+        }
+        let date = value
+            .to_str()
+            .ok()
+            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .ok_or_else(|| S3Error::invalid_argument("Invalid copy-source date header"))?;
+        // S3 tag validators take precedence over their corresponding dates.
+        if source_headers.contains_key(tag_header) {
+            continue;
+        }
+        let since = date
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .ok_or_else(|| S3Error::invalid_argument("Invalid copy-source date header"))?;
+        let Some(modified) = snapshot.updated_at_unix_seconds else {
+            return Err(S3Error::precondition_failed());
+        };
+        if (unmodified && modified > since) || (!unmodified && modified <= since) {
+            return Err(S3Error::precondition_failed());
+        }
+    }
+    Ok(())
+}
+
 /// Evaluates the `If-Match` / `If-None-Match` headers against the object's
 /// CURRENT state, before a write mutates anything.
 ///
@@ -411,17 +640,14 @@ async fn check_put_precondition(
 /// Evaluates the S3 conditional headers against a stored ETag.
 ///
 /// `stored_etag: None` means the object does not exist.
-fn check_precondition(
+pub(super) fn check_precondition(
     stored_etag: Option<&str>,
     headers: &HeaderMap,
     key: &str,
 ) -> Result<(), S3Error> {
-    let Some(condition) = read_conditional_headers(headers) else {
+    let Some(condition) = failing_condition(stored_etag, headers)? else {
         return Ok(());
     };
-    if condition.satisfied(stored_etag) {
-        return Ok(());
-    }
     if matches!(
         condition,
         shardline_s3_adapter::ConditionalHeader::IfMatch(_)
@@ -430,6 +656,41 @@ fn check_precondition(
         return Err(S3Error::no_such_key(key));
     }
     Err(S3Error::precondition_failed())
+}
+
+fn failing_condition(
+    stored_etag: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Option<shardline_s3_adapter::ConditionalHeader>, S3Error> {
+    let conditions = read_conditional_headers(headers)
+        .map_err(|_error| S3Error::invalid_argument("Invalid conditional entity-tag header"))?;
+    Ok(conditions
+        .into_iter()
+        .find(|condition| !condition.satisfied(stored_etag)))
+}
+
+/// GET/HEAD use 304 for failed If-None-Match, with no XML or content body.
+fn check_read_precondition(
+    stored_etag: Option<&str>,
+    headers: &HeaderMap,
+    key: &str,
+) -> Result<Option<Response>, S3Error> {
+    match failing_condition(stored_etag, headers)? {
+        Some(shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_)) => {
+            let mut response = StatusCode::NOT_MODIFIED.into_response();
+            if let Some(etag) =
+                stored_etag.and_then(|etag| HeaderValue::from_str(&etag_header(etag)).ok())
+            {
+                response.headers_mut().insert(ETAG, etag);
+            }
+            Ok(Some(response))
+        }
+        Some(_) => {
+            check_precondition(stored_etag, headers, key)?;
+            Ok(None)
+        }
+        None => Ok(None),
+    }
 }
 
 /// Wraps a byte stream with a hard total-byte ceiling (defense-in-depth for
@@ -500,7 +761,7 @@ fn bounded_byte_stream(
 /// while the latest alias still points at it (see
 /// `delete_file_reference_if_latest`). The process-local lock remains a useful
 /// single-node optimization, but correctness comes from the database CAS.
-async fn s3_upload_object_body(
+pub(super) async fn s3_upload_object_body(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
     body: RequestBodyReader,
@@ -530,8 +791,18 @@ async fn s3_upload_object_body(
     // Capture the exact metadata row that satisfied the condition. The later
     // compare-and-swap rejects the write if any replica changes that row while
     // this request streams its body.
-    let conditional_headers =
-        precondition.filter(|headers| read_conditional_headers(headers).is_some());
+    let conditional_headers = match precondition {
+        Some(headers)
+            if !read_conditional_headers(headers)
+                .map_err(|_error| {
+                    S3Error::invalid_argument("Invalid conditional entity-tag header")
+                })?
+                .is_empty() =>
+        {
+            Some(headers)
+        }
+        _ => None,
+    };
     let expected_entry = if let Some(headers) = conditional_headers {
         let existing = s3_object_entry(state, context).await?;
         check_precondition(
@@ -695,11 +966,13 @@ pub(crate) async fn s3_get_object(
     let entry = s3_object_entry(&state, &context).await?;
     // Conditional requests (If-Match / If-None-Match) evaluate against the
     // stored S3 ETag (listing-index row) before any bytes are served.
-    check_precondition(
+    if let Some(response) = check_read_precondition(
         entry.as_ref().map(|entry| entry.etag.as_str()),
         &headers,
         &context.key,
-    )?;
+    )? {
+        return Ok(response);
+    }
 
     // Resolve the object's length and record version from the SAME row whose
     // ETag / metadata are served below: the stream is pinned to the row's
@@ -725,7 +998,25 @@ pub(crate) async fn s3_get_object(
             (snapshot.total_bytes, snapshot.record_content_hash)
         }
     };
-    let range_header = headers.get(RANGE).and_then(|value| value.to_str().ok());
+    // If-Range is a single strong validator. Without an exact match (or an
+    // available date validator), return the entire pinned representation.
+    let if_range_values = headers.get_all(axum::http::header::IF_RANGE);
+    let mut if_range_values = if_range_values.iter();
+    let range_allowed = match if_range_values.next() {
+        None => true,
+        Some(value) if if_range_values.next().is_none() => entry.as_ref().is_some_and(|row| {
+            value
+                .to_str()
+                .ok()
+                .is_some_and(|value| value.trim_matches([' ', '\t']) == etag_header(&row.etag))
+        }),
+        Some(_) => false,
+    };
+    let range_header = if range_allowed {
+        headers.get(RANGE).and_then(|value| value.to_str().ok())
+    } else {
+        None
+    };
     let range = match range_header {
         Some(header) => {
             // An explicit range on an empty object is unsatisfiable.
@@ -784,7 +1075,12 @@ pub(crate) async fn s3_get_object(
         );
         insert_user_metadata(&mut response, &entry.user_metadata);
     }
-    metrics::record_download("s3", total_length, 0.0, true);
+    // Count the payload selected for this response before its body is polled.
+    // This is not a count of bytes acknowledged by the client.
+    let selected_length = range
+        .map_or(Some(total_length), |range| range.len())
+        .ok_or(ServerError::Overflow)?;
+    metrics::record_download("s3", selected_length, 0.0, true);
     Ok(response)
 }
 
@@ -814,11 +1110,13 @@ pub(crate) async fn s3_head_object(
     let entry = s3_object_entry(&state, &context).await?;
     // Conditional requests evaluate against the stored S3 ETag before the
     // headers are served.
-    check_precondition(
+    if let Some(response) = check_read_precondition(
         entry.as_ref().map(|entry| entry.etag.as_str()),
         &headers,
         &context.key,
-    )?;
+    )? {
+        return Ok(response);
+    }
 
     let size = match &entry {
         Some(row) => row.size_bytes,
@@ -884,10 +1182,7 @@ pub(crate) async fn s3_delete_object(
     // out of scope.
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
-    if let Some(S3SubResource::UploadId(upload_id)) = resources
-        .iter()
-        .find(|resource| matches!(resource, S3SubResource::UploadId(_)))
-    {
+    if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
         return multipart::s3_abort_multipart_upload(&state, &context, upload_id).await;
     }
     if !resources.is_empty() {
@@ -932,9 +1227,8 @@ pub(crate) async fn s3_delete_object(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// `POST /{bucket}/{*key}` — `CreateMultipartUpload`/`UploadPart` are Lane 4
-/// work; `PostObject` is out of scope. Everything is `501 NotImplemented`
-/// today.
+/// `POST /{bucket}/{*key}` dispatches multipart creation or completion.
+/// Unsupported or conflicting operation selectors return `501 NotImplemented`.
 #[tracing::instrument(skip(auth, state, headers, body), fields(bucket, key))]
 pub(crate) async fn s3_post_object(
     auth: S3Repository,
@@ -950,17 +1244,14 @@ pub(crate) async fn s3_post_object(
     // anything else (PostObject) is out of scope.
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
-    if resources
-        .iter()
-        .any(|resource| matches!(resource, S3SubResource::Uploads))
-    {
+    if let [S3SubResource::Uploads] = resources.as_slice() {
         return multipart::s3_create_multipart_upload(&state, &context, &headers).await;
     }
-    if let Some(S3SubResource::UploadId(upload_id)) = resources
-        .iter()
-        .find(|resource| matches!(resource, S3SubResource::UploadId(_)))
-    {
-        return multipart::s3_complete_multipart_upload(&state, &context, upload_id, body).await;
+    if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
+        return multipart::s3_complete_multipart_upload(
+            &state, &context, upload_id, &headers, body,
+        )
+        .await;
     }
     Err(S3Error::not_implemented())
 }
@@ -973,4 +1264,63 @@ pub(crate) async fn s3_post_object(
 fn last_modified_from_entry(entry: Option<&S3ObjectEntry>) -> String {
     let updated_at = entry.map(|row| row.updated_at_unix_seconds).unwrap_or(0);
     format_http_date(updated_at)
+}
+
+#[cfg(test)]
+mod conditional_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    #[test]
+    fn metadata_legacy_pairs_and_unprintable_values_are_served_without_loss() {
+        let mut response = axum::response::Response::new(Body::empty());
+        insert_user_metadata(
+            &mut response,
+            &[
+                ("Label".to_owned(), "first".to_owned()),
+                ("label".to_owned(), "second".to_owned()),
+                ("unprintable".to_owned(), "hidden\tvalue".to_owned()),
+            ],
+        );
+        assert_eq!(response.headers()["x-amz-meta-label"], "first,second");
+        assert!(!response.headers().contains_key("x-amz-meta-unprintable"));
+        assert_eq!(response.headers()["x-amz-missing-meta"], "1");
+    }
+
+    #[test]
+    fn metadata_unicode_words_are_bounded_and_recover_exact_text() {
+        let text = "é東京🙂".repeat(40);
+        let encoded = encode_metadata_value(&text);
+        assert!(encoded.split(' ').all(|word| word.len() <= 75));
+        assert_eq!(decode_metadata_value(&encoded), text);
+        assert_eq!(
+            decode_metadata_value("prefix =?UTF-8?B?Y2Fm?= \t =?utf-8?Q?=C3=A9?= suffix"),
+            "prefix café suffix"
+        );
+        for literal in ["=?custom?B?YWJj?=", "=?UTF-8?B?bad?=", "=?UTF-8?Q?bad=XY?="] {
+            assert_eq!(decode_metadata_value(literal), literal);
+        }
+    }
+
+    #[test]
+    fn unknown_copy_source_validators_preserve_existence_wildcards() {
+        let snapshot = crate::backend::S3ObjectReadSnapshot {
+            total_bytes: 1,
+            record_content_hash: None,
+            user_metadata: Vec::new(),
+            etag: None,
+            updated_at_unix_seconds: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amz-copy-source-if-match", "*".parse().unwrap());
+        assert!(check_copy_source_preconditions(&headers, &snapshot).is_ok());
+        headers.clear();
+        headers.insert("x-amz-copy-source-if-none-match", "*".parse().unwrap());
+        assert!(check_copy_source_preconditions(&headers, &snapshot).is_err());
+        headers.clear();
+        headers.insert(
+            "x-amz-copy-source-if-none-match",
+            "\"unknown\"".parse().unwrap(),
+        );
+        assert!(check_copy_source_preconditions(&headers, &snapshot).is_err());
+    }
 }

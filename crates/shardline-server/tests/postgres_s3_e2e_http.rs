@@ -904,19 +904,24 @@ async fn oci_upload_blob_oneshot(
     digest
 }
 
-fn oci_manifest_json(config_digest: &str, layer_digest: &str) -> String {
+fn oci_manifest_json(
+    config_digest: &str,
+    layer_digest: &str,
+    config_size: usize,
+    layer_size: usize,
+) -> String {
     serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": config_size,
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [
             {
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
+                "size": layer_size,
                 "digest": format!("sha256:{layer_digest}")
             }
         ]
@@ -934,7 +939,12 @@ async fn test_oci_manifest_push_and_get_by_tag() {
     let layer_data = b"\x1f\x8b\x08\x00";
     let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
     let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
-    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+    let manifest_body = oci_manifest_json(
+        &config_digest,
+        &layer_digest,
+        config_data.len(),
+        layer_data.len(),
+    );
     let manifest_digest = oci_digest_hex(manifest_body.as_bytes());
 
     let put_uri = format!("/v2/{repo}/manifests/{tag}");
@@ -979,7 +989,12 @@ async fn test_oci_manifest_get_by_digest() {
 
     let config_digest = oci_upload_blob_oneshot(&app, &token, repo, b"{}").await;
     let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, b"pg-s3-dl").await;
-    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+    let manifest_body = oci_manifest_json(
+        &config_digest,
+        &layer_digest,
+        b"{}".len(),
+        b"pg-s3-dl".len(),
+    );
     let manifest_digest = oci_digest_hex(manifest_body.as_bytes());
 
     app.clone()
@@ -1025,7 +1040,12 @@ async fn test_oci_tags_list() {
                 .uri(&format!("/v2/{repo}/manifests/{tag}"))
                 .header("Authorization", format!("Bearer {token}"))
                 .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-                .body(axum::body::Body::from(oci_manifest_json(&cd, &ld)))
+                .body(axum::body::Body::from(oci_manifest_json(
+                    &cd,
+                    &ld,
+                    b"{}".len(),
+                    b"pg-s3-tl".len(),
+                )))
                 .unwrap(),
         )
         .await

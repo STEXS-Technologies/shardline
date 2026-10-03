@@ -1,4 +1,7 @@
-use std::{io::Error as IoError, path::Path};
+use std::{
+    io::{BufWriter, Error as IoError, Write},
+    path::Path,
+};
 
 use shardline_server::{
     BackupManifestReport, ServerConfigError, ServerError,
@@ -6,7 +9,10 @@ use shardline_server::{
 };
 use thiserror::Error;
 
-use crate::{config::load_server_config, local_output::write_output_bytes};
+use crate::{
+    config::load_server_config,
+    local_output::{AtomicOutputFile, validate_deployment_output},
+};
 
 /// Backup command runtime failure.
 #[derive(Debug, Error)]
@@ -33,9 +39,15 @@ pub async fn run_backup_manifest(
     output: &Path,
 ) -> Result<BackupManifestReport, BackupRuntimeError> {
     let config = load_server_config(root, None)?;
-    let mut manifest = Vec::new();
-    let report = write_server_backup_manifest(config, &mut manifest).await?;
-    write_output_bytes(output, &manifest, false)?;
+    validate_deployment_output(&config, output)?;
+    let mut output_file = AtomicOutputFile::create(output, false)?;
+    let report = {
+        let mut writer = BufWriter::new(&mut output_file);
+        let report = write_server_backup_manifest(config, &mut writer).await?;
+        writer.flush()?;
+        report
+    };
+    output_file.commit()?;
     Ok(report)
 }
 
@@ -169,6 +181,20 @@ mod tests {
         assert!(output.exists(), "manifest output file should be created");
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reserved_metadata_destination_preserves_database_bytes() {
+        let sandbox = tempfile::tempdir().unwrap();
+        run_backup_manifest(Some(sandbox.path()), &sandbox.path().join("manifest.json"))
+            .await
+            .unwrap();
+        let database = sandbox.path().join("metadata.sqlite3");
+        let previous = std::fs::read(&database).unwrap();
+        assert!(previous.starts_with(b"SQLite format 3"));
+        let result = run_backup_manifest(Some(sandbox.path()), &database).await;
+        assert!(matches!(result, Err(BackupRuntimeError::Io(_))));
+        assert_eq!(std::fs::read(&database).unwrap(), previous);
+    }
+
     #[tokio::test]
     async fn run_backup_manifest_rejects_missing_root() {
         let sandbox = tempfile::tempdir().unwrap();
@@ -176,5 +202,66 @@ mod tests {
         let result =
             run_backup_manifest(Some(Path::new("/nonexistent-shardline-test-root")), &output).await;
         assert!(result.is_err());
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streamed_manifest_matches_server_output() {
+        let sandbox = tempfile::tempdir().unwrap();
+        std::fs::create_dir(sandbox.path().join("chunks")).unwrap();
+        std::fs::write(sandbox.path().join("chunks/object"), b"payload").unwrap();
+        let config = crate::config::load_server_config(Some(sandbox.path()), None).unwrap();
+        let mut expected = Vec::new();
+        let expected_report = shardline_server::write_backup_manifest(config, &mut expected)
+            .await
+            .unwrap();
+        let output = sandbox.path().join("manifest.json");
+        let report = run_backup_manifest(Some(sandbox.path()), &output)
+            .await
+            .unwrap();
+        assert_eq!(report, expected_report);
+        assert_eq!(std::fs::read(output).unwrap(), expected);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_inventory_preserves_previous_manifest_and_cleans_temporary_output() {
+        use std::os::unix::ffi::OsStringExt;
+        let sandbox = tempfile::tempdir().unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+        let output = output_dir.path().join("manifest.json");
+        std::fs::write(&output, b"previous manifest").unwrap();
+        std::fs::create_dir(sandbox.path().join("chunks")).unwrap();
+        let invalid_key = std::ffi::OsString::from_vec(vec![0xff]);
+        std::fs::write(sandbox.path().join("chunks").join(invalid_key), b"payload").unwrap();
+        let result = run_backup_manifest(Some(sandbox.path()), &output).await;
+        assert!(matches!(result, Err(BackupRuntimeError::Server(_))));
+        assert_eq!(std::fs::read(&output).unwrap(), b"previous manifest");
+        assert_eq!(std::fs::read_dir(output_dir.path()).unwrap().count(), 1);
+    }
+    #[tokio::test]
+    async fn manifest_output_inside_object_store_is_rejected_before_creation() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let objects = sandbox.path().join("chunks");
+        std::fs::create_dir(&objects).unwrap();
+        let result =
+            run_backup_manifest(Some(sandbox.path()), &objects.join("manifest.json")).await;
+        assert!(matches!(result, Err(BackupRuntimeError::Io(_))));
+        assert_eq!(std::fs::read_dir(objects).unwrap().count(), 0);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aliased_object_store_destination_preserves_existing_target() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let objects = sandbox.path().join("chunks");
+        std::fs::create_dir(&objects).unwrap();
+        std::fs::write(objects.join("manifest.json"), b"previous").unwrap();
+        let alias = sandbox.path().join("alias");
+        std::os::unix::fs::symlink(&objects, &alias).unwrap();
+        let result = run_backup_manifest(Some(sandbox.path()), &alias.join("manifest.json")).await;
+        assert!(matches!(result, Err(BackupRuntimeError::Io(_))));
+        assert_eq!(
+            std::fs::read(objects.join("manifest.json")).unwrap(),
+            b"previous"
+        );
+        assert_eq!(std::fs::read_dir(objects).unwrap().count(), 1);
     }
 }

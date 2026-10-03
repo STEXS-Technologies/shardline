@@ -281,6 +281,11 @@ shardline gc --mark \
   --orphan-inventory reports/gc-orphans.json
 ```
 
+Export destinations must be distinct and must not be nested below each other.
+The CLI checks destinations, including reserved deployment state, before GC runs
+or creates any output. Ordinary report directories under the deployment root are
+supported.
+
 Example: S3 object storage with Postgres-backed metadata still uses the same command
 shape, but the adapter choice comes from environment/config rather than the `--root`
 flag:
@@ -295,6 +300,13 @@ SHARDLINE_S3_SECRET_ACCESS_KEY=<secret-key> \
 SHARDLINE_INDEX_POSTGRES_URL=postgres://user:password@db.example.com:5432/shardline \
 shardline gc --mark --sweep
 ```
+
+Administrative holds can protect keys before their objects arrive. Both permanent and
+unexpired finite holds survive lifecycle repair and pass integrity checks when the
+held key is absent. GC continues collecting unrelated eligible objects and protects
+bytes subsequently stored at the held key. Expired holds may be removed automatically;
+explicit release is required to end a permanent hold. Required bytes referenced by
+file records still undergo independent integrity checks in fsck.
 
 Administrative retention holds can be managed with:
 
@@ -318,6 +330,23 @@ Mode behavior:
 The supported `shardline gc` command acquires the barrier automatically. Library code
 calling the lower-level `run_gc_with_stores` function directly must provide equivalent
 writer exclusion whenever `mark` or `sweep` is enabled.
+
+The supported `shardline hold set` and `shardline hold release` commands share
+that barrier for their complete metadata mutation. A hold acknowledged before
+mutating GC begins protects the object; a hold requested during GC waits until
+that run finishes. A new hold cannot recover bytes already deleted by an earlier
+run. Library integrations should use `shardline_server::set_retention_hold` and
+`release_retention_hold`, or provide the same exclusion around low-level index
+hold mutations. The barrier coordinates metadata with object storage; it does
+not make their operations one storage transaction.
+
+For `hold set`, a relative `--ttl-seconds` starts after acquiring the GC
+barrier. Metadata lock waits can still consume its duration. If a positive TTL
+expires before the write is acknowledged, the command returns an expiration
+error and leaves the expired row for normal cleanup; it does not retry or delete
+a potentially newer hold. A zero TTL intentionally creates an immediately
+expired hold. The library's `set_retention_hold` keeps the caller's absolute
+expiration unchanged.
 
 New quarantine candidates default to a retention window of `86400` seconds.
 That default applies only when a run includes `--mark`.

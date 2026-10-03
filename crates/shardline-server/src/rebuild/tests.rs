@@ -22,6 +22,131 @@ use crate::{
 
 const LARGE_METADATA_RECORD_COUNT: usize = 128;
 
+async fn rebuild_waits_for_writer(use_configured_entry: bool) {
+    let storage = tempfile::tempdir().unwrap();
+    let record_store = LocalRecordStore::open(storage.path().to_path_buf());
+    let record = synthetic_large_inventory_record(0).unwrap();
+    RecordMutation::write_version_record(&record_store, &record)
+        .await
+        .unwrap();
+    let writer = crate::maintenance_barrier::acquire_local_shared(storage.path())
+        .await
+        .unwrap();
+    let config = crate::ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let root = storage.path().to_path_buf();
+    let rebuild = async move {
+        if use_configured_entry {
+            super::run_index_rebuild(config).await
+        } else {
+            run_local_index_rebuild(root).await
+        }
+    };
+    tokio::pin!(rebuild);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut rebuild)
+            .await
+            .is_err()
+    );
+    assert!(
+        RecordTraversal::read_latest_record_bytes(&record_store, &record)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(writer);
+    let report = tokio::time::timeout(Duration::from_secs(10), rebuild)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(report.is_clean());
+    assert_eq!(report.rebuilt_latest_records, 1);
+    let latest = RecordTraversal::read_latest_record_bytes(&record_store, &record)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(from_slice::<FileRecord>(&latest).unwrap(), record);
+    // A completed rebuild must release exclusive ownership for the next writer.
+    let _next_writer = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::maintenance_barrier::acquire_local_shared(storage.path()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_rebuild_waits_for_active_writer_and_releases_barrier() {
+    rebuild_waits_for_writer(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_rebuild_waits_for_active_writer_and_releases_barrier() {
+    rebuild_waits_for_writer(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_rebuild_waits_for_active_writer_and_releases_barrier() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("skipping PostgreSQL rebuild coordination: DATABASE_URL is unset");
+        return;
+    };
+    let storage = tempfile::tempdir().unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let record_store = shardline_index::PostgresRecordStore::new(pool.clone());
+    let record = synthetic_large_inventory_record(0).unwrap();
+    RecordMutation::write_version_record(&record_store, &record)
+        .await
+        .unwrap();
+    let writer = crate::maintenance_barrier::acquire_postgres_shared(&pool)
+        .await
+        .unwrap();
+    let config = crate::ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_index_postgres_url(url)
+    .unwrap();
+    let rebuild = super::run_index_rebuild(config);
+    tokio::pin!(rebuild);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut rebuild)
+            .await
+            .is_err()
+    );
+    assert!(
+        RecordTraversal::read_latest_record_bytes(&record_store, &record)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(writer);
+    let report = tokio::time::timeout(Duration::from_secs(10), rebuild)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(report.is_clean());
+    let latest = RecordTraversal::read_latest_record_bytes(&record_store, &record)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(from_slice::<FileRecord>(&latest).unwrap(), record);
+    let _next_writer = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::maintenance_barrier::acquire_postgres_shared(&pool),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
 fn checked_inventory_value(index: u64, delta: u64) -> Result<u64, Box<dyn Error>> {
     index
         .checked_add(delta)

@@ -9,6 +9,22 @@ use thiserror::Error;
 /// Server configuration loading failure.
 #[derive(Debug, Error)]
 pub enum ServerConfigError {
+    /// A resource capacity cannot be represented by the runtime limiter.
+    #[error("{name} capacity {capacity} exceeds the supported maximum {maximum}")]
+    ResourceCapacityOutOfRange {
+        name: &'static str,
+        capacity: usize,
+        maximum: usize,
+    },
+    /// An enabled durable upload session's expiry cannot be represented.
+    #[error(
+        "{name} value {seconds} seconds exceeds the durable timestamp maximum TTL {maximum} seconds at the current clock"
+    )]
+    SessionTtlOutOfRange {
+        name: &'static str,
+        seconds: u64,
+        maximum: u64,
+    },
     /// The bind address could not be parsed.
     #[error("invalid bind address")]
     BindAddress(#[from] AddrParseError),
@@ -396,6 +412,9 @@ pub enum ServerConfigError {
     /// Provider token issuance needs the CAS signing key.
     #[error("provider token issuance requires shardline token signing key configuration")]
     ProviderTokensRequireSigningKey,
+    /// The chunk size is smaller than the CDC algorithm supports.
+    #[error("chunk size must be at least 128 bytes")]
+    ChunkSizeTooSmall,
     /// The chunk size exceeds the maximum allowed value.
     #[error("chunk size must not exceed 1 GB")]
     ChunkSizeTooLarge,

@@ -303,11 +303,13 @@ struct CdcChunker {
 impl CdcChunker {
     /// Creates a new chunker with the given target chunk size.
     ///
-    /// `target_chunk_size` must be a power of two and greater than 64.
+    /// Panics unless `target_chunk_size` is a power of two in 128..=1 GiB.
     #[must_use]
     fn new(target_chunk_size: usize) -> Self {
-        debug_assert!(target_chunk_size.is_power_of_two());
-        debug_assert!(target_chunk_size > 64);
+        assert!(
+            target_chunk_size.is_power_of_two() && (128..=1 << 30).contains(&target_chunk_size),
+            "CDC target chunk size must be a power of two in 128..=1073741824 bytes"
+        );
 
         let raw_mask = target_chunk_size.wrapping_sub(1) as u64;
         let mask = raw_mask << raw_mask.leading_zeros();
@@ -477,8 +479,11 @@ pub struct Chunker {
 impl Chunker {
     /// Creates a new chunker with the given target chunk size.
     ///
-    /// `target_chunk_size` must be a power of two and greater than 64; the
-    /// default is [`DEFAULT_TARGET_CHUNK_SIZE`] (64 KiB).
+    /// The default is [`DEFAULT_TARGET_CHUNK_SIZE`] (64 KiB).
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `target_chunk_size` is a power of two in 128..=1 GiB.
     #[must_use]
     pub fn new(target_chunk_size: usize) -> Self {
         Self {
@@ -536,29 +541,43 @@ impl Chunker {
     pub fn next_block_bytes(&mut self, data: &Bytes, is_final: bool) -> Vec<Chunk> {
         let mut chunks = Vec::new();
 
+        let mut pos = 0;
         if !self.chunkbuf.is_empty() {
-            // A partial trailing chunk is buffered: append the block and scan
-            // the combined buffer (server accumulate-then-scan semantics).
-            self.chunkbuf.extend_from_slice(data);
-            self.drain_buffer(&mut chunks);
-        } else {
-            // Zero-copy fast path: scan the block directly.
-            let mut pos = 0;
-            while pos < data.len() {
-                let remaining = data.get(pos..).unwrap_or_default();
-                match self.cdc.find_boundary(remaining) {
-                    Some(boundary) => {
-                        chunks.push(Chunk::new(data.slice(pos..pos.wrapping_add(boundary))));
-                        pos = pos.wrapping_add(boundary);
+            // Complete only the pending chunk. Extra bytes read ahead of its
+            // boundary are scanned from the original Bytes after the CDC reset.
+            let prior_len = self.chunkbuf.len();
+            let append_len = self.max_chunk().saturating_sub(prior_len).min(data.len());
+            self.chunkbuf.reserve_exact(append_len);
+            self.chunkbuf
+                .extend_from_slice(data.get(..append_len).unwrap_or_default());
+            if let Some(boundary) = self.cdc.find_boundary(&self.chunkbuf) {
+                self.chunkbuf.truncate(boundary);
+                chunks.push(Chunk::new(Bytes::from(std::mem::take(&mut self.chunkbuf))));
+                pos = boundary.saturating_sub(prior_len);
+            } else {
+                // A full max_chunk buffer always has a forced boundary, so
+                // this case consumed all data and retains a partial tail.
+                pos = data.len();
+            }
+        }
+
+        // Zero-copy fast path, including the rest of a block after a pending
+        // chunk completes. Only a partial trailing chunk needs buffering.
+        while pos < data.len() {
+            let remaining = data.get(pos..).unwrap_or_default();
+            match self.cdc.find_boundary(remaining) {
+                Some(boundary) => {
+                    chunks.push(Chunk::new(data.slice(pos..pos.wrapping_add(boundary))));
+                    pos = pos.wrapping_add(boundary);
+                }
+                None => {
+                    if is_final {
+                        chunks.push(Chunk::new(data.slice(pos..)));
+                    } else {
+                        self.chunkbuf.reserve_exact(remaining.len());
+                        self.chunkbuf.extend_from_slice(remaining);
                     }
-                    None => {
-                        if is_final {
-                            chunks.push(Chunk::new(data.slice(pos..)));
-                        } else {
-                            self.chunkbuf.extend_from_slice(remaining);
-                        }
-                        break;
-                    }
+                    break;
                 }
             }
         }
@@ -635,8 +654,8 @@ impl Chunker {
             }
             pos = pos.saturating_add(consumed);
         }
-        if is_final {
-            self.reset();
+        if is_final && let Some(tail) = self.finish() {
+            chunks.push(tail);
         }
         chunks
     }
@@ -645,19 +664,6 @@ impl Chunker {
     #[must_use]
     pub fn finish(&mut self) -> Option<Chunk> {
         self.next(&[], true).0
-    }
-
-    /// Emits every complete chunk from the internal buffer, keeping any
-    /// remaining partial tail for the next block.
-    fn drain_buffer(&mut self, chunks: &mut Vec<Chunk>) {
-        while let Some(boundary) = self.cdc.find_boundary(&self.chunkbuf) {
-            let tail = self.chunkbuf.split_off(boundary);
-            let chunk_bytes = std::mem::replace(&mut self.chunkbuf, tail);
-            chunks.push(Chunk::new(Bytes::from(chunk_bytes)));
-            if self.chunkbuf.is_empty() {
-                break;
-            }
-        }
     }
 }
 
@@ -818,6 +824,129 @@ mod tests {
             start = end;
         }
         boundaries
+    }
+
+    #[test]
+    fn chunker_empty_final_frame_preserves_tail_and_resets() {
+        for len in [0, 1, 16, 127, 1023, 131072] {
+            let data = vec![59u8; len];
+            let mut chunker = Chunker::default_target();
+            let mut chunks = chunker.next_block(&data, false);
+            chunks.extend(chunker.next_block(&[], true));
+            assert_eq!(
+                chunks
+                    .iter()
+                    .flat_map(|c| c.as_bytes().iter().copied())
+                    .collect::<Vec<_>>(),
+                data
+            );
+            assert!(chunker.finish().is_none());
+            // A final flush starts a new independent stream.
+            let next = chunker.next_block(b"fresh stream", true);
+            assert_eq!(next.len(), 1);
+            assert_eq!(next[0].as_bytes(), b"fresh stream");
+        }
+    }
+
+    #[test]
+    fn chunker_split_frames_and_empty_final_match_server_bytes_and_hashes() {
+        for target in [128, 1024, DEFAULT_TARGET_CHUNK_SIZE] {
+            for len in [0, 1, 17, target, target * 2, target * 3 + 17] {
+                let data = splitmix_data(len, 42);
+                let boundaries = server_batch_boundaries(&data, target);
+                for frame in [1, 17, 257, 8192] {
+                    let mut bytes_chunker = Chunker::new(target);
+                    let mut compat_chunker = Chunker::new(target);
+                    let bytes = Bytes::copy_from_slice(&data);
+                    let mut actual = Vec::new();
+                    let mut compat = Vec::new();
+                    let mut pos = 0;
+                    while pos < len {
+                        let end = pos.saturating_add(frame).min(len);
+                        actual
+                            .extend(bytes_chunker.next_block_bytes(&bytes.slice(pos..end), false));
+                        compat.extend(compat_chunker.next_block(&data[pos..end], false));
+                        assert!(bytes_chunker.chunkbuf.len() <= bytes_chunker.max_chunk());
+                        assert!(bytes_chunker.chunkbuf.capacity() <= bytes_chunker.max_chunk());
+                        pos = end;
+                    }
+                    actual.extend(bytes_chunker.next_block_bytes(&Bytes::new(), true));
+                    compat.extend(compat_chunker.next_block(&[], true));
+                    for chunks in [&actual, &compat] {
+                        assert_eq!(chunks.len(), boundaries.len());
+                        let mut start = 0;
+                        for (chunk, end) in chunks.iter().zip(&boundaries) {
+                            assert_eq!(chunk.as_bytes(), &data[start..*end]);
+                            assert_eq!(
+                                chunk.hash(),
+                                crate::hash::compute_chunk_hash(&data[start..*end])
+                            );
+                            start = *end;
+                        }
+                        assert_eq!(start, len);
+                    }
+                    assert!(bytes_chunker.finish().is_none());
+                    assert!(compat_chunker.finish().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunker_pending_head_resumes_shared_bytes_for_large_block() {
+        let bytes = Bytes::from(splitmix_data(1024 * 1024, 7));
+        let mut chunker = Chunker::new(1024);
+        assert!(
+            chunker
+                .next_block_bytes(&bytes.slice(..1), false)
+                .is_empty()
+        );
+        let chunks = chunker.next_block_bytes(&bytes.slice(1..), false);
+        assert!(chunks.len() > 2);
+        let mut offset = 0;
+        for (index, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.as_bytes(), &bytes[offset..offset + chunk.len()]);
+            if index > 0 {
+                assert_eq!(chunk.as_bytes().as_ptr(), bytes.slice(offset..).as_ptr());
+            }
+            offset += chunk.len();
+        }
+        assert!(chunker.chunkbuf.len() <= chunker.max_chunk());
+        assert!(chunker.chunkbuf.capacity() <= chunker.max_chunk());
+        if let Some(tail) = chunker.finish() {
+            assert_eq!(tail.as_bytes(), &bytes[offset..]);
+            offset += tail.len();
+        }
+        assert_eq!(offset, bytes.len());
+    }
+
+    #[test]
+    fn chunker_target_bounds_reject_invalid_sizes_before_allocation() {
+        for size in [
+            0,
+            1,
+            2,
+            64,
+            127,
+            129,
+            (1 << 30) + 1,
+            1 << 31,
+            1usize << (usize::BITS - 1),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| Chunker::new(size)).is_err(),
+                "size={size}"
+            );
+        }
+        // Test all supported targets through allocation-free CDC construction.
+        for exponent in 7..=30 {
+            let size = 1 << exponent;
+            let mut chunker = super::CdcChunker::new(size);
+            assert_eq!(chunker.max_chunk, size * 2);
+            if let Some(boundary) = chunker.find_boundary(&[0; 512]) {
+                assert!(boundary > 0 && boundary <= 512);
+            }
+        }
     }
 
     #[test]

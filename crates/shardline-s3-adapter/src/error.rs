@@ -193,6 +193,11 @@ impl S3Error {
             S3ErrorClass::RangeNotSatisfiable => Self::invalid_range(),
             S3ErrorClass::NotFound => Self::no_such_key(""),
             S3ErrorClass::AccessDenied => Self::access_denied(),
+            S3ErrorClass::BadDigest => Self {
+                code: "BadDigest",
+                message: "The Content-MD5 you specified did not match what we received.".to_owned(),
+                status: StatusCode::BAD_REQUEST,
+            },
             S3ErrorClass::Internal => Self::internal(),
         }
     }
@@ -231,6 +236,8 @@ pub enum S3ErrorClass {
     NotFound,
     /// The caller lacked permission (`ServerError` authorization variants).
     AccessDenied,
+    /// The request payload did not match its Content-MD5 digest.
+    BadDigest,
     /// Any other server failure.
     Internal,
 }

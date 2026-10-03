@@ -304,6 +304,7 @@ impl Default for XetClientBuilder {
             upload_chunk_size: crate::chunker::DEFAULT_TARGET_CHUNK_SIZE,
             retry_policy: RetryPolicy::default(),
             session_id: None,
+            reconstruction_response_limit: 64 * 1024 * 1024,
         }
     }
 }
@@ -353,6 +354,7 @@ pub struct XetClientBuilder {
     upload_chunk_size: usize,
     retry_policy: RetryPolicy,
     session_id: Option<String>,
+    reconstruction_response_limit: usize,
 }
 
 impl XetClientBuilder {
@@ -423,6 +425,17 @@ impl XetClientBuilder {
     #[must_use]
     pub const fn with_stream_limits(mut self, limits: StreamLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Sets the reconstruction JSON wire byte budget (default 64 MiB).
+    ///
+    /// Configurable server term/advertised URL limits can require a larger
+    /// envelope. See [`TransferClient::reconstruction_envelope_bytes`] for a
+    /// checked compact-JSON bound, and allow extra space for wire extensions.
+    #[must_use]
+    pub const fn with_reconstruction_response_limit(mut self, bytes: usize) -> Self {
+        self.reconstruction_response_limit = bytes;
         self
     }
 
@@ -526,7 +539,8 @@ impl XetClientBuilder {
             .build()
             .map_err(TransferError::from)?;
         let session_id = self.session_id.clone().unwrap_or_default();
-        let mut transfer = TransferClient::new(http_client);
+        let mut transfer = TransferClient::new(http_client)
+            .with_reconstruction_response_limit(self.reconstruction_response_limit);
         if !session_id.is_empty() {
             transfer = transfer.with_session_id(session_id);
         }
@@ -591,23 +605,6 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, RepositoryId), SdxError> {
             url.scheme()
         )));
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| SdxError::InvalidEndpoint(format!("missing host in {endpoint:?}")))?;
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err(SdxError::InvalidEndpoint(format!(
-            "query or fragment in {endpoint:?} is not supported"
-        )));
-    }
-
-    let mut api_base = String::new();
-    api_base.push_str("http://");
-    api_base.push_str(host);
-    if let Some(port) = url.port() {
-        api_base.push(':');
-        api_base.push_str(&port.to_string());
-    }
-
     let segments: Vec<&str> = url
         .path_segments()
         .map(|segments| segments.collect())
@@ -618,33 +615,8 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, RepositoryId), SdxError> {
             segments.len()
         )));
     }
-    let mut parts = segments.into_iter();
-    let provider = parts
-        .next()
-        .ok_or_else(|| SdxError::InvalidEndpoint("missing provider".to_owned()))?
-        .to_owned();
-    let owner = parts
-        .next()
-        .ok_or_else(|| SdxError::InvalidEndpoint("missing owner".to_owned()))?
-        .to_owned();
-    let repo = parts
-        .next()
-        .ok_or_else(|| SdxError::InvalidEndpoint("missing repo".to_owned()))?
-        .to_owned();
-    let revision = parts
-        .next()
-        .ok_or_else(|| SdxError::InvalidEndpoint("missing revision".to_owned()))?
-        .to_owned();
-
-    Ok((
-        api_base,
-        RepositoryId {
-            provider,
-            owner,
-            repo,
-            revision,
-        },
-    ))
+    let parsed = crate::url::XetUrl::parse(endpoint)?;
+    Ok((parsed.api_base.clone(), parsed.repository_id()))
 }
 
 #[cfg(test)]

@@ -331,7 +331,7 @@ fn temporary_artifact_unix_nanos(key: &ObjectKey, frontends: &[ServerFrontend]) 
     }
     // The base must be exactly a key this store writes via the temp-then-
     // hardlink local write path: a managed object key (chunk, xorb, or shard),
-    // the xorb chunk-cache sidecar namespace, or the reserved GC clock anchor.
+    // the xorb chunk-cache sidecar namespace, or a reserved GC clock anchor/boot-observation key.
     // Mirroring the store-written key space keeps the reaper's accepted keys
     // identical to the namespace the rest of GC operates on, so a matching key
     // can never be a live object or a user-controlled key (F-67, F-99).
@@ -366,7 +366,7 @@ fn temporary_artifact_unix_nanos(key: &ObjectKey, frontends: &[ServerFrontend]) 
 /// `.tmp-` suffix is only ever present on temp-then-hardlink write artifacts),
 /// and user keys — for example S3 frontend objects under
 /// `protocols/s3/{scope}/{key}`, or any other `gc/`-shaped key that is not the
-/// exact anchor — never match, so a user object that merely ends in
+/// exact anchor or boot-observation key — never match, so a user object that merely ends in
 /// `.tmp-<digits>-<digits>` is never reaped.
 fn is_gc_reaper_managed_base(base_key: &ObjectKey, frontends: &[ServerFrontend]) -> bool {
     if managed_object_hash(base_key, frontends)
@@ -382,6 +382,7 @@ fn is_gc_reaper_managed_base(base_key: &ObjectKey, frontends: &[ServerFrontend])
         return true;
     }
     base_key.as_str() == LAST_GC_CLOCK_ANCHOR_KEY
+        || base_key.as_str() == crate::quarantine::GC_CLOCK_BOOT_OBSERVATION_KEY
 }
 
 /// Result of scanning the object store for stranded managed-object temp
@@ -1374,6 +1375,64 @@ mod tests {
 
     fn anchor_temp_key(nanos: u128, counter: u64) -> String {
         format!("gc/last-gc-clock-anchor.tmp-{nanos}-{counter}")
+    }
+
+    #[test]
+    fn generated_temporary_names_preserve_managed_reaping_boundaries() {
+        let hash = SIDECAR_TEMP_TEST_HASH;
+        let managed = [
+            format!("aa/{hash}"),
+            format!("xorbs/default/aa/{hash}.xorb"),
+            format!("shards/aa/{hash}.shard"),
+            format!("_xorb_chunks/aa/{hash}"),
+            LAST_GC_CLOCK_ANCHOR_KEY.to_owned(),
+            crate::quarantine::GC_CLOCK_BOOT_OBSERVATION_KEY.to_owned(),
+        ];
+        let generated_key = |base: &str| {
+            let (parent, file_name) = base.rsplit_once('/').unwrap();
+            let name = shardline_storage::temporary_file_name(std::ffi::OsStr::new(file_name));
+            ObjectKey::parse(&format!("{parent}/{}", name.to_str().unwrap())).unwrap()
+        };
+        for base in managed {
+            assert!(
+                temporary_artifact_unix_nanos(&generated_key(&base), &[ServerFrontend::Xet])
+                    .is_some(),
+                "generated managed temporary name must remain reapable: {base}"
+            );
+            assert!(
+                temporary_artifact_unix_nanos(
+                    &ObjectKey::parse(&base).unwrap(),
+                    &[ServerFrontend::Xet]
+                )
+                .is_none()
+            );
+        }
+        for base in [
+            format!("protocols/s3/scope/{hash}"),
+            format!("protocols/s3/scope/{}", "n".repeat(255)),
+        ] {
+            assert!(
+                temporary_artifact_unix_nanos(&generated_key(&base), &[ServerFrontend::Xet])
+                    .is_none(),
+                "user object temporary names must remain ineligible: {base}"
+            );
+        }
+    }
+
+    #[test]
+    fn boot_observation_sidecar_reaps_only_stranded_temporary_artifacts() {
+        let now = 2_000_000_000;
+        let old_nanos = u128::from(now - 7200_u64) * 1_000_000_000;
+        let live_key = crate::quarantine::GC_CLOCK_BOOT_OBSERVATION_KEY;
+        let temp_key = format!("{live_key}.tmp-{old_nanos}-0");
+        let old_mtime = u64::try_from(old_nanos).unwrap();
+        let store = MockTempStore::new(vec![
+            (live_key, 50, Some(old_mtime)),
+            (temp_key.as_str(), 50, Some(old_mtime)),
+        ]);
+        let scan = scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now).unwrap();
+        assert_eq!(scan.stale.len(), 1);
+        assert_eq!(scan.stale[0].0.as_str(), temp_key);
     }
 
     #[test]

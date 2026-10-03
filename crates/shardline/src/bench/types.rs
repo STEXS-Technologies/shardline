@@ -1,4 +1,5 @@
 use std::{
+    collections::TryReserveError,
     io::Error as IoError,
     num::{NonZeroUsize, TryFromIntError},
     path::PathBuf,
@@ -226,195 +227,264 @@ pub struct BenchTotals {
 
 impl BenchReport {
     pub fn print_summary(&self) {
-        println!("mode: e2e");
-        println!("deployment_target: {}", self.deployment_target.as_str());
-        println!("metadata_backend: {}", self.metadata_backend);
-        println!("object_backend: {}", self.object_backend);
-        println!("inventory_scope: {}", self.inventory_scope.as_str());
-        println!("scenario: {}", self.scenario.as_str());
+        let _result = self.write_summary(&mut std::io::stdout().lock());
+    }
+
+    /// Writes the report and flushes the destination.
+    ///
+    /// # Errors
+    /// Returns the first write or flush error.
+    pub fn write_summary<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+        writeln!(writer, "mode: e2e")?;
+        writeln!(
+            writer,
+            "deployment_target: {}",
+            self.deployment_target.as_str()
+        )?;
+        writeln!(writer, "metadata_backend: {}", self.metadata_backend)?;
+        writeln!(writer, "object_backend: {}", self.object_backend)?;
+        writeln!(writer, "inventory_scope: {}", self.inventory_scope.as_str())?;
+        writeln!(writer, "scenario: {}", self.scenario.as_str())?;
         if self.scenario == BenchScenario::Full {
-            println!("scenario: sparse-update");
-            println!("scenario: concurrent-latest-download");
-            println!("scenario: concurrent-upload");
-            println!("scenario: cross-repository-upload");
-            println!("scenario: cached-latest-reconstruction");
+            writeln!(writer, "scenario: sparse-update")?;
+            writeln!(writer, "scenario: concurrent-latest-download")?;
+            writeln!(writer, "scenario: concurrent-upload")?;
+            writeln!(writer, "scenario: cross-repository-upload")?;
+            writeln!(writer, "scenario: cached-latest-reconstruction")?;
         }
-        println!("storage_dir: {}", self.storage_dir.display());
-        println!("iterations: {}", self.iterations);
-        println!("concurrency: {}", self.concurrency);
-        println!(
+        writeln!(writer, "storage_dir: {}", self.storage_dir.display())?;
+        writeln!(writer, "iterations: {}", self.iterations)?;
+        writeln!(writer, "concurrency: {}", self.concurrency)?;
+        writeln!(
+            writer,
             "upload_max_in_flight_chunks: {}",
             self.upload_max_in_flight_chunks
-        );
-        println!("chunk_size_bytes: {}", self.chunk_size_bytes);
-        println!("base_bytes: {}", self.base_bytes);
-        println!("mutated_bytes: {}", self.mutated_bytes);
-        println!("available_parallelism: {}", self.available_parallelism);
-        println!(
+        )?;
+        writeln!(writer, "chunk_size_bytes: {}", self.chunk_size_bytes)?;
+        writeln!(writer, "base_bytes: {}", self.base_bytes)?;
+        writeln!(writer, "mutated_bytes: {}", self.mutated_bytes)?;
+        writeln!(
+            writer,
+            "available_parallelism: {}",
+            self.available_parallelism
+        )?;
+        writeln!(
+            writer,
             "average_initial_upload_micros: {}",
             self.latency.initial_upload_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_sparse_update_upload_micros: {}",
             self.latency.sparse_update_upload_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_latest_download_micros: {}",
             self.latency.latest_download_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_previous_download_micros: {}",
             self.latency.previous_download_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_ranged_reconstruction_micros: {}",
             self.latency.ranged_reconstruction_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_latest_download_micros: {}",
             self.latency.concurrent_latest_download_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_upload_micros: {}",
             self.latency.concurrent_upload_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_cross_repository_upload_micros: {}",
             self.latency.cross_repository_upload_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_cached_latest_reconstruction_cold_micros: {}",
             self.latency.cached_latest_reconstruction_cold_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_cached_latest_reconstruction_hot_micros: {}",
             self.latency.cached_latest_reconstruction_hot_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_process_cpu_micros: {}",
             self.timing.process_cpu_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_process_cpu_cores_per_mille: {}",
             self.timing.process_cpu_cores_per_mille
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_process_host_utilization_per_mille: {}",
             self.timing.process_host_utilization_per_mille
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_initial_upload_bytes_per_second: {}",
             self.throughput.average_initial_upload_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_sparse_update_upload_bytes_per_second: {}",
             self.throughput
                 .average_sparse_update_upload_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_latest_download_bytes_per_second: {}",
             self.throughput.average_latest_download_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_previous_download_bytes_per_second: {}",
             self.throughput.average_previous_download_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_latest_download_bytes_per_second: {}",
             self.throughput
                 .average_concurrent_latest_download_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_upload_bytes_per_second: {}",
             self.throughput.average_concurrent_upload_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_cross_repository_upload_bytes_per_second: {}",
             self.throughput
                 .average_cross_repository_upload_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_cached_latest_reconstruction_hit_bytes_per_second: {}",
             self.throughput
                 .average_cached_latest_reconstruction_hit_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "concurrent_latest_download_scaling_per_mille: {}",
             self.totals.concurrent_latest_download_scaling_per_mille
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "concurrent_upload_scaling_per_mille: {}",
             self.totals.concurrent_upload_scaling_per_mille
-        );
-        println!("total_uploaded_bytes: {}", self.totals.total_uploaded_bytes);
-        println!(
+        )?;
+        writeln!(
+            writer,
+            "total_uploaded_bytes: {}",
+            self.totals.total_uploaded_bytes
+        )?;
+        writeln!(
+            writer,
             "total_downloaded_bytes: {}",
             self.totals.total_downloaded_bytes
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_cached_reconstruction_response_bytes: {}",
             self.totals.total_cached_reconstruction_response_bytes
-        );
-        println!("cache_hit_iterations: {}", self.totals.cache_hit_iterations);
-        println!(
+        )?;
+        writeln!(
+            writer,
+            "cache_hit_iterations: {}",
+            self.totals.cache_hit_iterations
+        )?;
+        writeln!(
+            writer,
             "total_concurrent_downloaded_bytes: {}",
             self.totals.total_concurrent_downloaded_bytes
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_concurrent_uploaded_bytes: {}",
             self.totals.total_concurrent_uploaded_bytes
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_newly_stored_bytes: {}",
             self.totals.total_newly_stored_bytes
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_concurrent_newly_stored_bytes: {}",
             self.totals.total_concurrent_newly_stored_bytes
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_cross_repository_newly_stored_bytes: {}",
             self.totals.total_cross_repository_newly_stored_bytes
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_initial_inserted_chunks: {}",
             self.totals.total_initial_inserted_chunks
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_sparse_update_inserted_chunks: {}",
             self.totals.total_sparse_update_inserted_chunks
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_sparse_update_reused_chunks: {}",
             self.totals.total_sparse_update_reused_chunks
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_concurrent_upload_inserted_chunks: {}",
             self.totals.total_concurrent_upload_inserted_chunks
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_concurrent_upload_reused_chunks: {}",
             self.totals.total_concurrent_upload_reused_chunks
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_cross_repository_inserted_chunks: {}",
             self.totals.total_cross_repository_inserted_chunks
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_cross_repository_reused_chunks: {}",
             self.totals.total_cross_repository_reused_chunks
-        );
+        )?;
         if let Some(last) = self.iterations_detail.last() {
-            println!(
+            writeln!(
+                writer,
                 "last_iteration_chunk_objects: {}",
                 last.inventory.chunk_objects
-            );
-            println!("last_iteration_chunk_bytes: {}", last.inventory.chunk_bytes);
-            println!(
+            )?;
+            writeln!(
+                writer,
+                "last_iteration_chunk_bytes: {}",
+                last.inventory.chunk_bytes
+            )?;
+            writeln!(
+                writer,
                 "last_iteration_visible_files: {}",
                 last.inventory.visible_files
-            );
+            )?;
         }
+        writer.flush()
     }
 }
 
@@ -514,91 +584,126 @@ pub struct IngestBenchReport {
 
 impl IngestBenchReport {
     pub fn print_summary(&self) {
-        println!("mode: ingest");
-        println!("scenario: {}", self.scenario.as_str());
+        let _result = self.write_summary(&mut std::io::stdout().lock());
+    }
+
+    /// Writes the report and flushes the destination.
+    ///
+    /// # Errors
+    /// Returns the first write or flush error.
+    pub fn write_summary<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+        writeln!(writer, "mode: ingest")?;
+        writeln!(writer, "scenario: {}", self.scenario.as_str())?;
         if self.scenario == BenchScenario::Full {
-            println!("scenario: sparse-update");
-            println!("scenario: concurrent-upload");
+            writeln!(writer, "scenario: sparse-update")?;
+            writeln!(writer, "scenario: concurrent-upload")?;
         }
-        println!("iterations: {}", self.iterations);
-        println!("concurrency: {}", self.concurrency);
-        println!(
+        writeln!(writer, "iterations: {}", self.iterations)?;
+        writeln!(writer, "concurrency: {}", self.concurrency)?;
+        writeln!(
+            writer,
             "upload_max_in_flight_chunks: {}",
             self.upload_max_in_flight_chunks
-        );
-        println!("chunk_size_bytes: {}", self.chunk_size_bytes);
-        println!("base_bytes: {}", self.base_bytes);
-        println!("mutated_bytes: {}", self.mutated_bytes);
-        println!("available_parallelism: {}", self.available_parallelism);
-        println!(
+        )?;
+        writeln!(writer, "chunk_size_bytes: {}", self.chunk_size_bytes)?;
+        writeln!(writer, "base_bytes: {}", self.base_bytes)?;
+        writeln!(writer, "mutated_bytes: {}", self.mutated_bytes)?;
+        writeln!(
+            writer,
+            "available_parallelism: {}",
+            self.available_parallelism
+        )?;
+        writeln!(
+            writer,
             "average_initial_upload_micros: {}",
             self.average_initial_upload_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_sparse_update_upload_micros: {}",
             self.average_sparse_update_upload_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_upload_micros: {}",
             self.average_concurrent_upload_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_initial_upload_bytes_per_second: {}",
             self.average_initial_upload_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_sparse_update_upload_bytes_per_second: {}",
             self.average_sparse_update_upload_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_upload_bytes_per_second: {}",
             self.average_concurrent_upload_bytes_per_second
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_upload_process_cpu_micros: {}",
             self.average_concurrent_upload_process_cpu_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_upload_process_cpu_cores_per_mille: {}",
             self.average_concurrent_upload_process_cpu_cores_per_mille
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_concurrent_upload_process_host_utilization_per_mille: {}",
             self.average_concurrent_upload_process_host_utilization_per_mille
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_process_cpu_micros: {}",
             self.average_process_cpu_micros
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_process_cpu_cores_per_mille: {}",
             self.average_process_cpu_cores_per_mille
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "average_process_host_utilization_per_mille: {}",
             self.average_process_host_utilization_per_mille
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "concurrent_upload_scaling_per_mille: {}",
             self.concurrent_upload_scaling_per_mille
-        );
-        println!("total_uploaded_bytes: {}", self.total_uploaded_bytes);
-        println!(
+        )?;
+        writeln!(
+            writer,
+            "total_uploaded_bytes: {}",
+            self.total_uploaded_bytes
+        )?;
+        writeln!(
+            writer,
             "total_concurrent_uploaded_bytes: {}",
             self.total_concurrent_uploaded_bytes
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_initial_inserted_chunks: {}",
             self.total_initial_inserted_chunks
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_sparse_update_inserted_chunks: {}",
             self.total_sparse_update_inserted_chunks
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "total_concurrent_upload_inserted_chunks: {}",
             self.total_concurrent_upload_inserted_chunks
-        );
+        )?;
+        writer.flush()
     }
 }
 
@@ -721,6 +826,99 @@ pub struct BenchConfig {
     pub mutated_bytes: usize,
 }
 
+impl BenchConfig {
+    /// Validates end-to-end benchmark parameters before allocating or creating storage.
+    ///
+    /// # Errors
+    /// Returns [`BenchRuntimeError`] for invalid CDC sizes, numeric parameters,
+    /// or allocation lengths that cannot be represented by a Rust vector.
+    pub fn validate_e2e(&self) -> Result<(), BenchRuntimeError> {
+        self.validate_common()?;
+        validate_allocation_capacity::<BenchIterationReport>(
+            usize::try_from(self.iterations)?,
+            "iteration reports",
+        )?;
+        validate_allocation_capacity::<ConcurrentUploadCase>(
+            usize::try_from(self.concurrency)?,
+            "concurrent upload cases",
+        )?;
+        let cross_repository_bytes = self
+            .chunk_size_bytes
+            .checked_mul(3)
+            .ok_or(BenchRuntimeError::CrossRepositoryAssetOverflow)?;
+        validate_allocation_capacity::<u8>(cross_repository_bytes, "cross-repository asset")
+    }
+
+    /// Validates ingest benchmark parameters before allocating asset buffers.
+    ///
+    /// # Errors
+    /// Returns [`BenchRuntimeError`] for unsupported scenarios, invalid numeric
+    /// parameters, or allocation lengths that cannot be represented by a vector.
+    pub fn validate_ingest(&self) -> Result<(), BenchRuntimeError> {
+        if !self.scenario.supports_ingest() {
+            return Err(BenchRuntimeError::UnsupportedScenarioForMode);
+        }
+        self.validate_common()?;
+        validate_allocation_capacity::<IngestBenchIterationReport>(
+            usize::try_from(self.iterations)?,
+            "ingest iteration reports",
+        )?;
+        validate_allocation_capacity::<ConcurrentUploadCase>(
+            usize::try_from(self.concurrency)?,
+            "concurrent upload cases",
+        )?;
+        validate_allocation_capacity::<ConcurrentIngestUploadCase>(
+            usize::try_from(self.concurrency)?,
+            "concurrent ingest cases",
+        )
+    }
+
+    fn validate_common(&self) -> Result<(), BenchRuntimeError> {
+        if self.iterations == 0 {
+            return Err(BenchRuntimeError::ZeroIterations);
+        }
+        if self.concurrency == 0 {
+            return Err(BenchRuntimeError::ZeroConcurrency);
+        }
+        if self.upload_max_in_flight_chunks == 0 {
+            return Err(BenchRuntimeError::ZeroUploadMaxInFlightChunks);
+        }
+        let chunk_size =
+            NonZeroUsize::new(self.chunk_size_bytes).ok_or(BenchRuntimeError::ZeroChunkSize)?;
+        shardline_server::validate_chunk_size(chunk_size)?;
+        if self.mutated_bytes == 0 {
+            return Err(BenchRuntimeError::ZeroMutatedBytes);
+        }
+        if self.mutated_bytes > self.base_bytes {
+            return Err(BenchRuntimeError::MutatedBytesExceedBaseBytes);
+        }
+        validate_allocation_capacity::<u8>(self.base_bytes, "base asset")
+    }
+}
+
+pub(crate) fn validate_allocation_capacity<T>(
+    length: usize,
+    name: &'static str,
+) -> Result<(), BenchRuntimeError> {
+    let bytes = length
+        .checked_mul(std::mem::size_of::<T>())
+        .filter(|bytes| *bytes <= isize::MAX as usize);
+    if bytes.is_none() {
+        return Err(BenchRuntimeError::InvalidAllocationCapacity(name));
+    }
+    Ok(())
+}
+
+pub(crate) fn try_vec_with_capacity<T>(
+    length: usize,
+    name: &'static str,
+) -> Result<Vec<T>, BenchRuntimeError> {
+    validate_allocation_capacity::<T>(length, name)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(length)?;
+    Ok(values)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ConcurrentUploadCase {
     pub(crate) file_id: String,
@@ -774,6 +972,12 @@ pub(crate) enum BenchBackendSetup {
 /// Benchmark runtime failure.
 #[derive(Debug, Error)]
 pub enum BenchRuntimeError {
+    /// A benchmark vector length exceeds its representable allocation layout.
+    #[error("benchmark {0} exceeds the supported allocation capacity")]
+    InvalidAllocationCapacity(&'static str),
+    /// Reserving a benchmark buffer failed.
+    #[error("benchmark buffer allocation failed: {0}")]
+    Allocation(#[from] TryReserveError),
     /// The benchmark chunk size must be positive.
     #[error("benchmark chunk size must be greater than zero")]
     ZeroChunkSize,
@@ -924,5 +1128,122 @@ impl BenchBackendSetup {
                 .await?)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+    #[test]
+    fn benchmark_writers_preserve_text_and_propagate_write_and_flush_errors() {
+        let e2e = BenchReport {
+            scenario: BenchScenario::Full,
+            deployment_target: BenchDeploymentTarget::IsolatedLocal,
+            metadata_backend: "fixture".to_owned(),
+            object_backend: "fixture".to_owned(),
+            inventory_scope: BenchInventoryScope::Isolated,
+            storage_dir: "/fixture".into(),
+            iterations: 0,
+            chunk_size_bytes: 0,
+            concurrency: 0,
+            upload_max_in_flight_chunks: 0,
+            base_bytes: 0,
+            mutated_bytes: 0,
+            available_parallelism: 0,
+            latency: LatencyMetrics {
+                initial_upload_micros: 0,
+                sparse_update_upload_micros: 0,
+                latest_download_micros: 0,
+                previous_download_micros: 0,
+                ranged_reconstruction_micros: 0,
+                concurrent_latest_download_micros: 0,
+                concurrent_upload_micros: 0,
+                cross_repository_upload_micros: 0,
+                cached_latest_reconstruction_cold_micros: 0,
+                cached_latest_reconstruction_hot_micros: 0,
+            },
+            throughput: BenchThroughputMetrics {
+                average_initial_upload_bytes_per_second: 0,
+                average_sparse_update_upload_bytes_per_second: 0,
+                average_latest_download_bytes_per_second: 0,
+                average_previous_download_bytes_per_second: 0,
+                average_concurrent_latest_download_bytes_per_second: 0,
+                average_concurrent_upload_bytes_per_second: 0,
+                average_cross_repository_upload_bytes_per_second: 0,
+                average_cached_latest_reconstruction_hit_bytes_per_second: 0,
+            },
+            timing: TimingMetrics {
+                process_cpu_micros: 0,
+                process_cpu_cores_per_mille: 0,
+                process_host_utilization_per_mille: 0,
+            },
+            totals: BenchTotals {
+                concurrent_latest_download_scaling_per_mille: 0,
+                concurrent_upload_scaling_per_mille: 0,
+                total_uploaded_bytes: 0,
+                total_downloaded_bytes: 0,
+                total_cached_reconstruction_response_bytes: 0,
+                cache_hit_iterations: 0,
+                total_concurrent_downloaded_bytes: 0,
+                total_concurrent_uploaded_bytes: 0,
+                total_concurrent_newly_stored_bytes: 0,
+                total_newly_stored_bytes: 0,
+                total_initial_inserted_chunks: 0,
+                total_sparse_update_inserted_chunks: 0,
+                total_sparse_update_reused_chunks: 0,
+                total_concurrent_upload_inserted_chunks: 0,
+                total_concurrent_upload_reused_chunks: 0,
+                total_cross_repository_inserted_chunks: 0,
+                total_cross_repository_reused_chunks: 0,
+                total_cross_repository_newly_stored_bytes: 0,
+            },
+            iterations_detail: vec![],
+        };
+        let ingest = IngestBenchReport {
+            scenario: BenchScenario::Full,
+            iterations: 0,
+            chunk_size_bytes: 0,
+            concurrency: 0,
+            upload_max_in_flight_chunks: 0,
+            base_bytes: 0,
+            mutated_bytes: 0,
+            available_parallelism: 0,
+            average_initial_upload_micros: 0,
+            average_sparse_update_upload_micros: 0,
+            average_concurrent_upload_micros: 0,
+            average_initial_upload_bytes_per_second: 0,
+            average_sparse_update_upload_bytes_per_second: 0,
+            average_concurrent_upload_bytes_per_second: 0,
+            average_concurrent_upload_process_cpu_micros: 0,
+            average_concurrent_upload_process_cpu_cores_per_mille: 0,
+            average_concurrent_upload_process_host_utilization_per_mille: 0,
+            average_process_cpu_micros: 0,
+            average_process_cpu_cores_per_mille: 0,
+            average_process_host_utilization_per_mille: 0,
+            concurrent_upload_scaling_per_mille: 0,
+            total_uploaded_bytes: 0,
+            total_concurrent_uploaded_bytes: 0,
+            total_initial_inserted_chunks: 0,
+            total_sparse_update_inserted_chunks: 0,
+            total_concurrent_upload_inserted_chunks: 0,
+            iterations_detail: vec![],
+        };
+        crate::hold::output_test_support::assert_writer_errors(|writer| e2e.write_summary(writer));
+        crate::hold::output_test_support::assert_writer_errors(|writer| {
+            ingest.write_summary(writer)
+        });
+        let mut bytes = Vec::new();
+        e2e.write_summary(&mut bytes).expect("e2e summary");
+        assert!(bytes.starts_with(b"mode: e2e\ndeployment_target: isolated-local\nmetadata_backend: fixture\nobject_backend: fixture\ninventory_scope: isolated\nscenario: full\n"));
+        assert!(
+            bytes
+                .windows(b"total_uploaded_bytes: 0\n".len())
+                .any(|window| window == b"total_uploaded_bytes: 0\n")
+        );
+        bytes.clear();
+        ingest.write_summary(&mut bytes).expect("ingest summary");
+        assert!(bytes.starts_with(
+            b"mode: ingest\nscenario: full\nscenario: sparse-update\nscenario: concurrent-upload\n"
+        ));
     }
 }

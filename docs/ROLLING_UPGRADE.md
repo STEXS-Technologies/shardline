@@ -1,12 +1,19 @@
 # Rolling Upgrade
 
-This document describes how to upgrade a running Shardline deployment without a full
-service outage: one role class at a time, verifying readiness after each step.
+This document describes a rolling process upgrade: one role class at a time,
+verifying readiness after each step. Pending schema migrations can require a
+controlled write maintenance window before that rollout.
 
 Shardline processes are stateless in the request path. The durable boundaries are the
 object-store adapter and the index and record adapters, which are external to the
 process. That makes a live upgrade safe as long as each process is drained, restarted
 on the new version, and confirmed ready before the next process moves.
+
+On Unix, both SIGTERM (the usual container stop signal) and SIGINT start the
+server's graceful connection drain. By default the server waits for active
+connections to finish; allow enough runtime termination grace for those transfers.
+If an embedding application sets `ServerConfig::with_shutdown_timeout`, give the
+runtime a longer grace period so the server's deadline runs before SIGKILL.
 
 ## Roles And Upgrade Units
 
@@ -53,6 +60,14 @@ schema change, apply it before the process rollout with `shardline db migrate up
 by the previous version's processes for the duration of the rollout. Evidence-bound
 writes are intentionally gated until all writers are upgraded.
 
+The PostgreSQL index migrations `20261002010000`, `20261002020000`,
+`20261002030000`, `20261003000000`, and `20261003010000` use ordinary transactional index builds and
+block writes on their indexed tables. When any is pending, drain writers across the deployment and apply
+the migrations in the [index-build maintenance
+window](DATABASE_MIGRATIONS.md#postgresql-index-builds-during-patch-upgrades) before
+rolling either role class. The process rollout order alone does not provide this
+write drain.
+
 The OCI tag-index migration is additive and old processes continue to read their
 object-store tag pointers. During the API-class rollout, drain OCI manifest `PUT` and
 `DELETE` traffic, OCI blob deletion, and provider webhook traffic, or route those
@@ -81,6 +96,12 @@ rollout. The new release coordinates GC against writers with a shared/exclusive
 barrier, but an older server does not participate in that barrier. Dry-run GC remains
 safe. Resume scheduled destructive GC only after every API and transfer replica runs
 the barrier-aware version.
+
+Pause scheduled lifecycle repair and full repair during the rollout as well, and
+upgrade maintenance binaries before resuming these jobs. Older lifecycle repair
+can delete unexpired finite retention holds for objects that have not arrived yet;
+older fsck can reject these valid future-object holds. Resume maintenance only
+when every maintenance job uses the new future-object retention semantics.
 
 ## Procedure
 

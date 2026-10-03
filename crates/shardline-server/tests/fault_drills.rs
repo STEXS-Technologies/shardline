@@ -341,12 +341,28 @@ fn count_chunk_files(root: &Path) -> usize {
     count_files_recursive(&root.join("chunks"))
 }
 
+// These drills stream one part per owned session. Before publication the
+// server writes to an anonymous .tmp file; part-N is now an immutable versioned
+// file created only after the body completes. Observe bytes while tx stays open.
 fn part_file_size(root: &Path, upload_id: &str, part_number: u32) -> u64 {
-    let path = root
-        .join("s3-uploads")
-        .join(upload_id)
-        .join(format!("part-{part_number}"));
-    std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+    let directory = root.join("s3-uploads").join(upload_id);
+    let legacy = format!("part-{part_number}");
+    let versioned = format!("{legacy}-");
+    std::fs::read_dir(directory)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".tmp") || name == legacy || name.starts_with(&versioned)
+        })
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .max()
+        .unwrap_or(0)
 }
 
 fn session_dir_exists(root: &Path, upload_id: &str) -> bool {
@@ -617,11 +633,12 @@ async fn drill1_v3_multipart_part_kill_leaves_no_object() {
     );
 }
 
-/// V3b: with TTL=1s, an expired session is reclaimed by the startup sweep on
-/// restart, and a late CompleteMultipartUpload is rejected cleanly.
+/// V3b: prepare a partial upload before switching the restart policy to TTL=1s.
+/// An explicitly aged session is reclaimed by startup and late Complete fails.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill1_v3b_multipart_ttl_expiry_reclaims_session() {
-    let mut harness = DrillHarness::new(1); // 1-second session TTL
+    // Preparation must not expire while the scheduler delays UploadPart.
+    let mut harness = DrillHarness::new(3600);
     harness.spawn_server().await;
 
     let key = "mp-ttl";
@@ -651,9 +668,27 @@ async fn drill1_v3b_multipart_ttl_expiry_reclaims_session() {
     let uid = upload_id.clone();
     wait_part_evidence(&root, &uid, &part_task).await;
     part_task.abort();
-
-    // Let the session expire, then restart so the startup sweep runs.
-    harness.settle(Duration::from_millis(1600)).await;
+    let _ = part_task.await;
+    harness.kill_hard().await;
+    assert!(session_dir_exists(&harness.root, &upload_id));
+    let session =
+        shardline_s3_adapter::read_session(&harness.root, &upload_id, harness.session_ttl_seconds)
+            .await
+            .unwrap();
+    harness.session_ttl_seconds = NonZeroU64::new(1).unwrap();
+    wait_until(
+        Duration::from_secs(5),
+        "session age reaches one-second TTL",
+        || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            shardline_s3_adapter::is_expired(&session, harness.session_ttl_seconds, now)
+        },
+    )
+    .await;
+    // The actual restarted server uses TTL=1s and performs the startup sweep.
     harness.restart().await;
 
     let root = harness.root.clone();

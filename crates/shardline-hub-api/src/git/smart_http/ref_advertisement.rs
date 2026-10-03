@@ -95,10 +95,21 @@ pub(super) async fn collect_refs(
     state: &HubState,
     repo_id: &str,
 ) -> Result<Vec<GitRef>, HubApiError> {
-    let store_refs = state.store.list_refs(repo_id).map_err(|e| {
-        tracing::debug!("failed to list revisions for {repo_id}: {e}");
-        HubApiError::RepoNotFound
-    })?;
+    let owned_state = state.clone();
+    let owned_repo_id = repo_id.to_owned();
+    tokio::task::spawn_blocking(move || collect_refs_sync(&owned_state, &owned_repo_id))
+        .await
+        .map_err(|error| HubApiError::CasError(error.to_string()))?
+}
+
+fn collect_refs_sync(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
+    let store_refs = state
+        .store
+        .list_refs_bounded(repo_id, 10_000)
+        .map_err(|e| {
+            tracing::debug!("failed to list revisions for {repo_id}: {e}");
+            HubApiError::RepoNotFound
+        })?;
 
     let mut refs = Vec::new();
     let mut seen_refs = std::collections::HashSet::new();
@@ -186,15 +197,34 @@ pub async fn info_refs(
     require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
-    let refs = collect_refs(&state, &repo_id).await?;
+    let capability = match auth_ctx {
+        Some(ctx) => shardline_server_core::AuthorizedRepository::from_verified_context(
+            ctx,
+            TokenScope::Read,
+        )?,
+        None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
+    };
+    let projection =
+        super::projection::project_history_async(state.clone(), repo_id.clone(), capability)
+            .await?;
+    let mut refs = collect_refs(&state, &repo_id).await?;
+    for git_ref in &mut refs {
+        if let Some(sha) = projection.identities.get(&git_ref.sha1) {
+            git_ref.sha1 = sha.clone();
+        } else {
+            return Err(HubApiError::CasError(
+                "Git ref has no commit object".to_owned(),
+            ));
+        }
+    }
 
     let (capabilities, content_type) = match service {
         GitSmartHttpService::ReceivePack => (
-            "report-status delete-refs side-band-64k quiet",
+            "report-status delete-refs quiet",
             "application/x-git-receive-pack-advertisement",
         ),
         GitSmartHttpService::UploadPack => (
-            "side-band-64k thin-pack multi_ack_detailed",
+            "side-band-64k",
             "application/x-git-upload-pack-advertisement",
         ),
     };
@@ -210,12 +240,7 @@ pub async fn info_refs(
     if let Some(first) = refs.first() {
         body.push_str(&pktline::encode_line({
             line_buf.clear();
-            writeln!(
-                line_buf,
-                "{} {} capabilities^{{}}\x00{capabilities}",
-                first.sha1, first.name
-            )
-            .ok();
+            writeln!(line_buf, "{} {}\x00{capabilities}", first.sha1, first.name).ok();
             &line_buf
         })?);
         // SAFETY: refs has at least one element (first is Some), so skip(1)

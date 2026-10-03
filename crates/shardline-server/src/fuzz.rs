@@ -911,9 +911,15 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_classify_retention_delete_missing() {
-        let result = fuzz_classify_retention(Some(200), 100, false, 150);
-        assert_eq!(result, FuzzRetentionAction::DeleteMissing);
+    fn fuzz_classify_retention_keeps_future_object_hold() {
+        for release_after in [None, Some(200)] {
+            let result = fuzz_classify_retention(release_after, 100, false, 150);
+            assert_eq!(result, FuzzRetentionAction::Keep);
+        }
+        assert_eq!(
+            fuzz_classify_retention(Some(150), 100, false, 150),
+            FuzzRetentionAction::DeleteExpired
+        );
     }
 
     #[test]
@@ -1040,10 +1046,22 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_lifecycle_repair_summary_retention_delete_missing() {
-        let result =
-            fuzz_lifecycle_repair_summary(200, 100, &[], &[(Some(300), 100, false)], &[]).unwrap();
-        assert_eq!(result.retention_delete_missing, 1);
+    fn fuzz_lifecycle_repair_summary_keeps_future_object_holds() {
+        let result = fuzz_lifecycle_repair_summary(
+            200,
+            100,
+            &[],
+            &[
+                (Some(300), 100, false),
+                (None, 100, false),
+                (Some(200), 100, false),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(result.retention_keep, 2);
+        assert_eq!(result.retention_delete_expired, 1);
+        assert_eq!(result.retention_delete_missing, 0);
     }
 
     #[test]

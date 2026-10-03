@@ -4,6 +4,96 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+This patch hardens storage, recovery, protocol handling, and the SDK, while reducing
+memory growth and blocking work in large inventories and transfers.
+
+### Changed
+
+- Publish release artifacts only on a release-tag push; manual workflow runs
+  perform validation without publishing.
+- Hold the exclusive maintenance barrier throughout index rebuild so uploads
+  cannot invalidate its version snapshot or derived-state repairs.
+- Accept OCI repository names containing protocol operation words without
+  changing repository identity, and keep every Git sideband packet within its
+  wire-size limit. String pkt-line encoding rejects non-UTF-8 input.
+- Bound OIDC discovery and JWKS JSON to 1 MiB, reject unsuccessful HTTP responses
+  and redirects, and keep signing-key refresh alive until the last provider owner
+  is dropped.
+- Enforce JWK purpose, algorithm, and EC curve constraints when selecting JWT
+  verification keys, including mixed-purpose keys sharing a key ID.
+- Support synchronous S3 operations inside current-thread Tokio runtimes and
+  after moving an adapter out of its construction runtime.
+- Bound SDK config and token files to 1 MiB and remove a full-payload temporary
+  copy from cache serialization.
+- Apply pending database migrations explicitly before rollout.
+  PostgreSQL index builds require a controlled write maintenance window; drain writers
+  rather than relying on process rollout order.
+  See [Database Migrations](docs/DATABASE_MIGRATIONS.md) and
+  [Rolling Upgrade](docs/ROLLING_UPGRADE.md).
+- Upgrade maintenance binaries and pause destructive GC and lifecycle repair during
+  mixed-version rollouts.
+  Permanent and unexpired retention holds now remain valid even when the protected
+  object has not arrived yet.
+- Reject malformed repository scopes, token claims, ranges, singleton headers, upload
+  intents, and unrepresentable quota or expiry settings earlier, including during
+  deserialization. Invalid CLI arguments and dotenv files are rejected before changing
+  deployment state.
+- CLI output and flush failures now return operational exit code `2`, including broken
+  pipes. Backup and GC report destinations that overlap deployment state or each other
+  are rejected before maintenance begins.
+
+### Fixed
+
+- Release partial PostgreSQL resource-lock bundles on cancellation while
+  another resource remains held, without waiting on a blocked server query.
+- Fixed repository isolation, Git tree and pack integrity, exact-head recovery, and
+  concurrent ref publication.
+  Strengthened conditional S3 and OCI updates, resumable completion recovery, upload
+  journal preservation, and webhook registration atomicity.
+- Restored multipart completion and CopyObject source-condition compatibility with
+  clients that send unquoted MD5 ETags, while preserving identity and integrity checks.
+- Fixed transfer range and body-length validation, encoded S3 object identities, XML
+  listing and deletion decoding, and interrupted or failed publication cleanup.
+  SDK downloads preserve existing output files when publication fails.
+- Fixed retention and evidence races across PostgreSQL and SQLite.
+  Durable-state inventory reads use coherent snapshots and validate evidence before
+  invoking callbacks.
+- Fixed SDK upload cancellation and failure handling: failed readers cannot publish file
+  metadata, background xorb failures remain terminal for the session, aborted groups
+  cannot commit, and upload registration is serialized with abort.
+- Fixed SDK download cancellation, queued-buffer release, and interrupted I/O handling.
+  Cancelling a pending `next()` preserves data for retry; cancelled streams release
+  queued capacity. Grouped downloads report completion after observed EOF, and retained
+  upload handles report their actual state after group drop.
+- Fixed benchmark crashes on invalid chunk sizes and impossible allocation lengths.
+  CLI and library validation now rejects these inputs before creating benchmark storage.
+- Fixed token-refresh resource retention, cache reservation ownership, expiry, durable
+  cache validation, and quota accounting under concurrency and failure.
+- Fixed Unix local-object publication and deletion synchronization, including directory
+  creation, duplicate uploads, and hard links.
+  Deep deletion uses bounded descriptors, and inventory rejects filenames that cannot
+  round-trip as object keys.
+- Updated bundled SQLite to `3.51.3` to address WAL-reset corruption.
+  Corrected SQLite backup restoration guidance, graceful Unix termination, native CLI
+  configuration paths, GC schedule names, and Docker toolchain overrides.
+
+### Improved
+
+- Streamed backup manifests and metadata inventories without retaining complete result
+  sets. Flat local namespace pages retain only the requested candidates; directory
+  enumeration still scans eligible entries.
+- Added indexed PostgreSQL tree-prefix traversal and deletion, bounded Hub tree pages,
+  SQLite evidence-head lookups, and batched OCI evidence checks.
+- Moved expensive metadata encoding/decoding and SDK cache work off async workers with
+  bounded admission, preserving transaction and error behavior.
+- Bounded peer response bodies, reconstruction metadata, database verification,
+  retention batches, and webhook pruning.
+  Reconstruction budgets are configurable for deployments with larger valid plans.
+- Made migration status and verification commands read-only, honored TOML database URLs,
+  and preserved installed tracing subscribers and deployment files during CLI failures.
+
 ## [1.11.2] - 2026-09-26
 
 This patch release improves the performance of the existing reliability-hardened
@@ -1141,6 +1231,7 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
+[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.2...HEAD
 [1.11.2]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.1...v1.11.2
 [1.11.1]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.10.0...v1.11.0

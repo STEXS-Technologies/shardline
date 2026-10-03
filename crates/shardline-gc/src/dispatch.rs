@@ -125,6 +125,48 @@ mod tests {
     use super::*;
     use shardline_storage::ObjectKey;
 
+    #[test]
+    fn hub_git_archives_are_excluded_from_orphan_sweep() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+        let temp = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(temp.path().to_owned()).unwrap();
+        let frontends = [
+            ServerFrontend::Xet,
+            ServerFrontend::Lfs,
+            ServerFrontend::BazelHttp,
+            ServerFrontend::Oci,
+            ServerFrontend::S3,
+            ServerFrontend::Hub,
+        ];
+        for suffix in ["a".repeat(40), "b".repeat(40), "c".repeat(40)] {
+            let key = ObjectKey::parse(&format!(
+                "protocols/hub/git/global/{}/{suffix}",
+                "d".repeat(64)
+            ))
+            .unwrap();
+            let bytes = b"retained Git object";
+            let integrity =
+                ObjectIntegrity::new(shardline_server_core::chunk_hash(bytes), bytes.len() as u64);
+            store
+                .put_if_absent(&key, ObjectBody::from_slice(bytes), &integrity)
+                .unwrap();
+            assert_eq!(
+                managed_protocol_object_identity(&frontends, &key).unwrap(),
+                None
+            );
+        }
+        let orphans = crate::reachability::scan_orphan_objects(
+            &store,
+            &frontends,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        assert!(
+            orphans.is_empty(),
+            "Git archives must never become unindexed ordinary GC candidates"
+        );
+    }
+
     const VALID_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]

@@ -6,3 +6,6 @@ tmp
 dist
 dist-*
 *.log
+
+# Local audit evidence is never part of the container build context.
+audit-results-local

@@ -266,6 +266,12 @@ pub trait ReconstructionStore {
     /// Returns the adapter error when the inventory lookup fails.
     fn list_reconstruction_file_ids(&self) -> Result<Vec<FileId>, Self::Error>;
 
+    visit_items!(
+        visit_reconstruction_file_ids,
+        list_reconstruction_file_ids,
+        FileId
+    );
+
     /// Deletes one persisted file reconstruction.
     ///
     /// # Errors
@@ -442,12 +448,21 @@ pub trait LifecycleStore {
 
     /// Inserts or replaces durable retention-hold state for one object key.
     ///
+    /// Callers must exclude mutating GC for the entire operation with the shared
+    /// GC/write barrier. This low-level metadata write alone cannot serialize
+    /// against physical object deletion. Applications can use
+    /// `shardline_server::set_retention_hold` for coordinated administration.
+    ///
     /// # Errors
     ///
     /// Returns the adapter error when persistence fails.
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error>;
 
     /// Deletes durable retention-hold state for one object key.
+    ///
+    /// Administrative callers must hold the shared GC/write barrier, or use
+    /// `shardline_server::release_retention_hold`. GC itself deletes expired
+    /// holds while owning the exclusive barrier.
     ///
     /// # Errors
     ///
@@ -625,6 +640,12 @@ pub trait AsyncIndexStore {
     /// Lists every persisted file-reconstruction identifier.
     fn list_reconstruction_file_ids(&self) -> IndexStoreFuture<'_, Vec<FileId>, Self::Error>;
 
+    visit_items_async!(
+        visit_reconstruction_file_ids,
+        list_reconstruction_file_ids,
+        FileId
+    );
+
     /// Deletes one persisted file reconstruction.
     fn delete_reconstruction<'operation>(
         &'operation self,
@@ -790,12 +811,21 @@ pub trait AsyncIndexStore {
     visit_items_async!(visit_retention_holds, list_retention_holds, RetentionHold);
 
     /// Inserts or replaces durable retention-hold state for one object key.
+    ///
+    /// Callers must exclude mutating GC for the entire operation with the shared
+    /// GC/write barrier. This low-level metadata write alone cannot serialize
+    /// against physical object deletion. Applications can use
+    /// `shardline_server::set_retention_hold` for coordinated administration.
     fn upsert_retention_hold<'operation>(
         &'operation self,
         hold: &'operation RetentionHold,
     ) -> IndexStoreFuture<'operation, (), Self::Error>;
 
     /// Deletes durable retention-hold state for one object key.
+    ///
+    /// Administrative callers must hold the shared GC/write barrier, or use
+    /// `shardline_server::release_retention_hold`. GC itself deletes expired
+    /// holds while owning the exclusive barrier.
     fn delete_retention_hold<'operation>(
         &'operation self,
         object_key: &'operation ObjectKey,

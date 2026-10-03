@@ -118,7 +118,7 @@ impl LocalGcOptions {
 ///
 /// Summarizes one GC run: how many records were scanned, how many orphan
 /// chunks were discovered or deleted, and how much space was reclaimed. All
-/// fields are plain counters; a freshly defaulted report represents a run that
+/// fields summarize counters and clock deferral; a defaulted report represents a run that
 /// found and changed nothing.
 ///
 /// # Examples
@@ -141,6 +141,8 @@ impl LocalGcOptions {
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalGcReport {
+    /// Retention mutation was deferred because a forward clock step is suspected.
+    pub retention_deferred_clock: bool,
     /// Number of file and file-version records scanned.
     pub scanned_records: u64,
     /// Number of distinct chunk hashes referenced by records.

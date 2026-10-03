@@ -20,22 +20,48 @@ pub enum ReconstructionCacheLookup {
 /// Distributed adapters fence mutations with the owner token. Callers must
 /// pass the reservation back when publishing, refreshing, or abandoning a
 /// load; possession by cache key alone never establishes ownership.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct ReconstructionCacheReservation {
     owner_token: Option<Arc<str>>,
+    local_owner: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl ReconstructionCacheReservation {
     pub(crate) fn distributed(owner_token: String) -> Self {
         Self {
             owner_token: Some(Arc::from(owner_token)),
+            local_owner: None,
         }
+    }
+
+    pub(crate) const fn local(notify: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            owner_token: None,
+            local_owner: Some(notify),
+        }
+    }
+
+    pub(crate) const fn local_owner(&self) -> Option<&Arc<tokio::sync::Notify>> {
+        self.local_owner.as_ref()
     }
 
     pub(crate) fn owner_token(&self) -> Option<&str> {
         self.owner_token.as_deref()
     }
 }
+
+impl PartialEq for ReconstructionCacheReservation {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner_token == other.owner_token
+            && match (&self.local_owner, &other.local_owner) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for ReconstructionCacheReservation {}
 
 /// Asynchronous reconstruction-cache adapter contract.
 pub trait AsyncReconstructionCache: Send + Sync {

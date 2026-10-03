@@ -34,6 +34,7 @@ use super::enums::{
     ProviderConfig,
 };
 use super::error::ServerConfigError;
+
 use crate::{
     reconstruction_cache::{
         DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES, DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
@@ -42,6 +43,51 @@ use crate::{
     server_frontend::ServerFrontend,
     server_role::ServerRole,
 };
+
+/// Validates a target chunk size against the canonical CDC protocol limits.
+///
+/// # Errors
+///
+/// Returns [`ServerConfigError`] unless the size is a power of two in 128..=1 GiB.
+pub const fn validate_chunk_size(chunk_size: NonZeroUsize) -> Result<(), ServerConfigError> {
+    use crate::upload_ingest::cdc::{MAX_TARGET_CHUNK_SIZE, MIN_TARGET_CHUNK_SIZE};
+    if chunk_size.get() < MIN_TARGET_CHUNK_SIZE {
+        return Err(ServerConfigError::ChunkSizeTooSmall);
+    }
+    if chunk_size.get() > MAX_TARGET_CHUNK_SIZE {
+        return Err(ServerConfigError::ChunkSizeTooLarge);
+    }
+    if !chunk_size.get().is_power_of_two() {
+        return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
+    }
+    Ok(())
+}
+
+/// Checks the exact timestamp representation used by durable session storage.
+/// The clock is explicit so boundary behavior can be checked without waiting.
+pub(super) fn validate_session_ttl_at(
+    name: &'static str,
+    ttl: NonZeroU64,
+    now_unix_seconds: u64,
+) -> Result<(), ServerConfigError> {
+    let latest_expiry = chrono::DateTime::<chrono::Utc>::MAX_UTC
+        .timestamp()
+        .unsigned_abs();
+    let maximum = latest_expiry.saturating_sub(now_unix_seconds);
+    let representable = now_unix_seconds
+        .checked_add(ttl.get())
+        .and_then(|expiry| i64::try_from(expiry).ok())
+        .and_then(|expiry| chrono::DateTime::<chrono::Utc>::from_timestamp(expiry, 0))
+        .is_some();
+    if !representable {
+        return Err(ServerConfigError::SessionTtlOutOfRange {
+            name,
+            seconds: ttl.get(),
+            maximum,
+        });
+    }
+    Ok(())
+}
 
 /// Default bounded-parser limits for native Xet shard metadata.
 pub use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
@@ -1356,12 +1402,83 @@ impl ServerConfig {
     /// Returns [`ServerConfigError::PlaintextSecretsInProduction`] when a
     /// non-insecure deployment mode would persist secrets without at-rest
     /// encryption keys.
+    /// Returns [`ServerConfigError::ResourceCapacityOutOfRange`] when a resource
+    /// capacity exceeds the runtime semaphore or batch-count representation.
+    /// Returns [`ServerConfigError::ChunkSizeTooSmall`],
+    /// [`ServerConfigError::ChunkSizeTooLarge`], or
+    /// [`ServerConfigError::ChunkSizeNotPowerOfTwo`] when the target chunk size
+    /// is not a power of two in 128 bytes through 1 GiB.
+    /// Returns [`ServerConfigError::SessionTtlOutOfRange`] when an enabled
+    /// PostgreSQL session expiry cannot fit its durable timestamp representation.
     pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
-        // The CDC chunker requires a power-of-two chunk size; a misconfigured
-        // value must fail startup with a clear error instead of panicking on
-        // the first upload (see `upload_ingest::cdc::CdcChunker`).
-        if !self.chunk_size.get().is_power_of_two() {
-            return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
+        crate::admission::validate_capacity(
+            "admission_max_weight",
+            self.admission_max_weight(),
+            crate::admission::maximum_counted_capacity(),
+        )?;
+        crate::admission::validate_capacity(
+            "transfer_max_in_flight_chunks",
+            self.transfer_max_in_flight_chunks(),
+            crate::admission::maximum_counted_capacity(),
+        )?;
+        crate::admission::validate_capacity(
+            "oci_registry_token_max_in_flight_requests",
+            self.oci_registry_token_max_in_flight_requests(),
+            tokio::sync::Semaphore::MAX_PERMITS,
+        )?;
+        validate_chunk_size(self.chunk_size)?;
+
+        if self.index_postgres_url().is_some() {
+            // PostgreSQL counts and quota parameters use signed BIGINT values.
+            let maximum = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+            for (frontend, name, capacity) in [
+                (
+                    ServerFrontend::Oci,
+                    "oci_upload_max_active_sessions",
+                    self.oci_upload_max_active_sessions(),
+                ),
+                (
+                    ServerFrontend::S3,
+                    "s3_upload_max_active_sessions",
+                    self.s3_upload_max_active_sessions(),
+                ),
+                (
+                    ServerFrontend::S3,
+                    "s3_upload_max_active_part_files",
+                    self.s3_upload_max_active_part_files(),
+                ),
+                (
+                    ServerFrontend::Lfs,
+                    "lfs_patch_max_active_sessions",
+                    self.lfs_patch_max_active_sessions(),
+                ),
+            ] {
+                if self.server_frontends.contains(&frontend) {
+                    crate::admission::validate_capacity(name, capacity, maximum)?;
+                }
+            }
+            let now = shardline_protocol::unix_now_seconds_lossy();
+            for (frontend, name, ttl) in [
+                (
+                    ServerFrontend::Oci,
+                    "oci_upload_session_ttl_seconds",
+                    self.oci_upload_session_ttl_seconds(),
+                ),
+                (
+                    ServerFrontend::S3,
+                    "s3_upload_session_ttl_seconds",
+                    self.s3_upload_session_ttl_seconds(),
+                ),
+                (
+                    ServerFrontend::Lfs,
+                    "lfs_patch_ttl_seconds",
+                    self.lfs_patch_ttl_seconds(),
+                ),
+            ] {
+                if self.server_frontends.contains(&frontend) {
+                    validate_session_ttl_at(name, ttl, now)?;
+                }
+            }
         }
 
         if self.auth.token_signing_key.is_none()

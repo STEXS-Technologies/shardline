@@ -11,7 +11,7 @@
 //!
 //! // The global metrics instance is always available and never fails.
 //! let m = metrics();
-//! m.system.set_uptime(1_700_000_000);
+//! m.system.start_uptime();
 //!
 //! // Render everything in Prometheus exposition format for scraping.
 //! let text = shardline_metrics::encode_metrics();

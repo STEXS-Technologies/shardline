@@ -30,6 +30,57 @@ use super::{
 use crate::model::ProviderTokenIssueRequest;
 
 #[test]
+fn provider_service_rejects_repeated_bootstrap_keys_in_every_order() {
+    let issuer = ProviderTokenIssuer::new(
+        "issuer",
+        b"a]32-byte-signing-key-for-testing!",
+        NonZeroU64::MIN,
+    );
+    assert!(issuer.is_ok());
+    let Ok(issuer) = issuer else {
+        return;
+    };
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
+        issuer,
+        registry: ProviderRegistry {
+            providers: HashMap::new(),
+        },
+    };
+    assert!(matches!(
+        service.authorize_bootstrap_key(&HeaderMap::new()),
+        Err(ProviderServiceError::MissingApiKey)
+    ));
+    let mut singleton = HeaderMap::new();
+    singleton.insert(
+        "x-shardline-provider-key",
+        HeaderValue::from_static("bootstrap-key-16bytes"),
+    );
+    assert!(service.authorize_bootstrap_key(&singleton).is_ok());
+    singleton.insert(
+        "x-shardline-provider-key",
+        HeaderValue::from_static("invalid-key"),
+    );
+    assert!(matches!(
+        service.authorize_bootstrap_key(&singleton),
+        Err(ProviderServiceError::InvalidApiKey)
+    ));
+    for (first, second) in [
+        ("bootstrap-key-16bytes", "invalid-key"),
+        ("invalid-key", "bootstrap-key-16bytes"),
+        ("bootstrap-key-16bytes", "bootstrap-key-16bytes"),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.append("x-shardline-provider-key", HeaderValue::from_static(first));
+        headers.append("x-shardline-provider-key", HeaderValue::from_static(second));
+        assert!(matches!(
+            service.authorize_bootstrap_key(&headers),
+            Err(ProviderServiceError::InvalidApiKey)
+        ));
+    }
+}
+
+#[test]
 fn provider_service_rejects_missing_bootstrap_key() {
     let issuer = ProviderTokenIssuer::new(
         "issuer",

@@ -31,7 +31,7 @@ pub trait AuthProvider: Send + Sync {
 | **Local HMAC** | `local` | Default. Signs and verifies tokens using a shared HMAC-SHA256 signing key (`SHARDLINE_TOKEN_SIGNING_KEY` or `_FILE`). Supports both verification and minting. |
 | **Ed25519** | `ed25519` | Signs and verifies Shardline tokens with an Ed25519 private key, or verifies them with a public key only. |
 | **OIDC** | `oidc` | Validates tokens against an OpenID Connect issuer. Fetches signing keys from the issuer's discovery endpoint. Verification only; does not support token minting. |
-| **JWKS** | `jwks` | Validates tokens against a static JWKS endpoint. Keys are cached with a configurable TTL. Verification only; does not support token minting. |
+| **JWKS** | `jwks` | Validates tokens against a static JWKS endpoint. Signing keys are refreshed periodically. Verification only; does not support token minting. |
 | **Passthrough** | `passthrough` | Trust-all provider for development. Any non-empty token is accepted with full write scope. Does not support token minting. **Do not use in production.** |
 
 ## Configuration
@@ -196,7 +196,7 @@ legitimately serve keys from a different host (e.g. Google serves JWKS from
 SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST=www.googleapis.com
 ```
 
-Set `SHARDLINE_AUTH_OIDC_AUDIENCE` to additionally require a specific `aud`
+Set `SHARDLINE_AUTH_OIDC_AUDIENCE` to require a specific `aud`
 claim (and reject tokens that omit it). Token minting is not supported; use an
 external identity provider to issue tokens.
 
@@ -209,9 +209,26 @@ SHARDLINE_AUTH_PROVIDER=jwks
 SHARDLINE_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 ```
 
-Keys are fetched and cached with a 300-second TTL. This is useful when you have an
+Keys are fetched and refreshed every 300 seconds. This is useful when you have an
 external service that already issues JWTs signed with keys published at a JWKS endpoint.
 Token minting is not supported.
+
+Refresh failures retain the last successfully fetched keys; the refresh interval
+is not a cache expiry deadline. Static JWKS verification does not enforce an
+audience. Use OIDC with the intended issuer and audience when those claims must
+be checked.
+
+OIDC discovery and both providers' JWKS responses must have a successful HTTP
+status and fit within 1 MiB. These fetches reject redirects, including redirects
+to another signing-key endpoint. Configure the final endpoint URL directly.
+
+Both providers select verification keys by key ID and compatible key metadata.
+When present, `use` must be `sig`, `key_ops` must allow `verify` without duplicate
+or unrelated operations, and `alg` must match the token's algorithm. ES256 keys
+must declare P-256, and ES384 keys must declare P-384. Optional
+purpose and algorithm metadata may be omitted, but conflicting declarations
+are rejected, including when a JWKS contains encryption and signing keys with
+the same key ID.
 
 ### Passthrough
 

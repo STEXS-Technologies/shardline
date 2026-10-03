@@ -1,6 +1,6 @@
 //! Tree walking and commit parsing utilities.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::super::pack::{GitObject, ObjectType};
 use super::error::SmartHttpError;
@@ -9,6 +9,8 @@ use shardline_index::hub::HubFileEntry;
 /// Maximum depth for recursive tree walking to prevent stack overflow from
 /// maliciously crafted pushes with deeply nested tree objects.
 const MAX_TREE_DEPTH: usize = 128;
+const MAX_TREE_ENTRIES: usize = 100_000;
+const MAX_TREE_PATH_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parses a raw Git commit object and extracts tree SHA, parent SHA, and message.
 ///
@@ -63,6 +65,31 @@ pub(crate) fn walk_git_tree_inner(
     prefix: &str,
     depth: usize,
 ) -> Result<Vec<HubFileEntry>, SmartHttpError> {
+    let mut remaining = MAX_TREE_ENTRIES;
+    let mut path_bytes = 0;
+    let mut entries = Vec::new();
+    walk_tree_into(
+        tree_sha,
+        objects,
+        prefix,
+        depth,
+        &mut remaining,
+        &mut path_bytes,
+        &mut entries,
+    )?;
+    Ok(entries)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_tree_into(
+    tree_sha: &[u8; 20],
+    objects: &HashMap<[u8; 20], &GitObject>,
+    prefix: &str,
+    depth: usize,
+    remaining: &mut usize,
+    path_bytes: &mut usize,
+    entries: &mut Vec<HubFileEntry>,
+) -> Result<(), SmartHttpError> {
     if depth > MAX_TREE_DEPTH {
         return Err(SmartHttpError::TreeDepthExceeded);
     }
@@ -75,11 +102,14 @@ pub(crate) fn walk_git_tree_inner(
         return Err(SmartHttpError::ExpectedTreeObject(tree_obj.object_type));
     }
 
-    let mut entries = Vec::new();
+    let mut names = HashSet::new();
     let data = &tree_obj.data;
     let mut pos = 0;
 
     while pos < data.len() {
+        *remaining = remaining.checked_sub(1).ok_or_else(|| {
+            SmartHttpError::StoreFiles("tree traversal exceeds 100000 entries".to_owned())
+        })?;
         // Parse mode (octal string until space).
         // SAFETY: While loop ensures pos < data.len(), so data.get(pos..) is Some.
         // .position() scans from pos for the first space byte. If found, space_pos
@@ -148,6 +178,16 @@ pub(crate) fn walk_git_tree_inner(
             .checked_add(20)
             .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
 
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name
+                .trim_end_matches([' ', '.'])
+                .eq_ignore_ascii_case(".git")
+            || !names.insert(name)
+        {
+            return Err(SmartHttpError::TreeInvalidEntryName(name.to_owned()));
+        }
         let full_path = if prefix.is_empty() {
             name.to_owned()
         } else {
@@ -163,13 +203,20 @@ pub(crate) fn walk_git_tree_inner(
             return Err(SmartHttpError::TreeInvalidEntryName(name.to_owned()));
         }
 
+        *path_bytes = path_bytes
+            .checked_add(full_path.len())
+            .filter(|n| *n <= MAX_TREE_PATH_BYTES)
+            .ok_or_else(|| {
+                SmartHttpError::StoreFiles("expanded tree paths exceed 64 MiB".to_owned())
+            })?;
         if mode_str == "40000" {
             // Directory — recurse into subtree.
             let next_depth = depth
                 .checked_add(1)
                 .ok_or(SmartHttpError::TreeDepthOverflow)?;
-            let mut sub_entries = walk_git_tree_inner(&entry_sha, objects, &full_path, next_depth)?;
-            entries.append(&mut sub_entries);
+            walk_tree_into(
+                &entry_sha, objects, &full_path, next_depth, remaining, path_bytes, entries,
+            )?;
         } else if mode_str == "100644" || mode_str == "100755" {
             // Regular file.
             let blob_obj = objects
@@ -187,8 +234,18 @@ pub(crate) fn walk_git_tree_inner(
             {
                 let text = std::str::from_utf8(&blob_obj.data)
                     .map_err(|e| SmartHttpError::LfsPointerEncoding(e.to_string()))?;
+                if text.lines().next() != Some("version https://git-lfs.github.com/spec/v1") {
+                    return Err(SmartHttpError::LfsPointerMissingOid);
+                }
                 let oid = parse_lfs_pointer_field(text, "oid")
                     .ok_or(SmartHttpError::LfsPointerMissingOid)?;
+                if oid.len() != 64
+                    || !oid
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(SmartHttpError::LfsPointerMissingOid);
+                }
                 let size_str = parse_lfs_pointer_field(text, "size")
                     .ok_or(SmartHttpError::LfsPointerMissingSize)?;
                 let size: u64 = size_str
@@ -217,11 +274,14 @@ pub(crate) fn walk_git_tree_inner(
                     is_lfs: false,
                 });
             }
+        } else {
+            return Err(SmartHttpError::StoreFiles(format!(
+                "unsupported tree mode: {mode_str}"
+            )));
         }
-        // Skip other entry types (symlinks 120000, submodules 160000).
     }
 
-    Ok(entries)
+    Ok(())
 }
 
 /// Parses a field value from an LFS pointer.
@@ -233,14 +293,15 @@ pub(crate) fn walk_git_tree_inner(
 /// size <size>
 /// ```
 pub(super) fn parse_lfs_pointer_field(text: &str, field: &str) -> Option<String> {
-    for line in text.lines() {
-        if let Some(value) = line.strip_prefix(&format!("{field} ")) {
-            // For "oid", strip the "sha256:" prefix.
-            if field == "oid" {
-                return value.strip_prefix("sha256:").map(|s| s.to_owned());
-            }
-            return Some(value.trim().to_owned());
-        }
+    let prefix = format!("{field} ");
+    let mut values = text.lines().filter_map(|line| line.strip_prefix(&prefix));
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
     }
-    None
+    if field == "oid" {
+        value.strip_prefix("sha256:").map(str::to_owned)
+    } else {
+        Some(value.trim().to_owned())
+    }
 }

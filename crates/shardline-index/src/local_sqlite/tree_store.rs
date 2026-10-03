@@ -1,7 +1,10 @@
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
-use crate::{RepoKey, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeStore};
+use crate::{
+    RepoKey, RevisionCreationOutcome, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey,
+    TreeRegistrationOutcome, TreeStore,
+};
 
 fn tree_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeEntry> {
     Ok(TreeEntry {
@@ -174,11 +177,21 @@ fn scan_tree_sql(
     if !prefix.is_empty() {
         write!(
             sql,
-            " AND (path = ?{index} OR substr(path, 1, length(?{index}) + 1) = ?{index} || '/')"
+            " AND path >= ?{index} AND (path = ?{index} OR substr(path, 1, length(?{index}) + 1) = ?{index} || '/')"
         )
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
         args.push(Value::Text(prefix.to_owned()));
         index = index.saturating_add(1);
+        // Bound the binary primary-key scan before applying the segment-aware
+        // predicate. Without this range a tiny late-prefix page scans every
+        // unrelated earlier path in the revision. The literal predicate still
+        // excludes adjacent names and treats SQL wildcard characters literally.
+        if let Some(upper) = crate::hub::prefix_successor(prefix) {
+            write!(sql, " AND path < ?{index}")
+                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
+            args.push(Value::Text(upper));
+            index = index.saturating_add(1);
+        }
     }
     if let Some(cursor) = cursor {
         write!(sql, " AND path > ?{index}")
@@ -219,7 +232,6 @@ fn upsert_revision_sql(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT (provider, owner, repo, revision)
          DO UPDATE SET
-            created_at_unix_seconds = excluded.created_at_unix_seconds,
             updated_at_unix_seconds = excluded.updated_at_unix_seconds",
         params![
             rev.provider,
@@ -345,18 +357,25 @@ fn delete_revision_sql(
 /// revisions, returning how many revision rows were removed.
 ///
 /// The subqueries select the same oldest rows both times: the tree-entry
-/// delete does not touch `shardline_revisions`, so the second subquery still
-/// sees the full pre-prune row set. `prune_limit` is pre-computed by the
-/// caller as `count - max_revisions` (never called when at/below the cap).
+/// delete does not touch `shardline_revisions`, so both subqueries see the same
+/// rows. Count and deletion share an IMMEDIATE write transaction: competing
+/// pruners cannot apply an excess computed from an earlier snapshot.
 fn prune_revisions_over_cap_sql(
     connection: &mut Connection,
     key: &RepoKey,
-    prune_limit: u64,
+    max_revisions: usize,
 ) -> Result<u64, LocalIndexStoreError> {
-    let limit_i64 = i64::try_from(prune_limit)
-        .map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
     helpers::retry_sqlite_busy(|| {
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let count = count_revisions_sql(&transaction, key)?;
+        let cap = u64::try_from(max_revisions).unwrap_or(u64::MAX);
+        let prune_limit = count.saturating_sub(cap);
+        if prune_limit == 0 {
+            return Ok(0);
+        }
+        let limit_i64 = i64::try_from(prune_limit)
+            .map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
         transaction.execute(
             "DELETE FROM shardline_tree_entries
              WHERE provider = ?1 AND owner = ?2 AND repo = ?3
@@ -406,12 +425,90 @@ fn list_revision_repo_keys_sql(
 impl TreeStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
 
+    async fn register_tree_entry(
+        &self,
+        entry: &TreeEntry,
+        max_revisions: usize,
+        max_tree_entries: usize,
+    ) -> Result<TreeRegistrationOutcome, Self::Error> {
+        let store = self.clone();
+        let entry = entry.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = store.open_connection()?;
+            helpers::retry_sqlite_busy(|| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let repo = RepoKey::new(&entry.provider, &entry.owner, &entry.repo);
+                if (count_revisions_sql(&transaction, &repo)?
+                    >= u64::try_from(max_revisions).unwrap_or(u64::MAX)
+                    && revision_sql(&transaction, &repo, &entry.revision)?.is_none())
+                    || count_tree_entries_sql(&transaction, &repo)?
+                        >= u64::try_from(max_tree_entries).unwrap_or(u64::MAX)
+                {
+                    return Ok(TreeRegistrationOutcome::LimitExceeded);
+                }
+                upsert_revision_sql(
+                    &transaction,
+                    &RevisionRecord {
+                        provider: entry.provider.clone(),
+                        owner: entry.owner.clone(),
+                        repo: entry.repo.clone(),
+                        revision: entry.revision.clone(),
+                        created_at_unix_seconds: entry.updated_at_unix_seconds,
+                        updated_at_unix_seconds: entry.updated_at_unix_seconds,
+                    },
+                )?;
+                let outcome = upsert_tree_entry_sql(&transaction, &entry)?;
+                transaction.commit()?;
+                Ok(TreeRegistrationOutcome::Registered(outcome))
+            })
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn create_revision_bounded(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<RevisionCreationOutcome, Self::Error> {
+        let store = self.clone();
+        let rev = rev.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = store.open_connection()?;
+            helpers::retry_sqlite_busy(|| {
+                let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let repo = RepoKey::new(&rev.provider,&rev.owner,&rev.repo);
+                if revision_sql(&transaction,&repo,&rev.revision)?.is_some() {
+                    return Ok(RevisionCreationOutcome::AlreadyExists);
+                }
+                if count_revisions_sql(&transaction,&repo)? >= u64::try_from(max_revisions).unwrap_or(u64::MAX) {
+                    return Ok(RevisionCreationOutcome::LimitExceeded);
+                }
+                transaction.execute(
+                    "INSERT INTO shardline_revisions (provider, owner, repo, revision, created_at_unix_seconds, updated_at_unix_seconds)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![rev.provider, rev.owner, rev.repo, rev.revision,
+                        helpers::u64_to_i64(rev.created_at_unix_seconds)?, helpers::u64_to_i64(rev.updated_at_unix_seconds)?],
+                )?;
+                transaction.commit()?;
+                Ok(RevisionCreationOutcome::Created)
+            })
+        }).await.map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
     async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
         let store = self.clone();
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            upsert_tree_entry_sql(&connection, &entry)
+            let mut connection = store.open_connection()?;
+            helpers::retry_sqlite_busy(|| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let outcome = upsert_tree_entry_sql(&transaction, &entry)?;
+                transaction.commit()?;
+                Ok(outcome)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -473,8 +570,14 @@ impl TreeStore for LocalIndexStore {
         let store = self.clone();
         let rev = rev.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            upsert_revision_sql(&connection, &rev)
+            let mut connection = store.open_connection()?;
+            helpers::retry_sqlite_busy(|| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let created = upsert_revision_sql(&transaction, &rev)?;
+                transaction.commit()?;
+                Ok(created)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -556,15 +659,7 @@ impl TreeStore for LocalIndexStore {
         let key = key.clone();
         tokio::task::spawn_blocking(move || {
             let mut connection = store.open_connection()?;
-            let count = count_revisions_sql(&connection, &key)?;
-            let cap = u64::try_from(max_revisions).unwrap_or(u64::MAX);
-            let Some(prune_limit) = count.checked_sub(cap) else {
-                return Ok(0);
-            };
-            if prune_limit == 0 {
-                return Ok(0);
-            }
-            prune_revisions_over_cap_sql(&mut connection, &key, prune_limit)
+            prune_revisions_over_cap_sql(&mut connection, &key, max_revisions)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -1035,6 +1130,80 @@ mod tests {
         assert!(TreeStore::upsert_revision(store, &rev).await.unwrap());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_pruners_retain_exact_capacity_and_timestamp_tie_order() {
+        let store = make_store();
+        for iteration in 0..10 {
+            let owner = format!("pruner-{iteration}");
+            let key = RepoKey::new("github", &owner, "repo");
+            for revision in 0..64 {
+                insert_revision_record(
+                    &store,
+                    "github",
+                    &owner,
+                    "repo",
+                    &format!("r{revision:03}"),
+                    100,
+                )
+                .await;
+            }
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+            let mut pruners = Vec::new();
+            for _ in 0..16 {
+                let store = store.clone();
+                let key = key.clone();
+                let barrier = barrier.clone();
+                pruners.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    TreeStore::prune_revisions_over_cap(&store, &key, 32)
+                        .await
+                        .unwrap()
+                }));
+            }
+            let mut removed = 0;
+            for pruner in pruners {
+                removed += pruner.await.unwrap();
+            }
+            assert_eq!(removed, 32);
+            let remaining = TreeStore::list_revisions(&store, &key, None, 100)
+                .await
+                .unwrap();
+            assert_eq!(remaining.len(), 32);
+            assert_eq!(remaining.first().unwrap().revision, "r032");
+            assert_eq!(remaining.last().unwrap().revision, "r063");
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_transaction_rechecks_capacity_after_another_pruner() {
+        let store = make_store();
+        for revision in 0..64 {
+            insert_revision_record(
+                &store,
+                "github",
+                "owner",
+                "repo",
+                &format!("r{revision:03}"),
+                100,
+            )
+            .await;
+        }
+        // Both callers enter with the same cap. The second transaction must
+        // derive zero excess from its current snapshot, never reuse the first
+        // caller's 32-row excess. This is deterministic without timing hooks.
+        let mut first = store.open_connection().unwrap();
+        let mut second = store.open_connection().unwrap();
+        assert_eq!(
+            prune_revisions_over_cap_sql(&mut first, &repo_key(), 32).unwrap(),
+            32
+        );
+        assert_eq!(
+            prune_revisions_over_cap_sql(&mut second, &repo_key(), 32).unwrap(),
+            0
+        );
+        assert_eq!(count_revisions_sql(&second, &repo_key()).unwrap(), 32);
+    }
+
     #[tokio::test]
     async fn prune_revisions_over_cap_removes_oldest_down_to_cap() {
         let store = make_store();
@@ -1211,5 +1380,94 @@ mod tests {
                 RepoKey::new("gitlab", "team", "assets"),
             ]
         );
+    }
+    #[tokio::test]
+    async fn scan_tree_binary_prefix_bounds_preserve_public_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+        let namespace = key("main");
+        let mut paths = vec![
+            "aaa",
+            "aaa/early",
+            "literal%",
+            "literal%/child",
+            "literal_/child",
+            "literal_neighbor",
+            "ζ",
+            "ζ/child",
+            "ζ/last",
+            "ζ-other",
+            "\u{d7ff}",
+            "\u{d7ff}/child",
+            "\u{e000}/neighbor",
+            "\u{10ffff}",
+            "\u{10ffff}/child",
+            "\u{10ffff}\u{10ffff}/child",
+        ];
+        paths.sort_unstable();
+        for path in &paths {
+            store
+                .upsert_tree_entry(&entry("main", path, &file_id(1), 1, 1))
+                .await
+                .unwrap();
+        }
+        for mut scoped in [
+            entry("feature", "outside/revision", &file_id(2), 1, 1),
+            entry("main", "outside/provider", &file_id(2), 1, 1),
+            entry("main", "outside/owner", &file_id(2), 1, 1),
+            entry("main", "outside/repo", &file_id(2), 1, 1),
+        ] {
+            if scoped.path.ends_with("provider") {
+                scoped.provider = "other".to_owned();
+            }
+            if scoped.path.ends_with("owner") {
+                scoped.owner = "other".to_owned();
+            }
+            if scoped.path.ends_with("repo") {
+                scoped.repo = "other".to_owned();
+            }
+            store.upsert_tree_entry(&scoped).await.unwrap();
+        }
+        for prefix in [
+            "",
+            "aaa",
+            "literal%",
+            "literal_",
+            "ζ",
+            "\u{d7ff}",
+            "\u{10ffff}",
+            "\u{10ffff}\u{10ffff}",
+            "missing",
+        ] {
+            for cursor in [None, Some("literal%"), Some("ζ/child"), Some("\u{10ffff}")] {
+                for limit in [0, 1, 2, 100] {
+                    let expected = paths
+                        .iter()
+                        .copied()
+                        .filter(|path| {
+                            prefix.is_empty()
+                                || *path == prefix
+                                || path
+                                    .strip_prefix(prefix)
+                                    .is_some_and(|rest| rest.starts_with('/'))
+                        })
+                        .filter(|path| cursor.is_none_or(|after| *path > after))
+                        .take(limit)
+                        .collect::<Vec<_>>();
+                    let actual = store
+                        .scan_tree(&namespace, prefix, cursor, limit)
+                        .await
+                        .unwrap();
+                    let actual_paths = actual
+                        .iter()
+                        .map(|row| row.path.as_str())
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        actual_paths, expected,
+                        "prefix={prefix:?} cursor={cursor:?} limit={limit}"
+                    );
+                }
+            }
+        }
     }
 }

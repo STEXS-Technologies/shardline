@@ -1,6 +1,6 @@
 //! Command handlers for the `sdx` file-management CLI lane.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use sdx::client::XetClientBuilder;
@@ -13,6 +13,17 @@ use super::error::XetError;
 use super::resolve::{
     Session, resolve_auth, resolve_remote, session_for, session_for_repo, session_for_revision,
 };
+
+fn write_line(writer: &mut impl Write, message: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    writeln!(writer, "{message}")?;
+    writer.flush()
+}
+
+// Acquire the stdout lock only for this synchronous emission, never across await.
+fn output_line(message: std::fmt::Arguments<'_>) -> Result<(), XetError> {
+    write_line(&mut std::io::stdout().lock(), message)?;
+    Ok(())
+}
 
 /// Memory bound for streaming downloads (cat) and downloads.
 const DOWNLOAD_BUFFER_CAP: u64 = 256 * 1024 * 1024;
@@ -95,7 +106,7 @@ pub(crate) async fn ls(
     if args.branches {
         let revisions = session.client.list_revisions().await?;
         for revision in revisions {
-            println!("{}", revision.name);
+            output_line(format_args!("{}", revision.name))?;
         }
         return Ok(());
     }
@@ -105,9 +116,9 @@ pub(crate) async fn ls(
             let size = entry
                 .size
                 .map_or_else(|| "-".to_owned(), |size| size.to_string());
-            println!("{size:>12} {}", entry.path);
+            output_line(format_args!("{size:>12} {}", entry.path))?;
         } else {
-            println!("{}", entry.path);
+            output_line(format_args!("{}", entry.path))?;
         }
     }
     Ok(())
@@ -128,7 +139,7 @@ pub(crate) async fn rm(
         .client
         .delete_path(&session.url.path, args.recursive)
         .await?;
-    println!("deleted {deleted} path(s)");
+    output_line(format_args!("deleted {deleted} path(s)"))?;
     Ok(())
 }
 
@@ -165,14 +176,14 @@ pub(crate) async fn info(
     let url = &session.url;
     if url.path.is_empty() || url.path.ends_with('/') {
         let entries = session.client.list_dir_all(&url.path).await?;
-        println!(
+        output_line(format_args!(
             "path: {}",
             if url.path.is_empty() {
                 "/"
             } else {
                 url.path.as_str()
             }
-        );
+        ))?;
         let files = entries.iter().filter(|entry| !entry.is_dir).count();
         let total = entries
             .iter()
@@ -180,14 +191,14 @@ pub(crate) async fn info(
             .fold(0_u64, |acc, entry| {
                 acc.saturating_add(entry.size.unwrap_or(0))
             });
-        println!("files: {files}");
-        println!("total_bytes: {total}");
+        output_line(format_args!("files: {files}"))?;
+        output_line(format_args!("total_bytes: {total}"))?;
     } else {
         let entry = session.client.resolve_path(&url.path).await?;
-        println!("path: {}", entry.path);
-        println!("file_id: {}", entry.file_id);
-        println!("size: {}", entry.size);
-        println!("updated_at: {}", entry.updated_at);
+        output_line(format_args!("path: {}", entry.path))?;
+        output_line(format_args!("file_id: {}", entry.file_id))?;
+        output_line(format_args!("size: {}", entry.size))?;
+        output_line(format_args!("updated_at: {}", entry.updated_at))?;
     }
     Ok(())
 }
@@ -208,18 +219,18 @@ pub(crate) async fn branch(
         // revision being created.
         let scoped = session_for_revision(&args.url, name, global, config)?;
         let revision = scoped.client.create_revision(name).await?;
-        println!("created revision {}", revision.name);
+        output_line(format_args!("created revision {}", revision.name))?;
         return Ok(());
     }
     if let Some(name) = &args.delete {
         let scoped = session_for_revision(&args.url, name, global, config)?;
         scoped.client.delete_revision(name).await?;
-        println!("deleted revision {name}");
+        output_line(format_args!("deleted revision {name}"))?;
         return Ok(());
     }
     let revisions = session.client.list_revisions().await?;
     for revision in revisions {
-        println!("{}", revision.name);
+        output_line(format_args!("{}", revision.name))?;
     }
     Ok(())
 }
@@ -299,22 +310,22 @@ async fn upload_one(
 ) -> Result<(), XetError> {
     if transfer.no_register {
         let info = upload_no_register(client, path).await?;
-        println!(
+        output_line(format_args!(
             "{} -> {} ({} bytes, {} chunks) [not registered]",
             path.display(),
             remote,
             info.total_bytes,
             info.chunk_count
-        );
+        ))?;
     } else {
         let info = client.upload_file(path, remote).await?;
-        println!(
+        output_line(format_args!(
             "{} -> {} ({} bytes, {} chunks)",
             path.display(),
             remote,
             info.total_bytes,
             info.chunk_count
-        );
+        ))?;
     }
     Ok(())
 }
@@ -375,6 +386,8 @@ async fn download_cp(
 async fn download_dir(client: &XetClient, url: &XetUrl, dst: &str) -> Result<(), XetError> {
     let base = url.path.trim_matches('/');
     let entries = client.list_dir_all(&url.path).await?;
+    let mut downloads = Vec::new();
+    // Validate the complete remote listing before publishing any files.
     for entry in entries {
         if entry.is_dir {
             continue;
@@ -383,29 +396,87 @@ async fn download_dir(client: &XetClient, url: &XetUrl, dst: &str) -> Result<(),
             .file_id
             .as_deref()
             .ok_or_else(|| XetError::message(format!("missing file_id for {}", entry.path)))?;
-        let rel = if base.is_empty() {
-            entry.path.clone()
-        } else {
-            entry
-                .path
-                .strip_prefix(base)
-                .map(|rest| rest.trim_matches('/').to_owned())
-                .unwrap_or_else(|| entry.path.clone())
-        };
+        let rel = relative_download_path(base, &entry.path)?;
         let local = Path::new(dst).join(rel);
-        download_one(client, file_id, &local).await?;
+        downloads.push((file_id.to_owned(), local));
+    }
+    for (file_id, local) in downloads {
+        download_one(client, &file_id, &local).await?;
     }
     Ok(())
 }
 
+fn relative_download_path(base: &str, remote: &str) -> Result<PathBuf, XetError> {
+    let invalid = || XetError::message(format!("unsafe remote download path: {remote:?}"));
+    if remote.contains(['\\', '\0'])
+        || remote.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || (part.len() == 2 && part.ends_with(':'))
+        })
+    {
+        return Err(invalid());
+    }
+    let relative = if base.is_empty() {
+        remote
+    } else {
+        remote
+            .strip_prefix(base)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .ok_or_else(invalid)?
+    };
+    if relative.is_empty() {
+        return Err(invalid());
+    }
+    Ok(PathBuf::from(relative))
+}
+
 /// Downloads one remote file to a local path.
 async fn download_one(client: &XetClient, file_id: &str, local: &Path) -> Result<(), XetError> {
-    if let Some(parent) = local.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file = std::fs::File::create(local)?;
+    #[cfg(unix)]
+    let output = crate::local_output::AtomicOutputFile::create(local, true)?;
+    #[cfg(unix)]
+    let file = output.try_clone_file()?;
+    #[cfg(not(unix))]
+    let output = {
+        if let Ok(metadata) = std::fs::symlink_metadata(local)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(XetError::message(
+                "download destination must not be a symlink".to_owned(),
+            ));
+        }
+        if let Some(parent) = local.parent().filter(|path| !path.as_os_str().is_empty()) {
+            crate::local_output::ensure_output_directory(parent)?;
+        }
+        tempfile::NamedTempFile::new_in(
+            local
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new(".")),
+        )?
+    };
+    #[cfg(not(unix))]
+    let file = output.as_file().try_clone()?;
     let n = client.download_to_writer(file_id, file).await?;
-    println!("{} <- {} ({} bytes)", local.display(), file_id, n);
+    #[cfg(unix)]
+    tokio::task::spawn_blocking(move || output.commit())
+        .await
+        .map_err(|error| XetError::message(error.to_string()))??;
+    #[cfg(not(unix))]
+    {
+        output.as_file().sync_all()?;
+        output
+            .persist(local)
+            .map_err(|error| XetError::Io(error.error))?;
+    }
+    output_line(format_args!(
+        "{} <- {} ({} bytes)",
+        local.display(),
+        file_id,
+        n
+    ))?;
     Ok(())
 }
 
@@ -437,13 +508,8 @@ async fn sync_push(
         } else {
             format!("{base}/{rel_str}")
         };
-        if let Ok(entry) = session.client.resolve_path(&remote).await {
-            let local_size = std::fs::metadata(&file).map_or(0, |metadata| metadata.len());
-            if entry.size == local_size {
-                println!("skip (unchanged) {remote}");
-                continue;
-            }
-        }
+        // Size equality cannot establish content equality. Let the upload
+        // pipeline hash the bytes and deduplicate unchanged CAS objects.
         upload_one(&session.client, &file, &remote, transfer).await?;
     }
     Ok(())
@@ -454,10 +520,22 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), XetError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            return Err(XetError::message(format!(
+                "refusing symlink in upload tree: {}",
+                path.display()
+            )));
+        }
+        if kind.is_dir() {
             collect_files(&path, out)?;
-        } else {
+        } else if kind.is_file() {
             out.push(path);
+        } else {
+            return Err(XetError::message(format!(
+                "upload tree contains a non-regular file: {}",
+                path.display()
+            )));
         }
     }
     Ok(())
@@ -476,4 +554,202 @@ fn build_download_client(url: &XetUrl, auth: sdx::Auth) -> Result<XetClient, Xet
         .with_buffer_semaphore(DOWNLOAD_BUFFER_CAP)
         .build()
         .map_err(XetError::Sdx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_paths_stay_in_selected_remote_directory() {
+        assert_eq!(
+            relative_download_path("models", "models/nested/file").unwrap(),
+            PathBuf::from("nested/file")
+        );
+        for (base, path) in [
+            ("", "../valuable"),
+            ("", "/absolute"),
+            ("", "C:/valuable"),
+            ("", "nested\\valuable"),
+            ("", "nested/./file"),
+            ("", "nested//file"),
+            ("models", "models2/file"),
+            ("models", "other/file"),
+        ] {
+            assert!(
+                relative_download_path(base, path).is_err(),
+                "accepted {path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_tree_rejects_symlink_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+        assert!(collect_files(dir.path(), &mut Vec::new()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_download_preserves_destination_and_removes_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("download");
+        std::fs::write(&dest, b"original").unwrap();
+        // Keep a listener alive without serving requests: token issuance stays
+        // pending after the temporary writer is created.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url =
+            XetUrl::parse(&format!("xet://127.0.0.1:{port}/github/team/assets/main")).unwrap();
+        let auth = sdx::Auth::new(&format!("http://127.0.0.1:{port}"), url.repository_id())
+            .unwrap()
+            .with_api_key("test-bootstrap-key".to_owned())
+            .with_subject("test-subject".to_owned());
+        let client = build_download_client(&url, auth).unwrap();
+        let task_dest = dest.clone();
+        let task =
+            tokio::spawn(async move { download_one(&client, &"0".repeat(64), &task_dest).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while std::fs::read_dir(dir.path()).unwrap().count() == 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn recursive_download_cannot_escape_destination_with_server_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("downloads");
+        let valuable = dir.path().join("valuable");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(&valuable, b"original outside directory").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let response_base = base.clone();
+        let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+            let response_base = response_base.clone();
+            async move {
+                if uri.path().contains("xet-read-token") {
+                    let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
+                    axum::Json(serde_json::json!({"casUrl": response_base, "exp": exp, "accessToken": "test"}))
+                } else {
+                    axum::Json(serde_json::json!({"entries": [{"path": "../valuable", "isDir": false, "fileId": "invalid"}], "nextCursor": null}))
+                }
+            }
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url =
+            XetUrl::parse(&format!("xet://127.0.0.1:{port}/github/team/assets/main/")).unwrap();
+        let auth = sdx::Auth::new(&base, url.repository_id())
+            .unwrap()
+            .with_api_key("test-bootstrap-key".to_owned())
+            .with_subject("test-subject".to_owned());
+        let client = build_download_client(&url, auth).unwrap();
+        assert!(
+            download_dir(&client, &url, dest.to_str().unwrap())
+                .await
+                .is_err()
+        );
+        server.abort();
+        assert_eq!(
+            std::fs::read(&valuable).unwrap(),
+            b"original outside directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_download_preserves_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("download");
+        std::fs::write(&dest, b"valuable original").unwrap();
+        let url = XetUrl::parse("xet://127.0.0.1:9/github/team/assets/main").unwrap();
+        let auth = sdx::Auth::new("http://127.0.0.1:9", url.repository_id()).unwrap();
+        let client = build_download_client(&url, auth).unwrap();
+        assert!(
+            download_one(&client, "invalid-file-id", &dest)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"valuable original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    struct OutputWriter {
+        bytes: Vec<u8>,
+        failure: Option<std::io::ErrorKind>,
+        flush_failure: bool,
+        flushed: bool,
+    }
+
+    impl Write for OutputWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(kind) = self.failure {
+                return Err(std::io::Error::from(kind));
+            }
+            let count = bytes.len().min(2);
+            let bytes = bytes
+                .get(..count)
+                .ok_or_else(|| std::io::Error::other("invalid output fixture range"))?;
+            self.bytes.extend_from_slice(bytes);
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushed = true;
+            if self.flush_failure {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn command_lines_preserve_short_write_text_and_surface_io_failures() {
+        let mut writer = OutputWriter {
+            bytes: Vec::new(),
+            failure: None,
+            flush_failure: false,
+            flushed: false,
+        };
+        write_line(
+            &mut writer,
+            format_args!("{size:>12} {}", "remote/file", size = 100),
+        )
+        .unwrap();
+        assert_eq!(writer.bytes, b"         100 remote/file\n");
+        assert!(writer.flushed);
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::StorageFull,
+        ] {
+            writer.failure = Some(kind);
+            let error = write_line(&mut writer, format_args!("deleted {} path(s)", 1)).unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert!(matches!(XetError::from(error), XetError::Io(error) if error.kind() == kind));
+        }
+        writer.failure = None;
+        writer.flush_failure = true;
+        assert_eq!(
+            write_line(&mut writer, format_args!("files: {}", 1))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
 }
