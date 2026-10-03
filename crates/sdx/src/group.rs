@@ -858,10 +858,12 @@ impl GroupedUploadStream {
     /// Returns this upload's status snapshot.
     #[must_use]
     pub fn status(&self) -> XetTaskState {
+        // The handle owns its upload session; dropping the parent group does
+        // not abort it. Explicit abort is also retained in the handle flags.
         let aborted = self
             .group
             .upgrade()
-            .is_none_or(|group| group.aborted.load(Ordering::Relaxed));
+            .is_some_and(|group| group.aborted.load(Ordering::Relaxed));
         self.registration.state(aborted)
     }
 
@@ -973,6 +975,75 @@ mod tests {
             .mount(server)
             .await;
         client(server).await
+    }
+
+    #[tokio::test]
+    async fn retained_upload_status_survives_parent_drop() {
+        let server = MockServer::start().await;
+        let client = upload_client(&server, Duration::ZERO).await;
+        let group = client.new_upload_group().unwrap();
+        let handle = group.upload_stream().unwrap();
+        let group_clone = group.clone();
+        drop(group);
+        assert_eq!(handle.status(), XetTaskState::Queued);
+        drop(group_clone);
+        assert_eq!(handle.status(), XetTaskState::Queued);
+        handle
+            .write(Bytes::from_static(b"ordinary payload"))
+            .await
+            .unwrap();
+        assert_eq!(handle.status(), XetTaskState::InProgress);
+        let info = handle.finish().await.unwrap();
+        assert_eq!(info.total_bytes, 16);
+        assert_eq!(handle.try_finish(), Some(info));
+        assert_eq!(handle.status(), XetTaskState::Completed);
+        handle.cancel();
+        assert_eq!(handle.status(), XetTaskState::Cancelled);
+        assert!(handle.write(Bytes::new()).await.is_err());
+        assert!(handle.finish().await.is_err());
+
+        let aborted_group = client.new_upload_group().unwrap();
+        let aborted = aborted_group.upload_stream().unwrap();
+        aborted_group.abort();
+        drop(aborted_group);
+        assert_eq!(aborted.status(), XetTaskState::Cancelled);
+        assert!(aborted.write(Bytes::new()).await.is_err());
+        assert!(aborted.finish().await.is_err());
+        tokio::task::unconstrained(async { drop(server) }).await;
+    }
+
+    #[tokio::test]
+    async fn failed_upload_status_survives_parent_drop() {
+        let server = MockServer::start().await;
+        let client = upload_client(&server, Duration::ZERO).await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/v1/chunks/default-merkledb/.*",
+            ))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(json!({"error": "owned failure"})),
+            )
+            .mount(&server)
+            .await;
+        let group = client.new_upload_group().unwrap();
+        let handle = group.upload_stream().unwrap();
+        handle
+            .write(Bytes::from_static(b"ordinary payload"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            handle.finish().await,
+            Err(SdxError::Transfer(crate::error::TransferError::BadRequest(
+                _
+            )))
+        ));
+        let failed = handle.status();
+        assert!(matches!(failed, XetTaskState::Failed(_)));
+        drop(group);
+        assert_eq!(handle.status(), failed);
+        handle.cancel();
+        assert_eq!(handle.status(), XetTaskState::Cancelled);
+        tokio::task::unconstrained(async { drop(server) }).await;
     }
 
     #[tokio::test]
