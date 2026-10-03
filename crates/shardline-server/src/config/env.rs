@@ -975,6 +975,18 @@ pub fn load_server_config_from_env_with_toml(
     load_server_config_from_env()
 }
 
+/// Resolves the optional TOML metadata URL without loading server-only settings.
+///
+/// Expands `${VAR_NAME}` references using the same environment interpolation as
+/// server configuration. Callers apply explicit and environment URL precedence.
+#[must_use]
+pub fn load_index_postgres_url_from_toml(toml: &ShardlineTomlConfig) -> Option<String> {
+    toml.index
+        .as_ref()
+        .and_then(|index| index.postgres_url.as_deref())
+        .map(interpolate_env_vars)
+}
+
 /// Interpolates `${VAR_NAME}` patterns in `value` using the current process
 /// environment. Returns the original value when no patterns are found.
 fn interpolate_env_vars(value: &str) -> String {
@@ -1013,6 +1025,22 @@ fn interpolate_env_vars(value: &str) -> String {
 #[cfg(test)]
 mod interpolate_tests {
     use super::interpolate_env_vars;
+
+    #[test]
+    fn metadata_url_helper_interpolates_without_server_configuration() {
+        let config: super::ShardlineTomlConfig = toml::from_str(
+            "[index]\npostgres_url = \"${DATABASE_URL}\"\n[auth]\nprovider = \"not-a-server-provider\"\n",
+        )
+        .unwrap();
+        super::super::environment::set_test_var("DATABASE_URL", "postgres://owned/db");
+        assert_eq!(
+            super::load_index_postgres_url_from_toml(&config).as_deref(),
+            Some("postgres://owned/db")
+        );
+        super::super::environment::remove_test_var("DATABASE_URL");
+        let empty: super::ShardlineTomlConfig = toml::from_str("").unwrap();
+        assert!(super::load_index_postgres_url_from_toml(&empty).is_none());
+    }
 
     #[test]
     fn test_no_vars() {

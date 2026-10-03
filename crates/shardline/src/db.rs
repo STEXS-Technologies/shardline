@@ -3,13 +3,17 @@ use std::{env::var, path::Path};
 use shardline_index::LocalIndexStore;
 use shardline_server::{
     DatabaseMigrationCommand, DatabaseMigrationError, DatabaseMigrationOptions,
-    DatabaseMigrationReport, run_database_migration,
+    DatabaseMigrationReport, ServerConfigError, load_index_postgres_url_from_toml,
+    load_toml_config, run_database_migration,
 };
 use thiserror::Error;
 
 /// Database-migration runtime failure.
 #[derive(Debug, Error)]
 pub enum DbRuntimeError {
+    /// The selected or auto-detected configuration file could not be loaded.
+    #[error(transparent)]
+    Config(#[from] ServerConfigError),
     /// No database URL was supplied and the active environment does not configure one.
     #[error(
         "no Postgres metadata URL configured; set SHARDLINE_INDEX_POSTGRES_URL or pass --database-url"
@@ -24,15 +28,22 @@ pub enum DbRuntimeError {
 ///
 /// # Errors
 ///
-/// Returns [`DbRuntimeError`] when no Postgres URL is available or the migration engine
-/// fails.
+/// Resolves the URL from the explicit override, environment, then active TOML.
+/// Returns [`DbRuntimeError`] when TOML loading fails, no Postgres URL is available,
+/// or the migration engine fails. Server authentication and provider bootstrap
+/// are not required to administer the schema.
 pub async fn run_db_migration(
     database_url_override: Option<&str>,
     command: DatabaseMigrationCommand,
 ) -> Result<DatabaseMigrationReport, DbRuntimeError> {
+    let config_path = crate::config::selected_config_path(None);
+    let toml =
+        load_toml_config(config_path.as_deref()).map_err(ServerConfigError::ConfigFileError)?;
     let database_url = if let Some(database_url) = database_url_override {
         database_url.to_owned()
     } else if let Ok(database_url) = var("SHARDLINE_INDEX_POSTGRES_URL") {
+        database_url
+    } else if let Some(database_url) = toml.as_ref().and_then(load_index_postgres_url_from_toml) {
         database_url
     } else {
         return Err(DbRuntimeError::MissingDatabaseUrl);
