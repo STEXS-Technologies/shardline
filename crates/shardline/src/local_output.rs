@@ -468,12 +468,20 @@ fn invalid_output_path_error() -> io::Error {
 
 /// Prints an error and its full source chain to stderr.
 pub fn print_error_chain(error: &dyn Error) {
-    eprintln!("{error}");
+    let _output_result = write_error_chain(&mut io::stderr().lock(), error);
+}
+
+pub(crate) fn write_error_chain(
+    writer: &mut (impl Write + ?Sized),
+    error: &dyn Error,
+) -> io::Result<()> {
+    writeln!(writer, "{error}")?;
     let mut source = error.source();
     while let Some(next) = source {
-        eprintln!("caused by: {next}");
+        writeln!(writer, "caused by: {next}")?;
         source = next.source();
     }
+    writer.flush()
 }
 
 #[cfg(test)]
@@ -844,5 +852,54 @@ mod tests {
         }
         assert_eq!(std::fs::read(output).unwrap(), b"previous");
         assert_eq!(std::fs::read_dir(sandbox.path()).unwrap().count(), 1);
+    }
+    struct FailingDiagnosticWriter {
+        fail_write: bool,
+        error_kind: std::io::ErrorKind,
+        bytes: Vec<u8>,
+    }
+
+    impl std::io::Write for FailingDiagnosticWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                return Err(std::io::Error::from(self.error_kind));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(self.error_kind))
+        }
+    }
+
+    #[test]
+    fn error_chain_writer_preserves_details_and_propagates_write_and_flush_failures() {
+        let error = ChainedError {
+            message: "outer error",
+            source: Some(Box::new(TestError("inner cause"))),
+        };
+        let mut bytes = Vec::new();
+        super::write_error_chain(&mut bytes, &error).unwrap();
+        assert_eq!(bytes, b"outer error\ncaused by: inner cause\n");
+        for error_kind in [
+            std::io::ErrorKind::StorageFull,
+            std::io::ErrorKind::BrokenPipe,
+        ] {
+            for fail_write in [true, false] {
+                let mut writer = FailingDiagnosticWriter {
+                    fail_write,
+                    error_kind,
+                    bytes: Vec::new(),
+                };
+                let returned = super::write_error_chain(&mut writer, &error).unwrap_err();
+                assert_eq!(returned.kind(), error_kind);
+                if fail_write {
+                    assert!(writer.bytes.is_empty());
+                } else {
+                    assert_eq!(writer.bytes, bytes);
+                }
+            }
+        }
     }
 }
