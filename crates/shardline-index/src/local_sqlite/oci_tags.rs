@@ -70,6 +70,20 @@ fn verify_oci_tag_listing_evidence(
     transaction: &Transaction<'_>,
     values: &[OciTagEntry],
 ) -> Result<(), LocalIndexStoreError> {
+    // Bound parameters below SQLite's traditional 999-variable ceiling, and
+    // keep transient event/commit JSON limited to one verification chunk.
+    // All chunks share the caller's transaction and snapshot.
+    const TAGS_PER_EVIDENCE_QUERY: usize = 900;
+    for chunk in values.chunks(TAGS_PER_EVIDENCE_QUERY) {
+        verify_oci_tag_listing_evidence_chunk(transaction, chunk)?;
+    }
+    Ok(())
+}
+
+fn verify_oci_tag_listing_evidence_chunk(
+    transaction: &Transaction<'_>,
+    values: &[OciTagEntry],
+) -> Result<(), LocalIndexStoreError> {
     if values.is_empty() {
         return Ok(());
     }
@@ -623,5 +637,142 @@ mod tests {
             .await
             .unwrap();
         assert!(current == Some(first) || current == Some(second));
+    }
+
+    fn listing_fixture(
+        tag_count: usize,
+        retarget_final: bool,
+    ) -> (tempfile::TempDir, LocalIndexStore) {
+        use shardline_reliability::{OciTagEvidenceLog, OciTagSnapshot};
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(directory.path().to_path_buf()).unwrap();
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        for index in 0..tag_count {
+            let tag = format!("t{index:05}");
+            let initial = OciTagSnapshot::new(
+                "chunk-fixture",
+                "team/assets",
+                tag.clone(),
+                Some("a".repeat(64)),
+            )
+            .unwrap();
+            let mut evidence = OciTagEvidenceLog::baseline(initial).unwrap();
+            let retarget = retarget_final && index == tag_count.saturating_sub(1);
+            let digest = if retarget { "b" } else { "a" }.repeat(64);
+            if retarget {
+                evidence
+                    .record(
+                        OciTagSnapshot::new(
+                            "chunk-fixture",
+                            "team/assets",
+                            tag.clone(),
+                            Some(digest.clone()),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            transaction.execute(
+                "INSERT INTO shardline_oci_tags(scope_namespace,repository,tag,digest_hex) VALUES('chunk-fixture','team/assets',?1,?2)",
+                params![tag,digest]).unwrap();
+            for event in evidence.events() {
+                persist_oci_tag_evidence(&transaction, event).unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+        (directory, store)
+    }
+
+    fn chunk_listing_values(transaction: &Transaction<'_>) -> Vec<OciTagEntry> {
+        let mut statement = transaction.prepare(
+            "SELECT scope_namespace,repository,tag,digest_hex FROM shardline_oci_tags WHERE scope_namespace='chunk-fixture' ORDER BY tag"
+        ).unwrap();
+        collect_rows(statement.query_map([], entry_from_row).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_oci_tag_listing_exceeds_sqlite_parameter_limit() {
+        // Bundled SQLite allows 32,766 parameters. The prior verifier used one
+        // per tag plus its operation-kind parameter, so this valid population
+        // exceeded the limit by one. Bulk seeding keeps fixture setup atomic.
+        let (_directory, store) = listing_fixture(32_766, false);
+        let values = store
+            .list_oci_tags("chunk-fixture", "team/assets", None, 32_766)
+            .await
+            .unwrap();
+        assert_eq!(values.len(), 32_766);
+        assert_eq!(values.first().unwrap().tag, "t00000");
+        assert_eq!(values.last().unwrap().tag, "t32765");
+        assert!(
+            values
+                .iter()
+                .all(|entry| entry.digest_hex == "a".repeat(64))
+        );
+    }
+
+    #[test]
+    fn oci_tag_listing_chunks_share_tag_and_evidence_snapshot_during_retarget() {
+        let (_directory, store) = listing_fixture(901, true);
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let values = chunk_listing_values(&transaction);
+        let mut retargeted = values.last().unwrap().clone();
+        retargeted.digest_hex = "c".repeat(64);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(store.upsert_oci_tag(&retargeted)).unwrap();
+        // The writer committed between the tag row read and both evidence
+        // queries. Every chunk must still verify the reader's older snapshot.
+        verify_oci_tag_listing_evidence(&transaction, &values).unwrap();
+        transaction.commit().unwrap();
+        let latest = runtime
+            .block_on(store.oci_tag("chunk-fixture", "team/assets", "t00900"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.digest_hex, retargeted.digest_hex);
+    }
+
+    #[test]
+    fn oci_tag_listing_chunks_reject_late_missing_null_forged_and_mismatched_evidence() {
+        let (_directory, store) = listing_fixture(901, true);
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let values = chunk_listing_values(&transaction);
+        let last = values.last().unwrap();
+        let operation = oci_tag_snapshot(
+            &last.scope_namespace,
+            &last.repository,
+            &last.tag,
+            Some(last.digest_hex.clone()),
+        )
+        .unwrap()
+        .evidence_operation()
+        .unwrap();
+        for sql in [
+            "DELETE FROM shardline_reliability_events WHERE operation_kind='OciTag' AND operation_id=?1",
+            "UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='OciTag' AND operation_id=?1 AND sequence=1",
+            "UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='OciTag' AND operation_id=?1 AND sequence=0",
+            "UPDATE shardline_reliability_events SET merkle_commit_json='{\"forged\":true}' WHERE operation_kind='OciTag' AND operation_id=?1 AND sequence=1",
+            "UPDATE shardline_reliability_events SET event_json='invalid JSON' WHERE operation_kind='OciTag' AND operation_id=?1 AND sequence=1",
+            "UPDATE shardline_reliability_events SET sequence=3 WHERE operation_kind='OciTag' AND operation_id=?1 AND sequence=1",
+        ] {
+            transaction.execute_batch("SAVEPOINT corruption").unwrap();
+            transaction.execute(sql, [&operation.operation_id]).unwrap();
+            let error = verify_oci_tag_listing_evidence(&transaction, &values)
+                .expect_err("late corrupt evidence must abort the complete listing");
+            if sql.contains("SET sequence=3") {
+                assert!(
+                    format!("{error:?}").contains("OCI tag listing evidence sequence mismatch")
+                );
+            }
+            transaction
+                .execute_batch("ROLLBACK TO corruption; RELEASE corruption")
+                .unwrap();
+        }
+        let mut mismatched = values;
+        mismatched.last_mut().unwrap().digest_hex = "d".repeat(64);
+        assert!(verify_oci_tag_listing_evidence(&transaction, &mismatched).is_err());
     }
 }
