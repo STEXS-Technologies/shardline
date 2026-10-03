@@ -1,7 +1,13 @@
-use std::{ffi::OsString, num::NonZeroUsize};
+use std::{
+    ffi::OsString,
+    fs,
+    io::{self, Cursor},
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
-use dotenvy::from_filename;
+use dotenvy::{from_read, from_read_iter};
 use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_reliability::OperationKind;
 use shardline_server::{
@@ -50,12 +56,7 @@ impl CliCommand {
         if let Some(env_path) = &definition.env_file
             && !gc_schedule_install
         {
-            from_filename(env_path).map_err(|error| {
-                CliParseError::validation(
-                    ErrorKind::InvalidValue,
-                    format!("failed to load env file {}: {error}", env_path.display()),
-                )
-            })?;
+            load_cli_env_file(env_path)?;
         }
 
         // Preserve the explicit path for every configuration-consuming command.
@@ -74,6 +75,50 @@ impl CliCommand {
     pub fn help_text() -> String {
         cli_definition_command().render_long_help().to_string()
     }
+}
+
+fn load_cli_env_file(path: &Path) -> Result<(), CliParseError> {
+    let failure = |error: &dyn std::fmt::Display| {
+        CliParseError::validation(
+            ErrorKind::InvalidValue,
+            format!("failed to load env file {}: {error}", path.display()),
+        )
+    };
+    // Validate the entire immutable input before dotenv mutates process state.
+    // A malformed later line must not leave an earlier configuration override
+    // behind for a subsequent embedded invocation.
+    let resolved = resolve_cli_env_file(path).map_err(|error| failure(&error))?;
+    let bytes = fs::read(resolved).map_err(|error| failure(&error))?;
+    for entry in from_read_iter(Cursor::new(&bytes)) {
+        let (key, value) = entry.map_err(|error| failure(&error))?;
+        if key.is_empty() || key.contains(['=', '\0']) {
+            return Err(failure(
+                &"environment names must be nonempty and contain neither '=' nor NUL bytes",
+            ));
+        }
+        if value.contains('\0') {
+            return Err(failure(&"environment values cannot contain NUL bytes"));
+        }
+    }
+    // Use dotenv's native application semantics, preserving interpolation,
+    // duplicates and existing-environment precedence from the original loader.
+    from_read(Cursor::new(bytes)).map_err(|error| failure(&error))
+}
+
+fn resolve_cli_env_file(path: &Path) -> io::Result<PathBuf> {
+    // Match dotenv's Finder: relative filenames search the current directory
+    // and its ancestors, prefer the nearest regular file, and skip directories.
+    let directory = std::env::current_dir()?;
+    for ancestor in directory.ancestors() {
+        let candidate = ancestor.join(path);
+        match fs::metadata(&candidate) {
+            Ok(metadata) if metadata.is_file() => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound, "path not found"))
 }
 
 pub(crate) fn cli_definition_command() -> clap::Command {
