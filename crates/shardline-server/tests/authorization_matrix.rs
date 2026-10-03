@@ -2158,3 +2158,84 @@ async fn tenant_isolation_across_repositories() {
         "xet: repo A must still reconstruct its own file"
     );
 }
+
+#[tokio::test]
+async fn repeated_authorization_rejects_http_mutations_without_first_value_selection() {
+    let server = TestServer::start().await;
+    let client = reqwest::Client::new();
+    let valid = bearer(&mint_token(TokenScope::Write, OWNER_A, NAME_A));
+    let other_repository = bearer(&mint_token(TokenScope::Write, OWNER_B, NAME_B));
+    let invalid = bearer(GARBAGE_TOKEN);
+    let content = b"duplicate-authorization-must-not-publish";
+    let cas_url = server.url(&format!("/v1/bazel/cache/cas/{}", sha256_hex(content)));
+    let info_url = server.url(&format!("/api/models/{OWNER_A}/{NAME_A}"));
+    let create_url = server.url("/api/repos/create");
+    let create_body = serde_json::json!({
+        "type": "model", "name": format!("{OWNER_A}/{NAME_A}"), "private": true
+    });
+    for (first, second) in [
+        (&valid, &invalid),
+        (&invalid, &valid),
+        (&valid, &other_repository),
+        (&valid, &valid),
+    ] {
+        let response = client
+            .put(&cas_url)
+            .header("Authorization", first)
+            .header("Authorization", second)
+            .body(content.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_denied_401(response.status(), "repeated credentials", "bazel PUT");
+        let response = client
+            .get(&cas_url)
+            .header("Authorization", &valid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        let response = client
+            .post(&create_url)
+            .header("Authorization", first)
+            .header("Authorization", second)
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap();
+        assert_denied_401(response.status(), "repeated credentials", "hub create");
+        let response = client
+            .get(&info_url)
+            .header("Authorization", &valid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+    let response = client
+        .put(&cas_url)
+        .header("Authorization", &valid)
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let stored = client
+        .get(&cas_url)
+        .header("Authorization", &valid)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(&stored[..], content);
+    let response = client
+        .post(&create_url)
+        .header("Authorization", &valid)
+        .json(&create_body)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+}

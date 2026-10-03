@@ -9,7 +9,7 @@ pub use shardline_rebuild::{
 use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
 
 use crate::{
-    ServerConfig, ServerError,
+    ServerConfig, ServerError, maintenance_barrier,
     object_store::{ServerObjectStore, object_store_from_config},
     postgres_backend::connect_postgres_metadata_pool,
     record_store::LocalRecordStore,
@@ -52,6 +52,14 @@ impl From<RebuildError> for ServerError {
 /// Returns [`ServerError`] when version records cannot be scanned or latest records
 /// cannot be written or removed.
 pub async fn run_index_rebuild(config: ServerConfig) -> Result<IndexRebuildReport, ServerError> {
+    // A version snapshot must remain authoritative until all derived heads and
+    // reconstruction rows have been reconciled. Coordinate with uploads and GC.
+    let _maintenance_guard = if let Some(url) = config.index_postgres_url() {
+        let pool = maintenance_barrier::postgres_coordination_pool(url)?;
+        maintenance_barrier::acquire_postgres_exclusive(&pool).await?
+    } else {
+        maintenance_barrier::acquire_local_exclusive(config.root_dir()).await?
+    };
     let object_store = object_store_from_config(&config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
@@ -91,6 +99,7 @@ pub async fn run_index_rebuild(config: ServerConfig) -> Result<IndexRebuildRepor
 pub async fn run_local_index_rebuild(
     root: PathBuf,
 ) -> Result<LocalIndexRebuildReport, ServerError> {
+    let _maintenance_guard = maintenance_barrier::acquire_local_exclusive(&root).await?;
     let object_store = ServerObjectStore::local(root.join("chunks"))?;
     let index_store = LocalIndexStore::open(root.clone());
     let record_store = LocalRecordStore::open(root);

@@ -65,7 +65,7 @@ pub enum XetTaskState {
     Queued,
     /// Stream started and reconstruction is in flight.
     InProgress,
-    /// Stream finished normally (all scheduled bytes delivered).
+    /// Stream finished normally (the consumer observed end of stream).
     Completed,
     /// A background task failed; the error message is attached.
     Failed(String),
@@ -108,6 +108,8 @@ struct StreamRegistration {
     start_signal: Option<Arc<Notify>>,
     started: AtomicBool,
     finished: AtomicBool,
+    explicitly_cancelled: AtomicBool,
+    observed_failure: Mutex<Option<String>>,
 }
 
 impl StreamRegistration {
@@ -118,6 +120,8 @@ impl StreamRegistration {
             start_signal: stream.pending_start_signal(),
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            explicitly_cancelled: AtomicBool::new(false),
+            observed_failure: Mutex::new(None),
         })
     }
 
@@ -128,28 +132,49 @@ impl StreamRegistration {
             start_signal: stream.pending_start_signal(),
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            explicitly_cancelled: AtomicBool::new(false),
+            observed_failure: Mutex::new(None),
         })
     }
 
     /// Cancels this stream only (never the group or its siblings).
     fn cancel(&self) {
+        self.explicitly_cancelled.store(true, Ordering::Relaxed);
         self.run_state.cancel();
         if let Some(signal) = &self.start_signal {
             signal.notify_one();
         }
     }
 
+    fn observe_result<T>(&self, result: &Result<Option<T>, SdxError>) {
+        if let Err(error) = result {
+            self.observed_failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get_or_insert_with(|| error.to_string());
+        }
+        if result.as_ref().is_ok_and(Option::is_none) {
+            self.finished.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Computes this stream's status snapshot.
     fn state(&self, group_aborted: bool) -> XetTaskState {
-        if group_aborted || self.run_state.is_cancelled() {
+        if group_aborted || self.explicitly_cancelled.load(Ordering::Relaxed) {
             return XetTaskState::Cancelled;
         }
-        if let Some(message) = self.run_state.error_message() {
+        let observed = self
+            .observed_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(message) = observed.or_else(|| self.run_state.error_message()) {
             return XetTaskState::Failed(message);
         }
-        let scheduled = self.run_state.total_bytes_scheduled();
-        let delivered = self.run_state.total_bytes_delivered();
-        if self.finished.load(Ordering::Relaxed) || (scheduled > 0 && delivered >= scheduled) {
+        if self.run_state.is_cancelled() {
+            return XetTaskState::Cancelled;
+        }
+        if self.finished.load(Ordering::Relaxed) {
             return XetTaskState::Completed;
         }
         if self.started.load(Ordering::Relaxed) {
@@ -395,9 +420,7 @@ impl GroupedDownloadStream {
     pub async fn next(&mut self) -> Result<Option<Bytes>, SdxError> {
         self.registration.started.store(true, Ordering::Relaxed);
         let result = self.inner.next().await;
-        if result.as_ref().is_ok_and(Option::is_none) {
-            self.registration.finished.store(true, Ordering::Relaxed);
-        }
+        self.registration.observe_result(&result);
         result
     }
 
@@ -422,9 +445,7 @@ impl GroupedDownloadStream {
     pub fn blocking_next(&mut self) -> Result<Option<Bytes>, SdxError> {
         self.registration.started.store(true, Ordering::Relaxed);
         let result = self.inner.blocking_next();
-        if result.as_ref().is_ok_and(Option::is_none) {
-            self.registration.finished.store(true, Ordering::Relaxed);
-        }
+        self.registration.observe_result(&result);
         result
     }
 
@@ -497,9 +518,7 @@ impl GroupedUnorderedDownloadStream {
     pub async fn next(&mut self) -> Result<Option<(u64, Bytes)>, SdxError> {
         self.registration.started.store(true, Ordering::Relaxed);
         let result = self.inner.next().await;
-        if result.as_ref().is_ok_and(Option::is_none) {
-            self.registration.finished.store(true, Ordering::Relaxed);
-        }
+        self.registration.observe_result(&result);
         result
     }
 
@@ -520,9 +539,7 @@ impl GroupedUnorderedDownloadStream {
     pub fn blocking_next(&mut self) -> Result<Option<(u64, Bytes)>, SdxError> {
         self.registration.started.store(true, Ordering::Relaxed);
         let result = self.inner.blocking_next();
-        if result.as_ref().is_ok_and(Option::is_none) {
-            self.registration.finished.store(true, Ordering::Relaxed);
-        }
+        self.registration.observe_result(&result);
         result
     }
 
@@ -572,6 +589,8 @@ struct XetUploadCommitInner {
     aborted: AtomicBool,
     active: Mutex<HashMap<u64, Weak<UploadRegistration>>>,
     next_id: AtomicU64,
+    #[cfg(test)]
+    registration_gate: Option<Arc<std::sync::Barrier>>,
 }
 
 /// Per-upload bookkeeping shared between the group and the handle wrapper.
@@ -614,6 +633,8 @@ impl XetUploadCommit {
                 aborted: AtomicBool::new(false),
                 active: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(0),
+                #[cfg(test)]
+                registration_gate: None,
             }),
         })
     }
@@ -642,6 +663,18 @@ impl XetUploadCommit {
     /// Returns [`SdxError`] when the group has been aborted.
     pub fn upload_stream(&self) -> Result<GroupedUploadStream, SdxError> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        if let Some(gate) = &self.inner.registration_gate {
+            gate.wait();
+            gate.wait();
+        }
+        // Serialize the abort check with registration: abort must either see
+        // this handle in the registry, or prevent its creation altogether.
+        let mut active = self
+            .inner
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.inner.aborted.load(Ordering::Relaxed) {
             return Err(SdxError::UploadSession(
                 "upload group aborted; cannot start new streams".to_owned(),
@@ -651,11 +684,6 @@ impl XetUploadCommit {
         let registration = Arc::new(UploadRegistration {
             handle: handle.clone(),
         });
-        let mut active = self
-            .inner
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         active.insert(id, Arc::downgrade(&registration));
         Ok(GroupedUploadStream::new(
             handle,
@@ -670,9 +698,16 @@ impl XetUploadCommit {
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when a xorb upload failed, the shard cannot be
-    /// built, or the shard POST fails. Calling twice fails.
+    /// Returns [`SdxError`] when the group is already aborted, a xorb upload
+    /// failed, the shard cannot be built, or the shard POST fails. Calling
+    /// twice fails. An abort after commit begins does not roll back a commit
+    /// already in progress.
     pub async fn commit(&self) -> Result<UploadReport, SdxError> {
+        if self.inner.aborted.load(Ordering::Relaxed) {
+            return Err(SdxError::UploadSession(
+                "upload group aborted; cannot commit".to_owned(),
+            ));
+        }
         self.inner.session.finalize().await
     }
 
@@ -823,10 +858,12 @@ impl GroupedUploadStream {
     /// Returns this upload's status snapshot.
     #[must_use]
     pub fn status(&self) -> XetTaskState {
+        // The handle owns its upload session; dropping the parent group does
+        // not abort it. Explicit abort is also retained in the handle flags.
         let aborted = self
             .group
             .upgrade()
-            .is_none_or(|group| group.aborted.load(Ordering::Relaxed));
+            .is_some_and(|group| group.aborted.load(Ordering::Relaxed));
         self.registration.state(aborted)
     }
 
@@ -862,6 +899,258 @@ mod tests {
     const FILE_ID: &str = "0000000000000000000000000000000000000000000000000000000000000000";
     const XORB_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const READ_TOKEN: &str = "read-token";
+
+    async fn upload_controls_inside_runtime() {
+        // These controls never make a request: even an untouched upload must
+        // be safe to inspect, cancel, abort, and drop on an executor thread.
+        let auth = Auth::new(
+            "http://127.0.0.1:1",
+            RepositoryId {
+                provider: "github".to_owned(),
+                owner: "team".to_owned(),
+                repo: "assets".to_owned(),
+                revision: "main".to_owned(),
+            },
+        )
+        .unwrap()
+        .with_api_key("local-test".to_owned());
+        let client = XetClientBuilder::new()
+            .endpoint("xet://127.0.0.1:1/github/team/assets/main")
+            .auth(auth)
+            .build()
+            .unwrap();
+        let direct = client.upload_session().unwrap().upload_stream_handle();
+        direct.abort();
+        assert!(direct.write(Bytes::from_static(b"late")).await.is_err());
+        assert!(direct.finish().await.is_err());
+
+        let group = client.new_upload_group().unwrap();
+        let first = group.upload_stream().unwrap();
+        let second = group.upload_stream().unwrap();
+        assert_eq!(first.status(), XetTaskState::Queued);
+        assert_eq!(group.status().len(), 2);
+        first.cancel();
+        assert_eq!(first.status(), XetTaskState::Cancelled);
+        assert_eq!(second.status(), XetTaskState::Queued);
+        drop(first);
+        assert_eq!(group.active_upload_count(), 1);
+        group.abort();
+        assert_eq!(second.status(), XetTaskState::Cancelled);
+        assert!(group.upload_stream().is_err());
+        drop(second);
+        assert_eq!(group.active_upload_count(), 0);
+        assert!(group.status().is_empty());
+    }
+
+    #[tokio::test]
+    async fn upload_controls_are_safe_in_current_thread_runtime() {
+        upload_controls_inside_runtime().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upload_controls_are_safe_in_multithread_runtime() {
+        upload_controls_inside_runtime().await;
+    }
+
+    async fn upload_client(server: &MockServer, shard_delay: Duration) -> crate::XetClient {
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/xet-write-token/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "casUrl": server.uri(), "exp": 4_000_000_000u64, "accessToken": "write-token",
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(r"/v1/xorbs/default/.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"was_inserted": true})))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/shards"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(shard_delay)
+                    .set_body_json(json!({"result": 1})),
+            )
+            .mount(server)
+            .await;
+        client(server).await
+    }
+
+    #[tokio::test]
+    async fn retained_upload_status_survives_parent_drop() {
+        let server = MockServer::start().await;
+        let client = upload_client(&server, Duration::ZERO).await;
+        let group = client.new_upload_group().unwrap();
+        let handle = group.upload_stream().unwrap();
+        let group_clone = group.clone();
+        drop(group);
+        assert_eq!(handle.status(), XetTaskState::Queued);
+        drop(group_clone);
+        assert_eq!(handle.status(), XetTaskState::Queued);
+        handle
+            .write(Bytes::from_static(b"ordinary payload"))
+            .await
+            .unwrap();
+        assert_eq!(handle.status(), XetTaskState::InProgress);
+        let info = handle.finish().await.unwrap();
+        assert_eq!(info.total_bytes, 16);
+        assert_eq!(handle.try_finish(), Some(info));
+        assert_eq!(handle.status(), XetTaskState::Completed);
+        handle.cancel();
+        assert_eq!(handle.status(), XetTaskState::Cancelled);
+        assert!(handle.write(Bytes::new()).await.is_err());
+        assert!(handle.finish().await.is_err());
+
+        let aborted_group = client.new_upload_group().unwrap();
+        let aborted = aborted_group.upload_stream().unwrap();
+        aborted_group.abort();
+        drop(aborted_group);
+        assert_eq!(aborted.status(), XetTaskState::Cancelled);
+        assert!(aborted.write(Bytes::new()).await.is_err());
+        assert!(aborted.finish().await.is_err());
+        tokio::task::unconstrained(async { drop(server) }).await;
+    }
+
+    #[tokio::test]
+    async fn failed_upload_status_survives_parent_drop() {
+        let server = MockServer::start().await;
+        let client = upload_client(&server, Duration::ZERO).await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/v1/chunks/default-merkledb/.*",
+            ))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(json!({"error": "owned failure"})),
+            )
+            .mount(&server)
+            .await;
+        let group = client.new_upload_group().unwrap();
+        let handle = group.upload_stream().unwrap();
+        handle
+            .write(Bytes::from_static(b"ordinary payload"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            handle.finish().await,
+            Err(SdxError::Transfer(crate::error::TransferError::BadRequest(
+                _
+            )))
+        ));
+        let failed = handle.status();
+        assert!(matches!(failed, XetTaskState::Failed(_)));
+        drop(group);
+        assert_eq!(handle.status(), failed);
+        handle.cancel();
+        assert_eq!(handle.status(), XetTaskState::Cancelled);
+        tokio::task::unconstrained(async { drop(server) }).await;
+    }
+
+    #[tokio::test]
+    async fn upload_constructor_resuming_after_abort_cannot_register() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        let mut group = client.new_upload_group().unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        Arc::get_mut(&mut group.inner).unwrap().registration_gate = Some(gate.clone());
+        let constructing = group.clone();
+        let task = std::thread::spawn(move || constructing.upload_stream());
+        // The constructor started, but has not acquired the registry lock.
+        // Complete abort before allowing that acquisition to proceed.
+        gate.wait();
+        group.abort();
+        gate.wait();
+        assert!(
+            matches!(task.join().unwrap(), Err(SdxError::UploadSession(message))
+            if message == "upload group aborted; cannot start new streams")
+        );
+        assert!(group.is_aborted());
+        assert_eq!(group.active_upload_count(), 0);
+        assert!(group.status().is_empty());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pre_aborted_upload_commit_withholds_completed_and_empty_files() {
+        for payload in [Vec::new(), b"ordinary payload".to_vec()] {
+            for aborted in [false, true] {
+                let server = MockServer::start().await;
+                let client = upload_client(&server, Duration::ZERO).await;
+                let group = client.new_upload_group().unwrap();
+                let handle = group.upload_stream().unwrap();
+                handle.write(payload.clone()).await.unwrap();
+                let info = handle.finish().await.unwrap();
+                if aborted {
+                    group.abort();
+                    assert!(
+                        matches!(group.commit().await, Err(SdxError::UploadSession(message)) if message == "upload group aborted; cannot commit")
+                    );
+                    assert_eq!(handle.status(), XetTaskState::Cancelled);
+                    assert!(group.upload_stream().is_err());
+                } else {
+                    let report = group.commit().await.unwrap();
+                    assert_eq!(report.files, vec![info]);
+                    assert_eq!(report.shard_posts, 1);
+                }
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|request| request.method.as_str() == "POST"
+                            && request.url.path() == "/v1/shards")
+                        .count(),
+                    usize::from(!aborted)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_aborted_empty_group_cannot_commit_healthy_empty_group_can() {
+        let server = MockServer::start().await;
+        let client = upload_client(&server, Duration::ZERO).await;
+        let healthy = client.new_upload_group().unwrap();
+        let report = healthy.commit().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
+        let aborted = client.new_upload_group().unwrap();
+        aborted.abort();
+        assert!(
+            matches!(aborted.commit().await, Err(SdxError::UploadSession(message)) if message == "upload group aborted; cannot commit")
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn abort_does_not_roll_back_an_upload_commit_already_posting() {
+        let server = MockServer::start().await;
+        let client = upload_client(&server, Duration::from_millis(100)).await;
+        let group = client.new_upload_group().unwrap();
+        let handle = group.upload_stream().unwrap();
+        let info = handle.finish().await.unwrap();
+        let committing_group = group.clone();
+        let committing = tokio::spawn(async move { committing_group.commit().await });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.url.path() == "/v1/shards")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        group.abort();
+        let report = committing.await.unwrap().unwrap();
+        assert_eq!(report.files, vec![info]);
+        assert_eq!(report.shard_posts, 1);
+    }
 
     fn serialize_payload(chunks: &[&[u8]]) -> Vec<u8> {
         use xet_core_structures::xorb_object::{CompressionScheme, serialize_chunk};
@@ -932,6 +1221,7 @@ mod tests {
     /// 416 fallback, and a 206 xorb range response (optionally delayed).
     async fn mocks(server: &MockServer, delay: Option<Duration>) {
         let payload = serialize_payload(&[&[7u8; 64], &[9u8; 64]]);
+        let end = payload.len().checked_sub(1).expect("nonempty xorb fixture");
         Mock::given(method("GET"))
             .and(path(format!("/v2/reconstructions/{FILE_ID}")))
             .and(header("authorization", format!("Bearer {READ_TOKEN}")))
@@ -946,7 +1236,7 @@ mod tests {
                     XORB_HASH: [{
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                         "ranges": [
-                            {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                            {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": end}}
                         ]
                     }]
                 }),
@@ -960,7 +1250,7 @@ mod tests {
             .mount(server)
             .await;
         let mut template = ResponseTemplate::new(206)
-            .insert_header("Content-Range", format!("bytes 0-200/{}", payload.len()))
+            .insert_header("Content-Range", format!("bytes 0-{end}/{}", payload.len()))
             .set_body_raw(payload, "application/octet-stream");
         if let Some(delay) = delay {
             template = template.set_delay(delay);
@@ -968,7 +1258,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/transfer/xorb/default/{XORB_HASH}")))
             .and(header("authorization", format!("Bearer {READ_TOKEN}")))
-            .and(header("range", "bytes=0-200"))
+            .and(header("range", format!("bytes=0-{end}")))
             .respond_with(template)
             .mount(server)
             .await;
@@ -1001,6 +1291,336 @@ mod tests {
         let out = drain(&mut stream).await;
         assert_eq!(out, vec![9u8; 64]);
         assert!(group.status().contains(&(id, XetTaskState::Completed)));
+    }
+
+    #[tokio::test]
+    async fn pending_reconstruction_block_is_in_progress_until_observed_eof() {
+        for unordered in [false, true] {
+            let server = MockServer::start().await;
+            let payload = serialize_payload(&[&[7u8; 64]]);
+            let end = payload.len().checked_sub(1).expect("nonempty fixture");
+            let body = v2_response_body(
+                0,
+                serde_json::Value::Array(vec![
+                    json!({
+                        "hash": XORB_HASH, "unpacked_length": 64,
+                        "range": {"start": 0, "end": 1}
+                    });
+                    64
+                ]),
+                json!({XORB_HASH: [{
+                    "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                    "ranges": [{"chunks": {"start": 0, "end": 1},
+                                "bytes": {"start": 0, "end": end}}]
+                }]}),
+            );
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let entered_handler = entered.clone();
+            let release_handler = release.clone();
+            let second_body = body.clone();
+            let app = axum::Router::new().route(
+                "/second",
+                axum::routing::get(move || {
+                    let entered = entered_handler.clone();
+                    let release = release_handler.clone();
+                    let body = second_body.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(body)
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let gate_server = tokio::spawn(async move { axum::serve(listener, app).await });
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+                .and(header("range", "bytes=0-4095"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+                .and(header("range", "bytes=4096-8191"))
+                .respond_with(
+                    ResponseTemplate::new(307)
+                        .insert_header("Location", format!("http://{address}/second")),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+                .respond_with(ResponseTemplate::new(416))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/transfer/xorb/default/{XORB_HASH}")))
+                .respond_with(
+                    ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes 0-{end}/{}", payload.len()))
+                        .set_body_raw(payload, "application/octet-stream"),
+                )
+                .mount(&server)
+                .await;
+            let group = client(&server).await.new_download_stream_group();
+            let mut out = Vec::new();
+            if unordered {
+                let mut stream = group
+                    .download_unordered_stream(FILE_ID, None)
+                    .await
+                    .unwrap();
+                for _ in 0..64 {
+                    let (_, chunk) = stream.next().await.unwrap().unwrap();
+                    out.extend_from_slice(&chunk);
+                }
+                timeout(Duration::from_secs(3), entered.notified())
+                    .await
+                    .unwrap();
+                assert_eq!(out, vec![7u8; 4096]);
+                assert!(
+                    group
+                        .status()
+                        .contains(&(stream.task_id(), XetTaskState::InProgress))
+                );
+                release.notify_one();
+                while let Some((_, chunk)) = stream.next().await.unwrap() {
+                    out.extend_from_slice(&chunk);
+                }
+                assert!(
+                    group
+                        .status()
+                        .contains(&(stream.task_id(), XetTaskState::Completed))
+                );
+            } else {
+                let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
+                for _ in 0..64 {
+                    out.extend_from_slice(&stream.next().await.unwrap().unwrap());
+                }
+                timeout(Duration::from_secs(3), entered.notified())
+                    .await
+                    .unwrap();
+                assert_eq!(out, vec![7u8; 4096]);
+                assert!(
+                    group
+                        .status()
+                        .contains(&(stream.task_id(), XetTaskState::InProgress))
+                );
+                release.notify_one();
+                while let Some(chunk) = stream.next().await.unwrap() {
+                    out.extend_from_slice(&chunk);
+                }
+                assert!(
+                    group
+                        .status()
+                        .contains(&(stream.task_id(), XetTaskState::Completed))
+                );
+            }
+            assert_eq!(out, vec![7u8; 8192]);
+            assert!(group.status().is_empty());
+            gate_server.abort();
+            assert!(gate_server.await.unwrap_err().is_cancelled());
+            tokio::task::unconstrained(async { drop(server) }).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_download_wrappers_complete_only_after_eof() {
+        for unordered in [false, true] {
+            let server = MockServer::start().await;
+            mocks(&server, None).await;
+            let group = client(&server).await.new_download_stream_group();
+            if unordered {
+                let mut stream = group
+                    .download_unordered_stream(FILE_ID, None)
+                    .await
+                    .unwrap();
+                let group_probe = group.clone();
+                tokio::task::spawn_blocking(move || {
+                    let id = stream.task_id();
+                    let mut out = Vec::new();
+                    for _ in 0..2 {
+                        let (_, chunk) = stream.blocking_next().unwrap().unwrap();
+                        out.extend_from_slice(&chunk);
+                    }
+                    assert!(
+                        group_probe
+                            .status()
+                            .contains(&(id, XetTaskState::InProgress))
+                    );
+                    assert!(stream.blocking_next().unwrap().is_none());
+                    assert!(
+                        group_probe
+                            .status()
+                            .contains(&(id, XetTaskState::Completed))
+                    );
+                    out.sort_unstable();
+                    assert_eq!(out, [vec![7u8; 64], vec![9u8; 64]].concat());
+                })
+                .await
+                .unwrap();
+            } else {
+                let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
+                let group_probe = group.clone();
+                tokio::task::spawn_blocking(move || {
+                    let id = stream.task_id();
+                    let mut out = Vec::new();
+                    for _ in 0..2 {
+                        out.extend_from_slice(&stream.blocking_next().unwrap().unwrap());
+                    }
+                    assert!(
+                        group_probe
+                            .status()
+                            .contains(&(id, XetTaskState::InProgress))
+                    );
+                    assert!(stream.blocking_next().unwrap().is_none());
+                    assert!(
+                        group_probe
+                            .status()
+                            .contains(&(id, XetTaskState::Completed))
+                    );
+                    assert_eq!(out, [vec![7u8; 64], vec![9u8; 64]].concat());
+                })
+                .await
+                .unwrap();
+            }
+            assert!(group.status().is_empty());
+            tokio::task::unconstrained(async { drop(server) }).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn download_failure_status_survives_typed_error_consumption_and_eof() {
+        for unordered in [false, true] {
+            for blocking in [false, true] {
+                let server = MockServer::start().await;
+                let group = client(&server).await.new_download_stream_group();
+                Mock::given(method("GET"))
+                    .and(wiremock::matchers::path_regex(r".*/reconstructions/.*"))
+                    .respond_with(
+                        ResponseTemplate::new(404)
+                            .set_body_json(json!({"error": "owned reconstruction failure"})),
+                    )
+                    .mount(&server)
+                    .await;
+                if unordered {
+                    let mut stream = group
+                        .download_unordered_stream(FILE_ID, None)
+                        .await
+                        .unwrap();
+                    let id = stream.task_id();
+                    stream.start();
+                    timeout(Duration::from_secs(5), async {
+                        while stream.registration.run_state.error_message().is_none() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(group.status().contains(&(
+                        id,
+                        XetTaskState::Failed(
+                            "not found (404): owned reconstruction failure".to_owned()
+                        )
+                    )));
+                    let result = if blocking {
+                        let (returned, result) = tokio::task::spawn_blocking(move || {
+                            let result = stream.blocking_next();
+                            (stream, result)
+                        })
+                        .await
+                        .unwrap();
+                        stream = returned;
+                        result
+                    } else {
+                        stream.next().await
+                    };
+                    assert!(
+                        matches!(result, Err(SdxError::Transfer(crate::error::TransferError::NotFound(message)))
+                        if message == "owned reconstruction failure")
+                    );
+                    assert!(stream.next().await.unwrap().is_none());
+                    assert!(group.status().contains(&(
+                        id,
+                        XetTaskState::Failed(
+                            "not found (404): owned reconstruction failure".to_owned()
+                        )
+                    )));
+                    stream.cancel();
+                    assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
+                } else {
+                    let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
+                    let id = stream.task_id();
+                    stream.start();
+                    timeout(Duration::from_secs(5), async {
+                        while stream.registration.run_state.error_message().is_none() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(group.status().contains(&(
+                        id,
+                        XetTaskState::Failed(
+                            "not found (404): owned reconstruction failure".to_owned()
+                        )
+                    )));
+                    let result = if blocking {
+                        let (returned, result) = tokio::task::spawn_blocking(move || {
+                            let result = stream.blocking_next();
+                            (stream, result)
+                        })
+                        .await
+                        .unwrap();
+                        stream = returned;
+                        result
+                    } else {
+                        stream.next().await
+                    };
+                    assert!(
+                        matches!(result, Err(SdxError::Transfer(crate::error::TransferError::NotFound(message)))
+                        if message == "owned reconstruction failure")
+                    );
+                    assert!(stream.next().await.unwrap().is_none());
+                    assert!(group.status().contains(&(
+                        id,
+                        XetTaskState::Failed(
+                            "not found (404): owned reconstruction failure".to_owned()
+                        )
+                    )));
+                    stream.cancel();
+                    assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn group_abort_prevents_a_new_read_after_a_delivered_chunk() {
+        for unordered in [false, true] {
+            let server = MockServer::start().await;
+            mocks(&server, None).await;
+            let group = client(&server).await.new_download_stream_group();
+            if unordered {
+                let mut stream = group
+                    .download_unordered_stream(FILE_ID, None)
+                    .await
+                    .unwrap();
+                let id = stream.task_id();
+                assert_eq!(stream.next().await.unwrap().unwrap().1.len(), 64);
+                group.abort();
+                assert!(stream.next().await.unwrap().is_none());
+                assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
+            } else {
+                let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
+                let id = stream.task_id();
+                assert_eq!(stream.next().await.unwrap().unwrap().len(), 64);
+                group.abort();
+                assert!(stream.next().await.unwrap().is_none());
+                assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
+            }
+        }
     }
 
     #[tokio::test]

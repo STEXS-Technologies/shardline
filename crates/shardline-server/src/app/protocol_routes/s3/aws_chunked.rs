@@ -52,17 +52,27 @@ pub fn is_aws_chunked(headers: &HeaderMap) -> bool {
         })
 }
 
-/// Returns the decoded-content length declared by the client, when present.
+/// Validates the required singleton decoded-content length for AWS-chunked bodies.
+/// Missing, repeated, malformed, or overflowing values are rejected before ingestion.
 ///
-/// `x-amz-decoded-content-length` is only sent with the SigV4 streaming form;
+/// AWS-chunked uploads require `x-amz-decoded-content-length`;
 /// `Content-Length` on a chunked body is the *framed* length and must not be
 /// used for the decoded size.
-#[must_use]
-pub fn declared_decoded_content_length(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get("x-amz-decoded-content-length")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+pub fn declared_decoded_content_length(
+    headers: &HeaderMap,
+) -> Result<u64, shardline_s3_adapter::S3Error> {
+    let invalid =
+        || shardline_s3_adapter::S3Error::invalid_argument("Invalid x-amz-decoded-content-length");
+    let mut values = headers.get_all("x-amz-decoded-content-length").iter();
+    let value = values.next().ok_or_else(invalid)?;
+    if values.next().is_some() {
+        return Err(invalid());
+    }
+    let value = value.to_str().map_err(|_error| invalid())?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    value.parse().map_err(|_error| invalid())
 }
 
 /// The decoder's parse state machine.
@@ -70,10 +80,13 @@ enum AwsChunkState {
     /// Reading the `<hex-size>[;chunk-signature=...]` line.
     ChunkSize,
     /// Reading `remaining` bytes of chunk data.
-    Data { remaining: usize },
+    Data {
+        remaining: usize,
+    },
     /// Expecting the `\r\n` terminator after chunk data.
     Trailer,
     /// The zero-size terminator chunk was seen.
+    Completion,
     Done,
 }
 
@@ -84,6 +97,7 @@ struct AwsChunkedDecoder {
     state: AwsChunkState,
     max_decoded_bytes: u64,
     decoded_bytes: u64,
+    expected_decoded_bytes: Option<u64>,
 }
 
 impl AwsChunkedDecoder {
@@ -97,6 +111,86 @@ impl AwsChunkedDecoder {
             }
             None => Ok(false),
         }
+    }
+
+    /// Reads a bounded CRLF-terminated line, allowing EOF only between lines.
+    async fn line(&mut self) -> Result<Option<Vec<u8>>, ServerError> {
+        loop {
+            if let Some(end) = self.pending.windows(2).position(|bytes| bytes == b"\r\n") {
+                if end.saturating_add(2) > MAX_AWS_CHUNK_LINE_BYTES {
+                    return Err(Self::malformed());
+                }
+                let mut line: Vec<u8> = self.pending.drain(..end.saturating_add(2)).collect();
+                line.truncate(end);
+                return Ok(Some(line));
+            }
+            if self.pending.len() >= MAX_AWS_CHUNK_LINE_BYTES {
+                return Err(Self::malformed());
+            }
+            if !self.fill().await? {
+                return if self.pending.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(Self::truncated())
+                };
+            }
+        }
+    }
+
+    async fn finish(&mut self) -> Result<(), ServerError> {
+        let mut terminated = false;
+        let mut trailers_seen = false;
+        let mut trailers_closed = false;
+        while let Some(line) = self.line().await? {
+            if line.is_empty() {
+                terminated = true;
+                trailers_closed |= trailers_seen;
+                continue;
+            }
+            if trailers_closed {
+                return Err(Self::malformed());
+            }
+            let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+                return Err(Self::malformed());
+            };
+            let name = line.get(..colon).ok_or_else(Self::malformed)?;
+            let name = std::str::from_utf8(name).map_err(|_error| Self::malformed())?;
+            let checksum = name.to_ascii_lowercase();
+            let recognized = checksum
+                .strip_prefix("x-amz-checksum-")
+                .is_some_and(|suffix| {
+                    !suffix.is_empty()
+                        && suffix
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                })
+                || name.eq_ignore_ascii_case("x-amz-trailer-signature");
+            let value = line
+                .get(colon.saturating_add(1)..)
+                .ok_or_else(Self::malformed)?;
+            // AWS documents an optional LF after a checksum value before CRLF.
+            let value = value.strip_suffix(b"\n").unwrap_or(value);
+            if !recognized
+                || value.is_empty()
+                || !value
+                    .iter()
+                    .all(|byte| byte.is_ascii_graphic() || *byte == b' ' || *byte == b'\t')
+            {
+                return Err(Self::malformed());
+            }
+            trailers_seen = true;
+            terminated = false;
+        }
+        if !terminated {
+            return Err(Self::truncated());
+        }
+        if self
+            .expected_decoded_bytes
+            .is_some_and(|expected| expected != self.decoded_bytes)
+        {
+            return Err(Self::malformed());
+        }
+        Ok(())
     }
 
     fn truncated() -> ServerError {
@@ -118,35 +212,16 @@ impl AwsChunkedDecoder {
         loop {
             match self.state {
                 AwsChunkState::ChunkSize => {
-                    // Find the terminating `\n`; its preceding byte must be `\r`.
-                    // Re-scan after every fill: a large payload can arrive in a
-                    // single raw chunk, so the line-length guard must only fire
-                    // when the line genuinely has no terminator within the bound.
-                    let newline = loop {
-                        if let Some(position) = self.pending.iter().position(|&byte| byte == b'\n')
-                        {
-                            break position;
-                        }
-                        if self.pending.len() > MAX_AWS_CHUNK_LINE_BYTES {
-                            return Err(Self::malformed());
-                        }
-                        if !self.fill().await? {
-                            return Err(Self::truncated());
-                        }
-                    };
-                    let cr_before = newline
-                        .checked_sub(1)
-                        .and_then(|index| self.pending.get(index));
-                    if cr_before != Some(&b'\r') {
+                    let line = self.line().await?.ok_or_else(Self::truncated)?;
+                    let size = line.split(|byte| *byte == b';').next().unwrap_or_default();
+                    if size.is_empty() || !size.iter().all(u8::is_ascii_hexdigit) {
                         return Err(Self::malformed());
                     }
-                    let line: Vec<u8> = self.pending.drain(..=newline).collect();
-                    let line = String::from_utf8_lossy(&line);
-                    let size_hex = line.split(';').next().unwrap_or("").trim();
+                    let size_hex = std::str::from_utf8(size).map_err(|_error| Self::malformed())?;
                     let chunk_size =
                         usize::from_str_radix(size_hex, 16).map_err(|_error| Self::malformed())?;
                     if chunk_size == 0 {
-                        self.state = AwsChunkState::Done;
+                        self.state = AwsChunkState::Completion;
                     } else {
                         self.state = AwsChunkState::Data {
                             remaining: chunk_size,
@@ -190,10 +265,12 @@ impl AwsChunkedDecoder {
                     self.pending.drain(..2);
                     self.state = AwsChunkState::ChunkSize;
                 }
-                AwsChunkState::Done => {
-                    self.pending.clear();
+                AwsChunkState::Completion => {
+                    self.finish().await?;
+                    self.state = AwsChunkState::Done;
                     return Ok(None);
                 }
+                AwsChunkState::Done => return Ok(None),
             }
         }
     }
@@ -202,10 +279,13 @@ impl AwsChunkedDecoder {
 /// Wraps a raw request body reader into an AWS-chunked-decoded reader.
 ///
 /// The returned stream yields the decoded payload bytes (no framing); the
-/// decoded byte count is enforced against `max_decoded_bytes`.
+/// decoded byte count is enforced against `max_decoded_bytes`, and a declared
+/// length must match before EOF is returned. Completion framing and the entire
+/// source stream are consumed, including checksum trailers (not cryptographically verified).
 pub fn decode_aws_chunked(
     reader: RequestBodyReader,
     max_decoded_bytes: u64,
+    expected_decoded_bytes: Option<u64>,
 ) -> impl Stream<Item = Result<Bytes, ServerError>> {
     stream::unfold(
         AwsChunkedDecoder {
@@ -214,12 +294,16 @@ pub fn decode_aws_chunked(
             state: AwsChunkState::ChunkSize,
             max_decoded_bytes,
             decoded_bytes: 0,
+            expected_decoded_bytes,
         },
         |mut decoder| async move {
             match decoder.next_decoded().await {
                 Ok(Some(bytes)) => Some((Ok(bytes), decoder)),
                 Ok(None) => None,
-                Err(error) => Some((Err(error), decoder)),
+                Err(error) => {
+                    decoder.state = AwsChunkState::Done;
+                    Some((Err(error), decoder))
+                }
             }
         },
     )
@@ -255,7 +339,7 @@ mod tests {
 
     async fn decode_all(bytes: Vec<u8>, max: u64) -> Result<Vec<u8>, ServerError> {
         let reader = RequestBodyReader::from_bytes(Bytes::from(bytes));
-        let stream = decode_aws_chunked(reader, max);
+        let stream = decode_aws_chunked(reader, max, None);
         tokio::pin!(stream);
         let mut decoded = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -283,7 +367,7 @@ mod tests {
                 .into_iter()
                 .map(|byte| Ok::<_, ServerError>(Bytes::from(vec![byte]))),
         ));
-        let stream = decode_aws_chunked(reader, 1024);
+        let stream = decode_aws_chunked(reader, 1024, None);
         tokio::pin!(stream);
         let mut decoded = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -337,6 +421,109 @@ mod tests {
         assert!(is_aws_chunked(&headers));
         let headers = HeaderMap::new();
         assert!(!is_aws_chunked(&headers));
+    }
+
+    #[test]
+    fn decoded_length_requires_one_unsigned_representable_value() {
+        let mut headers = HeaderMap::new();
+        assert!(declared_decoded_content_length(&headers).is_err());
+        for invalid in ["", "-1", "+1", " 1", "1 ", "1,1", "18446744073709551616"] {
+            headers.insert(
+                "x-amz-decoded-content-length",
+                HeaderValue::from_str(invalid).unwrap(),
+            );
+            assert!(
+                declared_decoded_content_length(&headers).is_err(),
+                "{invalid}"
+            );
+        }
+        for valid in ["0", "3", "18446744073709551615"] {
+            headers.insert(
+                "x-amz-decoded-content-length",
+                HeaderValue::from_str(valid).unwrap(),
+            );
+            assert_eq!(
+                declared_decoded_content_length(&headers).unwrap(),
+                valid.parse::<u64>().unwrap()
+            );
+        }
+        headers.append(
+            "x-amz-decoded-content-length",
+            HeaderValue::from_static("3"),
+        );
+        assert!(declared_decoded_content_length(&headers).is_err());
+    }
+
+    async fn fragmented_result(wire: &[u8], expected: u64) -> Result<Vec<u8>, ServerError> {
+        let reader = RequestBodyReader::from_stream(stream::iter(
+            Bytes::copy_from_slice(wire)
+                .into_iter()
+                .map(|byte| Ok::<_, ServerError>(Bytes::from(vec![byte]))),
+        ));
+        let decoded = decode_aws_chunked(reader, 4096, Some(expected));
+        tokio::pin!(decoded);
+        let mut result = Vec::new();
+        while let Some(chunk) = decoded.next().await {
+            result.extend_from_slice(&chunk?);
+        }
+        Ok(result)
+    }
+
+    #[tokio::test]
+    async fn completion_requires_framing_eof_and_exact_length() {
+        for invalid in [
+            b"3\r\nabc\r\n0\r\n".as_slice(),
+            b"3\r\nabc\r\n0\r\n\r\ngarbage\r\n",
+            b"3\r\nabc\r\n0\r\nx-unknown: value\r\n\r\n",
+            b"3\r\nabc\r\n0\r\nx-amz-checksum-crc32: value\r\n",
+        ] {
+            assert!(fragmented_result(invalid, 3).await.is_err());
+        }
+        let wire = b"3\r\nabc\r\n0\r\n\r\n";
+        assert!(fragmented_result(wire, 2).await.is_err());
+        assert!(fragmented_result(wire, 4).await.is_err());
+        assert_eq!(fragmented_result(wire, 3).await.unwrap(), b"abc");
+        assert_eq!(fragmented_result(b"0\r\n\r\n", 0).await.unwrap(), b"");
+    }
+
+    #[tokio::test]
+    async fn accepts_fragmented_aws_checksum_and_signature_trailers() {
+        for completion in [
+            "x-amz-checksum-crc32c:AAAA\r\n\r\n",
+            "x-amz-checksum-crc32c:AAAA\n\r\nx-amz-trailer-signature:deadbeef\r\n\r\n",
+            "\r\nx-amz-checksum-sha256:AAAA\r\n\r\n\r\n",
+        ] {
+            let wire =
+                format!("3;chunk-signature=aa\r\nabc\r\n0;chunk-signature=bb\r\n{completion}");
+            assert_eq!(fragmented_result(wire.as_bytes(), 3).await.unwrap(), b"abc");
+        }
+    }
+
+    #[tokio::test]
+    async fn size_line_bound_is_independent_of_source_frame_boundaries() {
+        let wire = format!("0;chunk-signature={}\r\n\r\n", "a".repeat(2048));
+        assert!(decode_all(wire.as_bytes().to_vec(), 4096).await.is_err());
+        assert!(fragmented_result(wire.as_bytes(), 0).await.is_err());
+        let valid = format!("0;{}\r\n\r\n", "a".repeat(MAX_AWS_CHUNK_LINE_BYTES - 4));
+        assert_eq!(fragmented_result(valid.as_bytes(), 0).await.unwrap(), b"");
+        let invalid = format!("0;{}\r\n\r\n", "a".repeat(MAX_AWS_CHUNK_LINE_BYTES - 3));
+        assert!(fragmented_result(invalid.as_bytes(), 0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn late_source_error_is_propagated_once_after_zero_chunk() {
+        let reader = RequestBodyReader::from_stream(stream::iter(vec![
+            Ok(Bytes::from_static(b"3\r\nabc\r\n0\r\n\r\n")),
+            Err(ServerError::Io(IoError::new(
+                ErrorKind::UnexpectedEof,
+                "late framed body error",
+            ))),
+        ]));
+        let decoded = decode_aws_chunked(reader, 4096, Some(3));
+        tokio::pin!(decoded);
+        assert_eq!(decoded.next().await.unwrap().unwrap(), b"abc".as_slice());
+        assert!(decoded.next().await.unwrap().is_err());
+        assert!(decoded.next().await.is_none());
     }
 
     #[tokio::test]

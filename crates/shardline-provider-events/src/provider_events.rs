@@ -291,6 +291,9 @@ where
 ///
 /// Returns [`ProviderEventsError`] when record or index storage cannot be read
 /// or updated.
+/// The caller must hold the deployment shared GC/write barrier for the whole
+/// operation, including retention-hold placement and record mutation. Supported
+/// server HTTP handlers acquire it before repository resource locks.
 pub async fn apply_provider_webhook_with_stores<RecordAdapter, IndexAdapter>(
     record_store: &RecordAdapter,
     index_store: &IndexAdapter,

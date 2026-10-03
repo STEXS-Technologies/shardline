@@ -132,3 +132,5 @@ routing only when all replicas run the new version. This rule is per logical res
 an N-1 writer must not overwrite an S3 object, OCI tag, Hub ref, or resumable session
 that an N writer has evidence-bound. A different key being safe does not make a
 same-key mixed-version write safe. See [Rolling Upgrade](ROLLING_UPGRADE.md).
+
+PostgreSQL advisory coordination uses pools separate from metadata work. Each server backend caps its work pool at 10 connections, its GC barrier pool at 4, and its resource lock pool at 4, for a maximum of 18 connections per backend instance. Metadata pool capacity alone does not bound total connections. Administrative GC and retention operations also use an independent bounded coordination pool. Resource bundles (including repository rename) acquire sorted keys on one session, preserving each durable fencing epoch and releasing partial bundles if cancelled. This prevents guard holders and queued GC from consuming the connections needed to finish protected metadata transactions.

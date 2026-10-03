@@ -18,6 +18,10 @@ use super::{
 
 /// Rebuilds latest-record state from immutable version records.
 ///
+/// The caller must prevent concurrent writes and destructive maintenance for
+/// the entire operation. Deployment entry points acquire the exclusive
+/// maintenance barrier; this generic store-level function cannot do so.
+///
 /// # Errors
 ///
 /// Returns [`RebuildError`] when version records cannot be scanned or latest records
@@ -70,6 +74,16 @@ where
 
         if existing_bytes.as_deref() == Some(record_bytes.as_slice()) {
             report.unchanged_latest_records = checked_increment(report.unchanged_latest_records)?;
+            continue;
+        }
+
+        // An unreadable version may be newer than the candidate selected from
+        // the readable subset. Preserve an existing head rather than silently
+        // rolling it back. Corrupt records have opaque locators on some store
+        // adapters, so we cannot reliably narrow this protection to one file.
+        // A missing head must also wait: recreating it from this subset could
+        // expose a stale version as latest. A clean rescan enables repairs.
+        if !report.is_clean() {
             continue;
         }
 

@@ -216,7 +216,7 @@ pub(crate) struct DbMigrateBackfillArgs {
     #[arg(long)]
     pub(crate) database_url: Option<String>,
     /// Maximum number of rows considered per materialized-state table.
-    #[arg(long, default_value = "256", value_parser = parse_positive_usize)]
+    #[arg(long, default_value = "256", value_parser = parse_backfill_batch_size)]
     pub(crate) batch_size: NonZeroUsize,
 }
 
@@ -333,10 +333,22 @@ pub(crate) struct RepairCommandArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum RepairSubcommand {
+    /// Restore a quarantined Hub tree from an authoritative manifest and advance its ref.
+    HubTree(RepairHubTreeArgs),
     /// Repair lifecycle state only.
     Lifecycle(RepairOptionsArgs),
     /// Rebuild one local LFS patch evidence envelope from an operator-verified state file.
     LfsEvidence(RepairLfsEvidenceArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RepairHubTreeArgs {
+    /// Deployment root (local Hub metadata is in ROOT/hub).
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    /// Authoritative JSON full tree, repository, ref, expected head and object namespace.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) state_file: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -794,4 +806,11 @@ pub(crate) fn parse_positive_usize(value: &str) -> Result<NonZeroUsize, String> 
         .parse::<usize>()
         .map_err(|e| format!("value must be a positive integer: {e}"))?;
     NonZeroUsize::new(parsed).ok_or_else(|| "value must be a positive integer".to_owned())
+}
+
+fn parse_backfill_batch_size(value: &str) -> Result<NonZeroUsize, String> {
+    let parsed = parse_positive_usize(value)?;
+    i64::try_from(parsed.get())
+        .map_err(|_error| "batch size must fit the PostgreSQL BIGINT range".to_owned())?;
+    Ok(parsed)
 }

@@ -1349,3 +1349,306 @@ async fn acquire_chunk_transfer_permit_times_out_when_permits_exhausted() {
         "expected TransferLimiterTimedOut, got {result:?}"
     );
 }
+
+async fn deadline_test_router() -> (Router, TempDir, String) {
+    use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope, TokenSigner};
+    use std::num::NonZeroU64;
+    let storage = TempDir::new().unwrap();
+    let provider_path = storage.path().join("providers.json");
+    std::fs::write(&provider_path, br#"{"providers":[{"kind":"github","integration_subject":"app","webhook_secret":"secret","repositories":[{"owner":"team","name":"assets","visibility":"private","default_revision":"main","clone_url":"https://github.example/team/assets.git","read_subjects":["test"],"write_subjects":["test"]}]}]}"#).unwrap();
+    let key = b"0123456789abcdef0123456789abcdef";
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_server_frontends([ServerFrontend::S3, ServerFrontend::Hub])
+    .unwrap()
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
+    .with_token_signing_key(key.to_vec())
+    .unwrap()
+    .with_provider_runtime(
+        provider_path,
+        b"bootstrap-key-16bytes".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    let repository =
+        RepositoryScope::new(RepositoryProvider::Generic, "audit", "bucket", None).unwrap();
+    let claims =
+        TokenClaims::new("shardline", "test", TokenScope::Write, repository, u64::MAX).unwrap();
+    let token = TokenSigner::new(key).unwrap().sign(&claims).unwrap();
+    (router(config).await.unwrap(), storage, token)
+}
+
+fn stalled_request(
+    uri: &str,
+    method: &str,
+    authorization: Option<&str>,
+) -> (Request<Body>, Arc<std::sync::atomic::AtomicBool>) {
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        task::Poll,
+    };
+    let polled = Arc::new(AtomicBool::new(false));
+    let body_polled = polled.clone();
+    let stream = futures_util::stream::poll_fn(move |_context| {
+        body_polled.store(true, Ordering::Release);
+        Poll::<Option<Result<bytes::Bytes, std::io::Error>>>::Pending
+    });
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ORIGIN, "https://deadline.example")
+        .header("x-shardline-provider-key", "bootstrap-key-16bytes");
+    if let Some(value) = authorization {
+        request = request.header(header::AUTHORIZATION, value);
+    }
+    (request.body(Body::from_stream(stream)).unwrap(), polled)
+}
+
+async fn wait_until_stalled_body_is_polled(
+    job: &tokio::task::JoinHandle<Result<axum::response::Response, std::convert::Infallible>>,
+    polled: &std::sync::atomic::AtomicBool,
+) {
+    // Keep the paused runtime runnable while actual SQLite/filesystem setup
+    // completes; only advance virtual time after the handler reaches its body.
+    let started = std::time::Instant::now();
+    while !polled.load(std::sync::atomic::Ordering::Acquire) {
+        assert!(
+            !job.is_finished(),
+            "request rejected before stalled-body read"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "body was never polled"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+fn assert_deadline_headers(response: &axum::response::Response) {
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "1");
+    assert_eq!(
+        response
+            .headers()
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        response.headers().get(header::X_FRAME_OPTIONS).unwrap(),
+        "DENY"
+    );
+    assert!(
+        response
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_deadline_covers_s3_provider_and_hub_handlers_with_error_headers() {
+    let (app, _storage, token) = deadline_test_router().await;
+    let s3_auth = format!(
+        "AWS4-HMAC-SHA256 Credential={token}/20261002/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef"
+    );
+    let bearer = format!("Bearer {token}");
+    let bucket = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/audit.bucket")
+                .header(header::AUTHORIZATION, &s3_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bucket.status(), StatusCode::OK);
+    for (uri, method, authorization) in [
+        ("/audit.bucket/stalled", "PUT", Some(s3_auth.as_str())),
+        ("/v1/providers/github/tokens", "POST", None),
+        ("/api/repos/create", "POST", Some(bearer.as_str())),
+    ] {
+        let (request, polled) = stalled_request(uri, method, authorization);
+        let job = tokio::spawn(app.clone().oneshot(request));
+        wait_until_stalled_body_is_polled(&job, &polled).await;
+        tokio::time::advance(crate::admission::timeouts::REQUEST_TOTAL).await;
+        let response = tokio::time::timeout(Duration::from_secs(1), job)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_deadline_headers(&response);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn handler_deadline_includes_gc_wait_without_resetting_budget() {
+    let (app, storage, token) = deadline_test_router().await;
+    let s3_auth = format!(
+        "AWS4-HMAC-SHA256 Credential={token}/20261002/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef"
+    );
+    let bucket = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/audit.bucket")
+                .header(header::AUTHORIZATION, &s3_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bucket.status(), StatusCode::OK);
+    let owner = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(storage.path().join(".gc-write-barrier.lock"))
+        .unwrap();
+    owner.lock().unwrap();
+    let (request, polled) = stalled_request("/audit.bucket/stalled", "PUT", Some(&s3_auth));
+    let started = std::sync::Arc::new(tokio::sync::Notify::new());
+    let started_signal = started.clone();
+    let job = tokio::spawn(async move {
+        started_signal.notify_one();
+        app.oneshot(request).await
+    });
+    started.notified().await;
+    assert!(!polled.load(std::sync::atomic::Ordering::Acquire));
+    tokio::time::advance(Duration::from_secs(299)).await;
+    drop(owner);
+    // A lock retry may have registered its next timer after the large advance.
+    // Drive retries without allowing the remaining handler budget to expire.
+    for _ in 0..20 {
+        if polled.load(std::sync::atomic::Ordering::Acquire) {
+            break;
+        }
+        tokio::time::advance(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
+    }
+    wait_until_stalled_body_is_polled(&job, &polled).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let response = tokio::time::timeout(Duration::from_secs(1), job)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_deadline_headers(&response);
+    tokio::time::resume();
+    let _exclusive = tokio::time::timeout(
+        Duration::from_secs(1),
+        crate::maintenance_barrier::acquire_local_exclusive(storage.path()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+// Signals are process-global: exercise the public server in an isolated child.
+#[cfg(unix)]
+#[test]
+fn unix_shutdown_subprocess_child() {
+    let Some(root) = std::env::var_os("SHARDLINE_SIGNAL_TEST_ROOT") else {
+        return;
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let root = std::path::PathBuf::from(root);
+        std::fs::write(root.join("address"), addr.to_string()).unwrap();
+        let config = ServerConfig::new(
+            addr,
+            format!("http://{addr}"),
+            root,
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_token_signing_key(vec![0_u8; 32])
+        .unwrap()
+        .with_shutdown_timeout(Duration::from_secs(2));
+        crate::serve_with_listener(config, listener).await.unwrap();
+    });
+}
+
+#[cfg(unix)]
+fn assert_process_signal_drains_server(signal: &str) {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ignored = self.0.kill();
+            let _ignored = self.0.wait();
+        }
+    }
+    let root = TempDir::new().unwrap();
+    let mut child = ChildGuard(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::tests::unix_shutdown_subprocess_child",
+                "--nocapture",
+            ])
+            .env("SHARDLINE_SIGNAL_TEST_ROOT", root.path())
+            .spawn()
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(100))
+        .build()
+        .unwrap();
+    loop {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "server exited before readiness"
+        );
+        if let Ok(addr) = std::fs::read_to_string(root.path().join("address"))
+            && let Ok(response) = client.get(format!("http://{addr}/healthz")).send()
+            && response.status() == StatusCode::OK
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "server readiness timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        std::process::Command::new("kill")
+            .args([signal, &child.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(status.success(), "server did not exit gracefully: {status}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "server shutdown timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_drains_public_server() {
+    assert_process_signal_drains_server("-TERM");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_drains_public_server() {
+    assert_process_signal_drains_server("-INT");
+}

@@ -75,12 +75,18 @@ async fn exercise_postgres_backend_ready_accepts_live_postgres_metadata_store()
 }
 
 async fn recreate_database(pool: &PgPool, database_name: &str) -> Result<(), Box<dyn Error>> {
-    query(&format!("DROP DATABASE IF EXISTS {database_name}"))
-        .execute(pool)
-        .await?;
-    query(&format!("CREATE DATABASE {database_name}"))
-        .execute(pool)
-        .await?;
+    // Quote the generated database identifier before constructing test-only DDL.
+    let database_identifier = format!("\"{}\"", database_name.replace('"', "\"\""));
+    query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {database_identifier}"
+    )))
+    .execute(pool)
+    .await?;
+    query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE {database_identifier}"
+    )))
+    .execute(pool)
+    .await?;
     Ok(())
 }
 fn database_url_for(base_url: &str, database_name: &str) -> Result<String, Box<dyn Error>> {

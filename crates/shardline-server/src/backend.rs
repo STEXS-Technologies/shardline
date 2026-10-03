@@ -96,6 +96,10 @@ pub(crate) struct S3ObjectReadSnapshot {
     /// listing-index row (e.g. the row-absent GET fallback): there is then no
     /// row metadata to pair.
     pub user_metadata: Vec<(String, String)>,
+    /// Validator paired with the same row/version, absent for legacy fallback.
+    pub etag: Option<String>,
+    /// Last-Modified paired with the same row/version.
+    pub updated_at_unix_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,8 +148,7 @@ impl ServerBackend {
         match self {
             Self::Local(_) => crate::maintenance_barrier::acquire_local_shared(root).await,
             Self::Postgres(backend) => {
-                crate::maintenance_barrier::acquire_postgres_shared(backend.index_store().pool())
-                    .await
+                crate::maintenance_barrier::acquire_postgres_shared(&backend.gc_barrier_pool).await
             }
         }
     }
@@ -162,11 +165,42 @@ impl ServerBackend {
             }
             Self::Postgres(backend) => {
                 crate::maintenance_barrier::acquire_postgres_resource_exclusive(
-                    backend.index_store().pool(),
+                    &backend.resource_lock_pool,
                     key,
                 )
                 .await
             }
+        }
+    }
+
+    /// Acquire a sorted resource bundle without nesting pool acquisitions.
+    pub(crate) async fn acquire_resource_write_locks(
+        &self,
+        root: &Path,
+        keys: &[ResourceLockKey],
+    ) -> Result<Vec<crate::maintenance_barrier::ResourceWriteGuard>, ServerError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let guard = match self {
+            Self::Local(_) => {
+                crate::maintenance_barrier::acquire_local_resources_exclusive(root, keys).await?
+            }
+            Self::Postgres(backend) => {
+                crate::maintenance_barrier::acquire_postgres_resources_exclusive(
+                    &backend.resource_lock_pool,
+                    keys,
+                )
+                .await?
+            }
+        };
+        Ok(vec![guard])
+    }
+
+    pub(crate) fn set_stream_work_pool(&mut self, pool: crate::admission::BoundedPool) {
+        match self {
+            Self::Local(backend) => backend.stream_work_pool = pool,
+            Self::Postgres(backend) => backend.stream_work_pool = pool,
         }
     }
 
@@ -775,6 +809,27 @@ impl ServerBackend {
             Self::Postgres(backend) => {
                 backend
                     .scan_s3_objects(scope_namespace, prefix, cursor, limit)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn scan_s3_objects_from(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        start: Option<shardline_index::S3ObjectScanStart<'_>>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .scan_s3_objects_from(scope_namespace, prefix, start, limit)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .scan_s3_objects_from(scope_namespace, prefix, start, limit)
                     .await
             }
         }
@@ -1425,6 +1480,8 @@ impl ServerBackend {
                 total_bytes: entry.size_bytes,
                 record_content_hash: Some(entry.content_hash),
                 user_metadata: entry.user_metadata,
+                etag: Some(entry.etag),
+                updated_at_unix_seconds: Some(entry.updated_at_unix_seconds),
             });
         }
         // Raw direct-object probe: unlike `object_length`, this does NOT fall
@@ -1439,6 +1496,8 @@ impl ServerBackend {
                 total_bytes: length,
                 record_content_hash: None,
                 user_metadata: Vec::new(),
+                etag: None,
+                updated_at_unix_seconds: None,
             }),
             Err(ServerError::NotFound) => {
                 let file_id = protocol_object_file_id(object_key);
@@ -1447,6 +1506,8 @@ impl ServerBackend {
                     total_bytes: record.total_bytes,
                     record_content_hash: Some(record.content_hash),
                     user_metadata: Vec::new(),
+                    etag: None,
+                    updated_at_unix_seconds: None,
                 })
             }
             Err(error) => Err(error),
@@ -1707,18 +1768,14 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn create_revision(&self, rev: &RevisionRecord) -> Result<bool, ServerError> {
+    pub(crate) async fn create_revision(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<shardline_index::RevisionCreationOutcome, ServerError> {
         match self {
-            Self::Local(backend) => backend.create_revision(rev).await,
-            Self::Postgres(backend) => backend.create_revision(rev).await,
-        }
-    }
-
-    /// Counts the revision registry rows for a repository (F-75 cap check).
-    pub(crate) async fn count_revisions(&self, key: &RepoKey) -> Result<u64, ServerError> {
-        match self {
-            Self::Local(backend) => backend.count_revisions(key).await,
-            Self::Postgres(backend) => backend.count_revisions(key).await,
+            Self::Local(backend) => backend.create_revision(rev, max_revisions).await,
+            Self::Postgres(backend) => backend.create_revision(rev, max_revisions).await,
         }
     }
 
@@ -1933,6 +1990,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         ServerError::BlockingTask(e) => OciAdapterError::BlockingTask(e),
         ref other @ (ServerError::RequestBodyRead(_)
         | ServerError::RequestBodyTooLarge
+        | ServerError::RequestBodyMd5Mismatch
         | ServerError::RequestQueryTooLarge
         | ServerError::InvalidAdminQuery
         | ServerError::RequestBodyFrameOutOfBounds
@@ -1940,6 +1998,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::ObjectStore(
             ObjectStoreError::MissingS3Config
             | ObjectStoreError::StoredLengthMismatch
+            | ObjectStoreError::StoredHashMismatch
             | ObjectStoreError::MigrationSourceHashMismatch { .. },
         )
         | ServerError::Index(_)

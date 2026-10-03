@@ -1,3 +1,4 @@
+use super::super::reconstruction_helpers::single_range_header;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
@@ -1251,7 +1252,7 @@ pub(crate) async fn lfs_patch_object(
     };
 
     // Validate Content-Range header is present.
-    let content_range = match headers.get(CONTENT_RANGE) {
+    let content_range = match single_range_header(&headers, CONTENT_RANGE)? {
         Some(value) => value.to_str().unwrap_or("").to_owned(),
         None => {
             return Ok((
@@ -2394,6 +2395,89 @@ mod tests {
     fn lfs_validation_response_returns_unprocessable_entity() {
         let response = lfs_validation_response("test error");
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_content_range_preserves_local_staging_and_retry() {
+        for fields in [
+            ["bytes 4-8/9", "invalid"],
+            ["invalid", "bytes 4-8/9"],
+            ["bytes 4-8/9", "bytes 5-9/10"],
+            ["bytes 5-9/10", "bytes 4-8/9"],
+            ["bytes 4-8/9", "bytes 4-8/9"],
+        ] {
+            let (state, _tmp) = build_test_state().await;
+            let app = lfs_router(Arc::clone(&state));
+            let oid = test_oid(b"seedfixed");
+            let uri = format!("/v1/lfs/objects/{oid}");
+            let seeded = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(&uri)
+                        .header(CONTENT_RANGE, "bytes 0-3/9")
+                        .header(CONTENT_LENGTH, 4)
+                        .body(Body::from("seed"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(seeded.status().is_success(), "{}", seeded.status());
+            let staging_dir = lfs_patch_dir(state.config.root_dir());
+            let prior_bytes = fs::read(staging_dir.join(&oid)).unwrap();
+            let ranges_path = staging_dir.join(format!("{oid}.ranges"));
+            let prior_ranges = fs::read(&ranges_path).unwrap();
+            let rejected = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(&uri)
+                        .header(CONTENT_RANGE, fields[0])
+                        .header(CONTENT_RANGE, fields[1])
+                        .header(CONTENT_LENGTH, 5)
+                        .body(Body::from("bad!!"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "{fields:?}");
+            assert_eq!(fs::read(staging_dir.join(&oid)).unwrap(), prior_bytes);
+            assert_eq!(fs::read(&ranges_path).unwrap(), prior_ranges);
+            let unpublished = app
+                .clone()
+                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(unpublished.status(), StatusCode::NOT_FOUND);
+            let retry = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(&uri)
+                        .header(CONTENT_RANGE, "bytes 4-8/9")
+                        .header(CONTENT_LENGTH, 5)
+                        .body(Body::from("fixed"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(retry.status(), StatusCode::OK);
+            let downloaded = app
+                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(downloaded.status(), StatusCode::OK);
+            assert_eq!(
+                axum::body::to_bytes(downloaded.into_body(), 1024)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                b"seedfixed"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

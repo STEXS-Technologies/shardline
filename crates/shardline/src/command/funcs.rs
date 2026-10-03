@@ -1,8 +1,15 @@
-use std::{ffi::OsString, num::NonZeroUsize};
+use std::{
+    ffi::OsString,
+    fs,
+    io::{self, Cursor},
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
-use dotenvy::{from_filename, from_read_override};
+use dotenvy::{from_read, from_read_iter};
 use shardline_protocol::{RepositoryProvider, TokenScope};
+use shardline_reliability::OperationKind;
 use shardline_server::{
     DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
 };
@@ -46,46 +53,27 @@ impl CliCommand {
             CliDefinitionCommand::Gc(gc_args)
                 if matches!(gc_args.command, Some(GcSubcommand::Schedule(_)))
         );
-        if let Some(env_path) = &definition.env_file
+        let env_file = definition.env_file.clone();
+        let config = definition.config.clone();
+        // Reject command-level validation errors before changing process state.
+        // Embedded callers can recover from a failed parse without inheriting
+        // its dotenv variables or selected configuration path.
+        let command = Self::try_from(definition)?;
+        if let Some(env_path) = &env_file
             && !gc_schedule_install
         {
-            from_filename(env_path).map_err(|error| {
-                CliParseError::validation(
-                    ErrorKind::InvalidValue,
-                    format!("failed to load env file {}: {error}", env_path.display()),
-                )
-            })?;
+            load_cli_env_file(env_path)?;
         }
 
         // Preserve the explicit path for every configuration-consuming command.
-        // `load_server_config` consumes this internal marker before auto-detection.
-        // Clear a marker left by an earlier in-process parse before applying
-        // this invocation's optional override.
-        from_read_override(std::io::Cursor::new("SHARDLINE_CLI_CONFIG_FILE=\n")).map_err(
-            |error| {
-                CliParseError::validation(
-                    ErrorKind::InvalidValue,
-                    format!("failed to clear selected config file: {error}"),
-                )
-            },
-        )?;
-        if let Some(config_path) = &definition.config {
-            let encoded = format!("SHARDLINE_CLI_CONFIG_FILE={:?}\n", config_path);
-            from_read_override(std::io::Cursor::new(encoded)).map_err(|error| {
-                CliParseError::validation(
-                    ErrorKind::InvalidValue,
-                    format!(
-                        "failed to select config file {}: {error}",
-                        config_path.display()
-                    ),
-                )
-            })?;
-        }
+        // `load_server_config` consumes this native path before auto-detection.
+        // Replace or clear an override left by an earlier in-process parse.
+        crate::config::set_cli_config_override(config);
 
         // Load shardline.toml (--config or auto-detected) for direct
         // struct deserialization. The TOML values are applied via
         // load_server_config_from_env_with_toml later during config resolution.
-        Self::try_from(definition)
+        Ok(command)
     }
 
     /// Returns top-level help text.
@@ -93,6 +81,50 @@ impl CliCommand {
     pub fn help_text() -> String {
         cli_definition_command().render_long_help().to_string()
     }
+}
+
+fn load_cli_env_file(path: &Path) -> Result<(), CliParseError> {
+    let failure = |error: &dyn std::fmt::Display| {
+        CliParseError::validation(
+            ErrorKind::InvalidValue,
+            format!("failed to load env file {}: {error}", path.display()),
+        )
+    };
+    // Validate the entire immutable input before dotenv mutates process state.
+    // A malformed later line must not leave an earlier configuration override
+    // behind for a subsequent embedded invocation.
+    let resolved = resolve_cli_env_file(path).map_err(|error| failure(&error))?;
+    let bytes = fs::read(resolved).map_err(|error| failure(&error))?;
+    for entry in from_read_iter(Cursor::new(&bytes)) {
+        let (key, value) = entry.map_err(|error| failure(&error))?;
+        if key.is_empty() || key.contains(['=', '\0']) {
+            return Err(failure(
+                &"environment names must be nonempty and contain neither '=' nor NUL bytes",
+            ));
+        }
+        if value.contains('\0') {
+            return Err(failure(&"environment values cannot contain NUL bytes"));
+        }
+    }
+    // Use dotenv's native application semantics, preserving interpolation,
+    // duplicates and existing-environment precedence from the original loader.
+    from_read(Cursor::new(bytes)).map_err(|error| failure(&error))
+}
+
+fn resolve_cli_env_file(path: &Path) -> io::Result<PathBuf> {
+    // Match dotenv's Finder: relative filenames search the current directory
+    // and its ancestors, prefer the nearest regular file, and skip directories.
+    let directory = std::env::current_dir()?;
+    for ancestor in directory.ancestors() {
+        let candidate = ancestor.join(path);
+        match fs::metadata(&candidate) {
+            Ok(metadata) if metadata.is_file() => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound, "path not found"))
 }
 
 pub(crate) fn cli_definition_command() -> clap::Command {
@@ -161,6 +193,12 @@ impl TryFrom<CliDefinition> for CliCommand {
                                 "db migrate repair requires a non-empty --operation-id",
                             ));
                         }
+                        if OperationKind::parse(&repair_args.operation_kind).is_none() {
+                            return Err(CliParseError::validation(
+                                ErrorKind::InvalidValue,
+                                "db migrate repair requires a supported --operation-kind (for example S3Object or ResumableSession, case-sensitive)",
+                            ));
+                        }
                         Ok(Self::DbMigrate {
                             database_url: repair_args.database_url.map(RedactedDbUrl),
                             command: DatabaseMigrationCommand::Repair {
@@ -194,6 +232,10 @@ impl TryFrom<CliDefinition> for CliCommand {
                 IndexSubcommand::Rebuild(args) => Ok(Self::IndexRebuild { root: args.root }),
             },
             CliDefinitionCommand::Repair(args) => match args.command {
+                Some(RepairSubcommand::HubTree(options)) => Ok(Self::RepairHubTree {
+                    root: options.root,
+                    state_file: options.state_file,
+                }),
                 Some(RepairSubcommand::Lifecycle(options)) => Ok(Self::RepairLifecycle {
                     root: options.root,
                     webhook_retention_seconds: options.webhook_retention_seconds,
@@ -276,6 +318,24 @@ impl TryFrom<CliDefinition> for CliCommand {
                         "end-to-end benchmark mode requires --storage-dir",
                     ));
                 }
+
+                let config = crate::bench::BenchConfig {
+                    deployment_target: args.deployment_target,
+                    scenario: args.scenario,
+                    iterations: args.iterations,
+                    concurrency: args.concurrency,
+                    upload_max_in_flight_chunks: args.upload_max_in_flight_chunks,
+                    chunk_size_bytes: args.chunk_size_bytes,
+                    base_bytes: args.base_bytes,
+                    mutated_bytes: args.mutated_bytes,
+                };
+                match args.mode {
+                    BenchMode::EndToEnd => config.validate_e2e(),
+                    BenchMode::Ingest => config.validate_ingest(),
+                }
+                .map_err(|error| {
+                    CliParseError::validation(ErrorKind::InvalidValue, error.to_string())
+                })?;
 
                 Ok(Self::Bench {
                     mode: args.mode,

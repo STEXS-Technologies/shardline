@@ -34,6 +34,12 @@ Inspect migration state:
 shardline db migrate status
 ```
 
+`status` and `verify` use read-only queries and do not acquire the migration
+advisory lock or create the history table. They can run on a read-only connection.
+If the history table is absent, `status` reports all bundled migrations as pending;
+`verify` reports that migration initialization is required. Use `up` to initialize
+the database explicitly.
+
 Revert the newest migration:
 
 ```bash
@@ -66,6 +72,9 @@ monitor reports no remaining work:
 ```bash
 shardline db migrate backfill --batch-size 256
 ```
+
+The batch size must be positive and fit PostgreSQL's `BIGINT` row-limit type.
+Invalid batch sizes are rejected before connecting to the database.
 
 Repair one known-corrupt reliability operation only after validating its
 authoritative materialized row. The confirmation flag is required because the
@@ -106,6 +115,64 @@ Mutating migration commands also hold one Postgres advisory lock for the full co
 so concurrent jobs serialize instead of both selecting and applying the same pending
 step. If a process or database connection dies, Postgres releases that lock and the
 step transaction rolls back; rerunning `up` resumes from the last committed step.
+
+## PostgreSQL Index Builds During Patch Upgrades
+
+A patch release can require a write maintenance window even when its schema changes
+are additive. These migrations create ordinary PostgreSQL indexes:
+
+| Migration | Table | Index |
+| --- | --- | --- |
+| `20261002010000` | `shardline_hub_repos` | `shardline_hub_repos_search_prefix_idx` |
+| `20261002020000` | `shardline_hub_file_entries` | `shardline_hub_file_entries_page_idx` |
+| `20261002030000` | `shardline_s3_objects` | `shardline_s3_objects_scope_key_c_idx` |
+| `20261003000000` | `shardline_tree_entries` | `shardline_tree_entries_prefix_pattern_idx` |
+| `20261003010000` | `shardline_webhook_deliveries` | `shardline_webhook_deliveries_retention_idx` |
+
+The webhook retention index contains only the timestamp in PostgreSQL, whose
+purge query filters on that column and locks heap rows. SQLite includes the
+provider, owner, repository and delivery ID after the timestamp to cover its
+bounded keyset pages. Keeping the PostgreSQL index narrow also permits migration
+of wider schema-valid legacy receipts; those rows can exceed the current public
+webhook component limits.
+
+PostgreSQL's ordinary index build permits reads but blocks inserts, updates, and
+deletes on the indexed table. Build time depends on table size and available CPU,
+I/O, and memory; rehearse the upgrade against a representative restored database
+before scheduling the window. See the official [PostgreSQL CREATE INDEX
+documentation](https://www.postgresql.org/docs/current/sql-createindex.html).
+
+Shardline executes each bundled migration and its history update in one transaction.
+The index-build lock remains until that transaction completes; PostgreSQL describes
+this lock lifetime in [Explicit
+Locking](https://www.postgresql.org/docs/current/explicit-locking.html).
+`CREATE INDEX CONCURRENTLY` requires execution outside a transaction block, so adding
+that keyword to these bundled migrations is incompatible with the current runner.
+The migration advisory lock serializes migration commands; it does not drain normal
+application writers.
+
+For a deployment where these migrations are pending, use this controlled procedure
+before starting the process rollout:
+
+1. Confirm `shardline db migrate status` and take the native database/object-store
+   backups described in [Disaster Recovery](DISASTER_RECOVERY.md).
+2. Schedule a write maintenance window that covers the rehearsed build time. Stop
+   admitting mutating requests on every API and transfer replica; pause provider
+   webhook delivery, ingestion workers, and scheduled jobs that write metadata.
+   Drain in-flight writes and open write transactions, including independent database
+   clients, before running the migration. Existing replicas may continue serving
+   reads if their schema compatibility and routing allow it.
+3. Run `shardline db migrate up` once with the new release binary. Keep admission
+   closed until the command exits successfully and `shardline db migrate status`
+   reports the pending steps applied. If it fails, keep writes drained, resolve the
+   failure, and rerun `up`; completed steps remain committed and a failed step rolls
+   back.
+4. Continue the [rolling-upgrade procedure](ROLLING_UPGRADE.md), verify readiness,
+   and restore write admission according to its mixed-version routing constraints.
+   Resume paused workers and scheduled jobs only after those constraints are met.
+
+Use the same window for a Kubernetes migration Job on an existing deployment; a Job
+finishing before new pods start does not itself stop old replicas from writing.
 
 ## Kubernetes
 

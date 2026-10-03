@@ -147,6 +147,10 @@ const fn is_amz_credential_name(name: &str) -> bool {
 /// - `Authorization: Bearer <token>`
 /// - `x-amz-security-token: <token>` (fallback)
 ///
+/// Repeated Authorization fields are rejected. When the security-token fallback
+/// is selected, it must also have exactly one field value. An unused fallback
+/// does not override the higher-priority Authorization credential.
+///
 /// # Examples
 ///
 /// ```
@@ -165,6 +169,9 @@ const fn is_amz_credential_name(name: &str) -> bool {
 /// ```
 #[must_use]
 pub fn extract_access_key(headers: &HeaderMap) -> Option<&str> {
+    if headers.get_all(AUTHORIZATION).iter().nth(1).is_some() {
+        return None;
+    }
     let authorization = headers.get(AUTHORIZATION);
     if let Some(authorization) = authorization {
         let value = authorization.to_str().ok()?;
@@ -176,6 +183,15 @@ pub fn extract_access_key(headers: &HeaderMap) -> Option<&str> {
         if let Some(token) = authorization_token {
             return Some(token);
         }
+    }
+    // Only inspect the fallback after no higher-priority credential was selected.
+    if headers
+        .get_all(X_AMZ_SECURITY_TOKEN_HEADER)
+        .iter()
+        .nth(1)
+        .is_some()
+    {
+        return None;
     }
     headers.get(X_AMZ_SECURITY_TOKEN_HEADER)?.to_str().ok()
 }
@@ -418,17 +434,53 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_authorization_headers_first_wins() {
-        let mut headers = HeaderMap::new();
-        headers.append(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer first-token"),
-        );
-        headers.append(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer second-token"),
-        );
-        assert_eq!(extract_access_key(&headers), Some("first-token"));
+    fn repeated_authorization_is_rejected_in_every_order() {
+        for (first, second) in [
+            ("Bearer valid-token", "Bearer invalid-token"),
+            ("Bearer invalid-token", "Bearer valid-token"),
+            ("Bearer valid-token", "Bearer valid-token"),
+            (
+                "AWS4-HMAC-SHA256 Credential=valid-token",
+                "Bearer invalid-token",
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(AUTHORIZATION, HeaderValue::from_static(first));
+            headers.append(AUTHORIZATION, HeaderValue::from_static(second));
+            // A valid fallback cannot repair repeated Authorization fields.
+            headers.insert(
+                X_AMZ_SECURITY_TOKEN_HEADER,
+                HeaderValue::from_static("fallback-token"),
+            );
+            assert_eq!(extract_access_key(&headers), None);
+        }
+    }
+
+    #[test]
+    fn repeated_security_token_is_rejected_only_when_fallback_is_selected() {
+        for (first, second) in [
+            ("valid-token", "invalid-token"),
+            ("invalid-token", "valid-token"),
+            ("valid-token", "valid-token"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(X_AMZ_SECURITY_TOKEN_HEADER, HeaderValue::from_static(first));
+            headers.append(
+                X_AMZ_SECURITY_TOKEN_HEADER,
+                HeaderValue::from_static(second),
+            );
+            assert_eq!(extract_access_key(&headers), None);
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_static("unsupported scheme"),
+            );
+            assert_eq!(extract_access_key(&headers), None);
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_static("Bearer authorization-token"),
+            );
+            assert_eq!(extract_access_key(&headers), Some("authorization-token"));
+        }
     }
 
     #[test]

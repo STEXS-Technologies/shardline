@@ -284,14 +284,22 @@ pub fn extract_provider_subject(
 }
 
 fn bounded_subject(value: Option<&str>) -> Result<Option<&str>, ServerError> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(raw) = value else {
         return Ok(None);
     };
-    if value.len() > MAX_PROVIDER_SUBJECT_BYTES {
+    // Validate the selected source before normalization can hide malformed identity bytes.
+    if raw.chars().any(char::is_control) {
+        return Err(ServerError::InvalidProviderTokenRequest);
+    }
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    if normalized.len() > MAX_PROVIDER_SUBJECT_BYTES {
         return Err(ServerError::InvalidProviderTokenRequest);
     }
 
-    Ok(Some(value))
+    Ok(Some(normalized))
 }
 
 pub(super) fn map_provider_issue_error(error: ProviderServiceError) -> ServerError {
@@ -862,6 +870,42 @@ mod provider_tests {
     // -----------------------------------------------------------------------
     // bounded_subject — edge case for max length
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn bounded_subject_rejects_controls_before_normalizing() {
+        for malformed in ["\nuser\n", "\ruser\r", "\tuser\t", "\n", "user\0"] {
+            assert!(matches!(
+                bounded_subject(Some(malformed)),
+                Err(ServerError::InvalidProviderTokenRequest)
+            ));
+        }
+        assert_eq!(bounded_subject(Some(" user ")).unwrap(), Some("user"));
+        assert_eq!(bounded_subject(Some("   ")).unwrap(), None);
+        assert_eq!(bounded_subject(None).unwrap(), None);
+    }
+
+    #[test]
+    fn selected_subject_validation_preserves_source_precedence() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-shardline-provider-subject", "\tuser\t".parse().unwrap());
+        assert!(matches!(
+            extract_provider_subject(&headers, None),
+            Err(ServerError::InvalidProviderTokenRequest)
+        ));
+        assert_eq!(
+            extract_provider_subject(&headers, Some("query-subject")).unwrap(),
+            "query-subject"
+        );
+        headers.insert("x-shardline-provider-subject", "user".parse().unwrap());
+        assert!(matches!(
+            extract_provider_subject(&headers, Some("\n")),
+            Err(ServerError::InvalidProviderTokenRequest)
+        ));
+        assert_eq!(
+            extract_provider_subject(&headers, Some("   ")).unwrap(),
+            "user"
+        );
+    }
 
     #[test]
     fn bounded_subject_rejects_too_long() {

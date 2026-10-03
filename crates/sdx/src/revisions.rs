@@ -5,6 +5,8 @@
 //! [`XetClient::delete_revision`]. Creating a revision that already exists
 //! returns [`SdxError::RevisionExists`]; deletion is idempotent.
 
+use std::collections::HashSet;
+
 use reqwest::Method;
 use serde::Deserialize;
 use shardline_xet_adapter::{XET_REVISION_ROUTE, XET_REVISIONS_ROUTE};
@@ -14,6 +16,12 @@ use crate::{
     error::{SdxError, TransferError},
     tree::MetadataClient,
 };
+
+// Server names are <=512 UTF-8 bytes without controls. Quotes/backslashes
+// expand at most 2x; timestamps are u64. This client requests default 1000-row
+// pages, plus one bounded nextCursor and the outer JSON envelope.
+const REVISION_RESPONSE_LIMIT: usize = 1152;
+const REVISION_PAGE_RESPONSE_LIMIT: usize = 1_153_152;
 
 /// A revision record (`{name,createdAt,updatedAt}`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +35,7 @@ pub struct Revision {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct RevisionJson {
     name: String,
@@ -35,6 +44,7 @@ struct RevisionJson {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct RevisionsResponse {
     revisions: Vec<RevisionJson>,
@@ -43,6 +53,7 @@ struct RevisionsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct DeleteRevisionResponse {}
 
@@ -59,25 +70,35 @@ impl MetadataClient {
         let route = self.repo_route(XET_REVISIONS_ROUTE);
         let mut revisions = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut cursors = HashSet::new();
         loop {
             let query: Vec<(String, String)> = cursor
                 .as_deref()
                 .map(|c| vec![("cursor".to_owned(), c.to_owned())])
                 .unwrap_or_default();
             let url = crate::tree::build_url(&self.api_base, &route, &query);
-            let body = self
-                .send(&retry, token.token.clone(), Method::GET, url, None)
+            let response: RevisionsResponse = self
+                .send_json(
+                    &retry,
+                    token.token.clone(),
+                    Method::GET,
+                    url,
+                    None,
+                    ("list_revisions", REVISION_PAGE_RESPONSE_LIMIT),
+                )
                 .await?;
-            let response: RevisionsResponse = serde_json::from_slice(&body)
-                .map_err(|error| crate::tree::metadata_parse("list_revisions", &error))?;
             revisions.extend(response.revisions.into_iter().map(|revision| Revision {
                 name: revision.name,
                 created_at: revision.created_at,
                 updated_at: revision.updated_at,
             }));
-            match response.next_cursor {
-                Some(next) if next != cursor.as_deref().unwrap_or_default() => cursor = Some(next),
-                _ => break,
+            cursor = crate::tree::checked_next_cursor(
+                "list_revisions",
+                response.next_cursor,
+                &mut cursors,
+            )?;
+            if cursor.is_none() {
+                break;
             }
         }
         Ok(revisions)
@@ -88,21 +109,24 @@ impl MetadataClient {
         let token = self.tokens.write_token().await?;
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
-            .replace("{rev}", &crate::tree::encode_query(rev));
+            .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
         match self
-            .send(&retry, token.token, Method::POST, url, None)
+            .send_json::<RevisionJson>(
+                &retry,
+                token.token,
+                Method::POST,
+                url,
+                None,
+                ("create_revision", REVISION_RESPONSE_LIMIT),
+            )
             .await
         {
-            Ok(body) => {
-                let revision: RevisionJson = serde_json::from_slice(&body)
-                    .map_err(|error| crate::tree::metadata_parse("create_revision", &error))?;
-                Ok(Revision {
-                    name: revision.name,
-                    created_at: revision.created_at,
-                    updated_at: revision.updated_at,
-                })
-            }
+            Ok(revision) => Ok(Revision {
+                name: revision.name,
+                created_at: revision.created_at,
+                updated_at: revision.updated_at,
+            }),
             Err(SdxError::Transfer(TransferError::HttpStatus { status: 409, .. })) => {
                 Err(SdxError::RevisionExists(rev.to_owned()))
             }
@@ -115,14 +139,19 @@ impl MetadataClient {
         let token = self.tokens.write_token().await?;
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
-            .replace("{rev}", &crate::tree::encode_query(rev));
+            .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
-        let body = self
-            .send(&retry, token.token, Method::DELETE, url, None)
+        let _: DeleteRevisionResponse = self
+            .send_json(
+                &retry,
+                token.token,
+                Method::DELETE,
+                url,
+                None,
+                ("delete_revision", REVISION_RESPONSE_LIMIT),
+            )
             .await?;
         // Idempotent: the server returns 200 even when `deleted: false`.
-        let _: DeleteRevisionResponse = serde_json::from_slice(&body)
-            .map_err(|error| crate::tree::metadata_parse("delete_revision", &error))?;
         Ok(())
     }
 }
@@ -165,6 +194,32 @@ impl XetClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn revision_response_envelopes_cover_maximum_names_and_default_page() {
+        // Names permit quotes and backslashes (controls are rejected), both
+        // serialized as two bytes. Cursor is the raw last revision name.
+        let name = "\"\\".repeat(256);
+        let record = super::RevisionJson {
+            name: name.clone(),
+            created_at: u64::MAX,
+            updated_at: u64::MAX,
+        };
+        assert!(serde_json::to_vec(&record).unwrap().len() <= super::REVISION_RESPONSE_LIMIT);
+        let delete = serde_json::json!({ "name": &name, "deleted": false });
+        assert!(serde_json::to_vec(&delete).unwrap().len() <= super::REVISION_RESPONSE_LIMIT);
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Page<'wire> {
+            revisions: Vec<&'wire super::RevisionJson>,
+            next_cursor: Option<&'wire str>,
+        }
+        let page = Page {
+            revisions: vec![&record; 1000],
+            next_cursor: Some(&name),
+        };
+        assert!(serde_json::to_vec(&page).unwrap().len() <= super::REVISION_PAGE_RESPONSE_LIMIT);
+    }
+
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -211,6 +266,138 @@ mod tests {
 
     fn revision_json(name: &str) -> serde_json::Value {
         json!({"name": name, "createdAt": 1, "updatedAt": 2})
+    }
+
+    #[tokio::test]
+    async fn pagination_rejects_empty_repeated_and_cyclic_cursors() {
+        for returned_cursors in [vec![""], vec!["a", "a"], vec!["a", "b", "a"]] {
+            let server = MockServer::start().await;
+            mock_read_token(&server).await;
+            for (index, next) in returned_cursors.iter().enumerate() {
+                let expected = index.checked_sub(1).map(|i| returned_cursors[i].to_owned());
+                Mock::given(method("GET"))
+                    .and(path("/api/github/team/assets/revisions"))
+                    .and(move |request: &wiremock::Request| {
+                        request
+                            .url
+                            .query_pairs()
+                            .find(|(key, _)| key == "cursor")
+                            .map(|(_, value)| value.into_owned())
+                            == expected
+                    })
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "revisions": [], "nextCursor": next
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let client = build_client(&server).await;
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), client.list_revisions())
+                    .await
+                    .expect("malformed pagination must terminate");
+            assert!(
+                matches!(result, Err(crate::SdxError::Metadata(_))),
+                "{result:?}"
+            );
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn revisions_json_decode_preserves_context_without_retrying_parse_errors() {
+        let server = MockServer::start().await;
+        mock_read_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/revisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{invalid"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = build_client(&server)
+            .await
+            .list_revisions()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::SdxError::Metadata(message) if message.starts_with("list_revisions: "))
+        );
+    }
+
+    #[tokio::test]
+    async fn revisions_wrong_type_diagnostic_is_bounded_with_context_and_no_retry() {
+        let server = MockServer::start().await;
+        mock_read_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/revisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "revisions": [{"name": "main", "createdAt": "x".repeat(100_000), "updatedAt": 1}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = build_client(&server)
+            .await
+            .list_revisions()
+            .await
+            .unwrap_err();
+        assert!(matches!(error, crate::SdxError::Metadata(message)
+            if message.starts_with("list_revisions: ") && message.len() <= 8 * 1024 + "list_revisions: ".len()
+                && message.contains("[truncated; at line 1 column ")));
+    }
+
+    #[tokio::test]
+    async fn revision_mutations_preserve_path_segment_identity() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/xet-write-token/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "casUrl": server.uri(), "exp": 4_000_000_000u64,
+                "accessToken": "write-token",
+            })))
+            .mount(&server)
+            .await;
+        let client = build_client(&server).await;
+        for revision in [
+            "release candidate",
+            "release+candidate",
+            "release%candidate",
+            "版本",
+            "release/candidate",
+        ] {
+            for verb in ["POST", "DELETE"] {
+                let expected = revision.to_owned();
+                let response = if verb == "POST" {
+                    revision_json(revision)
+                } else {
+                    json!({"deleted": true})
+                };
+                Mock::given(method(verb))
+                    .and(move |request: &wiremock::Request| {
+                        request
+                            .url
+                            .path()
+                            .strip_prefix("/api/github/team/assets/revisions/")
+                            .is_some_and(|segment| {
+                                !segment.contains('/')
+                                    && percent_encoding::percent_decode_str(segment)
+                                        .decode_utf8()
+                                        .is_ok_and(|decoded| decoded == expected)
+                            })
+                    })
+                    .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            assert_eq!(
+                client.create_revision(revision).await.unwrap().name,
+                revision
+            );
+            client.delete_revision(revision).await.unwrap();
+        }
+        server.verify().await;
     }
 
     #[test]

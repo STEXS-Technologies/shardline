@@ -7,16 +7,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::super::pack::{GitObject, create_commit_object, empty_pack, generate_pack};
+use super::super::pack::{GitObject, generate_pack};
 use super::super::pktline::{self, FLUSH};
 use super::MAX_UPLOAD_PACK_REQUEST_BYTES;
-use super::ref_advertisement::{
-    GitRef, authorize_read_with_context, collect_refs, resolve_repo_id,
-};
+use super::ref_advertisement::{authorize_read_with_context, resolve_repo_id};
 use crate::{
     error::HubApiError,
     routes::{HubState, require_repository_binding},
 };
+#[cfg(test)]
 use shardline_index::hub::HubFileEntry;
 
 // ---- Upload-pack: POST /{type}/{ns}/{repo}/git-upload-pack ----
@@ -44,19 +43,44 @@ pub async fn upload_pack(
             HubApiError::BadRequest(format!("upload-pack request too large: {error}"))
         })?;
     let request_lines = pktline::decode_lines(&body);
-    let _wants = parse_wants(&request_lines);
+    let wants = parse_wants(&request_lines);
     let _haves = parse_haves(&request_lines);
 
-    let refs = collect_refs(&state, &repo_id).await?;
-
-    let pack_data = if refs.is_empty() {
-        empty_pack()?
-    } else {
-        generate_pack_for_refs(&state, &refs).await?
+    let capability = match auth_ctx {
+        Some(ctx) => shardline_server_core::AuthorizedRepository::from_verified_context(
+            ctx,
+            shardline_protocol::TokenScope::Read,
+        )?,
+        None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
     };
-
-    let mut response_body = pktline::sideband_data(&pack_data);
-    response_body.extend_from_slice(FLUSH.as_bytes());
+    let projection =
+        super::projection::project_history_async(state.clone(), repo_id.clone(), capability)
+            .await?;
+    let identities: std::collections::HashSet<_> = projection.identities.values().collect();
+    for want in &wants {
+        if !identities.contains(want) {
+            return Err(HubApiError::BadRequest(
+                "wanted Git commit is not in this repository".to_owned(),
+            ));
+        }
+    }
+    let sideband = request_lines.iter().any(|line| {
+        std::str::from_utf8(line)
+            .is_ok_and(|line| line.split_whitespace().any(|word| word == "side-band-64k"))
+    });
+    let response_body = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, HubApiError> {
+        let pack_data = generate_pack(&projection.objects)?;
+        let mut response_body = pktline::encode_line("NAK\n")?.into_bytes();
+        if sideband {
+            response_body.extend_from_slice(&pktline::sideband_data(&pack_data));
+            response_body.extend_from_slice(FLUSH.as_bytes());
+        } else {
+            response_body.extend_from_slice(&pack_data);
+        }
+        Ok(response_body)
+    })
+    .await
+    .map_err(|error| HubApiError::CasError(error.to_string()))??;
 
     let mut resp_headers = axum::http::HeaderMap::new();
     resp_headers.insert(
@@ -98,94 +122,12 @@ pub(super) fn parse_haves(lines: &[Vec<u8>]) -> Vec<String> {
 
 // ---- Real content pack generation ----
 
-/// Generates a Git pack file containing real objects built from HubStore
-/// metadata. For each non-HEAD ref this function:
-///
-/// 1. Resolves the revision SHA to fetch file entries from the store.
-/// 2. Builds a recursive Git tree object from the file list (including
-///    sub-trees for nested directories).
-/// 3. Generates blob objects — LFS pointer blobs for LFS files, or
-///    content-bearing blobs for inline files.
-/// 4. Creates a commit object referencing the root tree.
-async fn generate_pack_for_refs(state: &HubState, refs: &[GitRef]) -> Result<Vec<u8>, HubApiError> {
-    let mut all_objects: Vec<GitObject> = Vec::new();
-    let mut seen_trees: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
-    let mut seen_blobs: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
-    let mut parent_sha: Option<[u8; 20]> = None;
-
-    for git_ref in refs {
-        if git_ref.name == "HEAD" {
-            continue;
-        }
-
-        // Resolve files from HubStore for this ref's commit SHA.
-        let files = state
-            .store
-            .get_files(&git_ref.sha1)
-            .map_err(|e| HubApiError::CasError(e.to_string()))?;
-
-        // Build tree (and all sub-trees) from file entries.
-        let (root_tree, sub_trees) = build_git_tree_objects(&files);
-        let tree_sha = root_tree.sha1();
-
-        // Collect unique tree objects (including sub-trees).
-        if seen_trees.insert(tree_sha) {
-            all_objects.push(root_tree);
-        }
-        for tree in sub_trees {
-            let sha = tree.sha1();
-            if seen_trees.insert(sha) {
-                all_objects.push(tree);
-            }
-        }
-
-        // Generate blob objects for each file entry.
-        for file in &files {
-            let blob = if file.is_lfs {
-                build_lfs_pointer_blob(&file.sha, file.size)
-            } else {
-                build_inline_blob(file)
-            };
-            let blob_sha = blob.sha1();
-            if seen_blobs.insert(blob_sha) {
-                all_objects.push(blob);
-            }
-        }
-
-        // Add .gitattributes blob if there are LFS files.
-        if let Some(gitattr_blob) = build_gitattributes_blob(&files) {
-            let sha = gitattr_blob.sha1();
-            if seen_blobs.insert(sha) {
-                all_objects.push(gitattr_blob);
-            }
-        }
-
-        // Create the commit object.
-        let commit = create_commit_object(
-            &tree_sha,
-            parent_sha.as_ref(),
-            "Shardline Hub <hub@shardline.dev>",
-            git_ref
-                .name
-                .strip_prefix("refs/heads/")
-                .unwrap_or(&git_ref.name),
-        );
-        parent_sha = Some(commit.sha1());
-        all_objects.push(commit);
-    }
-
-    if all_objects.is_empty() {
-        return empty_pack().map_err(Into::into);
-    }
-
-    generate_pack(&all_objects).map_err(Into::into)
-}
-
 /// Builds Git tree objects (root + all sub-trees) from a flat list of
 /// file entries. Returns `(root_tree, sub_trees)`.
 ///
 /// Directories are represented as sub-tree objects. All sub-trees are
 /// returned in the second vector so the caller can add them to the pack.
+#[cfg(test)]
 pub(super) fn build_git_tree_objects(files: &[HubFileEntry]) -> (GitObject, Vec<GitObject>) {
     let refs: Vec<&HubFileEntry> = files.iter().collect();
     let mut sub_trees = Vec::new();
@@ -195,6 +137,7 @@ pub(super) fn build_git_tree_objects(files: &[HubFileEntry]) -> (GitObject, Vec<
 }
 
 /// Creates a Git tree object from owned (mode, name, sha1) entries.
+#[cfg(test)]
 fn tree_object_from_entries(entries: &[(u32, String, [u8; 20])]) -> GitObject {
     let mut tree_data = Vec::new();
     for (mode, name, sha1) in entries {
@@ -212,6 +155,7 @@ fn tree_object_from_entries(entries: &[(u32, String, [u8; 20])]) -> GitObject {
 ///
 /// `prefix` is the current directory path (empty string for root).
 /// `sub_trees` collects any sub-tree objects created during recursion.
+#[cfg(test)]
 fn build_tree_entries<'input>(
     files: &[&'input HubFileEntry],
     prefix: &str,
@@ -276,6 +220,7 @@ fn build_tree_entries<'input>(
 /// content hash), this generates a deterministic placeholder that Git can
 /// check out. The blob contains the file's SHA identifier so the content
 /// is at least addressable.
+#[cfg(test)]
 pub(super) fn build_inline_blob(file: &HubFileEntry) -> GitObject {
     // Use the file's content hash as deterministic blob content.
     // This ensures the same file always produces the same blob SHA.
@@ -299,6 +244,7 @@ pub(super) fn build_lfs_pointer_blob(oid: &str, size: u64) -> GitObject {
 
 /// Generates a `.gitattributes` blob that tells Git to treat LFS files
 /// as LFS-tracked. Returns `None` if no files are LFS-tracked.
+#[cfg(test)]
 pub(super) fn build_gitattributes_blob(files: &[HubFileEntry]) -> Option<GitObject> {
     let lfs_files: Vec<&HubFileEntry> = files.iter().filter(|f| f.is_lfs).collect();
     if lfs_files.is_empty() {

@@ -5,11 +5,10 @@
 //! — record-backed objects are not materialized at the protocol key, so the
 //! index is the only enumeration source and no object-store reads happen.
 //!
-//! The page walk is a keyset scan: fetch `max_keys + 1` rows ordered by raw
-//! `object_key` (the extra row detects truncation), then group them into
-//! `Contents` rows and `CommonPrefixes` rollups with S3 paging behavior — a
-//! delimiter group consumes every key under the common prefix and the page
-//! cursor advances past the whole group.
+//! This crate parses cursors and groups a supplied sorted batch. The native
+//! server walks indexed keyset pages, seeks past whole delimiter groups, and
+//! supplies `max_keys + 1` distinct logical entries to detect truncation.
+//! The standalone batch helper cannot discover children beyond its input.
 
 use crate::{S3Error, types::Contents};
 
@@ -34,11 +33,13 @@ enum ListParam {
     StartAfter,
     /// `marker` (ListObjects v1).
     Marker,
+    /// `encoding-type`.
+    EncodingType,
 }
 
 impl ListParam {
     /// Parses a raw query-parameter name into the typed set. Unknown names
-    /// (for example `fetch-owner` or `encoding-type`, which real S3 clients
+    /// (for example `fetch-owner` which real S3 clients
     /// send) return `None` and are ignored.
     fn parse(name: &str) -> Option<Self> {
         match name {
@@ -48,6 +49,7 @@ impl ListParam {
             "continuation-token" => Some(Self::ContinuationToken),
             "start-after" => Some(Self::StartAfter),
             "marker" => Some(Self::Marker),
+            "encoding-type" => Some(Self::EncodingType),
             _ => None,
         }
     }
@@ -87,6 +89,24 @@ impl Delimiter {
     }
 }
 
+/// Returns whether ListObjects response key-like fields should be URL encoded.
+/// The existing v1/v2 parameter structs keep their public literal shape.
+///
+/// # Errors
+/// Returns InvalidArgument for any supplied encoding-type other than `url`.
+pub fn parse_list_objects_url_encoding(query: &[(String, String)]) -> Result<bool, S3Error> {
+    let mut requested = false;
+    for (name, value) in query {
+        if matches!(ListParam::parse(name), Some(ListParam::EncodingType)) {
+            if value != "url" {
+                return Err(S3Error::invalid_argument("encoding-type must be url"));
+            }
+            requested = true;
+        }
+    }
+    Ok(requested)
+}
+
 /// Parsed `ListObjectsV2` request parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListObjectsV2Params {
@@ -97,8 +117,8 @@ pub struct ListObjectsV2Params {
     /// The page row budget (`Contents` rows + `CommonPrefixes`), capped at
     /// [`MAX_LIST_KEYS`].
     pub max_keys: usize,
-    /// The decoded raw key from `continuation-token` (the last key seen on the
-    /// previous page).
+    /// The decoded cursor from `continuation-token`: a raw object key or the
+    /// common prefix emitted by the native server. Legacy raw-key cursors remain valid.
     pub continuation_token: Option<String>,
     /// The raw key to start listing strictly after (`start-after`).
     pub start_after: Option<String>,
@@ -138,10 +158,12 @@ pub struct ListObjectsV1Params {
 /// # Errors
 ///
 /// Returns [`S3Error::invalid_argument`] when `max-keys` is not a valid
-/// positive integer or the `delimiter` is more than one character.
+/// nonnegative integer, the `delimiter` is more than one character, or
+/// `encoding-type` is supplied with a value other than `url`.
 pub fn parse_list_objects_v1_params(
     query: &[(String, String)],
 ) -> Result<ListObjectsV1Params, S3Error> {
+    parse_list_objects_url_encoding(query)?;
     let mut params = ListObjectsV1Params {
         prefix: String::new(),
         delimiter: None,
@@ -156,16 +178,12 @@ pub fn parse_list_objects_v1_params(
                 let parsed = value
                     .parse::<usize>()
                     .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?;
-                if parsed == 0 {
-                    return Err(S3Error::invalid_argument(
-                        "max-keys must be greater than zero",
-                    ));
-                }
                 params.max_keys = parsed.min(MAX_LIST_KEYS);
             }
             Some(ListParam::Marker) => params.marker = Some(value.clone()),
             Some(ListParam::ContinuationToken) => {} // v2-only; ignored by v1
             Some(ListParam::StartAfter) => {}        // v2-only; ignored by v1
+            Some(ListParam::EncodingType) => {}      // validated separately
             None => {}
         }
     }
@@ -189,19 +207,20 @@ pub struct ListPage {
 /// Parses the `ListObjectsV2` query parameters from a decoded query map.
 ///
 /// Only the typed listing parameters (`prefix`, `delimiter`, `max-keys`,
-/// `continuation-token`, `start-after`) are read; everything else (including
+/// `continuation-token`, `start-after`, `encoding-type`) are read; everything else (including
 /// the `list-type=2` sub-resource and client extras such as `fetch-owner`) is
-/// ignored. `max-keys` must be a positive integer and is capped at
+/// ignored. `max-keys` must be a nonnegative integer and is capped at
 /// [`MAX_LIST_KEYS`].
 ///
 /// # Errors
 ///
-/// Returns [`S3Error::invalid_argument`] when `max-keys` is missing/zero/non-
+/// Returns [`S3Error::invalid_argument`] when `max-keys` is empty/non-
 /// numeric, the delimiter is more than one character, or
-/// `continuation-token` is not a valid base64 cursor.
+/// `continuation-token` is not a valid base64 cursor, or `encoding-type` is not `url`.
 pub fn parse_list_objects_v2_params(
     query: &[(String, String)],
 ) -> Result<ListObjectsV2Params, S3Error> {
+    parse_list_objects_url_encoding(query)?;
     let mut params = ListObjectsV2Params {
         prefix: String::new(),
         delimiter: None,
@@ -217,11 +236,6 @@ pub fn parse_list_objects_v2_params(
                 let parsed = value
                     .parse::<usize>()
                     .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?;
-                if parsed == 0 {
-                    return Err(S3Error::invalid_argument(
-                        "max-keys must be greater than zero",
-                    ));
-                }
                 params.max_keys = parsed.min(MAX_LIST_KEYS);
             }
             Some(ListParam::ContinuationToken) => {
@@ -229,6 +243,7 @@ pub fn parse_list_objects_v2_params(
             }
             Some(ListParam::StartAfter) => params.start_after = Some(value.clone()),
             Some(ListParam::Marker) => {} // v1-only; ignored by ListObjectsV2
+            Some(ListParam::EncodingType) => {} // validated separately
             None => {}
         }
     }
@@ -249,8 +264,9 @@ pub fn parse_list_objects_v2_params(
 /// At most `max_keys` rows are produced. The caller fetches `max_keys + 1`
 /// rows, so the page is reported truncated exactly when the raw batch exceeded
 /// the row budget — the extra row detects that more keys exist. When a
-/// delimiter group spans a page boundary the rollup may be re-emitted on the
-/// following page (benign; clients merge).
+/// delimiter group spans a raw batch boundary, this standalone helper cannot
+/// discover or skip children outside that batch. The native server's indexed
+/// walker handles this by supplying distinct representatives and a logical cursor.
 #[must_use]
 pub fn group_page(
     entries: Vec<shardline_index::S3ObjectEntry>,
@@ -258,6 +274,16 @@ pub fn group_page(
     delimiter: Option<char>,
     max_keys: usize,
 ) -> ListPage {
+    // A zero result budget is an empty terminal page, even when matching
+    // objects exist. Do not emit truncation without a usable next cursor.
+    if max_keys == 0 {
+        return ListPage {
+            contents: Vec::new(),
+            common_prefixes: Vec::new(),
+            next_cursor: None,
+            is_truncated: false,
+        };
+    }
     let fetched_len = entries.len();
     let mut contents = Vec::new();
     let mut common_prefixes = Vec::new();
@@ -670,12 +696,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_params_rejects_zero_max_keys() {
-        let result = parse_list_objects_v2_params(&query(&[("max-keys", "0")]));
-        assert!(result.is_err());
-        let error = result.unwrap_err();
-        assert_eq!(error.code, "InvalidArgument");
-        assert_eq!(error.status, 400);
+    fn parse_params_accept_zero_max_keys_for_both_versions() {
+        let zero = query(&[("max-keys", "0")]);
+        assert_eq!(parse_list_objects_v1_params(&zero).unwrap().max_keys, 0);
+        assert_eq!(parse_list_objects_v2_params(&zero).unwrap().max_keys, 0);
+    }
+
+    #[test]
+    fn zero_budget_grouping_is_empty_and_terminal() {
+        for delimiter in [None, Some('/')] {
+            for entries in [Vec::new(), vec![entry("plain"), entry("dir/child")]] {
+                let page = group_page(entries, "", delimiter, 0);
+                assert!(page.contents.is_empty());
+                assert!(page.common_prefixes.is_empty());
+                assert!(!page.is_truncated);
+                assert!(page.next_cursor.is_none());
+            }
+        }
     }
 
     #[test]
@@ -690,8 +727,8 @@ mod tests {
 
     #[test]
     fn parse_params_unknown_keys_are_ignored() {
-        // Real clients send fetch-owner / encoding-type / list-type; those must
-        // not break the listing params parse (list-type=2 is a sub-resource).
+        // Unknown fetch-owner / list-type remain ignored; encoding-type is
+        // recognized (list-type=2 is a sub-resource).
         let params = parse_list_objects_v2_params(&query(&[
             ("list-type", "2"),
             ("prefix", "dir/"),
@@ -719,8 +756,28 @@ mod tests {
         assert_eq!(params.delimiter, Some(Delimiter('/')));
         assert_eq!(params.max_keys, 12);
         assert_eq!(params.marker.as_deref(), Some("dir/old"));
-        assert!(parse_list_objects_v1_params(&query(&[("max-keys", "0")])).is_err());
+        assert!(parse_list_objects_v1_params(&query(&[("max-keys", "-1")])).is_err());
         assert!(parse_list_objects_v1_params(&query(&[("max-keys", "bad")])).is_err());
         assert!(parse_list_objects_v1_params(&query(&[("delimiter", "//")])).is_err());
+    }
+    #[test]
+    fn url_encoding_is_opt_in_and_rejects_unsupported_values() {
+        assert!(!parse_list_objects_url_encoding(&[]).unwrap());
+        let raw = query(&[
+            ("encoding-type", "url"),
+            ("prefix", "é/+%"),
+            ("marker", "a%2Fb"),
+            ("start-after", "é/+%"),
+        ]);
+        let v1 = parse_list_objects_v1_params(&raw).unwrap();
+        let v2 = parse_list_objects_v2_params(&raw).unwrap();
+        assert!(parse_list_objects_url_encoding(&raw).unwrap());
+        assert_eq!(v1.prefix, "é/+%");
+        assert_eq!(v1.marker.as_deref(), Some("a%2Fb"));
+        assert_eq!(v2.start_after.as_deref(), Some("é/+%"));
+        for value in ["", "URL", "base64"] {
+            assert!(parse_list_objects_v1_params(&query(&[("encoding-type", value)])).is_err());
+            assert!(parse_list_objects_v2_params(&query(&[("encoding-type", value)])).is_err());
+        }
     }
 }

@@ -1,3 +1,8 @@
+// Read-before-write mutations acquire the SQLite writer lock before observing
+// authoritative rows or evidence. A deferred read transaction cannot wait out
+// a competing writer when upgrading its snapshot, even with a busy timeout.
+// Read-only operations retain deferred transactions and can run alongside WAL
+// writers; no callbacks or mutations are replayed by an automatic retry.
 use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
@@ -27,10 +32,601 @@ use crate::{
     xet_hash_hex_string,
 };
 
+// Active and cancelled async cursors share a bounded close budget. Admission is
+// nonwaiting: nested visitors receive WouldBlock at capacity rather than wait
+// for the enclosing callback's cursor. A permit survives until SQLite closes.
+const ASYNC_CURSOR_LIMIT: usize = 64;
+
+struct ClosePool {
+    sender: std::sync::mpsc::SyncSender<CloseJob>,
+    admission: std::sync::Arc<tokio::sync::Semaphore>,
+    faulted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub(crate) struct CloseReservation {
+    pool: std::sync::Arc<ClosePool>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct CloseJob {
+    // Declaration order also preserves close-before-permit-release on unwind.
+    _connection: rusqlite::Connection,
+    _reservation: CloseReservation,
+    #[cfg(test)]
+    before_close: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl CloseJob {
+    fn close(self) {
+        #[cfg(test)]
+        let mut job = self;
+        #[cfg(not(test))]
+        let job = self;
+        #[cfg(test)]
+        if let Some(hook) = job.before_close.take() {
+            hook();
+        }
+        drop(job);
+    }
+}
+
+impl ClosePool {
+    fn new_with_spawn<Spawn>(capacity: usize, spawn: Spawn) -> std::io::Result<Self>
+    where
+        Spawn: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<CloseJob>(capacity);
+        let faulted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_faulted = faulted.clone();
+        spawn(Box::new(move || {
+            // The static pool retains a sender. No user callback is executed
+            // here; an unexpected per-job panic faults admission, but does not
+            // abandon the remaining already admitted close jobs.
+            while let Ok(job) = receiver.recv() {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    job.close();
+                }));
+                if result.is_err() {
+                    worker_faulted.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }))?;
+        Ok(Self {
+            sender,
+            admission: std::sync::Arc::new(tokio::sync::Semaphore::new(capacity)),
+            faulted,
+        })
+    }
+
+    fn reserve(self: &std::sync::Arc<Self>) -> Result<CloseReservation, LocalIndexStoreError> {
+        if self.faulted.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "SQLite cursor close worker faulted",
+            )
+            .into());
+        }
+        let permit = self.admission.clone().try_acquire_owned().map_err(|admission_error| std::io::Error::new(std::io::ErrorKind::WouldBlock, format!("SQLite traversal capacity reached (64 active or closing cursors); try again after a traversal closes: {admission_error}")))?;
+        Ok(CloseReservation {
+            pool: self.clone(),
+            _permit: permit,
+        })
+    }
+
+    fn enqueue(&self, job: CloseJob) {
+        // Every job retains a reserved permit. With this job still outside
+        // the queue, at most capacity-1 jobs can be queued, so Full is excluded.
+        if let Err(error) = self.sender.try_send(job) {
+            // Exceptional internal-fault-only fallback: never leak a SQLite
+            // handle or create unbounded rescue jobs. This synchronous close
+            // can block its caller, and all future admission is rejected.
+            self.faulted
+                .store(true, std::sync::atomic::Ordering::Release);
+            let fallback = match error {
+                std::sync::mpsc::TrySendError::Full(payload)
+                | std::sync::mpsc::TrySendError::Disconnected(payload) => payload,
+            };
+            fallback.close();
+        }
+    }
+}
+
+pub(crate) fn reserve_async_cursor() -> Result<CloseReservation, LocalIndexStoreError> {
+    static POOL: std::sync::OnceLock<Result<std::sync::Arc<ClosePool>, std::io::Error>> =
+        std::sync::OnceLock::new();
+    let pool = POOL
+        .get_or_init(|| {
+            ClosePool::new_with_spawn(ASYNC_CURSOR_LIMIT, |worker| {
+                std::thread::Builder::new()
+                    .name("shardline-sqlite-close".into())
+                    .spawn(worker)
+                    .map(drop)
+            })
+            .map(std::sync::Arc::new)
+        })
+        .as_ref()
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("could not start SQLite cursor close worker: {error}"),
+            )
+        })?;
+    pool.reserve()
+}
+
+pub(crate) struct ReadConnection {
+    connection: Option<rusqlite::Connection>,
+    reservation: Option<CloseReservation>,
+}
+
+impl ReadConnection {
+    pub(crate) const fn new(
+        connection: rusqlite::Connection,
+        reservation: Option<CloseReservation>,
+    ) -> Self {
+        Self {
+            connection: Some(connection),
+            reservation,
+        }
+    }
+
+    pub(crate) fn get(&self) -> Result<&rusqlite::Connection, LocalIndexStoreError> {
+        self.connection.as_ref().ok_or_else(|| {
+            LocalIndexStoreError::BlockingTask("SQLite read cursor already closed".into())
+        })
+    }
+
+    // This method is called only by synchronous APIs or a blocking task. Close
+    // before releasing admission, including any last-WAL checkpoint work.
+    pub(crate) fn close(mut self) {
+        drop(self.connection.take());
+        drop(self.reservation.take());
+    }
+}
+
+impl Drop for ReadConnection {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            if let Some(reservation) = self.reservation.take() {
+                let pool = reservation.pool.clone();
+                pool.enqueue(CloseJob {
+                    _connection: connection,
+                    _reservation: reservation,
+                    #[cfg(test)]
+                    before_close: None,
+                });
+            } else {
+                drop(connection);
+            }
+        }
+    }
+}
+
+// A visitor retains one deferred read snapshot, but never retains an entire
+// inventory. Decode and evidence passes finish before any visitor side effect.
+pub(crate) const INVENTORY_BATCH_SIZE: usize = 256;
+
+const WEBHOOK_RETENTION_NEXT_PAGE_SQL: &str = "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                     FROM shardline_webhook_deliveries
+                     WHERE processed_at_unix_seconds < ?1
+                       AND (processed_at_unix_seconds, provider, owner, repo, delivery_id)
+                         > (?2, ?3, ?4, ?5, ?6)
+                     ORDER BY processed_at_unix_seconds, provider, owner, repo, delivery_id LIMIT ?7";
+
+const WEBHOOK_RETENTION_FIRST_PAGE_SQL: &str = "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                     FROM shardline_webhook_deliveries
+                     WHERE processed_at_unix_seconds < ?1
+                     ORDER BY processed_at_unix_seconds, provider, owner, repo, delivery_id LIMIT ?2";
+
+pub(crate) trait InventoryEntry: Sized + Send + 'static {
+    const TABLE: &'static str;
+    const COLUMNS: &'static str;
+    const KEYS: &'static [&'static str];
+    const HAS_EVIDENCE: bool = false;
+    const PREVALIDATE_SNAPSHOTS: bool = false;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> = None;
+    fn operation_ids(_batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        Ok(Vec::new())
+    }
+    fn verify_raw_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        if let Some(kind) = Self::OPERATION_KIND {
+            drop(super::helpers::load_latest_verified_event_json_batch(
+                connection,
+                kind,
+                &Self::operation_ids(batch)?,
+            )?);
+        }
+        Ok(())
+    }
+    fn verify_typed_heads(
+        _connection: &rusqlite::Connection,
+        _batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        Ok(())
+    }
+
+    fn validate_snapshots(_batch: &[Self]) -> Result<(), LocalIndexStoreError> {
+        Ok(())
+    }
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError>;
+    fn verify_batch(
+        _connection: &rusqlite::Connection,
+        _batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        Ok(())
+    }
+}
+
+pub(crate) struct InventoryScan<Entry> {
+    connection: ReadConnection,
+    after: Option<Vec<String>>,
+    entry: std::marker::PhantomData<Entry>,
+}
+
+impl<Entry: InventoryEntry> InventoryScan<Entry> {
+    pub(crate) fn new(store: &LocalIndexStore) -> Result<Self, LocalIndexStoreError> {
+        Self::open(store, None)
+    }
+
+    pub(crate) fn open(
+        store: &LocalIndexStore,
+        reservation: Option<CloseReservation>,
+    ) -> Result<Self, LocalIndexStoreError> {
+        let connection = ReadConnection::new(store.open_connection()?, reservation);
+        if let Err(error) = connection.get()?.execute_batch("BEGIN DEFERRED") {
+            connection.close();
+            return Err(error.into());
+        }
+        Ok(Self {
+            connection,
+            after: None,
+            entry: std::marker::PhantomData,
+        })
+    }
+
+    pub(crate) fn rewind(&mut self) {
+        self.after = None;
+    }
+
+    pub(crate) fn next_batch(&mut self, phase: u8) -> Result<Vec<Entry>, LocalIndexStoreError> {
+        let keys = Entry::KEYS.join(", ");
+        let predicate = if self.after.is_some() {
+            let placeholders = (1..=Entry::KEYS.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" WHERE ({keys}) > ({placeholders})")
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "SELECT {} FROM {}{} ORDER BY {} LIMIT {}",
+            Entry::COLUMNS,
+            Entry::TABLE,
+            predicate,
+            keys,
+            INVENTORY_BATCH_SIZE
+        );
+        let (batch, last_key) = {
+            let mut statement = self.connection.get()?.prepare(&sql)?;
+            let mut rows =
+                statement.query(rusqlite::params_from_iter(self.after.iter().flatten()))?;
+            let mut batch = Vec::with_capacity(INVENTORY_BATCH_SIZE);
+            let mut last_key = None;
+            while let Some(row) = rows.next()? {
+                batch.push(Entry::from_row(row)?);
+                last_key = Some(
+                    Entry::KEYS
+                        .iter()
+                        .map(|key| row.get::<_, String>(*key))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            (batch, last_key)
+        };
+        if phase == 1 {
+            Entry::validate_snapshots(&batch)?;
+        }
+        if phase == 2 {
+            Entry::verify_raw_heads(self.connection.get()?, &batch)?;
+        }
+        if phase == 3 {
+            Entry::verify_typed_heads(self.connection.get()?, &batch)?;
+        }
+        if phase == 4 {
+            Entry::verify_batch(self.connection.get()?, &batch)?;
+        }
+        if let Some(key) = last_key {
+            self.after = Some(key);
+        }
+        Ok(batch)
+    }
+
+    pub(crate) fn finish(self) -> Result<(), LocalIndexStoreError> {
+        let result = self
+            .connection
+            .get()?
+            .execute_batch("COMMIT")
+            .map_err(LocalIndexStoreError::from);
+        self.connection.close();
+        result
+    }
+
+    pub(crate) fn abort(self) {
+        self.connection.close();
+    }
+}
+
+fn visit_inventory<Entry, Visitor, VisitorError>(
+    store: &LocalIndexStore,
+    mut visitor: Visitor,
+) -> Result<(), VisitorError>
+where
+    Entry: InventoryEntry,
+    Visitor: FnMut(Entry) -> Result<(), VisitorError>,
+    LocalIndexStoreError: Into<VisitorError>,
+{
+    let mut scan = InventoryScan::<Entry>::new(store).map_err(Into::into)?;
+    for phase in 0..6 {
+        if (phase == 1 && !Entry::PREVALIDATE_SNAPSHOTS)
+            || ((2..=4).contains(&phase) && !Entry::HAS_EVIDENCE)
+        {
+            continue;
+        }
+        scan.rewind();
+        loop {
+            let batch = scan.next_batch(phase).map_err(Into::into)?;
+            if batch.is_empty() {
+                break;
+            }
+            if phase == 5 {
+                for entry in batch {
+                    visitor(entry)?;
+                }
+            }
+        }
+    }
+    scan.finish().map_err(Into::into)
+}
+
+impl InventoryEntry for FileId {
+    const TABLE: &'static str = "shardline_file_reconstructions";
+    const COLUMNS: &'static str = "file_id";
+    const KEYS: &'static [&'static str] = &["file_id"];
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(Self::new(parse_xet_hash_hex(&row.get::<_, String>(0)?)?))
+    }
+}
+
+impl InventoryEntry for DedupeShardMapping {
+    const TABLE: &'static str = "shardline_dedupe_shards";
+    const COLUMNS: &'static str = "chunk_hash, shard_object_key";
+    const KEYS: &'static [&'static str] = &["chunk_hash"];
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::dedupe_shard_mapping_from_row(row)?)
+    }
+}
+
+impl InventoryEntry for QuarantineCandidate {
+    const TABLE: &'static str = "shardline_quarantine_candidates";
+    const COLUMNS: &'static str = "object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds";
+    const KEYS: &'static [&'static str] = &["object_key"];
+    const HAS_EVIDENCE: bool = true;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> =
+        Some(shardline_reliability::OperationKind::GarbageCollection);
+    fn operation_ids(batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        Ok(batch
+            .iter()
+            .map(|entry| entry.object_key().as_str().to_owned())
+            .collect())
+    }
+    fn verify_typed_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        drop(load_quarantine_evidence_batch(
+            connection,
+            &Self::operation_ids(batch)?,
+        )?);
+        Ok(())
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::quarantine_candidate_from_row(row)?)
+    }
+    fn verify_batch(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let keys = batch
+            .iter()
+            .map(|entry| entry.object_key().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let evidence = load_quarantine_evidence_batch(connection, &keys)?;
+        for entry in batch {
+            let snapshot =
+                super::helpers::quarantine_snapshot(entry, QuarantineLifecycleState::Active)?;
+            let stored = evidence.get(entry.object_key().as_str()).ok_or(
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ),
+            )?;
+            verify_snapshot_evidence(stored, &snapshot)?;
+        }
+        Ok(())
+    }
+}
+
+impl InventoryEntry for RetentionHold {
+    const TABLE: &'static str = "shardline_retention_holds";
+    const COLUMNS: &'static str =
+        "object_key, reason, held_at_unix_seconds, release_after_unix_seconds";
+    const KEYS: &'static [&'static str] = &["object_key"];
+    const HAS_EVIDENCE: bool = true;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> =
+        Some(shardline_reliability::OperationKind::RetentionHold);
+    fn operation_ids(batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        Ok(batch
+            .iter()
+            .map(|entry| entry.object_key().as_str().to_owned())
+            .collect())
+    }
+    fn verify_typed_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        drop(load_retention_evidence_batch(
+            connection,
+            &Self::operation_ids(batch)?,
+        )?);
+        Ok(())
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::retention_hold_from_row(row)?)
+    }
+    fn verify_batch(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let keys = batch
+            .iter()
+            .map(|entry| entry.object_key().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let evidence = load_retention_evidence_batch(connection, &keys)?;
+        for entry in batch {
+            let snapshot = retention_snapshot(entry, RetentionHoldLifecycleState::Active)?;
+            let stored = evidence.get(entry.object_key().as_str()).ok_or(
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ),
+            )?;
+            verify_snapshot_evidence(stored, &snapshot)?;
+        }
+        Ok(())
+    }
+}
+
+impl InventoryEntry for WebhookDelivery {
+    const TABLE: &'static str = "shardline_webhook_deliveries";
+    const COLUMNS: &'static str = "provider, owner, repo, delivery_id, processed_at_unix_seconds";
+    const KEYS: &'static [&'static str] = &["provider", "owner", "repo", "delivery_id"];
+    const HAS_EVIDENCE: bool = true;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> =
+        Some(shardline_reliability::OperationKind::WebhookDelivery);
+    fn operation_ids(batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        batch
+            .iter()
+            .map(|entry| {
+                Ok(
+                    webhook_snapshot(entry, WebhookDeliveryLifecycleState::Processed)?
+                        .evidence_operation()?
+                        .operation_id,
+                )
+            })
+            .collect()
+    }
+    fn verify_typed_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        drop(load_webhook_evidence_batch(connection, batch)?);
+        Ok(())
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::webhook_delivery_from_row(row)?)
+    }
+    fn verify_batch(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let evidence = load_webhook_evidence_batch(connection, batch)?;
+        for entry in batch {
+            let snapshot = webhook_snapshot(entry, WebhookDeliveryLifecycleState::Processed)?;
+            let id = snapshot.evidence_operation()?.operation_id;
+            let stored = evidence.get(&id).ok_or(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ))?;
+            verify_snapshot_evidence(stored, &snapshot)?;
+        }
+        Ok(())
+    }
+}
+
+impl InventoryEntry for ProviderRepositoryState {
+    const TABLE: &'static str = "shardline_provider_repository_states";
+    const COLUMNS: &'static str = "provider, owner, repo, last_access_changed_at_unix_seconds, last_revision_pushed_at_unix_seconds, last_pushed_revision, last_cache_invalidated_at_unix_seconds, last_authorization_rechecked_at_unix_seconds, last_drift_checked_at_unix_seconds";
+    const KEYS: &'static [&'static str] = &["provider", "owner", "repo"];
+    const HAS_EVIDENCE: bool = true;
+    const OPERATION_KIND: Option<shardline_reliability::OperationKind> =
+        Some(shardline_reliability::OperationKind::ProviderEvent);
+    fn operation_ids(batch: &[Self]) -> Result<Vec<String>, LocalIndexStoreError> {
+        batch
+            .iter()
+            .map(|entry| {
+                Ok(super::helpers::provider_evidence_operation_id(
+                    &snapshot_from_state(entry)?,
+                ))
+            })
+            .collect()
+    }
+    fn verify_typed_heads(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let snapshots = batch
+            .iter()
+            .map(snapshot_from_state)
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(load_provider_evidence_batch(connection, &snapshots)?);
+        Ok(())
+    }
+
+    const PREVALIDATE_SNAPSHOTS: bool = true;
+    fn validate_snapshots(batch: &[Self]) -> Result<(), LocalIndexStoreError> {
+        for state in batch {
+            snapshot_from_state(state)?;
+        }
+        Ok(())
+    }
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self, LocalIndexStoreError> {
+        Ok(super::helpers::provider_repository_state_from_row(row)?)
+    }
+    fn verify_batch(
+        connection: &rusqlite::Connection,
+        batch: &[Self],
+    ) -> Result<(), LocalIndexStoreError> {
+        let snapshots = batch
+            .iter()
+            .map(snapshot_from_state)
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = load_provider_evidence_batch(connection, &snapshots)?;
+        for snapshot in snapshots {
+            let id = super::helpers::provider_evidence_operation_id(&snapshot);
+            let stored = evidence.get(&id).ok_or(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ))?;
+            if stored.events().is_empty() {
+                verify_provider_lifecycle_events(
+                    ProviderEvidenceLog::baseline(snapshot.clone())?.events(),
+                    &snapshot,
+                )?;
+            } else {
+                stored.verify_for(&snapshot)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 fn verify_sqlite_intent_evidence(
     transaction: &Transaction<'_>,
     intent: &UploadIntent,
-) -> Result<(), LocalIndexStoreError> {
+) -> Result<LifecycleEvent, LocalIndexStoreError> {
     let event = super::helpers::load_latest_verified_event_json(
         transaction,
         shardline_reliability::OperationKind::Upload,
@@ -51,7 +647,8 @@ fn verify_sqlite_intent_evidence(
         intent.object_hash(),
         intent.state(),
     )
-    .map_err(LocalIndexStoreError::Reliability)
+    .map_err(LocalIndexStoreError::Reliability)?;
+    Ok(event)
 }
 
 impl ReconstructionStore for LocalIndexStore {
@@ -88,6 +685,17 @@ impl ReconstructionStore for LocalIndexStore {
         Ok(file_ids)
     }
 
+    fn visit_reconstruction_file_ids<Visitor, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<(), VisitorError>
+    where
+        Self::Error: Into<VisitorError>,
+        Visitor: FnMut(FileId) -> Result<(), VisitorError>,
+    {
+        visit_inventory::<FileId, _, _>(self, visitor)
+    }
+
     fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error> {
         let connection = self.open_connection()?;
         let changed = connection.execute(
@@ -103,7 +711,8 @@ impl ReconstructionStore for LocalIndexStore {
         expected: &FileReconstruction,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let Some(terms) = transaction
             .query_row(
                 "SELECT terms FROM shardline_file_reconstructions WHERE file_id = ?1",
@@ -176,16 +785,13 @@ impl DedupeStore for LocalIndexStore {
 
     fn visit_dedupe_shard_mappings<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(DedupeShardMapping) -> Result<(), VisitorError>,
     {
-        for mapping in DedupeStore::list_dedupe_shard_mappings(self).map_err(Into::into)? {
-            visitor(mapping)?;
-        }
-        Ok(())
+        visit_inventory::<DedupeShardMapping, _, _>(self, visitor)
     }
 
     fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error> {
@@ -202,7 +808,8 @@ impl DedupeStore for LocalIndexStore {
         expected: &DedupeShardMapping,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let Some(current) = transaction
             .query_row(
                 "SELECT chunk_hash, shard_object_key
@@ -299,16 +906,13 @@ impl LifecycleStore for LocalIndexStore {
 
     fn visit_quarantine_candidates<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError>,
     {
-        for candidate in LifecycleStore::list_quarantine_candidates(self).map_err(Into::into)? {
-            visitor(candidate)?;
-        }
-        Ok(())
+        visit_inventory::<QuarantineCandidate, _, _>(self, visitor)
     }
 
     fn upsert_quarantine_candidate(
@@ -316,7 +920,8 @@ impl LifecycleStore for LocalIndexStore {
         candidate: &QuarantineCandidate,
     ) -> Result<(), Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous = transaction
             .query_row(
                 "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
@@ -385,7 +990,8 @@ impl LifecycleStore for LocalIndexStore {
 
     fn delete_quarantine_candidate(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let candidate = transaction
             .query_row(
                 "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
@@ -433,7 +1039,8 @@ impl LifecycleStore for LocalIndexStore {
         expected: &QuarantineCandidate,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let candidate = transaction
             .query_row(
                 "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
@@ -548,21 +1155,19 @@ impl LifecycleStore for LocalIndexStore {
 
     fn visit_retention_holds<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(RetentionHold) -> Result<(), VisitorError>,
     {
-        for hold in LifecycleStore::list_retention_holds(self).map_err(Into::into)? {
-            visitor(hold)?;
-        }
-        Ok(())
+        visit_inventory::<RetentionHold, _, _>(self, visitor)
     }
 
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous = transaction
             .query_row(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
@@ -623,7 +1228,8 @@ impl LifecycleStore for LocalIndexStore {
 
     fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let hold = transaction
             .query_row(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
@@ -659,7 +1265,8 @@ impl LifecycleStore for LocalIndexStore {
         expected: &RetentionHold,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let hold = transaction
             .query_row(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
@@ -712,7 +1319,8 @@ impl LifecycleStore for LocalIndexStore {
 
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
                 "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
@@ -803,21 +1411,19 @@ impl LifecycleStore for LocalIndexStore {
 
     fn visit_webhook_deliveries<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(WebhookDelivery) -> Result<(), VisitorError>,
     {
-        for delivery in LifecycleStore::list_webhook_deliveries(self).map_err(Into::into)? {
-            visitor(delivery)?;
-        }
-        Ok(())
+        visit_inventory::<WebhookDelivery, _, _>(self, visitor)
     }
 
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
                 "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
@@ -867,7 +1473,8 @@ impl LifecycleStore for LocalIndexStore {
         expected: &WebhookDelivery,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
                 "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
@@ -927,67 +1534,110 @@ impl LifecycleStore for LocalIndexStore {
         older_than_unix_seconds: u64,
     ) -> Result<u64, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
-        let mut statement = transaction.prepare(
-            "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
-             FROM shardline_webhook_deliveries
-             WHERE processed_at_unix_seconds < ?1",
-        )?;
-        let rows = statement.query_map(
-            params![u64_to_i64(older_than_unix_seconds)?],
-            super::helpers::webhook_delivery_from_row,
-        )?;
-        let deliveries = collect_rows(rows)?;
-        drop(statement);
-        let operation_ids = deliveries
-            .iter()
-            .map(|delivery| {
-                Ok::<_, LocalIndexStoreError>(
-                    webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
-                        .evidence_operation()?
-                        .operation_id,
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let cutoff = u64_to_i64(older_than_unix_seconds)?;
+        let batch_size = i64::try_from(INVENTORY_BATCH_SIZE)
+            .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?;
+        let mut purged = 0_u64;
+        let mut cursor: Option<(i64, String, String, String, String)> = None;
+        // Keyset pages follow the covering retention index, so retained deliveries
+        // beyond the cutoff are never scanned. Pages retain at most 256 rows
+        // and their evidence. One Immediate transaction keeps every page atomic,
+        // including late verification errors.
+        loop {
+            let deliveries =
+                if let Some((processed_at, provider, owner, repo, delivery_id)) = &cursor {
+                    let mut statement = transaction.prepare(WEBHOOK_RETENTION_NEXT_PAGE_SQL)?;
+                    collect_rows(statement.query_map(
+                        params![
+                            cutoff,
+                            processed_at,
+                            provider,
+                            owner,
+                            repo,
+                            delivery_id,
+                            batch_size
+                        ],
+                        super::helpers::webhook_delivery_from_row,
+                    )?)?
+                } else {
+                    let mut statement = transaction.prepare(WEBHOOK_RETENTION_FIRST_PAGE_SQL)?;
+                    collect_rows(statement.query_map(
+                        params![cutoff, batch_size],
+                        super::helpers::webhook_delivery_from_row,
+                    )?)?
+                };
+            let Some(last) = deliveries.last() else {
+                break;
+            };
+            cursor = Some((
+                u64_to_i64(last.processed_at_unix_seconds())?,
+                last.provider().as_str().to_owned(),
+                last.owner().to_owned(),
+                last.repo().to_owned(),
+                last.delivery_id().to_owned(),
+            ));
+            purged = purged
+                .checked_add(
+                    u64::try_from(deliveries.len()).map_err(|error| {
+                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
+                    })?,
                 )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let heads = super::helpers::load_latest_verified_event_json_batch(
-            &transaction,
-            shardline_reliability::OperationKind::WebhookDelivery,
-            &operation_ids,
-        )?;
-        for (delivery, operation_id) in deliveries.iter().zip(operation_ids) {
-            let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-            let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
-            let evidence = heads
-                .get(&operation_id)
-                .map(|event| {
-                    shardline_reliability::WebhookDeliveryEvidenceLog::from_head(
-                        serde_json::from_value(event.clone())?,
+                .ok_or_else(|| {
+                    LocalIndexStoreError::IntegerOutOfRange("webhook purge count overflow".into())
+                })?;
+            let operation_ids = deliveries
+                .iter()
+                .map(|delivery| {
+                    Ok::<_, LocalIndexStoreError>(
+                        webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
+                            .evidence_operation()?
+                            .operation_id,
                     )
                 })
-                .transpose()?
-                .unwrap_or_default();
-            let (evidence, evidence_was_empty) =
-                verify_and_append_snapshot_transition(evidence, snapshot, released)?;
-            transaction.execute(
-                "DELETE FROM shardline_webhook_deliveries
-                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
-                params![
-                    delivery.provider().as_str(),
-                    delivery.owner(),
-                    delivery.repo(),
-                    delivery.delivery_id(),
-                ],
+                .collect::<Result<Vec<_>, _>>()?;
+            let heads = super::helpers::load_latest_verified_event_json_batch(
+                &transaction,
+                shardline_reliability::OperationKind::WebhookDelivery,
+                &operation_ids,
             )?;
-            if evidence_was_empty {
-                for event in evidence.events() {
+            for (delivery, operation_id) in deliveries.iter().zip(operation_ids) {
+                let snapshot =
+                    webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+                let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
+                let evidence = heads
+                    .get(&operation_id)
+                    .map(|event| {
+                        shardline_reliability::WebhookDeliveryEvidenceLog::from_head(
+                            serde_json::from_value(event.clone())?,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                let (evidence, evidence_was_empty) =
+                    verify_and_append_snapshot_transition(evidence, snapshot, released)?;
+                transaction.execute(
+                    "DELETE FROM shardline_webhook_deliveries
+                     WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                    params![
+                        delivery.provider().as_str(),
+                        delivery.owner(),
+                        delivery.repo(),
+                        delivery.delivery_id(),
+                    ],
+                )?;
+                if evidence_was_empty {
+                    for event in evidence.events() {
+                        persist_webhook_evidence(&transaction, event)?;
+                    }
+                } else if let Some(event) = evidence.events().last() {
                     persist_webhook_evidence(&transaction, event)?;
                 }
-            } else if let Some(event) = evidence.events().last() {
-                persist_webhook_evidence(&transaction, event)?;
             }
         }
         transaction.commit()?;
-        Ok(u64::try_from(deliveries.len()).unwrap_or(u64::MAX))
+        Ok(purged)
     }
 
     fn provider_repository_state(
@@ -1079,16 +1729,13 @@ impl LifecycleStore for LocalIndexStore {
 
     fn visit_provider_repository_states<Visitor, VisitorError>(
         &self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(ProviderRepositoryState) -> Result<(), VisitorError>,
     {
-        for state in LifecycleStore::list_provider_repository_states(self).map_err(Into::into)? {
-            visitor(state)?;
-        }
-        Ok(())
+        visit_inventory::<ProviderRepositoryState, _, _>(self, visitor)
     }
 
     fn upsert_provider_repository_state(
@@ -1096,7 +1743,8 @@ impl LifecycleStore for LocalIndexStore {
         state: &ProviderRepositoryState,
     ) -> Result<(), Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
                 "SELECT provider,
@@ -1263,7 +1911,8 @@ impl LifecycleStore for LocalIndexStore {
         repo: &str,
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
                 "SELECT provider,
@@ -1329,6 +1978,7 @@ impl UploadIntentStore for super::LocalIndexStore {
         let tenant = tenant.to_owned();
         let repository = repository.to_owned();
         tokio::task::spawn_blocking(move || {
+            let object_length = u64_to_i64(intent.object_length())?;
             let mut conn = store.open_connection()?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1350,28 +2000,34 @@ impl UploadIntentStore for super::LocalIndexStore {
                     intent.intent_id(),
                     intent.object_key(),
                     intent.object_hash(),
-                    intent.object_length() as i64,
+                    object_length,
                     intent.state().as_str(),
                     now,
                     now,
                 ],
             )?;
             if inserted == 0 {
-                let matches_identity = transaction.query_row(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM shardline_upload_intents
-                        WHERE intent_id = ?1 AND object_key = ?2 AND object_hash = ?3
-                          AND object_length = ?4
-                     )",
-                    rusqlite::params![
-                        intent.intent_id(),
-                        intent.object_key(),
-                        intent.object_hash(),
-                        intent.object_length() as i64,
-                    ],
-                    |row| row.get::<_, bool>(0),
+                let durable_intent = transaction.query_row(
+                    "SELECT intent_id, object_key, object_hash, object_length, state,
+                            created_at_unix_seconds, updated_at_unix_seconds
+                     FROM shardline_upload_intents WHERE intent_id = ?1",
+                    rusqlite::params![intent.intent_id()],
+                    |row| {
+                        let state_text: String = row.get(4)?;
+                        let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+                            rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_text}"), rusqlite::types::Type::Text)
+                        })?;
+                        Ok(UploadIntent::from_parts(row.get(0)?, row.get(1)?, row.get(2)?,
+                            row.get::<_, i64>(3)? as u64, state,
+                            Duration::from_secs(row.get::<_, i64>(5)? as u64),
+                            Duration::from_secs(row.get::<_, i64>(6)? as u64)))
+                    },
                 )?;
-                if !matches_identity {
+                if !durable_intent.has_same_identity(&intent) {
+                    return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+                }
+                let event = verify_sqlite_intent_evidence(&transaction, &durable_intent)?;
+                if event.operation.tenant != tenant || event.operation.repository != repository {
                     return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
                 }
             } else {
@@ -1697,7 +2353,7 @@ impl UploadIntentStore for super::LocalIndexStore {
         let operation_id = event.operation.operation_id.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = store.open_connection()?;
-            let transaction = conn.transaction()?;
+            let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let (object_key, object_hash, state_text) = transaction
                 .query_row(
                     "SELECT object_key, object_hash, state
@@ -2484,6 +3140,189 @@ mod tests {
         );
     }
 
+    fn purge_fixture(count: usize, processed_at: u64) -> (LocalIndexStore, WebhookDelivery) {
+        let store = make_store();
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let mut last = None;
+        for index in 0..count {
+            // Timestamp order deliberately conflicts with the composite key.
+            // Keep the final record latest for late-page corruption controls.
+            let observed_at = processed_at
+                + if index == count.saturating_sub(1) {
+                    5
+                } else {
+                    (index * 31 % 5) as u64
+                };
+            let delivery = WebhookDelivery::new(
+                RepositoryProvider::GitHub,
+                format!("owner-{}", index / INVENTORY_BATCH_SIZE),
+                "repo".into(),
+                format!("batch-{:05}", index % INVENTORY_BATCH_SIZE),
+                observed_at,
+            )
+            .unwrap();
+            let snapshot =
+                webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Processed).unwrap();
+            let mut evidence =
+                shardline_reliability::WebhookDeliveryEvidenceLog::baseline(snapshot.clone())
+                    .unwrap();
+            if index == count.saturating_sub(1) {
+                evidence
+                    .record(
+                        webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Released)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                evidence.record(snapshot).unwrap();
+            }
+            transaction.execute(
+                "INSERT INTO shardline_webhook_deliveries(provider,owner,repo,delivery_id,processed_at_unix_seconds) VALUES('github',?1,'repo',?2,?3)",
+                params![delivery.owner(),delivery.delivery_id(),u64_to_i64(observed_at).unwrap()],
+            ).unwrap();
+            for event in evidence.events() {
+                persist_webhook_evidence(&transaction, event).unwrap();
+            }
+            last = Some(delivery);
+        }
+        transaction.commit().unwrap();
+        (store, last.unwrap())
+    }
+
+    #[test]
+    fn webhook_delivery_noop_purge_work_does_not_grow_with_retained_rows() {
+        let mut steps = Vec::new();
+        for count in [100, 2000] {
+            let (store, _) = purge_fixture(count, 1000);
+            let connection = store.open_connection().unwrap();
+            let mut statement = connection
+                .prepare(WEBHOOK_RETENTION_FIRST_PAGE_SQL)
+                .unwrap();
+            {
+                let mut rows = statement
+                    .query(params![200, i64::try_from(INVENTORY_BATCH_SIZE).unwrap()])
+                    .unwrap();
+                assert!(rows.next().unwrap().is_none());
+            }
+            steps.push(statement.get_status(rusqlite::StatementStatus::VmStep));
+            assert_eq!(
+                LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).unwrap(),
+                0
+            );
+        }
+        // Without the retention index/order, the valid larger inventory takes
+        // thousands of VM steps even though no row is eligible for retention.
+        assert!(
+            steps[1] <= steps[0] + 20,
+            "no-op query work grew: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_purge_batches_count_and_preserve_cutoff_and_retry() {
+        let (store, last) = purge_fixture(INVENTORY_BATCH_SIZE * 2 + 1, 100);
+        for timestamp in [200, 201] {
+            let delivery = WebhookDelivery::new(
+                RepositoryProvider::GitHub,
+                "owner".into(),
+                "repo".into(),
+                format!("fresh-{timestamp}"),
+                timestamp,
+            )
+            .unwrap();
+            assert!(LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap());
+        }
+        // Missing evidence still gets a valid baseline and release transition.
+        let operation = webhook_snapshot(&last, WebhookDeliveryLifecycleState::Processed)
+            .unwrap()
+            .evidence_operation()
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        connection.execute("DELETE FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1", [&operation.operation_id]).unwrap();
+        assert_eq!(
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, 0).unwrap(),
+            0
+        );
+        assert_eq!(
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).unwrap(),
+            u64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap()
+        );
+        assert_eq!(
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).unwrap(),
+            0
+        );
+        let remaining = LifecycleStore::list_webhook_deliveries(&store).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(
+            remaining
+                .iter()
+                .all(|delivery| delivery.processed_at_unix_seconds() >= 200)
+        );
+        assert!(LifecycleStore::record_webhook_delivery(&store, &last).unwrap());
+        assert!(!LifecycleStore::record_webhook_delivery(&store, &last).unwrap());
+    }
+
+    #[test]
+    fn webhook_delivery_purge_late_corruption_rolls_back_every_page() {
+        let (store, last) = purge_fixture(INVENTORY_BATCH_SIZE * 2 + 1, 100);
+        let operation = webhook_snapshot(&last, WebhookDeliveryLifecycleState::Processed)
+            .unwrap()
+            .evidence_operation()
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        let original: String = connection.query_row("SELECT merkle_commit_json FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=2", [&operation.operation_id], |row| row.get(0)).unwrap();
+        let baseline: String = connection.query_row("SELECT merkle_commit_json FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=0", [&operation.operation_id], |row| row.get(0)).unwrap();
+        for sql in [
+            "UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json='{}' WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json=NULL WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=0",
+        ] {
+            connection.execute(sql, [&operation.operation_id]).unwrap();
+            assert!(LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).is_err());
+            let rows: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM shardline_webhook_deliveries",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let events: i64 = connection.query_row("SELECT COUNT(*) FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery'", [], |row| row.get(0)).unwrap();
+            assert_eq!(rows, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap());
+            assert_eq!(events, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 3).unwrap());
+            connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json=?1 WHERE operation_kind='WebhookDelivery' AND operation_id=?2 AND sequence=2", params![original,operation.operation_id]).unwrap();
+            connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json=?1 WHERE operation_kind='WebhookDelivery' AND operation_id=?2 AND sequence=0", params![baseline,operation.operation_id]).unwrap();
+        }
+        connection.execute("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=106 WHERE delivery_id=?1 AND owner=?2", params![last.delivery_id(), last.owner()]).unwrap();
+        assert!(LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).is_err());
+        let rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_webhook_deliveries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap());
+    }
+
+    #[test]
+    fn webhook_delivery_purge_rejects_negative_timestamp_without_writes() {
+        let (store, last) = purge_fixture(INVENTORY_BATCH_SIZE * 2 + 1, 100);
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .unwrap();
+        connection.execute("UPDATE shardline_webhook_deliveries SET processed_at_unix_seconds=-1 WHERE delivery_id=?1 AND owner=?2", params![last.delivery_id(), last.owner()]).unwrap();
+        assert!(LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).is_err());
+        let rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_webhook_deliveries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap());
+    }
+
     // ── LifecycleStore: provider repository state ──────────────────────────
 
     #[test]
@@ -2848,6 +3687,83 @@ mod tests {
             stored_event.operation.tenant == "tenant-a"
                 && stored_event.operation.repository == "repo-a"
         }));
+    }
+
+    #[test]
+    fn sqlite_duplicate_intent_validates_scope_and_durable_state() {
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "duplicate-scope".into(),
+            "objects/scope".into(),
+            "a".repeat(64),
+            42,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+            .unwrap();
+        runtime
+            .block_on(store.transition_intent(intent.intent_id(), UploadIntentState::Storing))
+            .unwrap();
+        let before = runtime
+            .block_on(store.reliability_events(intent.intent_id()))
+            .unwrap();
+        runtime
+            .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+            .unwrap();
+        assert!(matches!(
+            runtime.block_on(store.create_intent_scoped(&intent, "tenant-b", "repo-b")),
+            Err(LocalIndexStoreError::UploadIntentConflict(_))
+        ));
+        assert_eq!(
+            runtime
+                .block_on(store.intent_by_id(intent.intent_id()))
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        assert_eq!(
+            runtime
+                .block_on(store.reliability_events(intent.intent_id()))
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn sqlite_duplicate_intent_rejects_corrupt_evidence_without_repair() {
+        for corruption in [
+            "UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_id = ?1",
+            "UPDATE shardline_reliability_events SET merkle_commit_json = json_set(merkle_commit_json, '$.body.next_state_root', 'sha256:0000000000000000000000000000000000000000000000000000000000000000') WHERE operation_id = ?1",
+            "UPDATE shardline_reliability_events SET event_json = json_set(event_json, '$.operation.repository', 'forged-repository') WHERE operation_id = ?1",
+            "UPDATE shardline_upload_intents SET state = 'storing' WHERE intent_id = ?1",
+        ] {
+            let store = make_store();
+            let intent = UploadIntent::new(
+                "corrupt-duplicate".into(),
+                "objects/corrupt".into(),
+                "a".repeat(64),
+                42,
+            );
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime
+                .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+                .unwrap();
+            let connection = store.open_connection().unwrap();
+            connection
+                .execute(corruption, [intent.intent_id()])
+                .unwrap();
+            let before: (String, Option<String>) = connection.query_row("SELECT event_json, merkle_commit_json FROM shardline_reliability_events WHERE operation_id = ?1", [intent.intent_id()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            assert!(
+                runtime
+                    .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+                    .is_err(),
+                "{corruption}"
+            );
+            let after: (String, Option<String>) = connection.query_row("SELECT event_json, merkle_commit_json FROM shardline_reliability_events WHERE operation_id = ?1", [intent.intent_id()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            assert_eq!(before, after);
+        }
     }
 
     #[test]
@@ -3306,5 +4222,342 @@ mod tests {
             )
             .unwrap();
         assert_eq!((count, minimum, maximum), (2, 0, 1));
+    }
+    #[test]
+    fn streaming_inventory_orders_all_types_across_batches() {
+        let store = make_store();
+        for i in 0..INVENTORY_BATCH_SIZE + 5 {
+            let key = ObjectKey::parse(&format!("inventory/{i:04}")).unwrap();
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&u64::try_from(i).unwrap().to_be_bytes());
+            let hash = ShardlineHash::from_bytes(hash);
+            store
+                .upsert_dedupe_shard_mapping(&DedupeShardMapping::new(hash, key.clone()))
+                .unwrap();
+            store
+                .insert_reconstruction(&FileId::new(hash), &FileReconstruction::new(vec![]))
+                .unwrap();
+            LifecycleStore::upsert_quarantine_candidate(
+                &store,
+                &QuarantineCandidate::new(key.clone(), 10, 1, 2).unwrap(),
+            )
+            .unwrap();
+            LifecycleStore::upsert_retention_hold(
+                &store,
+                &RetentionHold::new(key, "keep".into(), 1, None).unwrap(),
+            )
+            .unwrap();
+            LifecycleStore::record_webhook_delivery(
+                &store,
+                &WebhookDelivery::new(
+                    RepositoryProvider::GitHub,
+                    "owner".into(),
+                    format!("repo/{i:04}"),
+                    format!("delivery:{i:04}"),
+                    1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            LifecycleStore::upsert_provider_repository_state(
+                &store,
+                &ProviderRepositoryState::new(
+                    RepositoryProvider::GitHub,
+                    "owner".into(),
+                    format!("repo-{i:04}"),
+                    Some(1),
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        macro_rules! same_inventory {
+            ($trait:ident, $visit:ident, $list:ident) => {{
+                let expected = $trait::$list(&store).unwrap();
+                let mut actual = Vec::new();
+                $trait::$visit(&store, |row| {
+                    actual.push(row);
+                    Ok::<_, LocalIndexStoreError>(())
+                })
+                .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(actual.len(), INVENTORY_BATCH_SIZE + 5);
+            }};
+        }
+        same_inventory!(
+            DedupeStore,
+            visit_dedupe_shard_mappings,
+            list_dedupe_shard_mappings
+        );
+        same_inventory!(
+            ReconstructionStore,
+            visit_reconstruction_file_ids,
+            list_reconstruction_file_ids
+        );
+        same_inventory!(
+            LifecycleStore,
+            visit_quarantine_candidates,
+            list_quarantine_candidates
+        );
+        same_inventory!(LifecycleStore, visit_retention_holds, list_retention_holds);
+        same_inventory!(
+            LifecycleStore,
+            visit_webhook_deliveries,
+            list_webhook_deliveries
+        );
+        same_inventory!(
+            LifecycleStore,
+            visit_provider_repository_states,
+            list_provider_repository_states
+        );
+    }
+
+    #[test]
+    fn streaming_inventory_late_corruption_prevalidates_and_decode_precedes_evidence() {
+        let store = make_store();
+        for i in 0..INVENTORY_BATCH_SIZE + 1 {
+            LifecycleStore::upsert_retention_hold(
+                &store,
+                &RetentionHold::new(
+                    ObjectKey::parse(&format!("inventory/{i:04}")).unwrap(),
+                    "keep".into(),
+                    1,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let connection = store.open_connection().unwrap();
+        connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = '{}' WHERE operation_kind = 'RetentionHold' AND operation_id = ?1", [format!("inventory/{INVENTORY_BATCH_SIZE:04}")]).unwrap();
+        let mut calls = 0;
+        let error = LifecycleStore::visit_retention_holds(&store, |_| {
+            calls += 1;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .unwrap_err();
+        assert!(matches!(error, LocalIndexStoreError::Reliability(_)));
+        assert_eq!(calls, 0);
+        // Malformed materialized bytes in the last batch must win over an
+        // earlier bad evidence head, as the old eager decode did.
+        connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = '{}' WHERE operation_kind = 'RetentionHold' AND operation_id = 'inventory/0000'", []).unwrap();
+        let triggers = {
+            let mut statement = connection.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'shardline_retention_holds'").unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for trigger in triggers {
+            connection
+                .execute_batch(&format!(
+                    "DROP TRIGGER \"{}\"",
+                    trigger.replace('"', "\"\"")
+                ))
+                .unwrap();
+        }
+        connection.execute("UPDATE shardline_retention_holds SET reason = CAST(reason AS BLOB) WHERE object_key = ?1", [format!("inventory/{INVENTORY_BATCH_SIZE:04}")]).unwrap();
+        let error = LifecycleStore::visit_retention_holds(&store, |_| {
+            calls += 1;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .unwrap_err();
+        assert!(matches!(error, LocalIndexStoreError::Sqlite(_)));
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn streaming_inventory_cursor_order_and_late_invalid_id() {
+        let store = make_store();
+        let connection = store.open_connection().unwrap();
+        for i in 0..INVENTORY_BATCH_SIZE + 1 {
+            let key = format!("{i:064x}");
+            connection
+                .execute(
+                    "INSERT INTO shardline_file_reconstructions(file_id, terms, updated_at_unix_seconds) VALUES (?1, '[]', 0)",
+                    [&key],
+                )
+                .unwrap();
+        }
+        let expected = ReconstructionStore::list_reconstruction_file_ids(&store).unwrap();
+        let mut actual = Vec::new();
+        ReconstructionStore::visit_reconstruction_file_ids(&store, |id| {
+            actual.push(id);
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .unwrap();
+        assert_eq!(actual, expected);
+        connection.execute("INSERT INTO shardline_file_reconstructions(file_id, terms, updated_at_unix_seconds) VALUES ('zz-invalid', '[]', 0)", []).unwrap();
+        let mut calls = 0;
+        assert!(
+            ReconstructionStore::visit_reconstruction_file_ids(&store, |_| {
+                calls += 1;
+                Ok::<_, LocalIndexStoreError>(())
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 0);
+    }
+    #[test]
+    fn streaming_inventory_all_heads_precede_early_snapshot_mismatch() {
+        let store = make_store();
+        for i in 0..INVENTORY_BATCH_SIZE + 1 {
+            LifecycleStore::upsert_retention_hold(
+                &store,
+                &RetentionHold::new(
+                    ObjectKey::parse(&format!("priority/{i:04}")).unwrap(),
+                    "keep".into(),
+                    1,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let connection = store.open_connection().unwrap();
+        let triggers = {
+            let mut statement = connection.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'shardline_retention_holds'").unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for trigger in triggers {
+            connection
+                .execute_batch(&format!(
+                    "DROP TRIGGER \"{}\"",
+                    trigger.replace('"', "\"\"")
+                ))
+                .unwrap();
+        }
+        connection.execute("UPDATE shardline_retention_holds SET reason = 'wrong-snapshot' WHERE object_key = 'priority/0000'", []).unwrap();
+        assert!(
+            LifecycleStore::retention_hold(&store, &ObjectKey::parse("priority/0000").unwrap())
+                .is_err()
+        );
+        connection.execute("UPDATE shardline_reliability_events SET merkle_commit_json = '{}' WHERE operation_kind = 'RetentionHold' AND operation_id = ?1", [format!("priority/{INVENTORY_BATCH_SIZE:04}")]).unwrap();
+        let old = LifecycleStore::list_retention_holds(&store).unwrap_err();
+        let mut calls = 0;
+        let new = LifecycleStore::visit_retention_holds(&store, |_| {
+            calls += 1;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .unwrap_err();
+        assert!(matches!(
+            old,
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Serialize(
+                _
+            ))
+        ));
+        assert!(matches!(
+            new,
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Serialize(
+                _
+            ))
+        ));
+        assert_eq!(calls, 0);
+    }
+    #[test]
+    fn async_close_budget_retains_all64_permits_and_never_waits_for_nested_admission() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let pool = std::sync::Arc::new(
+            ClosePool::new_with_spawn(ASYNC_CURSOR_LIMIT, move |worker| {
+                std::thread::Builder::new()
+                    .spawn(move || {
+                        gate.recv().unwrap();
+                        worker();
+                    })
+                    .map(drop)
+            })
+            .unwrap(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // Each already completed task result owns a managed connection.
+            // Dropping those results on the executor only posts reserved jobs.
+            let mut completed = Vec::new();
+            for _ in 0..ASYNC_CURSOR_LIMIT {
+                let reservation = pool.reserve().unwrap();
+                completed.push(tokio::task::spawn_blocking(move || ReadConnection::new(rusqlite::Connection::open_in_memory().unwrap(), Some(reservation))).await.unwrap());
+            }
+            drop(completed);
+            assert_eq!(pool.admission.available_permits(), 0);
+            let start = std::time::Instant::now();
+            assert!(matches!(pool.reserve(), Err(LocalIndexStoreError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock));
+            assert!(start.elapsed() < std::time::Duration::from_secs(1));
+            // Timer progresses while the close worker cannot run any job.
+            tokio::time::timeout(std::time::Duration::from_secs(1), tokio::time::sleep(std::time::Duration::from_millis(5))).await.unwrap();
+            assert_eq!(pool.admission.available_permits(), 0);
+            release.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while pool.admission.available_permits() != ASYNC_CURSOR_LIMIT { tokio::time::sleep(std::time::Duration::from_millis(1)).await; }
+            }).await.unwrap();
+            assert!(pool.reserve().is_ok());
+        });
+    }
+
+    #[test]
+    fn async_close_worker_spawn_failure_is_typed_and_faulted_worker_drains_admitted_jobs() {
+        let error = ClosePool::new_with_spawn(2, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test worker spawn failure",
+            ))
+        })
+        .err()
+        .unwrap();
+        assert!(
+            matches!(LocalIndexStoreError::from(error), LocalIndexStoreError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        let pool = std::sync::Arc::new(
+            ClosePool::new_with_spawn(2, |worker| {
+                std::thread::Builder::new().spawn(worker).map(drop)
+            })
+            .unwrap(),
+        );
+        let first = pool.reserve().unwrap();
+        let second = pool.reserve().unwrap();
+        pool.enqueue(CloseJob {
+            _connection: rusqlite::Connection::open_in_memory().unwrap(),
+            _reservation: first,
+            before_close: Some(Box::new(|| panic!("test close worker fault"))),
+        });
+        pool.enqueue(CloseJob {
+            _connection: rusqlite::Connection::open_in_memory().unwrap(),
+            _reservation: second,
+            before_close: None,
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.admission.available_permits() != 2 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            matches!(pool.reserve(), Err(LocalIndexStoreError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+        // A disconnected queue fails closed without creating rescue workers.
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        drop(receiver);
+        let broken = std::sync::Arc::new(ClosePool {
+            sender,
+            admission: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            faulted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let reservation = broken.reserve().unwrap();
+        drop(ReadConnection::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+            Some(reservation),
+        ));
+        assert_eq!(broken.admission.available_permits(), 1);
+        assert!(
+            matches!(broken.reserve(), Err(LocalIndexStoreError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe)
+        );
     }
 }

@@ -30,6 +30,21 @@ Expected hostile inputs:
 
 These invariants must hold in all builds:
 
+- On Unix, successful local object publication synchronizes the verified bytes,
+  final directory entry, and containing entries for the directory chain. This also
+  applies when acknowledging an identical existing object: another writer may have
+  installed it before its directory synchronization failed. Existing directories
+  are synchronized too because a concurrent creator may not have completed its
+  parent synchronization; read-only directory walks do not sync.
+- On Unix, a successful local object deletion synchronizes the object unlink and
+  each empty-directory removal before acknowledging it. An already-missing object
+  synchronizes its surviving containing directory, or the nearest surviving ancestor
+  when an intermediate directory is missing, so retries can complete a failed sync.
+  Missing roots remain absent, and missing-path retries create or prune no directories.
+  Removal uses pinned parent descriptors and rejects detected namespace replacements;
+  empty-directory pruning preserves nonempty directories and the configured root.
+  Deletion retains a constant number of directory descriptors regardless of key
+  depth; ancestor identity snapshots preserve namespace checks while pruning.
 - A xorb is stored only if its body parses and its hash matches its content-addressed
   key.
 - A shard is registered only if its body parses and all referenced xorbs exist.
@@ -159,8 +174,8 @@ successful response.
 - visible latest records still have matching immutable version records
 - quarantine metadata still points at existing objects with matching observed lengths
   and does not target reachable live objects
-- active retention holds still point at existing objects and do not coexist with
-  quarantine state for the same object
+- active retention holds may protect future keys without current objects and do not
+  coexist with quarantine state for the same object
 - processed webhook delivery claims do not carry implausibly future timestamps
 - reconstruction rows reference registered xorbs
 - provider repository lifecycle state uses valid repository identity and plausible
@@ -169,7 +184,8 @@ successful response.
 `shardline repair lifecycle` removes stale lifecycle metadata without deleting payload
 bytes.
 It prunes quarantine candidates that became missing, reachable again, or protected
-by an active hold; drops expired or missing-object retention holds; and trims stale or
+by an active hold; drops expired retention holds while preserving future-key holds;
+and trims stale or
 future-dated webhook delivery claims.
 
 `shardline index rebuild` also removes stale reconstruction rows after deriving the

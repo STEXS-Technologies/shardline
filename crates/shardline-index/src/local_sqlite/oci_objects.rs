@@ -157,7 +157,8 @@ impl LocalIndexStore {
         tags: &[OciTagEntry],
     ) -> Result<(), LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous_deleted_at = transaction
             .query_row(
                 "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
@@ -231,7 +232,8 @@ impl LocalIndexStore {
         key: &OciObjectKey,
     ) -> Result<(), LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous_deleted_at = transaction
             .query_row(
                 "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
@@ -405,7 +407,8 @@ impl OciObjectStore for LocalIndexStore {
             let deleted_at = i64::try_from(tombstone.deleted_at_unix_seconds)
                 .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?;
             let mut connection = store.open_connection()?;
-            let transaction = connection.transaction()?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let found = transaction
                 .query_row(
                     "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones

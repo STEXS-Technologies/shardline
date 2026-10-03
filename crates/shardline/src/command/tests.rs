@@ -601,6 +601,80 @@ fn parse_db_migrate_repair_requires_confirmation() {
 }
 
 #[test]
+fn parse_db_migrate_repair_rejects_noncanonical_operation_kinds() {
+    for kind in ["", "s3object", "NotAnOperation", "S3Object\n", "\u{1b}[2J"] {
+        let error = CliCommand::parse([
+            "shardline",
+            "db",
+            "migrate",
+            "repair",
+            "--operation-kind",
+            kind,
+            "--operation-id",
+            "owned-synthetic",
+            "--confirm",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("supported --operation-kind"));
+        assert!(!error.to_string().contains('\u{1b}'));
+    }
+    let unconfirmed = CliCommand::parse([
+        "shardline",
+        "db",
+        "migrate",
+        "repair",
+        "--operation-kind",
+        "NotAnOperation",
+        "--operation-id",
+        "owned-synthetic",
+    ])
+    .unwrap_err();
+    assert!(unconfirmed.to_string().contains("--confirm"));
+}
+
+#[test]
+fn parse_db_migrate_repair_accepts_every_canonical_kind_and_exact_identity() {
+    use shardline_reliability::OperationKind;
+    for kind in [
+        OperationKind::Upload,
+        OperationKind::ResumableSession,
+        OperationKind::MetadataCommit,
+        OperationKind::OciTag,
+        OperationKind::S3Object,
+        OperationKind::Visibility,
+        OperationKind::ProviderEvent,
+        OperationKind::Repair,
+        OperationKind::GarbageCollection,
+        OperationKind::RetentionHold,
+        OperationKind::WebhookDelivery,
+    ] {
+        let parsed = CliCommand::parse([
+            "shardline",
+            "db",
+            "migrate",
+            "repair",
+            "--operation-kind",
+            kind.as_str(),
+            "--operation-id",
+            " exact/identity with spaces ",
+            "--confirm",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed,
+            CliCommand::DbMigrate {
+                database_url: None,
+                command: DatabaseMigrationCommand::Repair {
+                    operation_kind: kind.as_str().to_owned(),
+                    operation_id: " exact/identity with spaces ".to_owned(),
+                },
+            }
+        );
+    }
+}
+
+#[test]
 fn parse_db_migrate_rejects_zero_steps() {
     let args = vec![
         "shardline".to_owned(),
@@ -622,6 +696,60 @@ fn parse_db_migrate_rejects_zero_steps() {
             .to_string()
             .contains("value must be a positive integer")
     );
+}
+
+#[test]
+fn parse_db_migrate_backfill_accepts_representable_batch_boundaries() {
+    let maximum = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+    for batch_size in [1, 256, maximum] {
+        let args = [
+            "shardline".to_owned(),
+            "db".to_owned(),
+            "migrate".to_owned(),
+            "backfill".to_owned(),
+            "--batch-size".to_owned(),
+            batch_size.to_string(),
+        ];
+        assert_eq!(
+            CliCommand::parse(args),
+            Ok(CliCommand::DbMigrate {
+                database_url: None,
+                command: DatabaseMigrationCommand::Backfill { batch_size },
+            })
+        );
+    }
+}
+
+#[test]
+fn parse_db_migrate_backfill_rejects_zero_batch_size() {
+    assert!(
+        CliCommand::parse([
+            "shardline",
+            "db",
+            "migrate",
+            "backfill",
+            "--batch-size",
+            "0",
+        ])
+        .is_err()
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn parse_db_migrate_backfill_rejects_batch_above_postgres_bigint() {
+    for batch_size in ["9223372036854775808", "18446744073709551615"] {
+        let error = CliCommand::parse([
+            "shardline",
+            "db",
+            "migrate",
+            "backfill",
+            "--batch-size",
+            batch_size,
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("PostgreSQL BIGINT range"));
+    }
 }
 
 #[test]
@@ -1412,4 +1540,58 @@ fn completion_shell_value_enum_variants() {
     assert_eq!(super::CompletionShell::Fish as u8, 2);
     assert_eq!(super::CompletionShell::PowerShell as u8, 3);
     assert_eq!(super::CompletionShell::Zsh as u8, 4);
+}
+
+#[test]
+fn parse_explicit_hub_tree_recovery() {
+    assert_eq!(
+        CliCommand::parse([
+            "shardline",
+            "repair",
+            "hub-tree",
+            "--root",
+            "/data",
+            "--state-file",
+            "/backup/tree.json"
+        ]),
+        Ok(CliCommand::RepairHubTree {
+            root: Some(PathBuf::from("/data")),
+            state_file: PathBuf::from("/backup/tree.json")
+        })
+    );
+    assert!(CliCommand::parse(["shardline", "repair", "hub-tree"]).is_err());
+}
+
+#[test]
+fn parse_bench_rejects_invalid_chunks_and_unrepresentable_assets() {
+    for mode in ["e2e", "ingest"] {
+        for (chunk, base) in [
+            ("0".to_owned(), "256".to_owned()),
+            ("8".to_owned(), "256".to_owned()),
+            ("127".to_owned(), "256".to_owned()),
+            (usize::MAX.to_string(), "256".to_owned()),
+            ("129".to_owned(), "256".to_owned()),
+            ("128".to_owned(), usize::MAX.to_string()),
+        ] {
+            let args: Vec<String> = [
+                "shardline",
+                "bench",
+                "--mode",
+                mode,
+                "--storage-dir",
+                "/unused-benchmark-storage",
+                "--chunk-size-bytes",
+                &chunk,
+                "--base-bytes",
+                &base,
+                "--mutated-bytes",
+                "8",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            let error = CliCommand::parse(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        }
+    }
 }

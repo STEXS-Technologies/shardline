@@ -99,6 +99,7 @@ where
 /// `reachability` can recognize a stranded `<anchor>.tmp-*` write artifact
 /// (F-99).
 pub(super) const LAST_GC_CLOCK_ANCHOR_KEY: &str = "gc/last-gc-clock-anchor";
+pub(super) const GC_CLOCK_BOOT_OBSERVATION_KEY: &str = "gc/last-gc-clock-boot-observation";
 
 fn last_gc_clock_anchor_key() -> Result<ObjectKey, GcError> {
     ObjectKey::parse(LAST_GC_CLOCK_ANCHOR_KEY).map_err(|_error| GcError::InvalidContentHash)
@@ -110,50 +111,117 @@ fn last_gc_clock_anchor_key() -> Result<ObjectKey, GcError> {
 /// Returns `None` when no anchor has been persisted yet. An unreadable or
 /// malformed anchor (for example a torn write) is treated as absent — it is
 /// logged and will be overwritten by a later store-mutating run's anchor write.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct GcClockAnchor {
+    pub wall_seconds: u64,
+    pub boot: Option<GcBootObservation>,
+}
+
+/// Linux boot time is independent of wall-clock steps and survives GC process
+/// restarts. Boot identity prevents comparing uptimes from different boots or
+/// hosts. Missing procfs observations retain the conservative legacy guard.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct GcBootObservation {
+    pub boot_id: String,
+    pub uptime_seconds: u64,
+}
+
+pub(super) fn gc_boot_observation() -> Option<GcBootObservation> {
+    #[cfg(target_os = "linux")]
+    {
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
+        let uptime_seconds = uptime
+            .split_whitespace()
+            .next()?
+            .split('.')
+            .next()?
+            .parse()
+            .ok()?;
+        let boot_id = boot_id.trim().to_owned();
+        if boot_id.is_empty() {
+            return None;
+        }
+        Some(GcBootObservation {
+            boot_id,
+            uptime_seconds,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(test)]
 pub(super) fn read_last_gc_clock_anchor(
     object_store: &ServerObjectStore,
 ) -> Result<Option<u64>, GcError> {
+    Ok(read_gc_clock_anchor(object_store)?.map(|anchor| anchor.wall_seconds))
+}
+
+pub(super) fn read_gc_clock_anchor(
+    object_store: &ServerObjectStore,
+) -> Result<Option<GcClockAnchor>, GcError> {
     let key = last_gc_clock_anchor_key()?;
     let Some(metadata) = object_store.metadata(&key)? else {
         return Ok(None);
     };
     let body = object_store.read_full_object(&key, metadata.length())?;
-    let parsed = std::str::from_utf8(&body)
+    let Some(wall_seconds) = std::str::from_utf8(&body)
         .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok());
-    if parsed.is_none() {
-        tracing::warn!(
-            "ignoring unreadable last-GC-clock anchor at {LAST_GC_CLOCK_ANCHOR_KEY} ({} bytes); \
-             it will be overwritten this run",
-            body.len(),
-        );
-    }
-    Ok(parsed)
+        .and_then(|text| text.trim().parse::<u64>().ok())
+    else {
+        tracing::warn!("ignoring malformed last-GC-clock anchor at {LAST_GC_CLOCK_ANCHOR_KEY}");
+        return Ok(None);
+    };
+    // A partial update, an old binary's scalar update, or corrupt optional
+    // sidecar must fall back to the scalar anchor without elapsed-time trust.
+    let boot = read_gc_clock_boot_sidecar(object_store)
+        .ok()
+        .flatten()
+        .filter(|sidecar| sidecar.wall_seconds == wall_seconds)
+        .and_then(|sidecar| sidecar.boot);
+    Ok(Some(GcClockAnchor { wall_seconds, boot }))
 }
 
-/// Persists the supplied wall clock as the last-GC-clock anchor.
-///
-/// Called on every run that mutates the object store (mark and/or sweep) whose
-/// clock the forward guard deemed trustworthy (the guard did not fire). A pure
-/// dry run never calls this — dry runs must remain read-only. A fired run's
-/// `now` is suspect — the sweep and hold pruning were skipped for that reason —
-/// so it is never stamped as an anchor.
-///
-/// A write failure must be tolerated by the caller (warn and continue): the
-/// anchor is an optimization, not a correctness requirement, and the forward
-/// guard safely falls back to the creation-timestamp-only reference (the
-/// pre-anchor behavior) when no anchor is persisted.
+fn read_gc_clock_boot_sidecar(
+    object_store: &ServerObjectStore,
+) -> Result<Option<GcClockAnchor>, GcError> {
+    let key = ObjectKey::parse(GC_CLOCK_BOOT_OBSERVATION_KEY)
+        .map_err(|_error| GcError::InvalidContentHash)?;
+    let Some(metadata) = object_store.metadata(&key)? else {
+        return Ok(None);
+    };
+    let body = object_store.read_full_object(&key, metadata.length())?;
+    Ok(serde_json::from_slice(&body).ok())
+}
+
+/// Persists only a trusted observation; deferred and dry runs never write it.
+/// Keep the existing numeric anchor readable by older binaries. Write it first,
+/// then its optional elapsed-time sidecar; failures leave a mismatched sidecar
+/// that readers discard rather than trusting observations from different runs.
 pub(super) fn write_last_gc_clock_anchor(
     object_store: &ServerObjectStore,
     now_unix_seconds: u64,
 ) -> Result<(), GcError> {
     let key = last_gc_clock_anchor_key()?;
     let body = now_unix_seconds.to_string();
-    let integrity = ObjectIntegrity::new(
-        chunk_hash(body.as_bytes()),
-        u64::try_from(body.len()).unwrap_or(0),
-    );
+    let integrity = ObjectIntegrity::new(chunk_hash(body.as_bytes()), u64::try_from(body.len())?);
     object_store.put_overwrite(&key, ObjectBody::Borrowed(body.as_bytes()), &integrity)?;
+    let sidecar_key = ObjectKey::parse(GC_CLOCK_BOOT_OBSERVATION_KEY)
+        .map_err(|_error| GcError::InvalidContentHash)?;
+    let sidecar = serde_json::to_vec(&GcClockAnchor {
+        wall_seconds: now_unix_seconds,
+        boot: gc_boot_observation(),
+    })?;
+    let sidecar_integrity =
+        ObjectIntegrity::new(chunk_hash(&sidecar), u64::try_from(sidecar.len())?);
+    object_store.put_overwrite(
+        &sidecar_key,
+        ObjectBody::Borrowed(&sidecar),
+        &sidecar_integrity,
+    )?;
     Ok(())
 }
 
@@ -1956,6 +2024,93 @@ mod tests {
             read_last_gc_clock_anchor(&object_store).unwrap(),
             Some(now + 86_400)
         );
+    }
+
+    #[test]
+    fn clock_sidecar_matches_scalar_and_old_writer_invalidates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+        let now = 2_000_000_000;
+        write_last_gc_clock_anchor(&object_store, now).unwrap();
+        let scalar_key = last_gc_clock_anchor_key().unwrap();
+        let scalar = object_store.read_full_object(&scalar_key, 10).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&scalar)
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+            now
+        );
+        let observation = GcBootObservation {
+            boot_id: "boot-id".to_owned(),
+            uptime_seconds: 100,
+        };
+        let sidecar_key = ObjectKey::parse(GC_CLOCK_BOOT_OBSERVATION_KEY).unwrap();
+        let sidecar = serde_json::to_vec(&GcClockAnchor {
+            wall_seconds: now,
+            boot: Some(observation.clone()),
+        })
+        .unwrap();
+        let integrity = ObjectIntegrity::new(chunk_hash(&sidecar), sidecar.len() as u64);
+        object_store
+            .put_overwrite(&sidecar_key, ObjectBody::Borrowed(&sidecar), &integrity)
+            .unwrap();
+        assert_eq!(
+            read_gc_clock_anchor(&object_store).unwrap().unwrap().boot,
+            Some(observation)
+        );
+
+        // An old binary updates only the numeric anchor. This also simulates
+        // interruption after the first of the new writer's two writes.
+        let old_writer_body = (now + 10).to_string();
+        let integrity = ObjectIntegrity::new(
+            chunk_hash(old_writer_body.as_bytes()),
+            old_writer_body.len() as u64,
+        );
+        object_store
+            .put_overwrite(
+                &scalar_key,
+                ObjectBody::Borrowed(old_writer_body.as_bytes()),
+                &integrity,
+            )
+            .unwrap();
+        let changed = read_gc_clock_anchor(&object_store).unwrap().unwrap();
+        assert_eq!(changed.wall_seconds, now + 10);
+        assert!(changed.boot.is_none());
+
+        // Malformed optional observations cannot suppress the numeric guard.
+        let invalid_sidecar = b"broken";
+        let integrity =
+            ObjectIntegrity::new(chunk_hash(invalid_sidecar), invalid_sidecar.len() as u64);
+        object_store
+            .put_overwrite(
+                &sidecar_key,
+                ObjectBody::Borrowed(invalid_sidecar),
+                &integrity,
+            )
+            .unwrap();
+        assert!(
+            read_gc_clock_anchor(&object_store)
+                .unwrap()
+                .unwrap()
+                .boot
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn last_gc_clock_anchor_accepts_legacy_numeric_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+        let key = last_gc_clock_anchor_key().unwrap();
+        let body = b"2000000000";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+        object_store
+            .put_overwrite(&key, ObjectBody::Borrowed(body), &integrity)
+            .unwrap();
+        let anchor = read_gc_clock_anchor(&object_store).unwrap().unwrap();
+        assert_eq!(anchor.wall_seconds, 2_000_000_000);
+        assert!(anchor.boot.is_none());
     }
 
     #[test]

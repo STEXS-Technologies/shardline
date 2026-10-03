@@ -6,7 +6,7 @@
 //! section.
 
 /// Maximum pkt-line payload size (65516 bytes).
-const MAX_PAYLOAD: usize = 0xFFFF - 4;
+const MAX_PAYLOAD: usize = 65516;
 
 /// Encodes a single pkt-line: 4-hex length + content.
 ///
@@ -24,11 +24,14 @@ pub fn encode_line(line: &str) -> Result<String, PktLineError> {
     Ok(format!("{len:04x}{line}"))
 }
 
-/// Encodes a pkt-line with raw bytes (for binary content like SHA1 hashes).
+/// Encodes a pkt-line from UTF-8 bytes, preserving the exact payload bytes.
+///
+/// The returned string cannot represent arbitrary binary data. Non-UTF-8
+/// payloads are rejected rather than replaced, which would corrupt framing.
 ///
 /// # Errors
 ///
-/// Returns `Err` if `data` exceeds 65516 bytes.
+/// Returns `Err` if `data` exceeds the payload limit or is not valid UTF-8.
 pub fn encode_line_bytes(data: &[u8]) -> Result<String, PktLineError> {
     if data.len() > MAX_PAYLOAD {
         return Err(PktLineError::PayloadTooLarge {
@@ -36,15 +39,18 @@ pub fn encode_line_bytes(data: &[u8]) -> Result<String, PktLineError> {
             max: MAX_PAYLOAD,
         });
     }
+    let payload = std::str::from_utf8(data).map_err(|_error| PktLineError::InvalidUtf8)?;
     let len = data.len().wrapping_add(4);
     let mut out = format!("{len:04x}");
-    out.push_str(&String::from_utf8_lossy(data));
+    out.push_str(payload);
     Ok(out)
 }
 
 /// Pkt-line encoding error.
 #[derive(Debug, Clone)]
 pub enum PktLineError {
+    /// A string-producing encoder received a payload that is not valid UTF-8.
+    InvalidUtf8,
     /// Payload exceeds the 65516-byte pkt-line limit.
     PayloadTooLarge {
         /// Actual payload size.
@@ -57,6 +63,7 @@ pub enum PktLineError {
 impl std::fmt::Display for PktLineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidUtf8 => write!(f, "pkt-line string payload must be valid UTF-8"),
             Self::PayloadTooLarge { size, max } => {
                 write!(f, "pkt-line payload too large: {size} bytes (max {max})")
             }
@@ -84,11 +91,11 @@ pub const RESPONSE_END: &str = "0002";
 #[must_use]
 pub fn sideband_data(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    // Each chunk is at most 65516 bytes of payload
-    for chunk in data.chunks(65516) {
+    // The channel byte counts toward the 65516-byte packet payload ceiling.
+    for chunk in data.chunks(MAX_PAYLOAD - 1) {
         let len = chunk.len().wrapping_add(5); // 4-byte length prefix + 1-byte channel
         out.extend_from_slice(format!("{len:04x}").as_bytes());
-        out.push(b'1'); // channel 1 = pack data
+        out.push(1); // channel 1 = pack data
         out.extend_from_slice(chunk);
     }
     out
@@ -97,20 +104,32 @@ pub fn sideband_data(data: &[u8]) -> Vec<u8> {
 /// Wraps a message in sideband channel 2 (progress).
 #[must_use]
 pub fn sideband_progress(msg: &str) -> Vec<u8> {
-    let len = msg.len().wrapping_add(5);
-    let mut out = format!("{len:04x}").into_bytes();
-    out.push(b'2');
-    out.extend_from_slice(msg.as_bytes());
-    out
+    sideband_message(msg, 2)
 }
 
 /// Wraps a message in sideband channel 3 (fatal).
 #[must_use]
 pub fn sideband_fatal(msg: &str) -> Vec<u8> {
-    let len = msg.len().wrapping_add(5);
-    let mut out = format!("{len:04x}").into_bytes();
-    out.push(b'3');
-    out.extend_from_slice(msg.as_bytes());
+    sideband_message(msg, 3)
+}
+
+fn sideband_message(mut msg: &str, channel: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let mut end = msg.len().min(MAX_PAYLOAD - 1);
+        while !msg.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        let (chunk, remaining) = msg.split_at(end);
+        let len = chunk.len().saturating_add(5);
+        out.extend_from_slice(format!("{len:04x}").as_bytes());
+        out.push(channel);
+        out.extend_from_slice(chunk.as_bytes());
+        if remaining.is_empty() {
+            break;
+        }
+        msg = remaining;
+    }
     out
 }
 
@@ -200,8 +219,8 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
         };
 
         match channel {
-            b'1' => pack_data.extend_from_slice(payload),
-            b'2' | b'3' => {
+            1 => pack_data.extend_from_slice(payload),
+            2 | 3 => {
                 if let Ok(msg) = std::str::from_utf8(payload) {
                     messages.push(msg.to_owned());
                 }
@@ -279,13 +298,13 @@ mod tests {
     #[test]
     fn sideband_progress_is_channel_2() {
         let msg = sideband_progress("working");
-        assert_eq!(msg[4], b'2');
+        assert_eq!(msg[4], 2);
     }
 
     #[test]
     fn sideband_fatal_is_channel_3() {
         let msg = sideband_fatal("error");
-        assert_eq!(msg[4], b'3');
+        assert_eq!(msg[4], 3);
         let content = String::from_utf8_lossy(&msg[5..]);
         assert_eq!(content, "error");
     }
@@ -313,6 +332,24 @@ mod tests {
         let (pack, msgs) = decode_sideband(&msg);
         assert!(pack.is_empty());
         assert_eq!(msgs, vec!["working on it"]);
+    }
+
+    #[test]
+    fn oversized_sideband_messages_preserve_unicode_and_packet_limits() {
+        let message = "\u{1f642}".repeat(20_000);
+        for encoder in [sideband_progress, sideband_fatal] {
+            let encoded = encoder(&message);
+            let (_, messages) = decode_sideband(&encoded);
+            assert_eq!(messages.concat(), message);
+            let mut offset = 0;
+            while offset < encoded.len() {
+                let prefix = std::str::from_utf8(&encoded[offset..offset + 4]).unwrap();
+                let length = usize::from_str_radix(prefix, 16).unwrap();
+                assert!((5..=65_520).contains(&length));
+                offset += length;
+            }
+            assert_eq!(offset, encoded.len());
+        }
     }
 
     #[test]
@@ -398,22 +435,50 @@ mod tests {
     }
 
     #[test]
-    fn encode_line_bytes_binary_non_utf8() {
-        // \xff is not valid UTF-8; from_utf8_lossy replaces it with U+FFFD (3 UTF-8 bytes)
-        // Input: 4 bytes, length prefix = 4 + 4 = 8 → "0008"
-        // Lossy output: "\x00\x01\x02\u{FFFD}" = 6 UTF-8 bytes
-        // Total string: "0008" (4) + 6 = 10
-        let encoded = encode_line_bytes(b"\x00\x01\x02\xff").expect("binary bytes should encode");
-        assert!(
-            encoded.starts_with("0008"),
-            "expected '0008' prefix, got: {encoded}"
-        );
-        assert_eq!(
-            encoded.len(),
-            10,
-            "expected 10 total chars, got: {encoded} (len={})",
-            encoded.len()
-        );
+    fn encode_line_bytes_rejects_non_utf8_without_replacement() {
+        for payload in [&b"\x00\x01\x02\xff"[..], &b"\xc3"[..], &b"\xc0\xaf"[..]] {
+            assert!(matches!(
+                encode_line_bytes(payload),
+                Err(PktLineError::InvalidUtf8)
+            ));
+        }
+    }
+
+    #[test]
+    fn encode_line_bytes_preserves_multibyte_utf8_and_nul() {
+        let payload = "\0é🙂".as_bytes();
+        let encoded = encode_line_bytes(payload).expect("valid UTF-8");
+        assert_eq!(encoded.len(), payload.len() + 4);
+        assert_eq!(decode_lines(encoded.as_bytes()), vec![payload.to_vec()]);
+    }
+
+    #[test]
+    fn encode_line_bytes_checks_actual_payload_length_boundary() {
+        let payload = vec![b'x'; MAX_PAYLOAD];
+        let encoded = encode_line_bytes(&payload).expect("maximum payload");
+        assert_eq!(decode_lines(encoded.as_bytes()), vec![payload]);
+        assert!(matches!(
+            encode_line_bytes(&vec![b'x'; MAX_PAYLOAD + 1]),
+            Err(PktLineError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn sideband_data_respects_wire_packet_ceiling() {
+        for length in [65515, 65516, 131030, 131031] {
+            let payload = vec![0xff; length];
+            let encoded = sideband_data(&payload);
+            let mut remainder = encoded.as_slice();
+            while !remainder.is_empty() {
+                let packet_length =
+                    usize::from_str_radix(std::str::from_utf8(&remainder[..4]).unwrap(), 16)
+                        .unwrap();
+                assert!(packet_length <= 65520);
+                assert_eq!(remainder[4], 1);
+                remainder = &remainder[packet_length..];
+            }
+            assert_eq!(decode_sideband(&encoded).0, payload);
+        }
     }
 
     #[test]
@@ -467,7 +532,7 @@ mod tests {
     #[test]
     fn sideband_fatal_is_channel_3_and_parseable() {
         let msg = sideband_fatal("fatal error occurred");
-        assert_eq!(msg[4], b'3');
+        assert_eq!(msg[4], 3);
         let (pack, msgs) = decode_sideband(&msg);
         assert!(pack.is_empty());
         assert_eq!(msgs, vec!["fatal error occurred"]);
@@ -498,7 +563,7 @@ mod tests {
         // Channel 2 with invalid UTF-8 — should not be collected as message string
         let len = 7u16; // 4 prefix + 1 channel + 2 payload
         let mut packet = format!("{len:04x}").into_bytes();
-        packet.push(b'2');
+        packet.push(2);
         packet.extend_from_slice(b"\xff\xfe");
         let (pack, msgs) = decode_sideband(&packet);
         assert!(pack.is_empty());
@@ -551,7 +616,7 @@ mod tests {
         // Channel 3 with invalid UTF-8 — should not be collected as message
         let len = 7u16; // 4 prefix + 1 channel + 2 payload
         let mut packet = format!("{len:04x}").into_bytes();
-        packet.push(b'3');
+        packet.push(3);
         packet.extend_from_slice(b"\xff\xfe");
         let (pack, msgs) = decode_sideband(&packet);
         assert!(pack.is_empty());

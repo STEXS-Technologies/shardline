@@ -342,8 +342,8 @@ fn rebuild_with_mixed_valid_invalid_records() {
         report.issues[0].kind,
         IndexRebuildIssueKind::InvalidVersionContentHash
     );
-    // Only the valid candidate should result in a rebuilt latest record.
-    assert_eq!(report.rebuilt_latest_records, 1);
+    // An incomplete version scan cannot establish the latest head safely.
+    assert_eq!(report.rebuilt_latest_records, 0);
     assert_eq!(report.scanned_version_records, 2);
 }
 
@@ -400,8 +400,8 @@ fn rebuild_with_corrupted_json_detected() {
         report.issues[0].kind,
         IndexRebuildIssueKind::InvalidVersionRecordJson
     );
-    // Only the init record should have been rebuilt.
-    assert_eq!(report.rebuilt_latest_records, 1);
+    // Opaque corrupt locators may hide a newer version of a readable file.
+    assert_eq!(report.rebuilt_latest_records, 0);
 }
 
 /// Helper: open the SQLite DB that backs a [`LocalRecordStore`].

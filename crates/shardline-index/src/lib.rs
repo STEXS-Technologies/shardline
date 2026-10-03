@@ -122,12 +122,17 @@ pub use resumable_session::{
     ResumableSessionState,
 };
 pub use resumable_snapshot::resumable_state_digest;
-pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore, S3PublishCondition};
+pub use s3_objects::{
+    S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, S3PublishCondition, s3_prefix_successor,
+};
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,
 };
-pub use tree::{RepoKey, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeStore};
+pub use tree::{
+    RepoKey, RevisionCreationOutcome, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey,
+    TreeRegistrationOutcome, TreeStore,
+};
 pub use upload_intent::{
     UploadIntent, UploadIntentConflictError, UploadIntentState, UploadIntentStore,
 };

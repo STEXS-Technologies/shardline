@@ -19,6 +19,35 @@ const DEFAULT_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 const MIN_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
 
+// Signing-key and discovery documents are small configuration responses. Bound
+// actual streamed bytes, including responses without a Content-Length header.
+const MAX_AUTH_JSON_BYTES: usize = 1024 * 1024;
+
+async fn read_auth_json_bounded<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> Result<T, String> {
+    if !response.status().is_success() {
+        return Err(format!(
+            "authentication endpoint returned {}",
+            response.status()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_AUTH_JSON_BYTES as u64)
+    {
+        return Err("authentication JSON exceeds the 1 MiB document limit".to_owned());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if chunk.len() > MAX_AUTH_JSON_BYTES.saturating_sub(body.len()) {
+            return Err("authentication JSON exceeds the 1 MiB document limit".to_owned());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|error| error.to_string())
+}
+
 /// JWKS authentication provider.
 ///
 /// Validates tokens against a JWKS endpoint, caching keys and refreshing
@@ -28,8 +57,30 @@ pub struct JwksProvider {
     jwks_url: String,
     issuer: String,
     cached_keys: Arc<RwLock<Option<CachedJwks>>>,
-    background_handle: Arc<OnceLock<tokio::task::JoinHandle<()>>>,
+    background_handle: Arc<RefreshTask>,
     shutdown: Arc<AtomicBool>,
+}
+
+/// Shared task owner. The refresh future never holds this owner, so the last
+/// provider clone releases the task without an ownership cycle.
+#[derive(Default)]
+struct RefreshTask {
+    handle: OnceLock<tokio::task::JoinHandle<()>>,
+}
+
+impl std::ops::Deref for RefreshTask {
+    type Target = OnceLock<tokio::task::JoinHandle<()>>;
+    fn deref(&self) -> &Self::Target {
+        &self.handle
+    }
+}
+
+impl Drop for RefreshTask {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.get() {
+            handle.abort();
+        }
+    }
 }
 
 impl Clone for JwksProvider {
@@ -41,15 +92,6 @@ impl Clone for JwksProvider {
             cached_keys: Arc::clone(&self.cached_keys),
             background_handle: Arc::clone(&self.background_handle),
             shutdown: Arc::clone(&self.shutdown),
-        }
-    }
-}
-
-impl Drop for JwksProvider {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        if let Some(handle) = self.background_handle.get() {
-            handle.abort();
         }
     }
 }
@@ -76,6 +118,14 @@ struct Jwk {
     x_coord: Option<String>,
     #[serde(rename = "y")]
     y_coord: Option<String>,
+    #[serde(rename = "use")]
+    key_use: Option<String>,
+    #[serde(rename = "key_ops")]
+    key_operations: Option<Vec<String>>,
+    #[serde(rename = "alg")]
+    algorithm: Option<String>,
+    #[serde(rename = "crv")]
+    curve: Option<String>,
 }
 
 /// JWKS provider initialization failure.
@@ -110,6 +160,8 @@ impl JwksProvider {
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
+            // Keep the configured signing-key origin pinned on initial and refresh fetches.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| JwksProviderError::HttpClient(e.to_string()))?;
 
@@ -128,10 +180,9 @@ impl JwksProvider {
         let refresh_interval =
             parse_cache_max_age(response.headers()).unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL);
 
-        let jwks: JwksResponse = response
-            .json()
+        let jwks: JwksResponse = read_auth_json_bounded(response)
             .await
-            .map_err(|e| JwksProviderError::JwksFetch(e.to_string()))?;
+            .map_err(JwksProviderError::JwksFetch)?;
 
         let provider = Self {
             client,
@@ -142,7 +193,7 @@ impl JwksProvider {
                 etag,
                 refresh_interval,
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
         provider.start_background_refresh();
@@ -150,12 +201,14 @@ impl JwksProvider {
     }
 
     fn start_background_refresh(&self) {
-        let provider = self.clone();
+        let client = self.client.clone();
+        let jwks_url = self.jwks_url.clone();
+        let cached_keys = Arc::clone(&self.cached_keys);
         let shutdown = Arc::clone(&self.shutdown);
         let handle = tokio::spawn(async move {
             loop {
                 let interval = {
-                    let guard = provider.cached_keys.read().await;
+                    let guard = cached_keys.read().await;
                     guard
                         .as_ref()
                         .map(|c| c.refresh_interval)
@@ -171,23 +224,36 @@ impl JwksProvider {
                         }
                     }) => return,
                 }
-                if let Err(e) = provider.refresh_keys_if_changed().await {
+                if let Err(e) =
+                    Self::refresh_cached_keys_if_changed(&client, &jwks_url, &cached_keys).await
+                {
                     tracing::warn!("JWKS background refresh failed: {e}");
                 }
             }
         });
-        drop(self.background_handle.set(handle));
+        if let Err(handle) = self.background_handle.set(handle) {
+            // Concurrent or repeated starts must not detach an extra refresh task.
+            handle.abort();
+        }
     }
 
+    #[cfg(test)]
     async fn refresh_keys_if_changed(&self) -> Result<(), AuthError> {
-        let etag = self
-            .cached_keys
+        Self::refresh_cached_keys_if_changed(&self.client, &self.jwks_url, &self.cached_keys).await
+    }
+
+    async fn refresh_cached_keys_if_changed(
+        client: &Client,
+        jwks_url: &str,
+        cached_keys: &RwLock<Option<CachedJwks>>,
+    ) -> Result<(), AuthError> {
+        let etag = cached_keys
             .read()
             .await
             .as_ref()
             .and_then(|c| c.etag.clone());
 
-        let mut request = self.client.get(&self.jwks_url);
+        let mut request = client.get(jwks_url);
         if let Some(etag) = &etag {
             request = request.header("If-None-Match", etag);
         }
@@ -209,7 +275,7 @@ impl JwksProvider {
                 let new_interval = parse_cache_max_age(response.headers())
                     .unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL);
 
-                let jwks: JwksResponse = response.json().await.map_err(|e| {
+                let jwks: JwksResponse = read_auth_json_bounded(response).await.map_err(|e| {
                     AuthError::ProviderError(format!("JWKS refresh parse failed: {e}"))
                 })?;
 
@@ -219,7 +285,7 @@ impl JwksProvider {
                     refresh_interval: new_interval,
                 };
 
-                *self.cached_keys.write().await = Some(new_cache);
+                *cached_keys.write().await = Some(new_cache);
                 Ok(())
             }
             status => Err(AuthError::ProviderError(format!(
@@ -296,7 +362,7 @@ impl JwksProvider {
 
         let jwk = keys
             .iter()
-            .find(|k| k.kid == kid && is_algorithm_compatible(&k.key_type, algorithm))
+            .find(|k| k.kid == kid && jwk_allows_verification(k, algorithm))
             .ok_or_else(|| AuthError::ProviderError(format!("no matching key for kid {kid}")))?;
 
         let decoding_key = build_decoding_key(jwk, algorithm)
@@ -304,6 +370,9 @@ impl JwksProvider {
 
         let mut validation = Validation::new(algorithm);
         validation.set_issuer(&[self.issuer.as_str()]);
+        // An issuer constraint alone permits an absent `iss` claim. Require
+        // its presence so every accepted token identifies the pinned issuer.
+        validation.required_spec_claims.insert("iss".to_owned());
 
         // JwksProvider has no audience configuration, so jsonwebtoken's
         // `validate_aud` default of `true` would reject every token that
@@ -351,10 +420,8 @@ impl JwksProvider {
         let sub = payload
             .get("sub")
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                tracing::warn!("JWT payload missing 'sub' claim, defaulting to 'anonymous'");
-                "anonymous"
-            })
+            .filter(|subject| !subject.trim().is_empty())
+            .ok_or(AuthError::InvalidToken)?
             .to_owned();
 
         let scope_str = payload
@@ -394,6 +461,40 @@ impl AuthProvider for JwksProvider {
         Err(AuthError::ProviderError(
             "JWKS provider does not support token minting".to_owned(),
         ))
+    }
+}
+
+/// Explicit JWK metadata constrains key purpose and algorithm even when the
+/// mathematical key material could verify another signature scheme.
+fn jwk_allows_verification(jwk: &Jwk, algorithm: Algorithm) -> bool {
+    if !is_algorithm_compatible(&jwk.key_type, algorithm)
+        || jwk.key_use.as_deref().is_some_and(|usage| usage != "sig")
+        || jwk.algorithm.as_deref().is_some_and(|declared| {
+            !Algorithm::from_str(declared).is_ok_and(|declared| declared == algorithm)
+        })
+    {
+        return false;
+    }
+    if let Some(operations) = &jwk.key_operations {
+        // Verification permission is required. Only the related sign/verify
+        // combination is valid here; duplicates and unrelated uses are rejected.
+        if operations.len() > 2
+            || operations
+                .iter()
+                .filter(|operation| operation.as_str() == "verify")
+                .count()
+                != 1
+            || operations
+                .iter()
+                .any(|operation| !matches!(operation.as_str(), "sign" | "verify"))
+        {
+            return false;
+        }
+    }
+    match (jwk.key_type.as_str(), algorithm) {
+        ("EC", Algorithm::ES256) => jwk.curve.as_deref() == Some("P-256"),
+        ("EC", Algorithm::ES384) => jwk.curve.as_deref() == Some("P-384"),
+        _ => true,
     }
 }
 
@@ -510,6 +611,390 @@ fn is_secure_jwks_url(url: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    async fn auth_document_response(
+        body: &[u8],
+        chunked: bool,
+        advertised: Option<usize>,
+    ) -> (reqwest::Response, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("owned fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let body = body.to_vec();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("fixture request");
+            let mut request = [0_u8; 8192];
+            let mut filled = 0_usize;
+            loop {
+                let available = request.get_mut(filled..).expect("bounded request buffer");
+                assert!(
+                    !available.is_empty(),
+                    "fixture request headers exceed buffer"
+                );
+                let read = socket.read(available).await.expect("request headers");
+                assert!(read > 0, "fixture request ended before complete headers");
+                filled = filled.checked_add(read).expect("bounded request count");
+                if request
+                    .get(..filled)
+                    .expect("received header bytes")
+                    .windows(4)
+                    .any(|window| window == b"\r\n\r\n")
+                {
+                    break;
+                }
+            }
+            let framing = if chunked {
+                "Transfer-Encoding: chunked\r\n".to_owned()
+            } else {
+                format!("Content-Length: {}\r\n", advertised.unwrap_or(body.len()))
+            };
+            let headers = format!("HTTP/1.1 200 OK\r\n{framing}Connection: close\r\n\r\n");
+            if socket.write_all(headers.as_bytes()).await.is_err() {
+                return;
+            }
+            if chunked {
+                // Split the body so the limit must account for cumulative reads.
+                for chunk in body.chunks(MAX_AUTH_JSON_BYTES / 2) {
+                    if socket
+                        .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                        .await
+                        .is_err()
+                        || socket.write_all(chunk).await.is_err()
+                        || socket.write_all(b"\r\n").await.is_err()
+                    {
+                        return;
+                    }
+                }
+                let _ = socket.write_all(b"0\r\n\r\n").await;
+            } else {
+                let _ = socket.write_all(&body).await;
+            }
+        });
+        let response = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("fixture client")
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect("fixture response");
+        (response, server)
+    }
+
+    #[tokio::test]
+    async fn auth_json_rejects_oversized_content_length_before_reading() {
+        let (response, server) =
+            auth_document_response(b"{}", false, Some(MAX_AUTH_JSON_BYTES + 1)).await;
+        let error = read_auth_json_bounded::<serde_json::Value>(response)
+            .await
+            .expect_err("advertised overflow");
+        server.await.expect("fixture cleanup");
+        assert!(
+            error.contains("document limit"),
+            "must reject size before short-body error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_json_enforces_actual_chunked_bytes_and_accepts_exact_limit() {
+        for extra in [0, 1] {
+            let mut body = b"{}".to_vec();
+            body.resize(MAX_AUTH_JSON_BYTES + extra, b' ');
+            let (response, server) = auth_document_response(&body, true, None).await;
+            assert!(
+                response.content_length().is_none(),
+                "must exercise streamed bound"
+            );
+            let result = read_auth_json_bounded::<serde_json::Value>(response).await;
+            server.await.expect("fixture cleanup");
+            if extra == 0 {
+                assert_eq!(result.expect("exact limit is legal"), serde_json::json!({}));
+            } else {
+                assert!(
+                    result
+                        .expect_err("streamed overflow")
+                        .contains("document limit")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn jwks_constructor_rejects_error_status_even_with_keys_json() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(503).set_body_json(serde_json::json!({"keys": []})),
+            )
+            .mount(&server)
+            .await;
+        let result = JwksProvider::new(&server.uri(), "issuer").await;
+        assert!(
+            matches!(result, Err(JwksProviderError::JwksFetch(message)) if message.contains("503"))
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_constructor_rejects_redirect_without_contacting_target() {
+        let target = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys": []})),
+            )
+            .expect(0)
+            .mount(&target)
+            .await;
+        let origin = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(302).insert_header("Location", target.uri()),
+            )
+            .mount(&origin)
+            .await;
+        let result = JwksProvider::new(&origin.uri(), "issuer").await;
+        assert!(
+            matches!(result, Err(JwksProviderError::JwksFetch(message)) if message.contains("302"))
+        );
+        assert!(
+            target
+                .received_requests()
+                .await
+                .expect("target requests")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_constructor_rejects_oversized_document() {
+        let server = wiremock::MockServer::start().await;
+        let mut body = br#"{"keys":[]}"#.to_vec();
+        body.resize(MAX_AUTH_JSON_BYTES + 1, b' ');
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+        let result = JwksProvider::new(&server.uri(), "issuer").await;
+        assert!(
+            matches!(result, Err(JwksProviderError::JwksFetch(message)) if message.contains("document limit"))
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_refresh_failure_preserves_previous_key_cache() {
+        let server = wiremock::MockServer::start().await;
+        let mut provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![sample_rsa_jwk()]),
+            etag: Some("initial".to_owned()),
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        provider.jwks_url = server.uri();
+        let initial_kid = provider
+            .cached_keys
+            .read()
+            .await
+            .as_ref()
+            .expect("initial cache")
+            .keys[0]
+            .kid
+            .clone();
+        for status in [503, 200] {
+            server.reset().await;
+            let mut body = br#"{"keys":[]}"#.to_vec();
+            if status == 200 {
+                body.resize(MAX_AUTH_JSON_BYTES + 1, b' ');
+            }
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(status)
+                        .set_body_bytes(body)
+                        .insert_header("etag", "replacement"),
+                )
+                .mount(&server)
+                .await;
+            assert!(provider.refresh_keys_if_changed().await.is_err());
+            let guard = provider.cached_keys.read().await;
+            let cached = guard.as_ref().expect("previous cache retained");
+            assert_eq!(cached.keys[0].kid, initial_kid);
+            assert_eq!(cached.etag.as_deref(), Some("initial"));
+        }
+    }
+
+    #[test]
+    fn jwt_verification_respects_rsa_jwk_metadata_and_selects_signing_key() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        let claims = serde_json::json!({"iss":"https://example.com", "sub":"metadata-proof", "aud":"test-audience", "scope":"read", "exp":9999999999_u64});
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("metadata".to_owned());
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("local RSA fixture"),
+        )
+        .expect("signed JWT");
+        let key = test_rsa_jwk("metadata");
+        let base = serde_json::json!({"kid":"metadata", "kty":"RSA", "n":key.n, "e":key.e});
+        let make = |keys: Vec<Jwk>| {
+            make_provider(Some(CachedJwks {
+                keys: Arc::new(keys),
+                etag: None,
+                refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+            }))
+        };
+        for (metadata, allowed) in [
+            (serde_json::json!({}), true),
+            (
+                serde_json::json!({"use":"sig", "key_ops":["verify"], "alg":"RS256"}),
+                true,
+            ),
+            (serde_json::json!({"key_ops":["sign", "verify"]}), true),
+            (serde_json::json!({"use":"enc"}), false),
+            (serde_json::json!({"key_ops":["encrypt"]}), false),
+            (serde_json::json!({"key_ops":["sign"]}), false),
+            (serde_json::json!({"key_ops":[]}), false),
+            (serde_json::json!({"key_ops":["verify", "verify"]}), false),
+            (serde_json::json!({"key_ops":["verify", "encrypt"]}), false),
+            (
+                serde_json::json!({"use":"sig", "key_ops":["encrypt"]}),
+                false,
+            ),
+            (serde_json::json!({"alg":"RS512"}), false),
+            (serde_json::json!({"alg":"RSA-OAEP"}), false),
+        ] {
+            let mut value = base.clone();
+            for (field, value_part) in metadata.as_object().expect("metadata object") {
+                value[field] = value_part.clone();
+            }
+            let jwk: Jwk = serde_json::from_value(value).expect("JWK JSON");
+            let provider = make(vec![jwk]);
+            assert_eq!(
+                provider.verify_token(&token).is_ok(),
+                allowed,
+                "JWK metadata {metadata}"
+            );
+            // A valid declared purpose must not weaken cryptographic verification.
+            let mut corrupted = token.as_bytes().to_vec();
+            let offset = corrupted.len().checked_sub(4).expect("signature byte");
+            let byte = corrupted.get_mut(offset).expect("signature byte");
+            *byte = if *byte == b'A' { b'B' } else { b'A' };
+            assert!(
+                provider
+                    .verify_token(std::str::from_utf8(&corrupted).expect("JWT ASCII"))
+                    .is_err()
+            );
+        }
+        let mut encryption = base.clone();
+        encryption["use"] = serde_json::json!("enc");
+        let mut wrong_algorithm = base.clone();
+        wrong_algorithm["alg"] = serde_json::json!("RS512");
+        let mut signing = base;
+        signing["use"] = serde_json::json!("sig");
+        signing["alg"] = serde_json::json!("RS256");
+        let keys = [encryption, wrong_algorithm, signing]
+            .into_iter()
+            .map(|value| serde_json::from_value(value).expect("JWK JSON"))
+            .collect();
+        assert!(
+            make(keys).verify_token(&token).is_ok(),
+            "ineligible same-kid keys must not shadow signing key"
+        );
+    }
+
+    #[test]
+    fn jwt_verification_requires_matching_ec_curve_metadata() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        let claims = serde_json::json!({"iss":"https://example.com", "sub":"metadata-proof", "aud":"test-audience", "scope":"read", "exp":9999999999_u64});
+        let make = |keys: Vec<Jwk>| {
+            make_provider(Some(CachedJwks {
+                keys: Arc::new(keys),
+                etag: None,
+                refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+            }))
+        };
+
+        {
+            // Local synthetic ES256 fixture; never an operational signing key.
+            let pem = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgH1qSATO7+He02xGt\n7sd8J1ZU9vtd8z/QR0zrX5P2jdmhRANCAARBR606IUs63njTAEXDffW3BQZ0rG+N\nPo7ztoRDu5dA6RSblr8zAxMdBoTg+Ly8ZDuDRgGMKawWURMNUjLl2nke\n-----END PRIVATE KEY-----\n";
+            let mut header = Header::new(Algorithm::ES256);
+            header.kid = Some("curve".to_owned());
+            let token = encode(
+                &header,
+                &claims,
+                &EncodingKey::from_ec_pem(pem.as_bytes()).expect("local EC fixture"),
+            )
+            .expect("signed EC JWT");
+            for curve in [
+                None,
+                Some("P-256"),
+                Some("P-384"),
+                Some("P-521"),
+                Some("invalid"),
+            ] {
+                let mut value = serde_json::json!({"kid":"curve", "kty":"EC", "alg":"ES256", "use":"sig", "key_ops":["verify"], "x":"QUetOiFLOt540wBFw331twUGdKxvjT6O87aEQ7uXQOk", "y":"FJuWvzMDEx0GhOD4vLxkO4NGAYwprBZREw1SMuXaeR4"});
+                if let Some(curve) = curve {
+                    value["crv"] = serde_json::json!(curve);
+                }
+                let jwk: Jwk = serde_json::from_value(value).expect("EC JWK JSON");
+                let provider = make(vec![jwk]);
+                assert_eq!(
+                    provider.verify_token(&token).is_ok(),
+                    curve == Some("P-256"),
+                    "ES256 declared curve {curve:?}"
+                );
+                let mut corrupted = token.as_bytes().to_vec();
+                let offset = corrupted.len().checked_sub(4).expect("signature byte");
+                let byte = corrupted.get_mut(offset).expect("signature byte");
+                *byte = if *byte == b'A' { b'B' } else { b'A' };
+                assert!(
+                    provider
+                        .verify_token(std::str::from_utf8(&corrupted).expect("JWT ASCII"))
+                        .is_err()
+                );
+            }
+        }
+
+        {
+            // Local synthetic ES384 fixture; never an operational signing key.
+            let pem = "-----BEGIN PRIVATE KEY-----\nMIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDANM2Y5m/XXz77CWk/E\nYfKJgizMx4kzDus+kCstElM0GqmTplqihO/HY6pLoigZPCChZANiAATp4XHxidU6\noyNqpqdwq1yuhFeU8DyZ8m9iyrq6T7rEPd3UvdNXQANAjQz4rg74c5BuOMl6wKd4\nYLB9EG+4gd668oYQXY/EEvtiQ4aimM9H5GZJ7FLC2+dPQeyZr/1wpe4=\n-----END PRIVATE KEY-----\n";
+            let mut header = Header::new(Algorithm::ES384);
+            header.kid = Some("curve".to_owned());
+            let token = encode(
+                &header,
+                &claims,
+                &EncodingKey::from_ec_pem(pem.as_bytes()).expect("local EC fixture"),
+            )
+            .expect("signed EC JWT");
+            for curve in [
+                None,
+                Some("P-256"),
+                Some("P-384"),
+                Some("P-521"),
+                Some("invalid"),
+            ] {
+                let mut value = serde_json::json!({"kid":"curve", "kty":"EC", "alg":"ES384", "use":"sig", "key_ops":["verify"], "x":"6eFx8YnVOqMjaqancKtcroRXlPA8mfJvYsq6uk-6xD3d1L3TV0ADQI0M-K4O-HOQ", "y":"bjjJesCneGCwfRBvuIHeuvKGEF2PxBL7YkOGopjPR-RmSexSwtvnT0Hsma_9cKXu"});
+                if let Some(curve) = curve {
+                    value["crv"] = serde_json::json!(curve);
+                }
+                let jwk: Jwk = serde_json::from_value(value).expect("EC JWK JSON");
+                let provider = make(vec![jwk]);
+                assert_eq!(
+                    provider.verify_token(&token).is_ok(),
+                    curve == Some("P-384"),
+                    "ES384 declared curve {curve:?}"
+                );
+                let mut corrupted = token.as_bytes().to_vec();
+                let offset = corrupted.len().checked_sub(4).expect("signature byte");
+                let byte = corrupted.get_mut(offset).expect("signature byte");
+                *byte = if *byte == b'A' { b'B' } else { b'A' };
+                assert!(
+                    provider
+                        .verify_token(std::str::from_utf8(&corrupted).expect("JWT ASCII"))
+                        .is_err()
+                );
+            }
+        }
+    }
 
     // ── JwksProviderError display ────────────────────────────────────────
 
@@ -836,6 +1321,10 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     fn sample_rsa_jwk() -> Jwk {
         Jwk {
+            key_use: None,
+            key_operations: None,
+            algorithm: None,
+            curve: None,
             kid: "test".to_owned(),
             key_type: "RSA".to_owned(),
             n: Some(TEST_RSA_N.to_owned()),
@@ -847,6 +1336,10 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     fn sample_ec_jwk() -> Jwk {
         Jwk {
+            key_use: None,
+            key_operations: None,
+            algorithm: None,
+            curve: Some("P-256".to_owned()),
             kid: "test".to_owned(),
             key_type: "EC".to_owned(),
             n: None,
@@ -948,7 +1441,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             jwks_url: "https://example.com/.well-known/jwks".to_owned(),
             issuer: "https://example.com".to_owned(),
             cached_keys: Arc::new(RwLock::new(cached)),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1170,6 +1663,10 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         // Header base64: {"alg":"RS256","kid":"unknown"}
         let provider = make_provider(Some(CachedJwks {
             keys: Arc::new(vec![Jwk {
+                key_use: None,
+                key_operations: None,
+                algorithm: None,
+                curve: None,
                 kid: "different-key".to_owned(),
                 key_type: "RSA".to_owned(),
                 n: Some("n".to_owned()),
@@ -1198,6 +1695,10 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         // Header: RS256, but only EC key available — algorithm incompatible
         let provider = make_provider(Some(CachedJwks {
             keys: Arc::new(vec![Jwk {
+                key_use: None,
+                key_operations: None,
+                algorithm: None,
+                curve: Some("P-256".to_owned()),
                 kid: "test".to_owned(),
                 key_type: "EC".to_owned(),
                 n: None,
@@ -1263,9 +1764,9 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
     // ── JwksProvider Clone ───────────────────────────────────────────────
 
     #[test]
-    fn jwks_provider_clone_produces_valid_instance() {
+    fn jwks_provider_without_cached_keys_rejects_token() {
         let provider = make_provider(None);
-        // Both should behave identically (no keys available)
+        // No keys are available.
         assert!(matches!(
             provider.verify_token("a.b.c"),
             Err(AuthError::ProviderError(_))
@@ -1343,7 +1844,8 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let json = json!({
             "keys": [
                 { "kid": "k1", "kty": "RSA", "n": "n1", "e": "e1" },
-                { "kid": "k2", "kty": "EC", "x": "x2", "y": "y2" },
+                { "kid": "k2", "kty": "EC",
+            "crv": "P-256", "x": "x2", "y": "y2" },
                 { "kid": "k3", "kty": "RSA", "n": "n3", "e": "e3" }
             ]
         });
@@ -1465,7 +1967,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("my-etag".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1512,7 +2014,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("old-etag".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1555,7 +2057,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: None,
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1573,6 +2075,10 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     fn test_rsa_jwk(kid: &str) -> Jwk {
         Jwk {
+            key_use: None,
+            key_operations: None,
+            algorithm: None,
+            curve: None,
             kid: kid.to_owned(),
             key_type: "RSA".to_owned(),
             n: Some(TEST_RSA_N.to_owned()),
@@ -1633,7 +2139,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("old-jwks-version".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1675,6 +2181,63 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             current_after_rotation.is_ok(),
             "a token signed for the rotated JWKS kid must authenticate"
         );
+    }
+
+    #[test]
+    fn verify_token_requires_matching_issuer_and_string_subject() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+        let key = EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let valid = serde_json::json!({
+            "iss": "https://example.com",
+            "sub": "test-user",
+            "scope": "write",
+            "exp": 9999999999u64,
+        });
+
+        // All cases have a valid signature and expiry. Rejection must come
+        // from the identity claims rather than signature verification.
+        for (claim, invalid_value) in [
+            ("iss", None),
+            ("iss", Some(serde_json::json!("https://wrong.example.com"))),
+            ("iss", Some(serde_json::json!(42))),
+            ("sub", None),
+            ("sub", Some(serde_json::Value::Null)),
+            ("sub", Some(serde_json::json!(42))),
+            ("sub", Some(serde_json::json!(["test-user"]))),
+            ("sub", Some(serde_json::json!(""))),
+            ("sub", Some(serde_json::json!("  "))),
+        ] {
+            let mut claims = valid.clone();
+            let object = claims.as_object_mut().expect("claims object");
+            if let Some(value) = invalid_value {
+                object.insert(claim.to_owned(), value);
+            } else {
+                object.remove(claim);
+            }
+            let token = encode(&header, &claims, &key).expect("signed test token");
+            assert!(
+                provider.verify_token(&token).is_err(),
+                "must reject invalid {claim}: {claims}"
+            );
+        }
+
+        for subject in ["test-user", "anonymous", "subject with spaces", "δοκιμή"] {
+            let mut claims = valid.clone();
+            claims["sub"] = serde_json::json!(subject);
+            let token = encode(&header, &claims, &key).expect("signed test token");
+            let verified = provider.verify_token(&token).expect("valid identity");
+            assert_eq!(verified.subject(), subject);
+            assert_eq!(verified.repository().name(), subject);
+            assert_eq!(verified.scope(), TokenScope::Write);
+        }
     }
 
     #[test]
@@ -1907,6 +2470,53 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         assert_eq!(cached.etag.as_deref(), Some("\"abc123\""));
     }
 
+    #[tokio::test]
+    async fn dropping_provider_clone_preserves_refresh_until_last_owner() {
+        let provider = make_provider(None);
+        let weak_cache = Arc::downgrade(&provider.cached_keys);
+        let weak_owner = Arc::downgrade(&provider.background_handle);
+        provider.start_background_refresh();
+        tokio::task::yield_now().await;
+        assert!(
+            !provider
+                .background_handle
+                .get()
+                .expect("refresh handle")
+                .is_finished()
+        );
+
+        let survivor = provider.clone();
+        drop(provider);
+        tokio::task::yield_now().await;
+        assert!(!survivor.shutdown.load(Ordering::Acquire));
+        assert!(
+            !survivor
+                .background_handle
+                .get()
+                .expect("refresh handle")
+                .is_finished()
+        );
+
+        // A repeated start must not leave an unowned task retaining the cache.
+        survivor.start_background_refresh();
+        tokio::task::yield_now().await;
+        drop(survivor);
+        assert!(
+            weak_owner.upgrade().is_none(),
+            "last owner must release task guard"
+        );
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+            if weak_cache.upgrade().is_none() {
+                return;
+            }
+        }
+        assert!(
+            weak_cache.upgrade().is_none(),
+            "refresh task retained its cache after final provider was dropped"
+        );
+    }
+
     // ── start_background_refresh ────────────────────────────────────────
 
     #[tokio::test]
@@ -1949,7 +2559,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: None,
                 refresh_interval: Duration::from_millis(50),
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -2052,7 +2662,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("my-etag".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -2081,7 +2691,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("my-etag".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 

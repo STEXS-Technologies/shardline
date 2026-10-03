@@ -4,7 +4,7 @@ use axum::{
 };
 
 use crate::{error::HubApiError, models::*};
-use shardline_index::hub::HubFileEntry;
+use shardline_index::hub::{HubFileEntry, HubTreePageEntry, HubTreePageOptions};
 
 use super::{HubRepository, HubState};
 
@@ -55,6 +55,44 @@ async fn file_tree_for_path(
         .resolve_revision(&name, &rev)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RevisionNotFound)?;
+    if let Some(limit) = query.limit {
+        let page = state
+            .store
+            .get_tree_page(
+                &commit_sha,
+                &HubTreePageOptions {
+                    path: file_path,
+                    recursive: query.recursive,
+                    cursor: query.cursor,
+                    limit,
+                },
+            )
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        let entries = page
+            .entries
+            .into_iter()
+            .map(|entry| match entry {
+                HubTreePageEntry::Directory { path } => TreeEntry {
+                    entry_type: "directory".to_owned(),
+                    path,
+                    size: None,
+                    oid: None,
+                    lfs: None,
+                },
+                HubTreePageEntry::File(file) => TreeEntry {
+                    entry_type: "file".to_owned(),
+                    path: file.path,
+                    size: Some(file.size),
+                    oid: Some(file.sha.clone()),
+                    lfs: file.is_lfs.then_some(TreeEntryLfs {
+                        oid: file.sha,
+                        size: file.size,
+                    }),
+                },
+            })
+            .collect();
+        return Ok(Json(entries));
+    }
     let files = state
         .store
         .get_files(&commit_sha)
@@ -63,22 +101,6 @@ async fn file_tree_for_path(
         tree_entries_recursive(&files, &file_path)
     } else {
         tree_entries_at_path(&files, &file_path)
-    };
-    let entries = if let Some(limit) = query.limit {
-        let entries: Vec<TreeEntry> = if let Some(cursor) = &query.cursor {
-            // Skip entries until we pass the cursor, then take `limit` entries.
-            entries
-                .into_iter()
-                .skip_while(|e| &e.path != cursor)
-                .skip(1) // skip the cursor entry itself
-                .take(limit)
-                .collect()
-        } else {
-            entries.into_iter().take(limit).collect()
-        };
-        entries
-    } else {
-        entries
     };
     Ok(Json(entries))
 }

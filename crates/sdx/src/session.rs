@@ -146,6 +146,10 @@ impl DownloadSession {
     /// Downloads the file identified by `file_id` (64 lowercase hex
     /// characters) to `dest`, returning the number of bytes written.
     ///
+    /// Publishes the completed download atomically, replacing only `dest` (not
+    /// other hard links to its old contents). Unix paths must not contain
+    /// symlinks. A failure before publication preserves any existing file.
+    ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when `file_id` is malformed, token issuance fails,
@@ -294,7 +298,11 @@ impl DownloadSession {
             range,
         )
         .await?;
-        tokio::fs::write(dest, &file.data).await?;
-        Ok(u64::try_from(file.data.len()).unwrap_or(u64::MAX))
+        let len = u64::try_from(file.data.len()).unwrap_or(u64::MAX);
+        let dest = dest.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::local_output::write_atomic(&dest, &file.data))
+            .await
+            .map_err(|error| SdxError::TaskJoin(error.to_string()))??;
+        Ok(len)
     }
 }

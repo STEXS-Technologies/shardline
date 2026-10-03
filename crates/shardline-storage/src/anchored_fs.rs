@@ -3,8 +3,6 @@ use std::{
     fs::{self, DirBuilder, File, OpenOptions},
     io::{self, ErrorKind, Write},
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use std::os::unix::{
@@ -12,12 +10,11 @@ use std::os::unix::{
     io::AsRawFd,
 };
 
+use crate::temporary_file_name;
 use crate::{
     LocalPublishBoundary,
     fault_injection::{local_publish_failpoint, local_publish_partial_write_len},
 };
-
-static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// File and directory mode overrides for anchored filesystem writes.
 #[derive(Debug, Clone, Copy)]
@@ -102,14 +99,10 @@ pub fn open_anchored_target(
     let relative_parent = parent_path
         .strip_prefix(root)
         .map_err(|_error| invalid_path_error())?;
-    let mut current = match open_directory(root) {
-        Ok(directory) => directory,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            create_directory_all(root, options.directory_mode)?;
-            open_directory(root)?
-        }
-        Err(error) => return Err(error),
-    };
+    // The root and every child name must be durable before publication can
+    // acknowledge bytes beneath them. Walking existing names also covers a
+    // concurrent creator that has not synchronized its parent yet.
+    let mut current = open_directory_chain(root, true, options.directory_mode, invalid_path_error)?;
 
     for component in relative_parent.components() {
         let Component::Normal(segment) = component else {
@@ -166,6 +159,9 @@ pub fn open_directory_chain(
 
 /// Opens one child directory below `parent`, optionally creating it first.
 ///
+/// When creation is enabled, synchronizes the parent even if the child already
+/// exists, so concurrent creators and retries cannot bypass name durability.
+///
 /// # Errors
 ///
 /// Returns an error when the child is missing and creation is disabled, when the child is not a
@@ -177,17 +173,72 @@ pub fn open_or_create_child_directory(
     directory_mode: Option<u32>,
 ) -> io::Result<File> {
     let child_path = fd_child_path(parent, segment);
-    match open_directory(&child_path) {
-        Ok(directory) => Ok(directory),
+    let directory = match open_directory(&child_path) {
+        Ok(directory) => directory,
         Err(error) if error.kind() == ErrorKind::NotFound && create_missing => {
             match create_directory(&child_path, directory_mode) {
                 Ok(()) => {}
                 Err(create_error) if create_error.kind() == ErrorKind::AlreadyExists => {}
                 Err(create_error) => return Err(create_error),
             }
-            open_directory(&child_path)
+            open_directory(&child_path)?
         }
-        Err(error) => Err(error),
+        Err(error) => return Err(error),
+    };
+    if create_missing {
+        // Opening an existing child is not proof that another writer has made
+        // its name durable. Synchronize on that path too, including retries
+        // after mkdir succeeded but its parent sync failed.
+        local_publish_failpoint(&child_path, LocalPublishBoundary::BeforeDirectorySync)?;
+        parent.sync_all()?;
+        local_publish_failpoint(&child_path, LocalPublishBoundary::AfterDirectoryDurable)?;
+    }
+    Ok(directory)
+}
+
+/// Opens an existing child directory through its parent descriptor without
+/// following a replacement symlink or creating a missing path.
+///
+/// # Errors
+///
+/// Returns an error when the name is invalid, missing, symlinked, or not a directory.
+pub(crate) fn open_child_directory_no_follow(parent: &File, name: &OsStr) -> io::Result<File> {
+    use std::{ffi::CString, os::fd::FromRawFd};
+    let name = CString::new(name.as_encoded_bytes())
+        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
+    // SAFETY: the borrowed parent descriptor stays open, the name is a valid
+    // C string, and no creation flag requires a variadic mode argument.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned descriptor; this transfers ownership
+    // exactly once to File, which will close it on drop.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+/// Removes an empty child directory through its pinned parent descriptor.
+///
+/// # Errors
+///
+/// Returns an error when the name is invalid, absent, symlinked, or nonempty.
+pub(crate) fn remove_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
+    use std::ffi::CString;
+    let name = CString::new(name.as_encoded_bytes())
+        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
+    // SAFETY: the borrowed parent descriptor stays open, the name is a valid
+    // C string, and AT_REMOVEDIR restricts removal to an empty directory.
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -266,18 +317,6 @@ pub fn write_anchored_temporary_file(
 /// Returns an error when the operating system cannot synchronize the directory.
 pub fn sync_parent_directory(anchored: &AnchoredTarget) -> io::Result<()> {
     anchored.parent_dir().sync_all()
-}
-
-/// Returns a collision-resistant temporary filename beside `file_name`.
-#[must_use]
-pub fn temporary_file_name(file_name: &OsStr) -> OsString {
-    let counter = TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let unix_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_u128, |duration| duration.as_nanos());
-    let mut name = file_name.to_os_string();
-    name.push(format!(".tmp-{unix_nanos}-{counter}"));
-    name
 }
 
 /// Verifies that the anchored parent directory still points at the same on-disk directory.
@@ -360,6 +399,7 @@ pub fn create_directory(path: &Path, directory_mode: Option<u32>) -> io::Result<
 /// # Errors
 ///
 /// Returns an error when any directory in the chain cannot be created.
+#[cfg(test)]
 pub fn create_directory_all(path: &Path, directory_mode: Option<u32>) -> io::Result<()> {
     let mut builder = DirBuilder::new();
     builder.recursive(true);
@@ -543,6 +583,43 @@ mod tests {
 
     fn invalid_path_error() -> io::Error {
         io::Error::new(ErrorKind::InvalidInput, "invalid path")
+    }
+
+    #[test]
+    fn directory_sync_failure_is_propagated_for_new_and_existing_children() {
+        use crate::{LocalPublishFault, fault_injection::arm_fault};
+        let root = tempdir().unwrap();
+        let parent = open_directory(root.path()).unwrap();
+        let segment = OsStr::new("child");
+        let child_path = fd_child_path(&parent, segment);
+        for existing in [false, true] {
+            assert_eq!(root.path().join(segment).exists(), existing);
+            let guard = arm_fault(
+                child_path.clone(),
+                LocalPublishBoundary::BeforeDirectorySync,
+                LocalPublishFault::SyncFailure,
+            );
+            let error = open_or_create_child_directory(&parent, segment, true, None)
+                .expect_err("directory synchronization must fail closed");
+            assert_eq!(error.raw_os_error(), Some(libc::EIO));
+            drop(guard);
+        }
+        assert!(open_or_create_child_directory(&parent, segment, true, None).is_ok());
+    }
+
+    #[test]
+    fn read_only_directory_walk_does_not_require_publication_sync() {
+        use crate::{LocalPublishFault, fault_injection::arm_fault};
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("child")).unwrap();
+        let parent = open_directory(root.path()).unwrap();
+        let segment = OsStr::new("child");
+        let _guard = arm_fault(
+            fd_child_path(&parent, segment),
+            LocalPublishBoundary::BeforeDirectorySync,
+            LocalPublishFault::SyncFailure,
+        );
+        assert!(open_or_create_child_directory(&parent, segment, false, None).is_ok());
     }
 
     // ── AnchoredPathOptions ──────────────────────────────────────────────
@@ -843,7 +920,7 @@ mod tests {
         assert!(result.is_ok());
         let tmp_path = result.unwrap();
 
-        // Temp file name should contain the target name and ".tmp-"
+        // Short destinations retain the GC-recognizable suffix
         let tmp_name = tmp_path.file_name().unwrap().to_string_lossy();
         assert!(
             tmp_name.starts_with("target.txt.tmp-"),
@@ -1432,5 +1509,65 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+}
+
+#[cfg(test)]
+mod deletion_primitive_tests {
+    use super::{open_child_directory_no_follow, remove_directory_at};
+    use std::{
+        ffi::OsStr,
+        fs::{self, File},
+        os::unix::fs::symlink,
+    };
+
+    #[test]
+    fn child_directory_open_never_follows_a_symlink_or_creates_a_path() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("sentinel"), b"preserved").unwrap();
+        symlink(outside.path(), root.path().join("alias")).unwrap();
+        let parent = File::open(root.path()).unwrap();
+        assert!(open_child_directory_no_follow(&parent, OsStr::new("alias")).is_err());
+        assert!(open_child_directory_no_follow(&parent, OsStr::new("missing")).is_err());
+        assert!(!root.path().join("missing").exists());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).unwrap(),
+            b"preserved"
+        );
+    }
+
+    #[test]
+    fn directory_removal_does_not_follow_a_symlink_or_remove_nonempty_children() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("sentinel"), b"preserved").unwrap();
+        symlink(outside.path(), root.path().join("alias")).unwrap();
+        fs::create_dir(root.path().join("nonempty")).unwrap();
+        fs::write(root.path().join("nonempty/sentinel"), b"preserved").unwrap();
+        let parent = File::open(root.path()).unwrap();
+        assert!(remove_directory_at(&parent, OsStr::new("alias")).is_err());
+        assert!(remove_directory_at(&parent, OsStr::new("nonempty")).is_err());
+        assert!(root.path().join("alias").is_symlink());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).unwrap(),
+            b"preserved"
+        );
+        assert_eq!(
+            fs::read(root.path().join("nonempty/sentinel")).unwrap(),
+            b"preserved"
+        );
+    }
+
+    #[test]
+    fn existing_empty_child_can_be_opened_and_removed_without_removing_root() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("child")).unwrap();
+        let parent = File::open(root.path()).unwrap();
+        let child = open_child_directory_no_follow(&parent, OsStr::new("child")).unwrap();
+        assert!(child.metadata().unwrap().is_dir());
+        remove_directory_at(&parent, OsStr::new("child")).unwrap();
+        assert!(!root.path().join("child").exists());
+        assert!(root.path().is_dir());
     }
 }

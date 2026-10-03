@@ -166,8 +166,11 @@ pub enum S3SessionError {
 pub struct MultipartPart {
     /// The part byte length recorded at upload time.
     pub size_bytes: u64,
-    /// The part file name relative to the session directory (`part-{n}`).
+    /// The immutable part file name relative to the session directory.
     pub file_name: String,
+    /// Strong quoted lowercase MD5 content ETag, absent for legacy sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
 }
 
 /// A disk-persisted S3 multipart upload session.
@@ -200,6 +203,8 @@ pub struct MultipartUploadSession {
 struct MultipartPartSnapshotV1 {
     size_bytes: u64,
     file_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    etag: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,6 +235,7 @@ impl MultipartUploadSessionSnapshotV1 {
                         MultipartPartSnapshotV1 {
                             size_bytes: part.size_bytes,
                             file_name: part.file_name.clone(),
+                            etag: part.etag.clone(),
                         },
                     )
                 })
@@ -418,6 +424,58 @@ pub fn part_file_path(
     Ok(session_dir(root, upload_id)?.join(format!("part-{part_number}")))
 }
 
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Builds the immutable filename for a BLAKE3-addressed part.
+///
+/// # Errors
+///
+/// Returns a part-number error or a reliability error for a noncanonical digest.
+pub fn versioned_part_file_name(part_number: u32, digest: &str) -> Result<String, S3SessionError> {
+    validate_part_number(part_number)?;
+    if !is_lower_hex(digest, 64) {
+        return Err(S3SessionError::Reliability(
+            "invalid part content digest".into(),
+        ));
+    }
+    Ok(format!("part-{part_number}-{digest}"))
+}
+
+/// Resolves a recorded part without permitting path traversal or cross-part references.
+///
+/// Legacy `part-{n}` files remain readable. New filenames must be exactly
+/// `part-{n}-{64 lowercase hexadecimal digits}`.
+///
+/// # Errors
+///
+/// Returns an id/part-number error or a reliability error for an unsafe filename.
+pub fn stored_part_file_path(
+    root: &Path,
+    upload_id: &str,
+    part_number: u32,
+    part: &MultipartPart,
+) -> Result<PathBuf, S3SessionError> {
+    validate_part_number(part_number)?;
+    let legacy = format!("part-{part_number}");
+    let prefix = format!("{legacy}-");
+    if part.file_name != legacy
+        && !part
+            .file_name
+            .strip_prefix(&prefix)
+            .is_some_and(|digest| is_lower_hex(digest, 64))
+    {
+        return Err(S3SessionError::Reliability(
+            "invalid stored part filename".into(),
+        ));
+    }
+    Ok(session_dir(root, upload_id)?.join(&part.file_name))
+}
+
 // ── Locking ──────────────────────────────────────────────────────────────────
 
 /// Acquires the upload-root advisory file lock.
@@ -460,7 +518,7 @@ pub async fn lock_session_parts(
 }
 
 async fn acquire_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3SessionError> {
-    spawn_blocking(move || {
+    let file = spawn_blocking(move || {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -470,15 +528,15 @@ async fn acquire_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3Sessio
             .read(true)
             .write(true)
             .open(path)?;
-        file.lock()?;
-        Ok(S3FileLock { file })
+        Ok::<_, S3SessionError>(file)
     })
     .await
-    .map_err(S3SessionError::BlockingTask)?
+    .map_err(S3SessionError::BlockingTask)??;
+    wait_for_session_file_lock(file).await
 }
 
 async fn acquire_existing_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3SessionError> {
-    spawn_blocking(move || {
+    let file = spawn_blocking(move || {
         let file = match std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -492,11 +550,30 @@ async fn acquire_existing_session_file_lock(path: PathBuf) -> Result<S3FileLock,
             }
             Err(error) => return Err(S3SessionError::Io(error)),
         };
-        file.lock()?;
-        Ok(S3FileLock { file })
+        Ok::<_, S3SessionError>(file)
     })
     .await
-    .map_err(S3SessionError::BlockingTask)?
+    .map_err(S3SessionError::BlockingTask)??;
+    wait_for_session_file_lock(file).await
+}
+
+// OS lock waiting must remain cancellable; opening the file is the only
+// operation admitted to the runtime's blocking pool.
+async fn wait_for_session_file_lock(file: std::fs::File) -> Result<S3FileLock, S3SessionError> {
+    let mut delay = std::time::Duration::from_millis(10);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(S3FileLock { file }),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error))
+                if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(S3SessionError::Io(error)),
+        }
+        tokio::time::sleep(delay).await;
+        delay = delay
+            .saturating_mul(2)
+            .min(std::time::Duration::from_millis(50));
+    }
 }
 
 // ── Session lifecycle ────────────────────────────────────────────────────────
@@ -665,6 +742,99 @@ pub async fn store_part_locked(
     total_max_bytes: NonZeroU64,
     max_active_part_files: NonZeroUsize,
 ) -> Result<(), S3SessionError> {
+    store_part_metadata_locked(
+        root,
+        upload_id,
+        part_number,
+        MultipartPart {
+            size_bytes,
+            file_name: format!("part-{part_number}"),
+            etag: None,
+        },
+        None,
+        ttl_seconds,
+        session_max_bytes,
+        total_max_bytes,
+        max_active_part_files,
+    )
+    .await
+    .map(|_previous| ())
+}
+
+/// Publishes an already persisted immutable content-addressed part.
+///
+/// The caller holds both the global upload-session lock and the session part
+/// lock, writes and syncs the unique part file first, then calls this helper.
+/// Quotas and session binding are revalidated before the metadata pointer is
+/// committed atomically. The previously acknowledged part is returned only
+/// after that commit succeeds; its file can then be removed. On failure the
+/// caller must retain the staged file unless current session metadata can be
+/// reloaded and proves it is unreferenced: a directory-sync error may occur
+/// after the atomic rename has already made the new pointer visible.
+///
+/// # Errors
+///
+/// Returns the persistence/quota errors of [`store_part`], or a reliability
+/// error for an invalid filename, MD5 ETag, or changed session binding.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_versioned_part_locked(
+    root: &Path,
+    upload_id: &str,
+    part_number: u32,
+    part: MultipartPart,
+    expected_scope_namespace: &str,
+    expected_key: &str,
+    ttl_seconds: NonZeroU64,
+    session_max_bytes: NonZeroU64,
+    total_max_bytes: NonZeroU64,
+    max_active_part_files: NonZeroUsize,
+) -> Result<Option<MultipartPart>, S3SessionError> {
+    stored_part_file_path(root, upload_id, part_number, &part)?;
+    let prefix = format!("part-{part_number}-");
+    if !part.file_name.starts_with(&prefix)
+        || !part.etag.as_deref().is_some_and(|tag| {
+            tag.strip_prefix('"')
+                .and_then(|tag| tag.strip_suffix('"'))
+                .is_some_and(|tag| is_lower_hex(tag, 32))
+        })
+    {
+        return Err(S3SessionError::Reliability(
+            "invalid immutable part metadata".into(),
+        ));
+    }
+    let metadata =
+        fs::metadata(stored_part_file_path(root, upload_id, part_number, &part)?).await?;
+    if !metadata.is_file() || metadata.len() != part.size_bytes {
+        return Err(S3SessionError::Reliability(
+            "immutable part size mismatch".into(),
+        ));
+    }
+    store_part_metadata_locked(
+        root,
+        upload_id,
+        part_number,
+        part,
+        Some((expected_scope_namespace, expected_key)),
+        ttl_seconds,
+        session_max_bytes,
+        total_max_bytes,
+        max_active_part_files,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn store_part_metadata_locked(
+    root: &Path,
+    upload_id: &str,
+    part_number: u32,
+    part: MultipartPart,
+    expected_binding: Option<(&str, &str)>,
+    ttl_seconds: NonZeroU64,
+    session_max_bytes: NonZeroU64,
+    total_max_bytes: NonZeroU64,
+    max_active_part_files: NonZeroUsize,
+) -> Result<Option<MultipartPart>, S3SessionError> {
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
@@ -675,12 +845,19 @@ pub async fn store_part_locked(
     )
     .await?;
 
+    if expected_binding
+        .is_some_and(|(scope, key)| session.scope_namespace != scope || session.key != key)
+    {
+        return Err(S3SessionError::Reliability(
+            "session binding changed".into(),
+        ));
+    }
     let (total_active_bytes, total_active_part_files) =
         total_active_usage_locked(root, ttl_seconds, now_unix_seconds, None).await?;
     enforce_part_quotas(
         &session,
         part_number,
-        size_bytes,
+        part.size_bytes,
         session_max_bytes,
         total_max_bytes,
         max_active_part_files,
@@ -688,13 +865,7 @@ pub async fn store_part_locked(
         total_active_part_files,
     )?;
 
-    session.parts.insert(
-        part_number,
-        MultipartPart {
-            size_bytes,
-            file_name: format!("part-{part_number}"),
-        },
-    );
+    let previous = session.parts.insert(part_number, part);
     session.last_touched_unix_seconds = now_unix_seconds;
     let (evidence, _) = verify_and_append_session_transition(
         evidence,
@@ -708,7 +879,8 @@ pub async fn store_part_locked(
     let snapshot = session_snapshot(&session)?;
     snapshot_evidence = append_or_baseline_snapshot_evidence(snapshot_evidence, snapshot)
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-    persist_session_with_evidence(root, upload_id, &session, &evidence, snapshot_evidence).await
+    persist_session_with_evidence(root, upload_id, &session, &evidence, snapshot_evidence).await?;
+    Ok(previous)
 }
 
 /// Validates a part against the per-session and aggregate byte quotas and the
@@ -2452,6 +2624,241 @@ mod tests {
         assert_eq!(session.parts[&1].file_name, "part-1");
     }
 
+    #[test]
+    fn legacy_part_metadata_preserves_snapshot_bytes_and_validates_paths() {
+        let part: MultipartPart =
+            serde_json::from_str(r#"{"size_bytes":3,"file_name":"part-1"}"#).unwrap();
+        assert_eq!(part.etag, None);
+        assert_eq!(
+            serde_json::to_string(&part).unwrap(),
+            r#"{"size_bytes":3,"file_name":"part-1"}"#
+        );
+        let snapshot = MultipartPartSnapshotV1 {
+            size_bytes: part.size_bytes,
+            file_name: part.file_name.clone(),
+            etag: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&snapshot).unwrap(),
+            r#"{"size_bytes":3,"file_name":"part-1"}"#
+        );
+        let upload_id = "0123456789abcdef0123456789abcdef";
+        let root = Path::new("root");
+        assert_eq!(
+            stored_part_file_path(root, upload_id, 1, &part).unwrap(),
+            part_file_path(root, upload_id, 1).unwrap()
+        );
+        for file_name in [
+            "../part-1",
+            "/part-1",
+            "part-2",
+            "part-1-a",
+            "part-1-../../escaped",
+            "part-01",
+        ] {
+            let unsafe_part = MultipartPart {
+                file_name: file_name.into(),
+                ..part.clone()
+            };
+            assert!(stored_part_file_path(root, upload_id, 1, &unsafe_part).is_err());
+        }
+        let versioned = MultipartPart {
+            file_name: versioned_part_file_name(1, &"a".repeat(64)).unwrap(),
+            ..part
+        };
+        assert!(stored_part_file_path(root, upload_id, 1, &versioned).is_ok());
+        assert!(versioned_part_file_name(1, &"A".repeat(64)).is_err());
+        assert!(versioned_part_file_name(0, &"a".repeat(64)).is_err());
+    }
+
+    #[tokio::test]
+    async fn versioned_part_failure_preserves_acknowledged_bytes_and_metadata() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "large.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let _global = lock_upload_sessions(root.path()).await.unwrap();
+        let _parts = lock_session_parts(root.path(), &upload_id).await.unwrap();
+        let old = MultipartPart {
+            size_bytes: 3,
+            file_name: versioned_part_file_name(1, &"a".repeat(64)).unwrap(),
+            etag: Some("\"149603e6c03516362a8da23f624db945\"".into()),
+        };
+        let old_path = stored_part_file_path(root.path(), &upload_id, 1, &old).unwrap();
+        fs::write(&old_path, b"old").await.unwrap();
+        let previous = store_versioned_part_locked(
+            root.path(),
+            &upload_id,
+            1,
+            old.clone(),
+            "global",
+            "large.bin",
+            ttl(3600),
+            quota(100),
+            quota(100),
+            cap(16),
+        )
+        .await
+        .unwrap();
+        assert_eq!(previous, None);
+        let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let acknowledged_metadata = fs::read(&metadata_path).await.unwrap();
+        let new = MultipartPart {
+            size_bytes: 3,
+            file_name: versioned_part_file_name(1, &"b".repeat(64)).unwrap(),
+            etag: Some("\"22af645d1859cb5ca6da0c484f1f37ea\"".into()),
+        };
+        let new_path = stored_part_file_path(root.path(), &upload_id, 1, &new).unwrap();
+        fs::write(&new_path, b"new").await.unwrap();
+        // Force the final atomic metadata write to fail after journal append.
+        fs::create_dir(metadata_path.with_extension("json.tmp"))
+            .await
+            .unwrap();
+        assert!(
+            store_versioned_part_locked(
+                root.path(),
+                &upload_id,
+                1,
+                new.clone(),
+                "global",
+                "large.bin",
+                ttl(3600),
+                quota(100),
+                quota(100),
+                cap(16)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(&metadata_path).await.unwrap(),
+            acknowledged_metadata
+        );
+        assert_eq!(fs::read(&old_path).await.unwrap(), b"old");
+        let session = read_session_locked(root.path(), &upload_id, ttl(3600))
+            .await
+            .unwrap();
+        assert_eq!(session.parts[&1], old);
+        fs::remove_dir(metadata_path.with_extension("json.tmp"))
+            .await
+            .unwrap();
+        // The next update trims uncommitted journal tails and commits a new pointer.
+        let previous = store_versioned_part_locked(
+            root.path(),
+            &upload_id,
+            1,
+            new.clone(),
+            "global",
+            "large.bin",
+            ttl(3600),
+            quota(100),
+            quota(100),
+            cap(16),
+        )
+        .await
+        .unwrap();
+        assert_eq!(previous, Some(old));
+        assert_eq!(
+            read_session_locked(root.path(), &upload_id, ttl(3600))
+                .await
+                .unwrap()
+                .parts[&1],
+            new
+        );
+        assert_eq!(fs::read(&old_path).await.unwrap(), b"old");
+        assert_eq!(fs::read(&new_path).await.unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn versioned_part_revalidates_binding_and_content_metadata() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "large.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let _global = lock_upload_sessions(root.path()).await.unwrap();
+        let part = MultipartPart {
+            size_bytes: 3,
+            file_name: versioned_part_file_name(1, &"a".repeat(64)).unwrap(),
+            etag: Some("\"149603e6c03516362a8da23f624db945\"".into()),
+        };
+        fs::write(
+            stored_part_file_path(root.path(), &upload_id, 1, &part).unwrap(),
+            b"old",
+        )
+        .await
+        .unwrap();
+        for (candidate, scope, key) in [
+            (part.clone(), "other", "large.bin"),
+            (part.clone(), "global", "other.bin"),
+            (
+                MultipartPart {
+                    size_bytes: 4,
+                    ..part.clone()
+                },
+                "global",
+                "large.bin",
+            ),
+            (
+                MultipartPart {
+                    etag: None,
+                    ..part.clone()
+                },
+                "global",
+                "large.bin",
+            ),
+            (
+                MultipartPart {
+                    etag: Some("149603e6c03516362a8da23f624db945".into()),
+                    ..part
+                },
+                "global",
+                "large.bin",
+            ),
+        ] {
+            assert!(
+                store_versioned_part_locked(
+                    root.path(),
+                    &upload_id,
+                    1,
+                    candidate,
+                    scope,
+                    key,
+                    ttl(3600),
+                    quota(100),
+                    quota(100),
+                    cap(16)
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert!(
+            read_session_locked(root.path(), &upload_id, ttl(3600))
+                .await
+                .unwrap()
+                .parts
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn multipart_mutations_append_snapshot_evidence_instead_of_resetting_it() {
         let root = make_root().await;
@@ -3264,5 +3671,70 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod session_lock_cancellation_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::time::Duration;
+
+    #[test]
+    fn cancelled_session_waiters_leave_blocking_work_and_shutdown_available() {
+        let storage = tempfile::TempDir::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = runtime
+            .block_on(super::lock_upload_sessions(storage.path()))
+            .unwrap();
+        let waiters: Vec<_> = (0..2)
+            .map(|_| {
+                let root = storage.path().to_path_buf();
+                runtime.spawn(async move {
+                    let _guard = super::lock_upload_sessions(&root).await.unwrap();
+                })
+            })
+            .collect();
+        runtime.block_on(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        runtime.block_on(async {
+            for waiter in waiters {
+                waiter.abort();
+                assert!(waiter.await.unwrap_err().is_cancelled());
+            }
+        });
+        let unrelated_work_progressed = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                tokio::task::spawn_blocking(|| 17),
+            )
+            .await
+            .is_ok()
+        });
+        let (shutdown_done, shutdown_received) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(runtime);
+            shutdown_done.send(()).unwrap();
+        });
+        let shutdown_without_unlock = shutdown_received
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+        // Always release the owner before assertions, so an old implementation
+        // fails cleanly instead of hanging the test process during runtime drop.
+        drop(owner);
+        shutdown.join().unwrap();
+        assert!(
+            unrelated_work_progressed,
+            "cancelled waiters retained both blocking workers"
+        );
+        assert!(
+            shutdown_without_unlock,
+            "cancelled lock tasks stalled runtime shutdown"
+        );
     }
 }

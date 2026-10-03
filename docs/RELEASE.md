@@ -6,6 +6,10 @@ coordinated release (all publishable crates move together to the same version, e
 crates.io requirements (`^1.5.0`), the release **must** go out bottom-up
 (dependencies first).
 
+Publishing is triggered only by pushing a release tag. Manual runs of the Release
+workflow validate the build and never publish crates, images, or release assets.
+The tagged commit must be on `main`, and the tag must match the workspace version.
+
 ## Prerequisites
 
 - A crates.io API token for the account that owns all `shardline-*` crates and `sdx`.
@@ -36,37 +40,50 @@ crates.io requirements (`^1.5.0`), the release **must** go out bottom-up
    cargo clippy -p sdx -p shardline-xet-adapter -p shardline-server
    ```
 
+## Patch validation
+
+Validate the final release diff before changing the version or publishing. For patches
+that affect storage, transfers, or recovery, run these gates sequentially so separate
+suites do not compete for the same Docker and host resources:
+
+```bash
+cargo make ci
+cargo make test-docker
+cargo make test-loom
+cargo nextest run -p sdx --tests --all-features
+cargo nextest run -p shardline-storage --test resource_pressure
+cargo make test-kubernetes
+```
+
+The Docker gate includes server integration tests and the separate `e2e` workspace.
+Keep its SQLite and SQLx dependencies compatible with the main workspace and commit
+its refreshed lockfile when those dependencies change. The Kubernetes gate creates
+and removes a disposable kind cluster and verifies persisted data after pod replacement.
+
+Record ignored tests and runtime skips alongside the results. A test that requires
+`DATABASE_URL`, live provider credentials, or an external client does not prove that
+integration merely by returning successfully without its fixture. Run the relevant
+fixture explicitly when it is part of the release scope, and verify that configured
+fixtures actually initialize.
+
+Review [Database Migrations](DATABASE_MIGRATIONS.md) and
+[Rolling Upgrade](ROLLING_UPGRADE.md) for the specific pending migrations and mixed-version
+constraints. Rehearse ordinary PostgreSQL index builds against a representative restored
+database and drain writers for the documented maintenance window before rollout.
+Keep local audit evidence out of release commits and the container build context.
+
 ## Publish order (bottom-up, dependencies first)
 
-Verified from the `cargo metadata` dependency graph at `v1.5.0`. Each crate must be
+Derive the order from the release commit's `cargo metadata` dependency graph. Each crate must be
 on crates.io at the new version before any crate that depends on it.
 
-> The order below is generated from the `cargo metadata` dependency graph by `scripts/publish-order.py` — no manual list.
+```bash
+python3 scripts/publish-order.py --emit
+```
 
-1. `shardline-metrics`
-2. `shardline-protocol`
-3. `shardline-test-support`
-4. `shardline-validation`
-5. `shardline-xet-core`
-6. `shardline-auth`
-7. `shardline-cache`
-8. `shardline-storage`
-9. `shardline-vcs`
-10. `shardline-index`
-11. `shardline-cas`
-12. `shardline-server-core`
-13. `shardline-hub-api`
-14. `shardline-oci-adapter`
-15. `shardline-protocol-adapters`
-16. `shardline-xet-adapter`  ← MUST land before `sdx`
-17. `sdx`                    ← depends on the adapter (tree/path/revision route constants)
-18. `shardline-s3-adapter`   ← depends on `shardline-server-core`; MUST land before `shardline-server`
-19. `shardline-fsck`
-20. `shardline-gc`
-21. `shardline-provider-events`
-22. `shardline-rebuild`
-23. `shardline-server`       ← depends on `shardline-s3-adapter`
-24. `shardline`              ← CLI binary; depends on `sdx`, so last
+The Release workflow uses this same dependency-first order. Runtime, build, and
+development dependencies all count: packaging verification also needs published
+development dependencies. Do not reuse a list from an earlier release.
 
 ### Excluded crates
 
@@ -91,9 +108,10 @@ Consequence: publishing `sdx` **before** `shardline-xet-adapter` fails — the s
 tarball cannot resolve `^X.Y.Z` for the adapter until that version is on crates.io.
 Always publish the adapter first.
 
-`sdx` is published at position 17; `shardline` (the CLI binary) depends on `sdx` and is
-therefore published last (position 24). `shardline-server` depends on
-`shardline-s3-adapter`, so that adapter (position 18) must land before it.
+`sdx` also has a development dependency on `shardline-server`, so the server must
+be published before `sdx`. `shardline` (the CLI binary) depends on `sdx` and is
+published last. The server's own dependencies, including `shardline-s3-adapter`,
+must be published before the server.
 
 ## Verification gates between publishes
 
@@ -102,16 +120,12 @@ Use the provided script, which defaults to `--dry-run`:
 ```bash
 # Dry-run the whole release in order (nothing uploaded).
 ./scripts/publish-coordinated.sh
-
-# Actually publish everything, in order.
-./scripts/publish-coordinated.sh --go
 ```
 
-For a manual publish of a single crate:
+For a packaging check of a single crate:
 
 ```bash
-cargo publish -p <crate> --dry-run --allow-dirty   # verify the tarball first
-cargo publish -p <crate> --allow-dirty             # then upload
+cargo publish -p <crate> --dry-run --allow-dirty
 ```
 
 Each `cargo publish` verifies the crate's own tarball (packaging + a clean build in
@@ -123,15 +137,15 @@ isolation). `--allow-dirty` is required because the version-bump leaves uncommit
 > That is expected and is not a packaging problem. Re-run the dry-run for that crate
 > after its dependencies have been published — it will then pass.
 
-## Final `sdx` publish note
+## SDK packaging check
 
-`sdx` is a new crate (name was free on crates.io) and publishes at the workspace
-version `1.5.0`. Its dry-run can only pass after `shardline-xet-adapter@1.5.0` is
-actually on crates.io. After publishing the adapter, re-run:
+`sdx` publishes at the workspace version. Its packaging check needs its workspace
+dependencies, including development dependencies, published at the new version.
+The tag-triggered workflow publishes them first, then verifies and publishes SDX.
+For a read-only packaging check when those versions are available:
 
 ```bash
 cargo publish -p sdx --dry-run --allow-dirty   # verify (should now pass)
-cargo publish -p sdx --allow-dirty             # upload
 ```
 
 `sdx` pins `xet-core-structures = "=1.5.2"`; that exact version is on crates.io and
@@ -139,6 +153,10 @@ must not drift.
 
 ## Rollback / partial release
 
-If a publish fails partway through, the crates already published are fine to keep
-(they are all backward-compatible patch/minor within `^`). Fix the failing crate and
-resume from it; you do not need to re-publish anything before it.
+For a transient failure, rerun the failed tag-triggered workflow. It verifies
+which crate versions are already published and skips them before continuing in
+dependency order.
+
+If recovery requires source or manifest changes, prepare a new coordinated
+release version and push a new release tag. Keep existing release tags and
+published crate versions unchanged; do not resume through manual publishing.
