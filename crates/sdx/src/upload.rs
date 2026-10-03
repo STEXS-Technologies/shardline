@@ -458,6 +458,24 @@ struct SessionState {
     /// Last chunk index a global dedup query was issued for.
     last_global_query_index: Option<u64>,
     finalized: bool,
+    /// First observed background xorb failure; terminal even after its task is drained.
+    background_failure: Option<String>,
+}
+
+impl SessionState {
+    fn check_background_failure(&self) -> Result<(), SdxError> {
+        if let Some(message) = &self.background_failure {
+            return Err(SdxError::UploadSession(format!(
+                "session background xorb upload failed: {message}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn record_background_failure(&mut self, error: &SdxError) {
+        self.background_failure
+            .get_or_insert_with(|| error.to_string());
+    }
 }
 
 impl Default for SessionState {
@@ -472,6 +490,7 @@ impl Default for SessionState {
             global_chunk_index: 0,
             last_global_query_index: None,
             finalized: false,
+            background_failure: None,
         }
     }
 }
@@ -728,8 +747,15 @@ impl FileUploadPipeline {
             let hash = built.xorb_hash_hex.clone();
             let body = Bytes::from(built.serialized);
             let mut state = self.session.inner.state.lock().await;
+            state.check_background_failure()?;
             while let Some(completed) = state.xorb_upload_tasks.try_join_next() {
-                completed.map_err(|error| SdxError::TaskJoin(error.to_string()))??;
+                if let Err(error) = completed
+                    .map_err(|error| SdxError::TaskJoin(error.to_string()))
+                    .and_then(|result| result)
+                {
+                    state.record_background_failure(&error);
+                    return Err(error);
+                }
             }
             self.session
                 .inner
@@ -872,6 +898,7 @@ impl FileUploadPipeline {
         };
 
         let mut state = self.session.inner.state.lock().await;
+        state.check_background_failure()?;
         state.file_infos.push(file_entry);
         state.file_reports.push(info.clone());
         Ok(info)
@@ -1063,11 +1090,21 @@ impl UploadSession {
     /// # Errors
     ///
     /// Returns [`SdxError`] when a xorb upload failed, the shard cannot be
-    /// built, or the shard POST fails. Calling twice fails.
+    /// built, or the shard POST fails. Calling twice fails. A background xorb
+    /// failure permanently prevents metadata publication: its first observer
+    /// receives the original error, and later operations return an
+    /// [`SdxError::UploadSession`] containing the first failure's context.
     pub async fn finalize(&self) -> Result<UploadReport, SdxError> {
         let _finalize = self.inner.lifecycle.write().await;
         let mut tasks = {
             let mut state = self.inner.state.lock().await;
+            if let Err(error) = state.check_background_failure() {
+                // Drop all remaining tasks before returning; a failed session
+                // cannot publish metadata or benefit from more uploads.
+                let tasks = std::mem::take(&mut state.xorb_upload_tasks);
+                drop(tasks);
+                return Err(error);
+            }
             if state.finalized {
                 return Err(SdxError::UploadSession(
                     "session already finalized".to_owned(),
@@ -1077,7 +1114,17 @@ impl UploadSession {
             std::mem::take(&mut state.xorb_upload_tasks)
         };
         while let Some(result) = tasks.join_next().await {
-            result.map_err(|error| SdxError::TaskJoin(error.to_string()))??;
+            if let Err(error) = result
+                .map_err(|error| SdxError::TaskJoin(error.to_string()))
+                .and_then(|result| result)
+            {
+                self.inner
+                    .state
+                    .lock()
+                    .await
+                    .record_background_failure(&error);
+                return Err(error);
+            }
         }
 
         let (file_infos, xorb_infos, files) = {
@@ -1158,7 +1205,9 @@ impl UploadSession {
     }
 
     async fn check_not_finalized(&self) -> Result<(), SdxError> {
-        if self.inner.state.lock().await.finalized {
+        let state = self.inner.state.lock().await;
+        state.check_background_failure()?;
+        if state.finalized {
             return Err(SdxError::UploadSession(
                 "session already finalized".to_owned(),
             ));
@@ -2156,6 +2205,188 @@ mod tests {
             .with_retry_policy(policy)
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn consumed_background_xorb_failure_prevents_all_later_publication() {
+        use crate::error::{SdxError, TransferError};
+
+        for (status, consume) in [
+            (Some(400), true),
+            (Some(503), true),
+            (Some(400), false),
+            (None, true),
+        ] {
+            let failure = status.is_some();
+            let (server, _) = mock_client_opts(false, None).await;
+            if let Some(status) = status {
+                Mock::given(method("POST"))
+                    .and(path_regex(r"/v1/xorbs/default/.*"))
+                    .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                        "error": "owned_terminal_xorb_failure"
+                    })))
+                    .with_priority(1)
+                    .mount(&server)
+                    .await;
+            }
+            let port = server.uri().split(':').next_back().unwrap().to_owned();
+            let client = XetClientBuilder::new()
+                .endpoint(format!("xet://127.0.0.1:{port}/github/team/assets/main"))
+                .auth(
+                    Auth::new(
+                        &server.uri(),
+                        RepositoryId {
+                            provider: "github".to_owned(),
+                            owner: "team".to_owned(),
+                            repo: "assets".to_owned(),
+                            revision: "main".to_owned(),
+                        },
+                    )
+                    .unwrap()
+                    .with_api_key(BOOTSTRAP_KEY.to_owned()),
+                )
+                .with_upload_concurrency(1)
+                .with_retry_policy(
+                    crate::RetryPolicy::new()
+                        .with_max_attempts(u32::from(status == Some(503)))
+                        .with_base_delay(std::time::Duration::ZERO)
+                        .with_jitter(false),
+                )
+                .build()
+                .unwrap();
+            let session = client.upload_session().unwrap();
+            let info = session.upload_bytes("first", vec![1u8; 100]).await.unwrap();
+            assert_eq!(info.total_bytes, 100);
+            if consume {
+                let result = session.upload_bytes("second", vec![2u8; 100]).await;
+                if failure {
+                    if status == Some(503) {
+                        assert!(matches!(result,
+                            Err(SdxError::Transfer(TransferError::HttpStatus { status: 503, message, .. }))
+                            if message == "owned_terminal_xorb_failure"));
+                    } else {
+                        assert!(matches!(result,
+                            Err(SdxError::Transfer(TransferError::BadRequest(message)))
+                            if message == "owned_terminal_xorb_failure"));
+                    }
+                    let state = session.inner.state.lock().await;
+                    assert!(state.xorb_upload_tasks.is_empty());
+                    assert_eq!(state.file_reports.len(), 1);
+                    assert!(state.background_failure.is_some());
+                } else {
+                    assert_eq!(result.unwrap().total_bytes, 100);
+                }
+            }
+            let result = session.finalize().await;
+            if failure {
+                if consume {
+                    assert!(matches!(&result, Err(SdxError::UploadSession(message))
+                        if message.contains("owned_terminal_xorb_failure")));
+                } else {
+                    assert!(
+                        matches!(&result, Err(SdxError::Transfer(TransferError::BadRequest(message)))
+                        if message == "owned_terminal_xorb_failure")
+                    );
+                }
+                let terminal = session.finalize().await.unwrap_err().to_string();
+                assert!(terminal.contains("owned_terminal_xorb_failure"));
+                for data in [vec![3u8; 100], Vec::new()] {
+                    assert_eq!(
+                        session
+                            .upload_bytes("later", data)
+                            .await
+                            .unwrap_err()
+                            .to_string(),
+                        terminal
+                    );
+                }
+                let handle = session.upload_stream_handle();
+                assert_eq!(
+                    handle.write(Vec::new()).await.unwrap_err().to_string(),
+                    terminal
+                );
+                assert_eq!(handle.finish().await.unwrap_err().to_string(), terminal);
+                assert_eq!(session.xorb_post_count(), 1);
+                assert_eq!(
+                    session
+                        .inner
+                        .shard_posts
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    0
+                );
+            } else {
+                let report = result.unwrap();
+                assert_eq!(report.files.len(), 2);
+                assert_eq!(report.xorb_posts, 2);
+                assert_eq!(report.shard_posts, 1);
+                let empty = client.upload_session().unwrap();
+                assert!(empty.finalize().await.unwrap().files.is_empty());
+            }
+            let requests = server.received_requests().await.unwrap();
+            let xorb_posts = requests
+                .iter()
+                .filter(|request| {
+                    request.method.as_str() == "POST"
+                        && request.url.path().starts_with("/v1/xorbs/")
+                })
+                .count();
+            assert_eq!(xorb_posts, if status == Some(400) { 1 } else { 2 });
+            let shard_posts = requests
+                .iter()
+                .filter(|request| {
+                    request.method.as_str() == "POST" && request.url.path() == "/v1/shards"
+                })
+                .count();
+            let path_puts = requests
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .count();
+            assert_eq!(shard_posts, usize::from(!failure));
+            assert_eq!(path_puts, if failure { 0 } else { 2 });
+        }
+    }
+
+    #[tokio::test]
+    async fn consumed_background_xorb_task_join_failure_is_terminal() {
+        use crate::error::SdxError;
+
+        let (server, client) = mock_client_opts(false, None).await;
+        let session = client.upload_session().unwrap();
+        let mut state = session.inner.state.lock().await;
+        let task = state
+            .xorb_upload_tasks
+            .spawn(async { std::panic::resume_unwind(Box::new("owned_xorb_task_panic")) });
+        drop(state);
+        // Wait for completion, without removing the task from its JoinSet.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let error = session
+            .upload_bytes("first", vec![4u8; 100])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SdxError::TaskJoin(message) if message.contains("owned_xorb_task_panic"))
+        );
+        assert!(
+            matches!(session.finalize().await, Err(SdxError::UploadSession(message))
+            if message.contains("owned_xorb_task_panic"))
+        );
+        assert_eq!(session.xorb_post_count(), 0);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(
+                    |request| request.method.as_str() != "POST" && request.method.as_str() != "PUT"
+                )
+        );
     }
 
     /// The xorb POST 503s twice (retryable admission), then succeeds; the M4
