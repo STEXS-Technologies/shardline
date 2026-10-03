@@ -1378,6 +1378,43 @@ async fn user_profile_not_implemented_returns_404() {
 // 15. Git Smart HTTP push → clone roundtrip
 // ---------------------------------------------------------------------------
 
+/// Reads the Git identity advertised for an existing ref, including the seeded main.
+async fn advertised_ref(base_url: &str, token: &str, ref_name: &str) -> String {
+    let response = Client::new()
+        .get(format!(
+            "{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.bytes().await.unwrap();
+    // Smart HTTP discovery starts with a service packet and flush before refs.
+    let service_len = usize::from_str_radix(std::str::from_utf8(&body[..4]).unwrap(), 16).unwrap();
+    assert_eq!(&body[service_len..service_len + 4], b"0000");
+    shardline_hub_api::git::pktline::decode_lines(&body[service_len + 4..])
+        .into_iter()
+        .find_map(|line| {
+            let line = std::str::from_utf8(&line).ok()?;
+            let command = line.split('\0').next()?.trim();
+            let (sha, name) = command.split_once(' ')?;
+            (name == ref_name).then(|| sha.to_owned())
+        })
+        .expect("ref must be advertised")
+}
+
+/// Requests the named commit with the framing decoded by the clone assertions.
+fn build_upload_pack_request(commit_sha: &str) -> Vec<u8> {
+    use shardline_hub_api::git::pktline;
+    let mut body = pktline::encode_line(&format!("want {commit_sha} side-band-64k\n"))
+        .unwrap()
+        .into_bytes();
+    body.extend_from_slice(pktline::FLUSH.as_bytes());
+    body.extend_from_slice(pktline::encode_line("done\n").unwrap().as_bytes());
+    body
+}
+
 /// Builds a Git receive-pack request body that pushes a single commit containing
 /// one inline file. Returns (request_body_bytes, expected_commit_sha_hex).
 fn build_receive_pack_request(
@@ -1416,10 +1453,13 @@ fn build_receive_pack_request_for_ref(
     let tree = create_tree_object(&[(0o100644u32, file_path, &blob_sha)]);
     let tree_sha = tree.sha1();
 
+    // Updates descend from the advertised head; new refs have no parent.
+    let parent = (old_sha_hex != "0000000000000000000000000000000000000000")
+        .then(|| hex::decode(old_sha_hex).unwrap().try_into().unwrap());
     // 3. Build the commit.
     let commit = create_commit_object(
         &tree_sha,
-        None,
+        parent.as_ref(),
         "Test User <test@example.com>",
         commit_message,
     );
@@ -1495,9 +1535,9 @@ async fn git_push_clone_roundtrip_via_smart_http() {
     );
 
     // 4. Push a commit via git-receive-pack.
-    let null_sha = "0000000000000000000000000000000000000000";
+    let initial_sha = advertised_ref(base_url, token, "refs/heads/main").await;
     let (push_body, commit_sha) = build_receive_pack_request(
-        null_sha,
+        &initial_sha,
         "README.md",
         b"# Hello World\n\nThis is a test file pushed via Git smart HTTP.\n",
         "Initial commit via git push",
@@ -1555,7 +1595,7 @@ async fn git_push_clone_roundtrip_via_smart_http() {
         ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-upload-pack-request")
-        .body(Vec::<u8>::new())
+        .body(build_upload_pack_request(&commit_sha))
         .send()
         .await
         .unwrap();
@@ -1564,10 +1604,18 @@ async fn git_push_clone_roundtrip_via_smart_http() {
         "upload-pack after push should succeed: {}",
         upload_resp.status()
     );
-    let upload_response = upload_resp.text().await.unwrap();
+    let upload_response = upload_resp.bytes().await.unwrap();
     assert!(
         !upload_response.is_empty(),
         "upload-pack response should not be empty after push"
+    );
+    let (pack_data, _) = shardline_hub_api::git::pktline::decode_sideband(&upload_response);
+    let objects = shardline_hub_api::git::smart_http::parse_pack_data(&pack_data).unwrap();
+    assert!(
+        objects
+            .iter()
+            .any(|object| hex::encode(object.sha1()) == commit_sha),
+        "clone must include the pushed commit"
     );
     // The upload-pack response should contain the pack data with our objects.
     assert!(
@@ -1852,9 +1900,9 @@ async fn git_info_refs_discover_refs_for_clone() {
 
     // Create a model repo and push a commit.
     create_model_repo(base_url, token).await;
-    let null_sha = "0000000000000000000000000000000000000000";
+    let initial_sha = advertised_ref(base_url, token, "refs/heads/main").await;
     let (push_body, _commit_sha) = build_receive_pack_request(
-        null_sha,
+        &initial_sha,
         "model.bin",
         b"model-weights-data",
         "Add model weights",
@@ -1870,6 +1918,11 @@ async fn git_info_refs_discover_refs_for_clone() {
         .await
         .unwrap();
     assert!(push_resp.status().is_success());
+    let push_report = push_resp.text().await.unwrap();
+    assert!(
+        push_report.contains("ok refs/heads/main\n"),
+        "push must update main: {push_report:?}"
+    );
 
     // Test info/refs discovery for upload-pack (clone).
     let resp = client
@@ -1909,37 +1962,13 @@ fn build_receive_pack_request_with_ref(
     file_content: &[u8],
     commit_message: &str,
 ) -> (Vec<u8>, String) {
-    use shardline_hub_api::git::pack::{
-        create_blob_object, create_commit_object, create_tree_object, generate_pack,
-    };
-    use shardline_hub_api::git::pktline;
-
-    let blob = create_blob_object(file_content);
-    let blob_sha = blob.sha1();
-    let tree = create_tree_object(&[(0o100644u32, file_path, &blob_sha)]);
-    let tree_sha = tree.sha1();
-    let commit = create_commit_object(
-        &tree_sha,
-        None,
-        "Test User <test@example.com>",
+    build_receive_pack_request_for_ref(
+        old_sha_hex,
+        refname,
+        file_path,
+        file_content,
         commit_message,
-    );
-    let commit_sha = commit.sha1();
-    let commit_sha_hex = hex::encode(commit_sha);
-
-    let pack_data = generate_pack(&[blob, tree, commit]).expect("pack generation should not fail");
-
-    let ref_line = format!("{old_sha_hex} {commit_sha_hex} {refname}\n");
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        pktline::encode_line(&ref_line)
-            .expect("pkt-line too large")
-            .as_bytes(),
-    );
-    body.extend_from_slice(pktline::FLUSH.as_bytes());
-    body.extend_from_slice(&pack_data);
-
-    (body, commit_sha_hex)
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2163,9 +2192,13 @@ async fn git_clone_after_push_returns_correct_content() {
 
     // Push a commit with known file content.
     let file_content = b"Hello from Shardline e2e test!\n";
-    let null_sha = "0000000000000000000000000000000000000000";
-    let (push_body, commit_sha) =
-        build_receive_pack_request(null_sha, "greeting.txt", file_content, "Add greeting file");
+    let initial_sha = advertised_ref(base_url, token, "refs/heads/main").await;
+    let (push_body, commit_sha) = build_receive_pack_request(
+        &initial_sha,
+        "greeting.txt",
+        file_content,
+        "Add greeting file",
+    );
 
     let push_resp = client
         .post(format!(
@@ -2178,6 +2211,11 @@ async fn git_clone_after_push_returns_correct_content() {
         .await
         .unwrap();
     assert!(push_resp.status().is_success(), "push should succeed");
+    let push_report = push_resp.text().await.unwrap();
+    assert!(
+        push_report.contains("ok refs/heads/main\n"),
+        "push must update main: {push_report:?}"
+    );
 
     // Fetch via upload-pack and verify the pack contains the file content.
     let upload_resp = client
@@ -2186,7 +2224,7 @@ async fn git_clone_after_push_returns_correct_content() {
         ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-upload-pack-request")
-        .body(Vec::<u8>::new())
+        .body(build_upload_pack_request(&commit_sha))
         .send()
         .await
         .unwrap();
@@ -2208,6 +2246,12 @@ async fn git_clone_after_push_returns_correct_content() {
     assert!(
         num_objects >= 3,
         "pack should contain at least 3 objects (blob+tree+commit), got {num_objects}"
+    );
+
+    let objects = shardline_hub_api::git::smart_http::parse_pack_data(&pack_data).unwrap();
+    assert!(
+        objects.iter().any(|object| object.data == file_content),
+        "clone pack must contain the exact pushed file content"
     );
 
     // Verify the file content is accessible through the hub tree API.
@@ -2393,11 +2437,11 @@ async fn hub_force_push_rejected_on_existing_branch() {
     use shardline_hub_api::git::pktline;
 
     let client = Client::new();
-    let null_sha = "0000000000000000000000000000000000000000";
+    let initial_sha = advertised_ref(base_url, token, "refs/heads/main").await;
 
     // Push commit A to refs/heads/main.
     let (objects_a, _commit_a_sha) = build_receive_pack_request_with_ref(
-        null_sha,
+        &initial_sha,
         "refs/heads/main",
         "file_a.txt",
         b"content A",
@@ -2476,11 +2520,11 @@ async fn hub_tag_push_appears_in_revisions() {
     create_model_repo(base_url, token).await;
 
     let client = Client::new();
-    let null_sha = "0000000000000000000000000000000000000000";
+    let initial_sha = advertised_ref(base_url, token, "refs/heads/main").await;
 
     // First push a commit to refs/heads/main.
     let (push_body, _commit_sha) = build_receive_pack_request(
-        null_sha,
+        &initial_sha,
         "README.md",
         b"# Tagged Release",
         "Prepare release",
@@ -2496,11 +2540,16 @@ async fn hub_tag_push_appears_in_revisions() {
         .await
         .unwrap();
     assert!(push_resp.status().is_success());
+    let push_report = push_resp.text().await.unwrap();
+    assert!(
+        push_report.contains("ok refs/heads/main\n"),
+        "push must update main: {push_report:?}"
+    );
 
     // Push a lightweight tag refs/tags/v1.0 pointing at a new commit.
     // Create a new commit for the tag using the helper.
     let (tag_body, _tag_commit_hex) = build_receive_pack_request_with_ref(
-        null_sha,
+        "0000000000000000000000000000000000000000",
         "refs/tags/v1.0",
         "tagged.txt",
         b"tagged content",
@@ -2610,6 +2659,7 @@ async fn git_receive_pack_multiple_refs() {
     };
     use shardline_hub_api::git::pktline;
 
+    let initial_sha = advertised_ref(base_url, token, "refs/heads/main").await;
     let null_sha = "0000000000000000000000000000000000000000";
 
     // Build 3 separate commits for 3 different refs.
@@ -2625,16 +2675,23 @@ async fn git_receive_pack_multiple_refs() {
         let blob_sha = blob.sha1();
         let tree = create_tree_object(&[(0o100644u32, &format!("file_{i}.txt"), &blob_sha)]);
         let tree_sha = tree.sha1();
+        let old_sha = if refname == "refs/heads/main" {
+            initial_sha.as_str()
+        } else {
+            null_sha
+        };
+        let parent = (refname == "refs/heads/main")
+            .then(|| hex::decode(&initial_sha).unwrap().try_into().unwrap());
         let commit = create_commit_object(
             &tree_sha,
-            None,
+            parent.as_ref(),
             "Test User <test@example.com>",
             &format!("Commit for {refname}"),
         );
         let commit_sha = commit.sha1();
         let commit_hex = hex::encode(commit_sha);
 
-        ref_lines.push(format!("{null_sha} {commit_hex} {refname}\n"));
+        ref_lines.push(format!("{old_sha} {commit_hex} {refname}\n"));
         all_objects.push(blob);
         all_objects.push(tree);
         all_objects.push(commit);
@@ -3456,9 +3513,13 @@ async fn git_smart_http_works_with_valid_token() {
 
     // 2. Push a commit via git-receive-pack with a valid write token.
     let file_content = b"token-gated content\nThis verifies auth-gated push works.\n";
-    let null_sha = "0000000000000000000000000000000000000000";
-    let (push_body, commit_sha) =
-        build_receive_pack_request(null_sha, "auth_test.txt", file_content, "Auth-gated push");
+    let initial_sha = advertised_ref(base_url, token, "refs/heads/main").await;
+    let (push_body, commit_sha) = build_receive_pack_request(
+        &initial_sha,
+        "auth_test.txt",
+        file_content,
+        "Auth-gated push",
+    );
 
     let push_resp = client
         .post(format!(
@@ -3492,7 +3553,7 @@ async fn git_smart_http_works_with_valid_token() {
         ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-upload-pack-request")
-        .body(Vec::<u8>::new())
+        .body(build_upload_pack_request(&commit_sha))
         .send()
         .await
         .unwrap();
@@ -3515,6 +3576,12 @@ async fn git_smart_http_works_with_valid_token() {
     assert!(
         num_objects >= 3,
         "pack should contain at least 3 objects (blob+tree+commit), got {num_objects}"
+    );
+
+    let objects = shardline_hub_api::git::smart_http::parse_pack_data(&pack_data).unwrap();
+    assert!(
+        objects.iter().any(|object| object.data == file_content),
+        "authenticated clone must return the exact pushed bytes"
     );
 
     // 5. Verify info/refs advertises the correct commit SHA.
@@ -3553,9 +3620,9 @@ async fn git_receive_pack_rejects_non_fast_forward() {
     create_model_repo(base_url, token).await;
 
     // 2. Push commit A to main.
-    let null_sha = "0000000000000000000000000000000000000000";
+    let initial_sha = advertised_ref(base_url, token, "refs/heads/main").await;
     let (push_a_body, commit_a_sha) =
-        build_receive_pack_request(null_sha, "file_a.txt", b"content A", "Commit A");
+        build_receive_pack_request(&initial_sha, "file_a.txt", b"content A", "Commit A");
 
     let push_a_resp = client
         .post(format!(
@@ -3631,6 +3698,12 @@ async fn git_receive_pack_rejects_non_fast_forward() {
     assert!(
         push_b_response.contains("non-fast-forward"),
         "non-fast-forward push should be rejected: {push_b_response:?}"
+    );
+
+    assert_eq!(
+        advertised_ref(base_url, token, "refs/heads/main").await,
+        commit_a_sha,
+        "rejected update must preserve main's head"
     );
 
     // 4. Verify info/refs still shows commit A's SHA (main was not updated).
