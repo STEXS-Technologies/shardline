@@ -543,27 +543,31 @@ fn validate_offsets(
 
 /// Serializes an entry: fixed header followed by the payload (offsets + data).
 fn serialize_entry(chunk_range: (u64, u64), chunk_offsets: &[u32], data: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(
-        chunk_offsets
-            .len()
-            .saturating_mul(4)
-            .saturating_add(data.len()),
-    );
+    // Hash the payload directly, avoiding a full temporary payload copy while
+    // the worker already owns the decoded data and final serialized entry.
+    let mut checksum = crc32fast::Hasher::new();
     for offset in chunk_offsets {
-        payload.extend_from_slice(&offset.to_le_bytes());
+        checksum.update(&offset.to_le_bytes());
     }
-    payload.extend_from_slice(data);
-    let crc = crc32fast::hash(&payload);
+    checksum.update(data);
+    let payload_len = chunk_offsets
+        .len()
+        .saturating_mul(4)
+        .saturating_add(data.len());
+    let crc = checksum.finalize();
     let num_offsets = u32::try_from(chunk_offsets.len()).unwrap_or(u32::MAX);
     let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-    let mut out = Vec::with_capacity(HEADER_LEN.saturating_add(payload.len()));
+    let mut out = Vec::with_capacity(HEADER_LEN.saturating_add(payload_len));
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&chunk_range.0.to_le_bytes());
     out.extend_from_slice(&chunk_range.1.to_le_bytes());
     out.extend_from_slice(&num_offsets.to_le_bytes());
     out.extend_from_slice(&data_len.to_le_bytes());
     out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&payload);
+    for offset in chunk_offsets {
+        out.extend_from_slice(&offset.to_le_bytes());
+    }
+    out.extend_from_slice(data);
     out
 }
 
