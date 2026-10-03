@@ -65,6 +65,32 @@ jobs:
       - name: Build release archive
         run: bash scripts/build-release-archive.sh x86_64-unknown-linux-gnu dist
 
+      - name: Prepare release notes from changelog
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          changelog = Path("CHANGELOG.md").read_text()
+          heading = re.search(
+              rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$",
+              changelog,
+              re.MULTILINE,
+          )
+          if heading is None:
+              raise SystemExit(f"Missing dated changelog entry for {version}")
+          remainder = changelog[heading.end():]
+          notes = re.split(r"^## ", remainder, maxsplit=1, flags=re.MULTILINE)[0].strip()
+          if not notes:
+              raise SystemExit(f"Empty changelog entry for {version}")
+          Path("dist/release-notes.md").write_text(notes + "\n")
+          PY
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
@@ -190,6 +216,7 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
+          body_path: dist/release-notes.md
           files: |
             dist/*.tar.gz
             dist/*.sha256
