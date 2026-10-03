@@ -3,8 +3,6 @@ use std::{
     fs::{self, DirBuilder, File, OpenOptions},
     io::{self, ErrorKind, Write},
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use std::os::unix::{
@@ -12,12 +10,11 @@ use std::os::unix::{
     io::AsRawFd,
 };
 
+use crate::temporary_file_name;
 use crate::{
     LocalPublishBoundary,
     fault_injection::{local_publish_failpoint, local_publish_partial_write_len},
 };
-
-static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// File and directory mode overrides for anchored filesystem writes.
 #[derive(Debug, Clone, Copy)]
@@ -320,18 +317,6 @@ pub fn write_anchored_temporary_file(
 /// Returns an error when the operating system cannot synchronize the directory.
 pub fn sync_parent_directory(anchored: &AnchoredTarget) -> io::Result<()> {
     anchored.parent_dir().sync_all()
-}
-
-/// Returns a collision-resistant temporary filename beside `file_name`.
-#[must_use]
-pub fn temporary_file_name(file_name: &OsStr) -> OsString {
-    let counter = TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let unix_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_u128, |duration| duration.as_nanos());
-    let mut name = file_name.to_os_string();
-    name.push(format!(".tmp-{unix_nanos}-{counter}"));
-    name
 }
 
 /// Verifies that the anchored parent directory still points at the same on-disk directory.
@@ -935,7 +920,7 @@ mod tests {
         assert!(result.is_ok());
         let tmp_path = result.unwrap();
 
-        // Temp file name should contain the target name and ".tmp-"
+        // Short destinations retain the GC-recognizable suffix
         let tmp_name = tmp_path.file_name().unwrap().to_string_lossy();
         assert!(
             tmp_name.starts_with("target.txt.tmp-"),
