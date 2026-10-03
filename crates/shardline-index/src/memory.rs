@@ -775,28 +775,37 @@ impl UploadIntentStore for MemoryIndexStore {
         // `Created` intent over a concurrent caller's already-advanced intent
         // would reset its durable state and corrupt the upload lifecycle.
         let mut state = self.lock_state()?;
-        match state.upload_intents.entry(intent.intent_id().to_owned()) {
-            std::collections::hash_map::Entry::Occupied(existing) => {
-                if !existing.get().has_same_identity(intent) {
-                    return Err(UploadIntentConflictError::new(intent.intent_id()).into());
-                }
+        if let Some(existing) = state.upload_intents.get(intent.intent_id()) {
+            if !existing.has_same_identity(intent) {
+                return Err(UploadIntentConflictError::new(intent.intent_id()).into());
             }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let created_event = upload_lifecycle_event(
-                    tenant,
-                    repository,
-                    intent.intent_id(),
-                    intent.object_key(),
-                    intent.object_hash(),
-                    shardline_reliability::UploadLifecycleState::Created,
-                    shardline_reliability::UploadLifecycleState::Created,
-                )
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-                entry.insert(intent.clone());
-                state
-                    .reliability_events
-                    .insert(intent.intent_id().to_owned(), vec![created_event]);
+            verify_memory_intent_evidence(&state, existing)?;
+            let events = state
+                .reliability_events
+                .get(intent.intent_id())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let (stored_tenant, stored_repository) = upload_lifecycle_identity(events);
+            if stored_tenant != tenant || stored_repository != repository {
+                return Err(UploadIntentConflictError::new(intent.intent_id()).into());
             }
+        } else {
+            let created_event = upload_lifecycle_event(
+                tenant,
+                repository,
+                intent.intent_id(),
+                intent.object_key(),
+                intent.object_hash(),
+                shardline_reliability::UploadLifecycleState::Created,
+                shardline_reliability::UploadLifecycleState::Created,
+            )
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            state
+                .upload_intents
+                .insert(intent.intent_id().to_owned(), intent.clone());
+            state
+                .reliability_events
+                .insert(intent.intent_id().to_owned(), vec![created_event]);
         }
         Ok(())
     }
@@ -2142,6 +2151,65 @@ mod tests {
         assert!(events.iter().all(|event| {
             event.operation.tenant == "tenant-memory" && event.operation.repository == "repo-memory"
         }));
+    }
+
+    #[tokio::test]
+    async fn memory_duplicate_intent_validates_scope_and_evidence() {
+        let store = MemoryIndexStore::new();
+        let intent = UploadIntent::new(
+            "memory-duplicate".into(),
+            "objects/scope".into(),
+            "a".repeat(64),
+            42,
+        );
+        store
+            .create_intent_scoped(&intent, "tenant-a", "repo-a")
+            .await
+            .unwrap();
+        store
+            .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+            .await
+            .unwrap();
+        let before = store.reliability_events(intent.intent_id()).await.unwrap();
+        store
+            .create_intent_scoped(&intent, "tenant-a", "repo-a")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .create_intent_scoped(&intent, "tenant-b", "repo-b")
+                .await,
+            Err(MemoryIndexStoreError::UploadIntentConflict(_))
+        ));
+        assert_eq!(
+            store
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        assert_eq!(
+            store.reliability_events(intent.intent_id()).await.unwrap(),
+            before
+        );
+        store
+            .lock_state()
+            .unwrap()
+            .reliability_events
+            .get_mut(intent.intent_id())
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .operation
+            .repository = "forged-repository".into();
+        assert!(
+            store
+                .create_intent_scoped(&intent, "tenant-a", "repo-a")
+                .await
+                .is_err()
+        );
     }
 
     #[test]
