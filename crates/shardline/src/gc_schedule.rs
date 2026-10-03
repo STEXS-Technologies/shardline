@@ -62,7 +62,10 @@ static BEFORE_LOCAL_TEXT_FILE_READ_HOOK: LazyLock<Mutex<LocalTextFileReadHookSlo
 pub struct GcScheduleInstallOptions {
     /// Directory that receives the unit files.
     pub output_dir: PathBuf,
-    /// Unit basename without the `.service` or `.timer` suffix.
+    /// Systemd unit basename without the `.service` or `.timer` suffix.
+    ///
+    /// Supports ASCII letters, digits, `:`, `-`, `_`, `.`, `\`, and optional
+    /// `@` instance/template notation. At most 247 bytes, leaving room for `.service`.
     pub unit_prefix: String,
     /// `systemd.timer` calendar expression.
     pub calendar: String,
@@ -189,6 +192,9 @@ pub enum GcScheduleError {
         /// Invalid field name.
         field: &'static str,
     },
+    /// The unit prefix was a path, invalid systemd name, or too long.
+    #[error("invalid unit-prefix: value must be a systemd unit basename of at most 247 bytes")]
+    InvalidUnitPrefix,
     /// The output directory was not a directory after creation.
     #[error("invalid output directory: {0}")]
     InvalidOutputDirectory(PathBuf),
@@ -361,7 +367,7 @@ pub fn uninstall_gc_schedule(
     output_dir: &Path,
     unit_prefix: &str,
 ) -> Result<GcScheduleUninstallReport, GcScheduleError> {
-    validate_text_field("unit-prefix", unit_prefix)?;
+    validate_unit_prefix(unit_prefix)?;
 
     let service_path = output_dir.join(format!("{unit_prefix}.service"));
     let timer_path = output_dir.join(format!("{unit_prefix}.timer"));
@@ -384,7 +390,7 @@ fn remove_if_present(path: &Path) -> io::Result<bool> {
 fn resolve_install_options(
     options: &GcScheduleInstallOptions,
 ) -> Result<GcScheduleInstallOptions, GcScheduleError> {
-    validate_text_field("unit-prefix", &options.unit_prefix)?;
+    validate_unit_prefix(&options.unit_prefix)?;
     validate_text_field("calendar", &options.calendar)?;
     validate_absolute_path_field("env-file", &options.env_file)?;
     validate_absolute_path_field("working-directory", &options.working_directory)?;
@@ -461,6 +467,33 @@ fn validate_absolute_path_field(field: &'static str, path: &Path) -> Result<(), 
         field,
         path: path.to_path_buf(),
     })
+}
+
+// Systemd allows 255 bytes per unit filename, including the 8-byte `.service`.
+const MAX_SYSTEMD_UNIT_PREFIX_BYTES: usize = 247;
+
+fn validate_unit_prefix(value: &str) -> Result<(), GcScheduleError> {
+    validate_text_field("unit-prefix", value)?;
+    if value.len() > MAX_SYSTEMD_UNIT_PREFIX_BYTES
+        || value.starts_with('@')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b":-_.\\@".contains(&byte))
+        || value.contains('/')
+    {
+        return Err(GcScheduleError::InvalidUnitPrefix);
+    }
+    // Check the actual filename: `.` and `..` prefixes become safe, valid
+    // `..service` and `...service` files after the suffix is added. Native
+    // components still reject Windows path prefixes/separators on Windows.
+    let file_name = format!("{value}.service");
+    let mut components = Path::new(&file_name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(GcScheduleError::InvalidUnitPrefix);
+    }
+    Ok(())
 }
 
 fn validate_text_field(field: &'static str, value: &str) -> Result<(), GcScheduleError> {
@@ -1502,6 +1535,127 @@ mod tests {
     }
 
     // ── uninstall_gc_schedule validation ────────────────────────────────
+
+    #[test]
+    fn unit_prefix_rejects_paths_and_invalid_systemd_names() {
+        for prefix in [
+            "../sibling",
+            "/absolute",
+            "nested/name",
+            "./name",
+            "name/",
+            "name with spaces",
+            "name$invalid",
+            "unicode-é",
+            "@instance",
+        ] {
+            assert!(
+                matches!(
+                    super::validate_unit_prefix(prefix),
+                    Err(GcScheduleError::InvalidUnitPrefix)
+                ),
+                "accepted path prefix {prefix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_prefix_reserves_the_full_service_suffix_length() {
+        assert!(super::validate_unit_prefix(&"n".repeat(247)).is_ok());
+        assert!(matches!(
+            super::validate_unit_prefix(&"n".repeat(248)),
+            Err(GcScheduleError::InvalidUnitPrefix)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn schedule_path_prefixes_preserve_sibling_units_before_any_install_work() {
+        let sandbox = tempfile::tempdir().expect("owned fixture");
+        let units = sandbox.path().join("units");
+        let sibling = sandbox.path().join("sibling");
+        std::fs::create_dir_all(&sibling).expect("sibling directory");
+        let service = sibling.join("synthetic.service");
+        let timer = sibling.join("synthetic.timer");
+        std::fs::write(&service, b"previous service").expect("synthetic service");
+        std::fs::write(&timer, b"previous timer").expect("synthetic timer");
+
+        for prefix in [
+            "../sibling/synthetic".to_owned(),
+            sibling.join("synthetic").to_string_lossy().into_owned(),
+        ] {
+            let options = GcScheduleInstallOptions {
+                output_dir: units.clone(),
+                unit_prefix: prefix.clone(),
+                binary_path: sandbox.path().join("missing-binary"),
+                env_file: sandbox.path().join("missing-env"),
+                working_directory: sandbox.path().join("uncreated-work"),
+                ..GcScheduleInstallOptions::default()
+            };
+            assert!(matches!(
+                install_gc_schedule(&options),
+                Err(GcScheduleError::InvalidUnitPrefix)
+            ));
+            assert!(matches!(
+                uninstall_gc_schedule(&units, &prefix),
+                Err(GcScheduleError::InvalidUnitPrefix)
+            ));
+            assert_eq!(
+                std::fs::read(&service).expect("preserved service"),
+                b"previous service"
+            );
+            assert_eq!(
+                std::fs::read(&timer).expect("preserved timer"),
+                b"previous timer"
+            );
+            assert!(!units.exists());
+            assert!(!options.working_directory.exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn schedule_basename_prefixes_preserve_colons_and_literal_escapes() {
+        let sandbox = tempfile::tempdir().expect("owned fixture");
+        let units = sandbox.path().join("units");
+        let env_file = sandbox.path().join("service.env");
+        std::fs::write(&env_file, b"").expect("owned environment file");
+        for prefix in [
+            "ordinary-name",
+            ".",
+            "..",
+            "name:colon",
+            r"name\x2descape",
+            "name@instance",
+            "name@",
+            "name@@instance",
+        ] {
+            let options = GcScheduleInstallOptions {
+                output_dir: units.clone(),
+                unit_prefix: prefix.to_owned(),
+                env_file: env_file.clone(),
+                binary_path: std::env::current_exe().expect("test binary"),
+                working_directory: sandbox.path().join("work"),
+                user: "root".to_owned(),
+                group: "root".to_owned(),
+                ..GcScheduleInstallOptions::default()
+            };
+            let installed = install_gc_schedule(&options).expect("valid basename installation");
+            assert_eq!(
+                installed.service_path,
+                units.join(format!("{prefix}.service"))
+            );
+            assert_eq!(installed.timer_path, units.join(format!("{prefix}.timer")));
+            assert!(
+                std::fs::read_to_string(&installed.timer_path)
+                    .expect("timer content")
+                    .contains(&format!("Unit={prefix}.service\n"))
+            );
+            let removed = uninstall_gc_schedule(&units, prefix).expect("valid basename removal");
+            assert!(removed.removed_service && removed.removed_timer);
+            assert!(!installed.service_path.exists() && !installed.timer_path.exists());
+        }
+    }
 
     #[test]
     fn uninstall_gc_schedule_rejects_empty_prefix() {
