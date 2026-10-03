@@ -106,12 +106,42 @@ impl FromStr for RepositoryProvider {
 }
 
 /// Repository and revision scope encoded into a token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepositoryScope {
     provider: RepositoryProvider,
     owner: String,
     name: String,
     revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "RepositoryScope")]
+struct RepositoryScopeFields {
+    provider: RepositoryProvider,
+    owner: String,
+    name: String,
+    revision: Option<String>,
+}
+
+impl TryFrom<RepositoryScopeFields> for RepositoryScope {
+    type Error = TokenClaimsError;
+
+    fn try_from(fields: RepositoryScopeFields) -> Result<Self, Self::Error> {
+        Self::new(
+            fields.provider,
+            &fields.owner,
+            &fields.name,
+            fields.revision.as_deref(),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for RepositoryScope {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        RepositoryScopeFields::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RepositoryScope {
@@ -141,11 +171,7 @@ impl RepositoryScope {
         name: &str,
         revision: Option<&str>,
     ) -> Result<Self, TokenClaimsError> {
-        validate_component(owner, TokenClaimsError::EmptyRepositoryOwner)?;
-        validate_component(name, TokenClaimsError::EmptyRepositoryName)?;
-        if let Some(value) = revision {
-            validate_component(value, TokenClaimsError::EmptyRevision)?;
-        }
+        validate_repository_components(owner, name, revision)?;
 
         Ok(Self {
             provider,
@@ -181,13 +207,51 @@ impl RepositoryScope {
 }
 
 /// Signed token claims used by the Shardline API.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TokenClaims {
     issuer: String,
     subject: String,
     scope: TokenScope,
     repository: RepositoryScope,
     expires_at_unix_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "TokenClaims")]
+struct TokenClaimsFields {
+    issuer: String,
+    subject: String,
+    scope: TokenScope,
+    repository: RepositoryScopeFields,
+    expires_at_unix_seconds: u64,
+}
+
+impl TryFrom<TokenClaimsFields> for TokenClaims {
+    type Error = TokenClaimsError;
+
+    fn try_from(fields: TokenClaimsFields) -> Result<Self, Self::Error> {
+        let repository = RepositoryScope {
+            provider: fields.repository.provider,
+            owner: fields.repository.owner,
+            name: fields.repository.name,
+            revision: fields.repository.revision,
+        };
+        Self::new(
+            &fields.issuer,
+            &fields.subject,
+            fields.scope,
+            repository,
+            fields.expires_at_unix_seconds,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenClaims {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        TokenClaimsFields::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl TokenClaims {
@@ -229,6 +293,11 @@ impl TokenClaims {
     ) -> Result<Self, TokenClaimsError> {
         validate_component(issuer, TokenClaimsError::EmptyIssuer)?;
         validate_component(subject, TokenClaimsError::EmptySubject)?;
+        validate_repository_components(
+            repository.owner(),
+            repository.name(),
+            repository.revision(),
+        )?;
         Ok(Self {
             issuer: issuer.to_owned(),
             subject: subject.to_owned(),
@@ -541,24 +610,26 @@ pub fn decode_and_validate_claims(
     payload: &[u8],
     current_unix_seconds: u64,
 ) -> Result<TokenClaims, TokenCodecError> {
-    let claims = from_slice::<TokenClaims>(payload)?;
-    validate_component(claims.issuer(), TokenClaimsError::EmptyIssuer)?;
-    validate_component(claims.subject(), TokenClaimsError::EmptySubject)?;
-    validate_component(
-        claims.repository().owner(),
-        TokenClaimsError::EmptyRepositoryOwner,
-    )?;
-    validate_component(
-        claims.repository().name(),
-        TokenClaimsError::EmptyRepositoryName,
-    )?;
-    if let Some(revision) = claims.repository().revision() {
-        validate_component(revision, TokenClaimsError::EmptyRevision)?;
-    }
+    // Decode raw fields first so component validation keeps returning the
+    // public typed Claims error rather than a generic JSON error.
+    let claims = TokenClaims::try_from(from_slice::<TokenClaimsFields>(payload)?)?;
     if claims.expires_at_unix_seconds() < current_unix_seconds {
         return Err(TokenCodecError::Expired);
     }
     Ok(claims)
+}
+
+fn validate_repository_components(
+    owner: &str,
+    name: &str,
+    revision: Option<&str>,
+) -> Result<(), TokenClaimsError> {
+    validate_component(owner, TokenClaimsError::EmptyRepositoryOwner)?;
+    validate_component(name, TokenClaimsError::EmptyRepositoryName)?;
+    if let Some(value) = revision {
+        validate_component(value, TokenClaimsError::EmptyRevision)?;
+    }
+    Ok(())
 }
 
 fn validate_component(value: &str, empty_error: TokenClaimsError) -> Result<(), TokenClaimsError> {
@@ -585,6 +656,128 @@ mod tests {
         TOKEN_SIGNATURE_HEX_BYTES, TokenClaims, TokenClaimsError, TokenCodecError, TokenScope,
         TokenSigner, format_signed_token, split_token,
     };
+
+    #[test]
+    fn deserialized_repository_and_claims_validate_components() {
+        let valid = serde_json::json!({
+            "issuer": "issuer", "subject": "subject", "scope": "Read",
+            "repository": {"provider": "GitHub", "owner": "team", "name": "repo", "revision": "main"},
+            "expires_at_unix_seconds": 17
+        });
+        for (field, value, expected) in [
+            ("issuer", String::new(), TokenClaimsError::EmptyIssuer),
+            ("subject", " ".to_owned(), TokenClaimsError::EmptySubject),
+            (
+                "issuer",
+                "issuer\n".to_owned(),
+                TokenClaimsError::ControlCharacter,
+            ),
+            (
+                "subject",
+                "s".repeat(MAX_TOKEN_COMPONENT_BYTES + 1),
+                TokenClaimsError::TooLong,
+            ),
+        ] {
+            let mut input = valid.clone();
+            input[field] = value.into();
+            assert!(serde_json::from_value::<TokenClaims>(input.clone()).is_err());
+            assert!(
+                matches!(super::decode_and_validate_claims(&serde_json::to_vec(&input).unwrap(), 0),
+                Err(TokenCodecError::Claims(error)) if error == expected)
+            );
+        }
+        for (field, value, expected) in [
+            (
+                "owner",
+                String::new(),
+                TokenClaimsError::EmptyRepositoryOwner,
+            ),
+            (
+                "name",
+                " ".to_owned(),
+                TokenClaimsError::EmptyRepositoryName,
+            ),
+            ("revision", String::new(), TokenClaimsError::EmptyRevision),
+            (
+                "owner",
+                "team\0".to_owned(),
+                TokenClaimsError::ControlCharacter,
+            ),
+            (
+                "name",
+                "r".repeat(MAX_TOKEN_COMPONENT_BYTES + 1),
+                TokenClaimsError::TooLong,
+            ),
+        ] {
+            let mut input = valid.clone();
+            input["repository"][field] = value.into();
+            assert!(
+                serde_json::from_value::<RepositoryScope>(input["repository"].clone()).is_err()
+            );
+            assert!(serde_json::from_value::<TokenClaims>(input.clone()).is_err());
+            assert!(
+                matches!(super::decode_and_validate_claims(&serde_json::to_vec(&input).unwrap(), 0),
+                Err(TokenCodecError::Claims(error)) if error == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn checked_claims_preserve_wire_format_and_expiration_errors() {
+        for expires in [0, 17, u64::MAX] {
+            for revision in [None, Some("main")] {
+                let repository =
+                    RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", revision)
+                        .unwrap();
+                let claims =
+                    TokenClaims::new("issuer", "subject", TokenScope::Write, repository, expires)
+                        .unwrap();
+                let payload = super::encode_token_claims(&claims).unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<TokenClaims>(&payload).unwrap(),
+                    claims
+                );
+                assert_eq!(
+                    super::decode_and_validate_claims(&payload, expires).unwrap(),
+                    claims
+                );
+                let mut legacy = serde_json::to_value(&claims).unwrap();
+                legacy["repository"]["provider"] = "GitHub".into();
+                assert_eq!(
+                    serde_json::from_value::<TokenClaims>(legacy).unwrap(),
+                    claims
+                );
+                assert_eq!(
+                    serde_json::to_value(&claims).unwrap()["repository"]["provider"],
+                    "github"
+                );
+                if let Some(now) = expires.checked_add(1) {
+                    assert!(matches!(
+                        super::decode_and_validate_claims(&payload, now),
+                        Err(TokenCodecError::Expired)
+                    ));
+                }
+            }
+        }
+        assert!(matches!(
+            super::decode_and_validate_claims(b"not json", 0),
+            Err(TokenCodecError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn claims_constructor_rechecks_repository_components() {
+        let repository = RepositoryScope {
+            provider: RepositoryProvider::GitHub,
+            owner: String::new(),
+            name: "repo".to_owned(),
+            revision: None,
+        };
+        assert_eq!(
+            TokenClaims::new("issuer", "subject", TokenScope::Read, repository, 0),
+            Err(TokenClaimsError::EmptyRepositoryOwner)
+        );
+    }
 
     #[test]
     fn write_token_allows_read_and_write() {
