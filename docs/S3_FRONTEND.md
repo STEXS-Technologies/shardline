@@ -122,8 +122,9 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
   before publication or deletion. Upload checks hash the decoded payload,
   including AWS chunked uploads, with constant memory.
 - **Multipart part identity** is the quoted MD5 of that part's bytes.
-  Completion requires the ETag returned by the successful UploadPart for
-  every selected part, in ascending order; missing, stale or incorrect tags
+  Completion accepts that MD5 with or without the surrounding quotes and requires
+  the identity returned by the successful UploadPart for every selected part,
+  in ascending order; missing, stale or incorrect tags
   return `400 InvalidPart` and leave the session retryable. Local replacement
   parts use immutable content-addressed files and an atomic metadata pointer
   publication, so failed body reads, checksums or publication cannot truncate

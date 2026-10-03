@@ -209,9 +209,10 @@ pub(super) async fn s3_create_multipart_upload(
 
 /// `PUT /{bucket}/{*key}?partNumber=N&uploadId=U` — `UploadPart`.
 ///
-/// Streams the part body to the session's `part-{N}` file (overwrite: the
+/// Streams the part body to a temporary file, then publishes an immutable
+/// versioned part file (overwrite: the
 /// last upload of a part number wins) and responds `200` with an opaque
-/// per-part ETag (`"<upload_id>-<N>"`) the client echoes back in Complete.
+/// per-part MD5 ETag the client echoes back in Complete.
 /// UploadPart accepts ANY body size for any part number `1..=MAX_S3_PART_NUMBER`
 /// (matching S3: the 5 MiB minimum is enforced only at CompleteMultipartUpload
 /// for every part except the last). The per-session and aggregate byte quotas
@@ -248,6 +249,26 @@ async fn validate_local_part_file(
         return Err(S3Error::internal());
     }
     Ok(())
+}
+
+// Clients may echo an UploadPart MD5 ETag with or without its HTTP quotes.
+// Accept only this representation difference, never arbitrary opaque values.
+fn multipart_part_md5(etag: &str) -> Result<&str, S3Error> {
+    let value = if let Some(unquoted) = etag.strip_prefix('"') {
+        unquoted
+            .strip_suffix('"')
+            .ok_or_else(S3Error::invalid_part)?
+    } else {
+        etag
+    };
+    if value.len() != 32
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(S3Error::invalid_part());
+    }
+    Ok(value)
 }
 
 async fn local_part_md5_etag(
@@ -701,7 +722,7 @@ pub(super) async fn s3_complete_multipart_upload(
     let user_metadata = session.user_metadata.clone();
 
     // Parse the Complete request body (the client echoes the part
-    // numbers/etags it uploaded; ETags are opaque and ignored).
+    // numbers/etags it uploaded; selected MD5 identities are checked below).
     let mut reader = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
         .map_err(S3Error::from)?;
     if let Some(expected) = parse_content_md5(headers)? {
@@ -760,14 +781,14 @@ pub(super) async fn s3_complete_multipart_upload(
             Some(etag) => etag.clone(),
             None => local_part_md5_etag(&path, part.size_bytes).await?,
         };
-        if requested.etag(part_number) != Some(expected_etag.as_str()) {
+        let raw_etag = multipart_part_md5(&expected_etag)?;
+        let selected = requested
+            .etag(part_number)
+            .ok_or_else(S3Error::invalid_part)?;
+        if multipart_part_md5(selected)? != raw_etag {
             return Err(S3Error::invalid_part());
         }
         let file = tokio::fs::File::open(&path).await.map_err(io_to_s3)?;
-        let raw_etag = expected_etag
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .ok_or_else(S3Error::invalid_part)?;
         let mut expected_md5 = [0_u8; 16];
         hex::decode_to_slice(raw_etag, &mut expected_md5)
             .map_err(|_error| S3Error::invalid_part())?;
@@ -894,16 +915,8 @@ async fn durable_s3_complete_multipart_upload(
             let Some(stored_etag) = part.etag() else {
                 return Err(S3Error::invalid_part());
             };
-            let raw_etag = stored_etag
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'))
-                .ok_or_else(S3Error::invalid_part)?;
-            if raw_etag.len() != 32
-                || !raw_etag
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                || requested.etag(number) != Some(stored_etag)
-            {
+            let selected = requested.etag(number).ok_or_else(S3Error::invalid_part)?;
+            if multipart_part_md5(selected)? != multipart_part_md5(stored_etag)? {
                 return Err(S3Error::invalid_part());
             }
         }

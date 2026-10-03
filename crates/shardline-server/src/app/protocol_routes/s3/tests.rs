@@ -4005,6 +4005,16 @@ async fn s3_copy_source_conditions_validate_pinned_source() {
         ),
         (
             "x-amz-copy-source-if-none-match",
+            source_etag.trim_matches('"').to_owned(),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            "x-amz-copy-source-if-match",
+            "00000000000000000000000000000000".to_owned(),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            "x-amz-copy-source-if-none-match",
             "*".to_owned(),
             StatusCode::PRECONDITION_FAILED,
         ),
@@ -4047,7 +4057,13 @@ async fn s3_copy_source_conditions_validate_pinned_source() {
             b"seed-content".to_vec()
         );
     }
+    let bare_source_etag = source_etag.trim_matches('"');
     for headers in [
+        vec![("x-amz-copy-source-if-match", bare_source_etag)],
+        vec![(
+            "x-amz-copy-source-if-none-match",
+            "00000000000000000000000000000000",
+        )],
         vec![
             ("x-amz-copy-source-if-match", source_etag.as_str()),
             (
@@ -5090,4 +5106,67 @@ async fn s3_listing_url_encoding_groups_raw_unicode_prefixes_and_rejects_invalid
                 .contains("<Code>InvalidArgument</Code>")
         );
     }
+}
+
+async fn assert_multipart_completion_accepts_bare_md5_etag(state: Arc<AppState>) {
+    let app = s3_router(state);
+    for quoted in [false, true] {
+        let upload_id = create_upload_id(&app).await;
+        let bytes = b"owned multipart MD5 compatibility";
+        let upload = upload_part(&app, &upload_id, 1, bytes).await;
+        assert_eq!(upload.status(), StatusCode::OK);
+        let etag = upload.headers()[header::ETAG].to_str().unwrap();
+        let bare = etag.strip_prefix('"').unwrap().strip_suffix('"').unwrap();
+        for bad in [
+            "not-an-md5",
+            "00000000000000000000000000000000",
+            "\"unterminated",
+        ] {
+            let xml = format!(
+                "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{bad}</ETag></Part></CompleteMultipartUpload>"
+            );
+            assert_eq!(
+                complete_upload(&app, &upload_id, xml).await.status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let selected = if quoted { etag } else { bare };
+        let xml = format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{selected}</ETag></Part></CompleteMultipartUpload>"
+        );
+        assert_eq!(
+            complete_upload(&app, &upload_id, xml).await.status(),
+            StatusCode::OK
+        );
+        let get = Request::builder()
+            .method("GET")
+            .uri(format!("/{BUCKET}/{KEY}"))
+            .header(
+                header::AUTHORIZATION,
+                sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            body_bytes(app.clone().oneshot(get).await.unwrap()).await,
+            bytes
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_local_multipart_completion_accepts_bare_md5_etag() {
+    let (state, _tmp) = build_test_state().await;
+    assert_multipart_completion_accepts_bare_md5_etag(state).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_postgres_multipart_completion_accepts_bare_md5_etag() {
+    if std::env::var_os("DATABASE_URL").is_none() {
+        return;
+    }
+    let (state, _tmp) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL multipart fixture must initialize");
+    assert_multipart_completion_accepts_bare_md5_etag(state).await;
 }
