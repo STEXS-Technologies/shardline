@@ -296,6 +296,13 @@ SHARDLINE_INDEX_POSTGRES_URL=postgres://user:password@db.example.com:5432/shardl
 shardline gc --mark --sweep
 ```
 
+Administrative holds can protect keys before their objects arrive. Both permanent and
+unexpired finite holds survive lifecycle repair and pass integrity checks when the
+held key is absent. GC continues collecting unrelated eligible objects and protects
+bytes subsequently stored at the held key. Expired holds may be removed automatically;
+explicit release is required to end a permanent hold. Required bytes referenced by
+file records still undergo independent integrity checks in fsck.
+
 Administrative retention holds can be managed with:
 
 ```bash

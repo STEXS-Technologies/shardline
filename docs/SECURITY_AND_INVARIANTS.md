@@ -159,8 +159,8 @@ successful response.
 - visible latest records still have matching immutable version records
 - quarantine metadata still points at existing objects with matching observed lengths
   and does not target reachable live objects
-- active retention holds still point at existing objects and do not coexist with
-  quarantine state for the same object
+- active retention holds may protect future keys without current objects and do not
+  coexist with quarantine state for the same object
 - processed webhook delivery claims do not carry implausibly future timestamps
 - reconstruction rows reference registered xorbs
 - provider repository lifecycle state uses valid repository identity and plausible
@@ -169,7 +169,8 @@ successful response.
 `shardline repair lifecycle` removes stale lifecycle metadata without deleting payload
 bytes.
 It prunes quarantine candidates that became missing, reachable again, or protected
-by an active hold; drops expired or missing-object retention holds; and trims stale or
+by an active hold; drops expired retention holds while preserving future-key holds;
+and trims stale or
 future-dated webhook delivery claims.
 
 `shardline index rebuild` also removes stale reconstruction rows after deriving the

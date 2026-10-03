@@ -67,10 +67,9 @@ For quarantine candidates it removes entries when:
 - the object is reachable again from live metadata
 - an active retention hold already protects the same object
 
-For retention holds it removes entries when:
-
-- the hold is already expired
-- the protected object is missing
+For retention holds it removes only expired entries. Permanent and unexpired finite
+holds remain even when their keys have no objects yet, so protection survives until
+future bytes arrive or an operator explicitly releases the hold.
 
 For processed webhook delivery claims it removes entries when:
 
