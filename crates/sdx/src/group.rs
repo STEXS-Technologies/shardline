@@ -108,6 +108,8 @@ struct StreamRegistration {
     start_signal: Option<Arc<Notify>>,
     started: AtomicBool,
     finished: AtomicBool,
+    explicitly_cancelled: AtomicBool,
+    observed_failure: Mutex<Option<String>>,
 }
 
 impl StreamRegistration {
@@ -118,6 +120,8 @@ impl StreamRegistration {
             start_signal: stream.pending_start_signal(),
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            explicitly_cancelled: AtomicBool::new(false),
+            observed_failure: Mutex::new(None),
         })
     }
 
@@ -128,24 +132,47 @@ impl StreamRegistration {
             start_signal: stream.pending_start_signal(),
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            explicitly_cancelled: AtomicBool::new(false),
+            observed_failure: Mutex::new(None),
         })
     }
 
     /// Cancels this stream only (never the group or its siblings).
     fn cancel(&self) {
+        self.explicitly_cancelled.store(true, Ordering::Relaxed);
         self.run_state.cancel();
         if let Some(signal) = &self.start_signal {
             signal.notify_one();
         }
     }
 
+    fn observe_result<T>(&self, result: &Result<Option<T>, SdxError>) {
+        if let Err(error) = result {
+            self.observed_failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get_or_insert_with(|| error.to_string());
+        }
+        if result.as_ref().is_ok_and(Option::is_none) {
+            self.finished.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Computes this stream's status snapshot.
     fn state(&self, group_aborted: bool) -> XetTaskState {
-        if group_aborted || self.run_state.is_cancelled() {
+        if group_aborted || self.explicitly_cancelled.load(Ordering::Relaxed) {
             return XetTaskState::Cancelled;
         }
-        if let Some(message) = self.run_state.error_message() {
+        let observed = self
+            .observed_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(message) = observed.or_else(|| self.run_state.error_message()) {
             return XetTaskState::Failed(message);
+        }
+        if self.run_state.is_cancelled() {
+            return XetTaskState::Cancelled;
         }
         let scheduled = self.run_state.total_bytes_scheduled();
         let delivered = self.run_state.total_bytes_delivered();
@@ -395,9 +422,7 @@ impl GroupedDownloadStream {
     pub async fn next(&mut self) -> Result<Option<Bytes>, SdxError> {
         self.registration.started.store(true, Ordering::Relaxed);
         let result = self.inner.next().await;
-        if result.as_ref().is_ok_and(Option::is_none) {
-            self.registration.finished.store(true, Ordering::Relaxed);
-        }
+        self.registration.observe_result(&result);
         result
     }
 
@@ -422,9 +447,7 @@ impl GroupedDownloadStream {
     pub fn blocking_next(&mut self) -> Result<Option<Bytes>, SdxError> {
         self.registration.started.store(true, Ordering::Relaxed);
         let result = self.inner.blocking_next();
-        if result.as_ref().is_ok_and(Option::is_none) {
-            self.registration.finished.store(true, Ordering::Relaxed);
-        }
+        self.registration.observe_result(&result);
         result
     }
 
@@ -497,9 +520,7 @@ impl GroupedUnorderedDownloadStream {
     pub async fn next(&mut self) -> Result<Option<(u64, Bytes)>, SdxError> {
         self.registration.started.store(true, Ordering::Relaxed);
         let result = self.inner.next().await;
-        if result.as_ref().is_ok_and(Option::is_none) {
-            self.registration.finished.store(true, Ordering::Relaxed);
-        }
+        self.registration.observe_result(&result);
         result
     }
 
@@ -520,9 +541,7 @@ impl GroupedUnorderedDownloadStream {
     pub fn blocking_next(&mut self) -> Result<Option<(u64, Bytes)>, SdxError> {
         self.registration.started.store(true, Ordering::Relaxed);
         let result = self.inner.blocking_next();
-        if result.as_ref().is_ok_and(Option::is_none) {
-            self.registration.finished.store(true, Ordering::Relaxed);
-        }
+        self.registration.observe_result(&result);
         result
     }
 
@@ -1203,6 +1222,139 @@ mod tests {
         let out = drain(&mut stream).await;
         assert_eq!(out, vec![9u8; 64]);
         assert!(group.status().contains(&(id, XetTaskState::Completed)));
+    }
+
+    #[tokio::test]
+    async fn download_failure_status_survives_typed_error_consumption_and_eof() {
+        for unordered in [false, true] {
+            for blocking in [false, true] {
+                let server = MockServer::start().await;
+                let group = client(&server).await.new_download_stream_group();
+                Mock::given(method("GET"))
+                    .and(wiremock::matchers::path_regex(r".*/reconstructions/.*"))
+                    .respond_with(
+                        ResponseTemplate::new(404)
+                            .set_body_json(json!({"error": "owned reconstruction failure"})),
+                    )
+                    .mount(&server)
+                    .await;
+                if unordered {
+                    let mut stream = group
+                        .download_unordered_stream(FILE_ID, None)
+                        .await
+                        .unwrap();
+                    let id = stream.task_id();
+                    stream.start();
+                    timeout(Duration::from_secs(5), async {
+                        while stream.registration.run_state.error_message().is_none() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(group.status().contains(&(
+                        id,
+                        XetTaskState::Failed(
+                            "not found (404): owned reconstruction failure".to_owned()
+                        )
+                    )));
+                    let result = if blocking {
+                        let (returned, result) = tokio::task::spawn_blocking(move || {
+                            let result = stream.blocking_next();
+                            (stream, result)
+                        })
+                        .await
+                        .unwrap();
+                        stream = returned;
+                        result
+                    } else {
+                        stream.next().await
+                    };
+                    assert!(
+                        matches!(result, Err(SdxError::Transfer(crate::error::TransferError::NotFound(message)))
+                        if message == "owned reconstruction failure")
+                    );
+                    assert!(stream.next().await.unwrap().is_none());
+                    assert!(group.status().contains(&(
+                        id,
+                        XetTaskState::Failed(
+                            "not found (404): owned reconstruction failure".to_owned()
+                        )
+                    )));
+                    stream.cancel();
+                    assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
+                } else {
+                    let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
+                    let id = stream.task_id();
+                    stream.start();
+                    timeout(Duration::from_secs(5), async {
+                        while stream.registration.run_state.error_message().is_none() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(group.status().contains(&(
+                        id,
+                        XetTaskState::Failed(
+                            "not found (404): owned reconstruction failure".to_owned()
+                        )
+                    )));
+                    let result = if blocking {
+                        let (returned, result) = tokio::task::spawn_blocking(move || {
+                            let result = stream.blocking_next();
+                            (stream, result)
+                        })
+                        .await
+                        .unwrap();
+                        stream = returned;
+                        result
+                    } else {
+                        stream.next().await
+                    };
+                    assert!(
+                        matches!(result, Err(SdxError::Transfer(crate::error::TransferError::NotFound(message)))
+                        if message == "owned reconstruction failure")
+                    );
+                    assert!(stream.next().await.unwrap().is_none());
+                    assert!(group.status().contains(&(
+                        id,
+                        XetTaskState::Failed(
+                            "not found (404): owned reconstruction failure".to_owned()
+                        )
+                    )));
+                    stream.cancel();
+                    assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn group_abort_prevents_a_new_read_after_a_delivered_chunk() {
+        for unordered in [false, true] {
+            let server = MockServer::start().await;
+            mocks(&server, None).await;
+            let group = client(&server).await.new_download_stream_group();
+            if unordered {
+                let mut stream = group
+                    .download_unordered_stream(FILE_ID, None)
+                    .await
+                    .unwrap();
+                let id = stream.task_id();
+                assert_eq!(stream.next().await.unwrap().unwrap().1.len(), 64);
+                group.abort();
+                assert!(stream.next().await.unwrap().is_none());
+                assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
+            } else {
+                let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
+                let id = stream.task_id();
+                assert_eq!(stream.next().await.unwrap().unwrap().len(), 64);
+                group.abort();
+                assert!(stream.next().await.unwrap().is_none());
+                assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
+            }
+        }
     }
 
     #[tokio::test]

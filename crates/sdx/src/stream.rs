@@ -2505,6 +2505,12 @@ impl DownloadStream {
         if self.finished {
             return Ok(None);
         }
+        if self.run_state.is_cancelled() {
+            let terminal = self.run_state.check_error();
+            self.cancel();
+            terminal?;
+            return Ok(None);
+        }
         self.ensure_started();
 
         if self.pending_data.is_none() {
@@ -2517,6 +2523,13 @@ impl DownloadStream {
                     () = self.run_state.cancelled() => None,
                 }
             };
+            if self.run_state.is_cancelled() {
+                let terminal = self.run_state.check_error();
+                drop(item);
+                self.cancel();
+                terminal?;
+                return Ok(None);
+            }
             match item {
                 Some(SequentialRetrievalItem::Data { receiver, permit }) => {
                     self.pending_data = Some(PendingDownloadData { receiver, permit });
@@ -2542,6 +2555,12 @@ impl DownloadStream {
             data = &mut pending.receiver => Some(data),
             () = self.run_state.cancelled() => None,
         };
+        if self.run_state.is_cancelled() {
+            let terminal = self.run_state.check_error();
+            self.cancel();
+            terminal?;
+            return Ok(None);
+        }
         // A completed receiver cannot be polled again, and cancellation of
         // the whole reconstruction must release its permit promptly.
         if let Some(completed) = self.pending_data.take() {
@@ -2603,6 +2622,9 @@ impl DownloadStream {
         self.cancel_reconstruction();
         drop(self.start_signal.take());
         self.receiver.close();
+        while let Ok(item) = self.receiver.try_recv() {
+            drop(item);
+        }
         drop(self.pending_data.take());
         self.finished = true;
     }
@@ -2724,6 +2746,12 @@ impl UnorderedDownloadStream {
         if self.finished {
             return Ok(None);
         }
+        if self.run_state.is_cancelled() {
+            let terminal = self.run_state.check_error();
+            self.cancel();
+            terminal?;
+            return Ok(None);
+        }
         self.ensure_started();
 
         if let Ok(result) = self.receiver.try_recv() {
@@ -2737,6 +2765,12 @@ impl UnorderedDownloadStream {
         match next_item {
             Some(result) => self.process_term(result),
             None => {
+                if self.run_state.is_cancelled() {
+                    let terminal = self.run_state.check_error();
+                    self.cancel();
+                    terminal?;
+                    return Ok(None);
+                }
                 self.finished = true;
                 self.run_state.check_error()?;
                 Ok(None)
@@ -2767,6 +2801,13 @@ impl UnorderedDownloadStream {
         &mut self,
         result: Result<CompletedTerm, SdxError>,
     ) -> Result<Option<(u64, Bytes)>, SdxError> {
+        if self.run_state.is_cancelled() {
+            drop(result);
+            let terminal = self.run_state.check_error();
+            self.cancel();
+            terminal?;
+            return Ok(None);
+        }
         let term = result?;
         let offset = term.byte_range.start;
         let data = term.data;
@@ -2786,6 +2827,9 @@ impl UnorderedDownloadStream {
         self.cancel_reconstruction();
         drop(self.start_signal.take());
         self.receiver.close();
+        while let Ok(item) = self.receiver.try_recv() {
+            drop(item);
+        }
         self.finished = true;
     }
 
@@ -3126,6 +3170,15 @@ mod tests {
             .unwrap();
         assert_eq!(output, expected);
         assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 4);
+        // MockServer::drop synchronously polls a Tokio RwLock. A fully drained
+        // cooperative budget can defer its wake onto this same runtime, which
+        // cannot advance while Drop is blocking. Force that condition, then
+        // make only fixture teardown unconstrained.
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        assert!(!tokio::task::coop::has_budget_remaining());
+        tokio::task::unconstrained(async { drop(server) }).await;
     }
 
     #[tokio::test]
@@ -4349,6 +4402,147 @@ mod tests {
         let ctx = test_stream_context(&server, 1_048_576);
         let (out, _sizes) = drain(make_stream(ctx, Some(16..64))).await;
         assert_eq!(out, chunk[16..64]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_retained_stream_discards_queue_and_releases_shared_budget() {
+        for unordered in [false, true] {
+            for mode in 0..4 {
+                let server = MockServer::start().await;
+                let chunk = vec![7u8; 64];
+                let payload = serialize_payload(&[&chunk]);
+                reconstruction_mock(
+                    &server,
+                    0,
+                    4095,
+                    0,
+                    json!([
+                        {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}},
+                        {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}}
+                    ]),
+                    json!({XORB_HASH: [{
+                        "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                        "ranges": [{"chunks": {"start": 0, "end": 1},
+                            "bytes": {"start": 0, "end": payload.len().saturating_sub(1)}}]
+                    }]}),
+                )
+                .await;
+                xorb_payload_mock(&server, payload).await;
+                let ctx = test_stream_context(&server, 64);
+                let state;
+                if unordered {
+                    let mut stream = make_unordered_stream(ctx.clone(), None);
+                    assert_eq!(stream.next().await.unwrap().unwrap().1, chunk);
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while stream.receiver.is_empty() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(ctx.buffer_semaphore.available_permits(), 0);
+                    state = stream.run_state.clone();
+                    match mode {
+                        1 => stream.cancel(),
+                        2 => state.cancel(),
+                        3 => state.set_error(SdxError::Transfer(TransferError::NotFound(
+                            "owned queued failure".to_owned(),
+                        ))),
+                        _ => {}
+                    }
+                    let result = stream.next().await;
+                    if mode == 0 {
+                        assert_eq!(result.unwrap().unwrap().1, chunk);
+                    } else if mode == 3 {
+                        assert!(
+                            matches!(result, Err(SdxError::Transfer(TransferError::NotFound(message)))
+                            if message == "owned queued failure")
+                        );
+                    } else {
+                        assert!(result.unwrap().is_none());
+                    }
+                    assert!(stream.next().await.unwrap().is_none());
+                    assert!(stream.receiver.is_empty());
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while ctx.buffer_semaphore.available_permits() != 64 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let mut sibling = make_unordered_stream(ctx.clone(), None);
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(5), sibling.next())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .unwrap()
+                            .1,
+                        chunk
+                    );
+                    assert_eq!(sibling.next().await.unwrap().unwrap().1, chunk);
+                    assert!(sibling.next().await.unwrap().is_none());
+                    // Keep the original handle alive throughout sibling recovery.
+                    assert!(stream.next().await.unwrap().is_none());
+                } else {
+                    let mut stream = make_stream(ctx.clone(), None);
+                    assert_eq!(stream.next().await.unwrap().unwrap(), chunk);
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while stream.receiver.is_empty() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(ctx.buffer_semaphore.available_permits(), 0);
+                    state = stream.run_state.clone();
+                    match mode {
+                        1 => stream.cancel(),
+                        2 => state.cancel(),
+                        3 => state.set_error(SdxError::Transfer(TransferError::NotFound(
+                            "owned queued failure".to_owned(),
+                        ))),
+                        _ => {}
+                    }
+                    let result = stream.next().await;
+                    if mode == 0 {
+                        assert_eq!(result.unwrap().unwrap(), chunk);
+                    } else if mode == 3 {
+                        assert!(
+                            matches!(result, Err(SdxError::Transfer(TransferError::NotFound(message)))
+                            if message == "owned queued failure")
+                        );
+                    } else {
+                        assert!(result.unwrap().is_none());
+                    }
+                    assert!(stream.next().await.unwrap().is_none());
+                    assert!(stream.receiver.is_empty());
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while ctx.buffer_semaphore.available_permits() != 64 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let mut sibling = make_stream(ctx.clone(), None);
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(5), sibling.next())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .unwrap(),
+                        chunk
+                    );
+                    assert_eq!(sibling.next().await.unwrap().unwrap(), chunk);
+                    assert!(sibling.next().await.unwrap().is_none());
+                    assert!(stream.next().await.unwrap().is_none());
+                }
+                assert_eq!(
+                    state.total_bytes_delivered(),
+                    if mode == 0 { 128 } else { 64 }
+                );
+            }
+        }
     }
 
     #[tokio::test]
