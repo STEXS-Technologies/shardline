@@ -510,10 +510,36 @@ pub async fn serve_with_listener(
     config: ServerConfig,
     listener: TcpListener,
 ) -> Result<(), ServerError> {
-    serve_with_listener_until(config, listener, async {
-        tokio::signal::ctrl_c().await.ok();
+    #[cfg(unix)]
+    let shutdown = shutdown_signal()?;
+    #[cfg(not(unix))]
+    let shutdown = shutdown_signal();
+    serve_with_listener_until(config, listener, shutdown).await
+}
+
+/// Register process signals before accepting connections. Container runtimes
+/// normally request termination with SIGTERM rather than terminal Ctrl-C.
+#[cfg(unix)]
+fn shutdown_signal() -> Result<impl Future<Output = ()> + Send, Error> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {},
+            _ = terminate.recv() => {},
+        }
     })
-    .await
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> impl Future<Output = ()> + Send {
+    async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to receive shutdown signal");
+        }
+    }
 }
 
 /// Runs the server until the supplied shutdown signal resolves.

@@ -1551,3 +1551,104 @@ async fn handler_deadline_includes_gc_wait_without_resetting_budget() {
     .unwrap()
     .unwrap();
 }
+
+// Signals are process-global: exercise the public server in an isolated child.
+#[cfg(unix)]
+#[test]
+fn unix_shutdown_subprocess_child() {
+    let Some(root) = std::env::var_os("SHARDLINE_SIGNAL_TEST_ROOT") else {
+        return;
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let root = std::path::PathBuf::from(root);
+        std::fs::write(root.join("address"), addr.to_string()).unwrap();
+        let config = ServerConfig::new(
+            addr,
+            format!("http://{addr}"),
+            root,
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_token_signing_key(vec![0_u8; 32])
+        .unwrap()
+        .with_shutdown_timeout(Duration::from_secs(2));
+        crate::serve_with_listener(config, listener).await.unwrap();
+    });
+}
+
+#[cfg(unix)]
+fn assert_process_signal_drains_server(signal: &str) {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ignored = self.0.kill();
+            let _ignored = self.0.wait();
+        }
+    }
+    let root = TempDir::new().unwrap();
+    let mut child = ChildGuard(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::tests::unix_shutdown_subprocess_child",
+                "--nocapture",
+            ])
+            .env("SHARDLINE_SIGNAL_TEST_ROOT", root.path())
+            .spawn()
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(100))
+        .build()
+        .unwrap();
+    loop {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "server exited before readiness"
+        );
+        if let Ok(addr) = std::fs::read_to_string(root.path().join("address"))
+            && let Ok(response) = client.get(format!("http://{addr}/healthz")).send()
+            && response.status() == StatusCode::OK
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "server readiness timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        std::process::Command::new("kill")
+            .args([signal, &child.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(status.success(), "server did not exit gracefully: {status}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "server shutdown timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_drains_public_server() {
+    assert_process_signal_drains_server("-TERM");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_drains_public_server() {
+    assert_process_signal_drains_server("-INT");
+}

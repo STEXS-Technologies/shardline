@@ -9,6 +9,12 @@ object-store adapter and the index and record adapters, which are external to th
 process. That makes a live upgrade safe as long as each process is drained, restarted
 on the new version, and confirmed ready before the next process moves.
 
+On Unix, both SIGTERM (the usual container stop signal) and SIGINT start the
+server's graceful connection drain. By default the server waits for active
+connections to finish; allow enough runtime termination grace for those transfers.
+If an embedding application sets `ServerConfig::with_shutdown_timeout`, give the
+runtime a longer grace period so the server's deadline runs before SIGKILL.
+
 ## Roles And Upgrade Units
 
 `shardline serve` pins a process to a role:
