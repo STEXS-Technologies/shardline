@@ -572,6 +572,8 @@ struct XetUploadCommitInner {
     aborted: AtomicBool,
     active: Mutex<HashMap<u64, Weak<UploadRegistration>>>,
     next_id: AtomicU64,
+    #[cfg(test)]
+    registration_gate: Option<Arc<std::sync::Barrier>>,
 }
 
 /// Per-upload bookkeeping shared between the group and the handle wrapper.
@@ -614,6 +616,8 @@ impl XetUploadCommit {
                 aborted: AtomicBool::new(false),
                 active: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(0),
+                #[cfg(test)]
+                registration_gate: None,
             }),
         })
     }
@@ -642,6 +646,18 @@ impl XetUploadCommit {
     /// Returns [`SdxError`] when the group has been aborted.
     pub fn upload_stream(&self) -> Result<GroupedUploadStream, SdxError> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        if let Some(gate) = &self.inner.registration_gate {
+            gate.wait();
+            gate.wait();
+        }
+        // Serialize the abort check with registration: abort must either see
+        // this handle in the registry, or prevent its creation altogether.
+        let mut active = self
+            .inner
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.inner.aborted.load(Ordering::Relaxed) {
             return Err(SdxError::UploadSession(
                 "upload group aborted; cannot start new streams".to_owned(),
@@ -651,11 +667,6 @@ impl XetUploadCommit {
         let registration = Arc::new(UploadRegistration {
             handle: handle.clone(),
         });
-        let mut active = self
-            .inner
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         active.insert(id, Arc::downgrade(&registration));
         Ok(GroupedUploadStream::new(
             handle,
@@ -945,6 +956,30 @@ mod tests {
             .mount(server)
             .await;
         client(server).await
+    }
+
+    #[tokio::test]
+    async fn upload_constructor_resuming_after_abort_cannot_register() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        let mut group = client.new_upload_group().unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        Arc::get_mut(&mut group.inner).unwrap().registration_gate = Some(gate.clone());
+        let constructing = group.clone();
+        let task = std::thread::spawn(move || constructing.upload_stream());
+        // The constructor started, but has not acquired the registry lock.
+        // Complete abort before allowing that acquisition to proceed.
+        gate.wait();
+        group.abort();
+        gate.wait();
+        assert!(
+            matches!(task.join().unwrap(), Err(SdxError::UploadSession(message))
+            if message == "upload group aborted; cannot start new streams")
+        );
+        assert!(group.is_aborted());
+        assert_eq!(group.active_upload_count(), 0);
+        assert!(group.status().is_empty());
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
