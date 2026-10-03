@@ -44,35 +44,47 @@ pub(crate) fn parse_oci_path(path: &str) -> Result<OciPath, ServerError> {
             repository: repository.to_owned(),
         });
     }
-    if let Some((repository, session_id)) = path.split_once("/blobs/uploads/") {
-        validate_repository(repository)?;
-        return Ok(OciPath::BlobUploadSession {
-            repository: repository.to_owned(),
-            session_id: session_id.to_owned(),
-        });
-    }
-    if let Some((repository, digest)) = path.split_once("/blobs/") {
-        validate_repository(repository)?;
-        return Ok(OciPath::Blob {
-            repository: repository.to_owned(),
-            digest_hex: parse_sha256_digest(digest)?,
-        });
-    }
-    if let Some((repository, reference)) = path.split_once("/manifests/") {
-        validate_repository(repository)?;
-        return Ok(OciPath::Manifest {
-            repository: repository.to_owned(),
-            reference: reference.to_owned(),
-        });
-    }
     if let Some(repository) = path.strip_suffix("/tags/list") {
         validate_repository(repository)?;
         return Ok(OciPath::TagsList {
             repository: repository.to_owned(),
         });
     }
-
-    Err(ServerError::NotFound)
+    // Operation names are also legal repository components. Resolve the
+    // operation from the final path segments rather than its first occurrence.
+    let Some((prefix, value)) = path.rsplit_once('/') else {
+        return Err(ServerError::NotFound);
+    };
+    let Some((repository, operation)) = prefix.rsplit_once('/') else {
+        return Err(ServerError::NotFound);
+    };
+    match operation {
+        "blobs" => {
+            validate_repository(repository)?;
+            Ok(OciPath::Blob {
+                repository: repository.to_owned(),
+                digest_hex: parse_sha256_digest(value)?,
+            })
+        }
+        "manifests" => {
+            validate_repository(repository)?;
+            Ok(OciPath::Manifest {
+                repository: repository.to_owned(),
+                reference: value.to_owned(),
+            })
+        }
+        "uploads" => {
+            let Some(repository) = repository.strip_suffix("/blobs") else {
+                return Err(ServerError::NotFound);
+            };
+            validate_repository(repository)?;
+            Ok(OciPath::BlobUploadSession {
+                repository: repository.to_owned(),
+                session_id: value.to_owned(),
+            })
+        }
+        _ => Err(ServerError::NotFound),
+    }
 }
 
 #[cfg(test)]
@@ -277,13 +289,33 @@ mod tests {
     }
 
     #[test]
-    fn manifest_reference_with_slash_is_valid() {
-        // Slashes in the reference part are accepted as-is.
+    fn manifest_reference_with_slash_is_rejected() {
         let result = parse_oci_path("team/assets/manifests/v1/something");
-        assert!(matches!(
-            result,
-            Ok(OciPath::Manifest { reference, .. }) if reference == "v1/something"
-        ));
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[test]
+    fn operation_names_inside_repository_preserve_the_complete_repository() {
+        for repository in [
+            "team/blobs/assets",
+            "team/blobs/uploads/assets",
+            "team/manifests/assets",
+            "team/tags/list/assets",
+            "team/blobs/uploads/manifests/tags/list",
+        ] {
+            for suffix in [
+                format!("blobs/{VALID_DIGEST}"),
+                "blobs/uploads".to_owned(),
+                "blobs/uploads/0000000000000001".to_owned(),
+                "manifests/latest".to_owned(),
+                format!("manifests/{VALID_DIGEST}"),
+                "tags/list".to_owned(),
+            ] {
+                let path = format!("{repository}/{suffix}");
+                let parsed = parse_oci_path(&path).expect("valid operation and repository");
+                assert_eq!(parsed.repository(), repository, "{path}");
+            }
+        }
     }
 
     #[test]
