@@ -124,6 +124,14 @@ are additive. These migrations create ordinary PostgreSQL indexes:
 | `20261002020000` | `shardline_hub_file_entries` | `shardline_hub_file_entries_page_idx` |
 | `20261002030000` | `shardline_s3_objects` | `shardline_s3_objects_scope_key_c_idx` |
 | `20261003000000` | `shardline_tree_entries` | `shardline_tree_entries_prefix_pattern_idx` |
+| `20261003010000` | `shardline_webhook_deliveries` | `shardline_webhook_deliveries_retention_idx` |
+
+The webhook retention index contains only the timestamp in PostgreSQL, whose
+purge query filters on that column and locks heap rows. SQLite includes the
+provider, owner, repository and delivery ID after the timestamp to cover its
+bounded keyset pages. Keeping the PostgreSQL index narrow also permits migration
+of wider schema-valid legacy receipts; those rows can exceed the current public
+webhook component limits.
 
 PostgreSQL's ordinary index build permits reads but blocks inserts, updates, and
 deletes on the indexed table. Build time depends on table size and available CPU,

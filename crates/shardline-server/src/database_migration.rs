@@ -1,3 +1,4 @@
+use futures_util::TryStreamExt;
 use serde_json::{from_value, to_value};
 use shardline_index::{ResumableSessionState, UploadIntentState};
 use shardline_protocol::SecretString;
@@ -305,7 +306,7 @@ const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
     ),
 ];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 34] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 35] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -530,6 +531,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 34] = [
         up_sql: include_str!("../migrations/20261003000000_tree_prefix_pattern_index.up.sql"),
         down_sql: include_str!("../migrations/20261003000000_tree_prefix_pattern_index.down.sql"),
     },
+    DatabaseMigration {
+        version: "20261003010000",
+        name: "webhook_retention_index",
+        up_sql: include_str!("../migrations/20261003010000_webhook_retention_index.up.sql"),
+        down_sql: include_str!("../migrations/20261003010000_webhook_retention_index.down.sql"),
+    },
 ];
 
 /// Returns the bundled Shardline migration list in application order.
@@ -598,6 +605,9 @@ pub async fn run_database_migration(
 ) -> Result<DatabaseMigrationReport, DatabaseMigrationError> {
     if options.database_url().trim().is_empty() {
         return Err(DatabaseMigrationError::EmptyDatabaseUrl);
+    }
+    if let DatabaseMigrationCommand::Repair { operation_kind, .. } = options.command() {
+        parse_repair_operation_kind(operation_kind)?;
     }
 
     let pool = PgPoolOptions::new()
@@ -822,16 +832,22 @@ async fn verify_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigratio
     reconcile_reliability_events(pool, false, usize::MAX).await
 }
 
+fn parse_repair_operation_kind(
+    operation_kind: &str,
+) -> Result<OperationKind, DatabaseMigrationError> {
+    OperationKind::parse(operation_kind).ok_or_else(|| {
+        DatabaseMigrationError::Backfill(format!(
+            "unknown reliability operation kind for explicit repair: {operation_kind}"
+        ))
+    })
+}
+
 async fn repair_reliability_operation(
     pool: &PgPool,
     operation_kind: &str,
     operation_id: &str,
 ) -> Result<(), DatabaseMigrationError> {
-    let operation_kind = OperationKind::parse(operation_kind).ok_or_else(|| {
-        DatabaseMigrationError::Backfill(format!(
-            "unknown reliability operation kind for explicit repair: {operation_kind}"
-        ))
-    })?;
+    let operation_kind = parse_repair_operation_kind(operation_kind)?;
     let journal_exists: bool = query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM shardline_reliability_events
@@ -2279,15 +2295,14 @@ async fn reconcile_reliability_events(
 async fn verify_persisted_reliability_events(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), DatabaseMigrationError> {
-    let rows = query(
+    let mut rows = query(
         "SELECT operation_kind, operation_id, sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
          ORDER BY operation_kind, operation_id, sequence",
     )
-    .fetch_all(&mut **transaction)
-    .await?;
+    .fetch(&mut **transaction);
     let mut previous_operation: Option<(String, String, serde_json::Value)> = None;
-    for row in rows {
+    while let Some(row) = rows.try_next().await? {
         let operation_kind: String = row.try_get("operation_kind")?;
         let operation_id: String = row.try_get("operation_id")?;
         let previous = previous_operation
@@ -2305,7 +2320,7 @@ async fn verify_persisted_reliability_operation(
     operation_kind: OperationKind,
     operation_id: &str,
 ) -> Result<(), DatabaseMigrationError> {
-    let rows = query(
+    let mut rows = query(
         "SELECT operation_kind, operation_id, sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2
@@ -2313,10 +2328,9 @@ async fn verify_persisted_reliability_operation(
     )
     .bind(operation_kind.as_str())
     .bind(operation_id)
-    .fetch_all(pool)
-    .await?;
+    .fetch(pool);
     let mut previous: Option<serde_json::Value> = None;
-    for row in rows {
+    while let Some(row) = rows.try_next().await? {
         let observed = verify_persisted_reliability_row(&row, previous)?;
         previous = Some(observed);
     }
@@ -2627,6 +2641,36 @@ mod tests {
         format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 
+    #[tokio::test]
+    async fn invalid_repair_kind_is_rejected_before_database_connection() {
+        for kind in ["", "Unknown", "s3object", "S3Object\n"] {
+            let result = run_test_migration_command(
+                "postgres://localhost:1/no_connection",
+                DatabaseMigrationCommand::Repair {
+                    operation_kind: kind.to_owned(),
+                    operation_id: "example".to_owned(),
+                },
+            )
+            .await;
+            assert!(
+                matches!(result, Err(DatabaseMigrationError::Backfill(ref message))
+                if message.contains("unknown reliability operation kind"))
+            );
+        }
+        let result = run_test_migration_command(
+            "",
+            DatabaseMigrationCommand::Repair {
+                operation_kind: "Unknown".to_owned(),
+                operation_id: "example".to_owned(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(DatabaseMigrationError::EmptyDatabaseUrl)
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn explicit_repair_rebuilds_corrupt_published_oci_visibility_evidence() {
         let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
@@ -2765,7 +2809,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 34);
+        assert_eq!(bundled_database_migrations().len(), 35);
     }
 
     #[test]
@@ -2898,6 +2942,86 @@ mod tests {
             .expect("migration lock task should complete")
             .unwrap();
         drop(second);
+    }
+
+    #[tokio::test]
+    async fn webhook_retention_index_migrates_public_max_and_wide_schema_rows() {
+        use sqlx::Connection;
+
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let mut connection = sqlx::PgConnection::connect(&database_url).await.unwrap();
+        let mut transaction = connection.begin().await.unwrap();
+        query(
+            "CREATE TEMP TABLE shardline_webhook_deliveries (
+                provider TEXT NOT NULL CHECK(length(trim(provider)) > 0),
+                owner TEXT NOT NULL CHECK(length(trim(owner)) > 0),
+                repo TEXT NOT NULL CHECK(length(trim(repo)) > 0),
+                delivery_id TEXT NOT NULL CHECK(length(trim(delivery_id)) > 0),
+                processed_at_unix_seconds BIGINT NOT NULL CHECK(processed_at_unix_seconds >= 0),
+                PRIMARY KEY(provider,owner,repo,delivery_id)
+             ) ON COMMIT DROP",
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        // Incompressible deterministic strings keep the PostgreSQL B-tree
+        // width control meaningful. Only the 512-byte row is public-valid.
+        let value: String = sqlx::query_scalar(
+            "SELECT substr(string_agg(md5(i::text), '' ORDER BY i), 1, 889)
+             FROM generate_series(1, 40) AS i",
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+        let public_component = value.chars().take(512).collect::<String>();
+        let public = shardline_index::WebhookDelivery::new(
+            shardline_protocol::RepositoryProvider::GitHub,
+            public_component.clone(),
+            public_component.chars().rev().collect(),
+            public_component,
+            100,
+        )
+        .unwrap();
+        query("INSERT INTO shardline_webhook_deliveries VALUES('github', $1, $2, $3, 100)")
+            .bind(public.owner())
+            .bind(public.repo())
+            .bind(public.delivery_id())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        // This wider row is admitted by the existing schema/primary key, but
+        // deliberately exceeds the current public constructor's component cap.
+        query(
+            "INSERT INTO shardline_webhook_deliveries VALUES('github', $1, reverse($1), $1 || 'x', 100)",
+        ).bind(&value).execute(&mut *transaction).await.unwrap();
+        let migration = bundled_database_migrations()
+            .iter()
+            .find(|migration| migration.version == "20261003010000")
+            .unwrap();
+        sqlx::raw_sql(migration.up_sql)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shardline_webhook_deliveries")
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+        assert_eq!(rows, 2);
+        sqlx::raw_sql(migration.down_sql)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let exists: bool = sqlx::query_scalar(
+            "SELECT to_regclass('pg_temp.shardline_webhook_deliveries_retention_idx') IS NOT NULL",
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+        assert!(!exists);
+        transaction.rollback().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

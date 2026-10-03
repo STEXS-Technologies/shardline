@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS shardline_webhook_deliveries_retention_idx;
