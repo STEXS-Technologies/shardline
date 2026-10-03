@@ -80,6 +80,99 @@ fn take_matching_local_write_hook(
 #[cfg(not(test))]
 const fn run_before_local_write_hook(_path: &Path) {}
 
+/// Reject report destinations that overlap persistent deployment state before any
+/// server operation or output-directory creation. Ordinary reports under the root
+/// remain valid destinations.
+pub(crate) fn validate_deployment_output(
+    config: &shardline_server::ServerConfig,
+    output: &Path,
+) -> io::Result<()> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    crate::local_path::ensure_directory_path_components_are_not_symlinked(parent)?;
+    ensure_existing_target_is_regular_or_missing(output)?;
+    let root = resolved_output_path(config.root_dir())?;
+    let output = resolved_output_path(output)?;
+    let state_directories = [
+        "chunks",
+        "files",
+        "file_versions",
+        "gc",
+        "hub",
+        ".resource-locks",
+        "tmp",
+    ];
+    let state_files = [
+        "metadata.sqlite3",
+        "metadata.sqlite3-wal",
+        "metadata.sqlite3-shm",
+        "metadata.sqlite3-journal",
+        ".gc-write-barrier.lock",
+    ];
+    for state in state_directories {
+        let reserved = resolved_output_path(&root.join(state))?;
+        if output.starts_with(&reserved) || reserved.starts_with(&output) {
+            return Err(reserved_deployment_output_error());
+        }
+    }
+    for state in state_files {
+        if output.starts_with(resolved_output_path(&root.join(state))?) {
+            return Err(reserved_deployment_output_error());
+        }
+    }
+    Ok(())
+}
+
+fn reserved_deployment_output_error() -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidInput,
+        "report output must not overlap reserved deployment state",
+    )
+}
+
+// Resolve existing ancestors without creating directories. This also catches
+// aliases into state trees and protects names whose directories do not yet exist.
+fn resolved_output_path(path: &Path) -> io::Result<PathBuf> {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    let mut ancestor = normalized.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let name = ancestor.file_name().ok_or_else(invalid_output_path_error)?;
+                missing.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(invalid_output_path_error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Writes one local CLI output file through an anchored temporary path.
 ///
 /// # Errors
@@ -369,6 +462,54 @@ mod tests {
         effective_parent_path, remove_output_file_if_present, set_before_local_write_hook,
         write_output_bytes,
     };
+
+    #[test]
+    fn deployment_outputs_reserve_state_even_before_it_exists() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("deployment");
+        let config = crate::config::load_server_config(Some(&root), None).unwrap();
+        for name in [
+            "metadata.sqlite3",
+            "metadata.sqlite3-wal",
+            "metadata.sqlite3-shm",
+            "metadata.sqlite3-journal",
+            "metadata.sqlite3/nested.json",
+            ".gc-write-barrier.lock",
+            "chunks/aa/object",
+            "files/record.json",
+            "file_versions/record.json",
+            "gc/quarantine.json",
+            "hub/metadata.sqlite3",
+            ".resource-locks/resource.lock",
+            "tmp/lfs-patch/state",
+        ] {
+            let result = super::validate_deployment_output(&config, &root.join(name));
+            assert!(
+                matches!(result, Err(error) if error.kind() == ErrorKind::InvalidInput),
+                "{name}"
+            );
+        }
+        assert!(
+            super::validate_deployment_output(&config, &root.join("reports/retention.json"))
+                .is_ok()
+        );
+        assert!(super::validate_deployment_output(&config, &root.join("manifest.json")).is_ok());
+        assert!(!root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deployment_outputs_detect_aliased_state_directories() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("deployment");
+        std::fs::create_dir_all(root.join("chunks")).unwrap();
+        let alias = sandbox.path().join("alias");
+        symlink(root.join("chunks"), &alias).unwrap();
+        let config = crate::config::load_server_config(Some(&root), None).unwrap();
+        assert!(
+            super::validate_deployment_output(&config, &alias.join("nested/report.json")).is_err()
+        );
+    }
 
     #[cfg(unix)]
     #[test]
