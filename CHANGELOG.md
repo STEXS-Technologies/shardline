@@ -46,6 +46,8 @@ memory growth and blocking work in large inventories and transfers.
 
 ### Fixed
 
+- Updated the pinned Docker build toolchain to Rust 1.99 so release images build
+  with the SDK's current atomic APIs.
 - Release partial PostgreSQL resource-lock bundles on cancellation while
   another resource remains held, without waiting on a blocked server query.
 - Fixed repository isolation, Git tree and pack integrity, exact-head recovery, and
