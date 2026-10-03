@@ -867,9 +867,14 @@ async fn ingest_bench_focused_concurrent_upload() {
 async fn invalid_benchmark_parameters_reject_before_creating_storage() {
     let parent = tempfile::tempdir().unwrap();
     let storage = parent.path().join("must-not-exist");
-    for (chunk_size_bytes, base_bytes) in
-        [(8, 256), (129, 256), (usize::MAX, 256), (128, usize::MAX)]
-    {
+    for (chunk_size_bytes, base_bytes) in [
+        (0, 256),
+        (8, 256),
+        (127, 256),
+        (129, 256),
+        (usize::MAX, 256),
+        (128, usize::MAX),
+    ] {
         let config = BenchConfig {
             deployment_target: BenchDeploymentTarget::IsolatedLocal,
             scenario: BenchScenario::InitialUpload,
@@ -880,9 +885,37 @@ async fn invalid_benchmark_parameters_reject_before_creating_storage() {
             base_bytes,
             mutated_bytes: 8,
         };
-        assert!(run_bench(&storage, config).await.is_err());
+        for error in [
+            run_bench(&storage, config).await.unwrap_err(),
+            run_ingest_bench(config).await.unwrap_err(),
+        ] {
+            match chunk_size_bytes {
+                0 => assert!(matches!(error, BenchRuntimeError::ZeroChunkSize)),
+                8 | 127 => assert!(matches!(
+                    error,
+                    BenchRuntimeError::ServerConfig(
+                        shardline_server::ServerConfigError::ChunkSizeTooSmall
+                    )
+                )),
+                129 => assert!(matches!(
+                    error,
+                    BenchRuntimeError::ServerConfig(
+                        shardline_server::ServerConfigError::ChunkSizeNotPowerOfTwo
+                    )
+                )),
+                128 => assert!(matches!(
+                    error,
+                    BenchRuntimeError::InvalidAllocationCapacity("base asset")
+                )),
+                _ => assert!(matches!(
+                    error,
+                    BenchRuntimeError::ServerConfig(
+                        shardline_server::ServerConfigError::ChunkSizeTooLarge
+                    )
+                )),
+            }
+        }
         assert!(!storage.exists());
-        assert!(run_ingest_bench(config).await.is_err());
     }
 }
 
@@ -891,5 +924,58 @@ fn asset_capacity_overflow_is_a_typed_error() {
     assert!(matches!(
         build_base_asset(usize::MAX),
         Err(BenchRuntimeError::InvalidAllocationCapacity("base asset"))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn benchmark_minimum_chunk_size_runs_in_both_modes() {
+    let storage = tempfile::tempdir().unwrap();
+    let config = BenchConfig {
+        deployment_target: BenchDeploymentTarget::IsolatedLocal,
+        scenario: BenchScenario::Full,
+        iterations: 1,
+        concurrency: 1,
+        upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+        chunk_size_bytes: 128,
+        base_bytes: 256,
+        mutated_bytes: 8,
+    };
+    let e2e = run_bench(storage.path(), config).await.unwrap();
+    assert_eq!(e2e.chunk_size_bytes, 128);
+    assert_eq!(e2e.iterations, 1);
+    assert_eq!(e2e.iterations_detail.len(), 1);
+    let ingest = run_ingest_bench(config).await.unwrap();
+    assert_eq!(ingest.chunk_size_bytes, 128);
+    assert_eq!(ingest.iterations, 1);
+    assert_eq!(ingest.total_concurrent_uploaded_bytes, 256);
+}
+
+#[test]
+fn benchmark_validation_accepts_protocol_and_capacity_boundaries_without_allocating() {
+    let mut config = BenchConfig {
+        deployment_target: BenchDeploymentTarget::IsolatedLocal,
+        scenario: BenchScenario::InitialUpload,
+        iterations: 1,
+        concurrency: 1,
+        upload_max_in_flight_chunks: usize::MAX,
+        chunk_size_bytes: 1 << 30,
+        base_bytes: isize::MAX as usize,
+        mutated_bytes: 8,
+    };
+    assert!(config.validate_ingest().is_ok());
+    if usize::BITS > 32 {
+        assert!(config.validate_e2e().is_ok());
+    } else {
+        assert!(matches!(
+            config.validate_e2e(),
+            Err(BenchRuntimeError::InvalidAllocationCapacity(
+                "cross-repository asset"
+            ))
+        ));
+    }
+    config.scenario = BenchScenario::LatestDownload;
+    assert!(matches!(
+        config.validate_ingest(),
+        Err(BenchRuntimeError::UnsupportedScenarioForMode)
     ));
 }
