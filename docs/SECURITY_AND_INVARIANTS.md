@@ -30,6 +30,11 @@ Expected hostile inputs:
 
 These invariants must hold in all builds:
 
+- Installing local object bytes synchronizes the object bytes, its final directory
+  entry, and the containing entries for the directory chain before acknowledging
+  an insertion. Existing
+  directories are synchronized too because a concurrent creator may not have
+  completed its parent synchronization; read-only directory walks do not sync.
 - A xorb is stored only if its body parses and its hash matches its content-addressed
   key.
 - A shard is registered only if its body parses and all referenced xorbs exist.

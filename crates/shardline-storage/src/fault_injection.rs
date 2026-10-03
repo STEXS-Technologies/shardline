@@ -7,6 +7,10 @@ use std::{io, path::Path};
 /// rather than selecting a failpoint with a string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LocalPublishBoundary {
+    /// Before synchronizing a directory name in its containing directory.
+    BeforeDirectorySync,
+    /// After the containing directory has made a child directory name durable.
+    AfterDirectoryDurable,
     /// Before a temporary file is created or written.
     BeforeTemporaryWrite,
     /// While temporary-file bytes are being written.
