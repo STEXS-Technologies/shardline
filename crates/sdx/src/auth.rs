@@ -624,8 +624,14 @@ impl TokenService {
     }
 
     fn start_refresh(&self, scope: Scope) -> RefreshFuture {
-        let this = Arc::clone(&self.inner);
-        Box::pin(async move { this.issue(scope).await })
+        // The cached shared future must not retain its owning state: a last
+        // cancelled waiter could otherwise leave a permanent Arc cycle.
+        Box::pin(issue_token(
+            self.inner.client.clone(),
+            self.inner.auth.clone(),
+            self.inner.env.clone(),
+            scope,
+        ))
     }
 
     /// Drops the cached read token so the next [`read_token`](Self::read_token)
@@ -660,26 +666,29 @@ impl TokenService {
     }
 }
 
-impl TokenServiceInner {
-    async fn issue(&self, scope: Scope) -> Result<ScopedToken, AuthError> {
-        let credential = self.auth.resolve_credential(self.env.as_ref())?;
-        let url = self.auth.token_url(scope);
-        let request = self.client.get(url);
-        let request = apply_credential(request, credential);
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = error_message(response).await;
-            return Err(http_error(status, message));
-        }
-        let bytes = read_token_response(response).await?;
-        let parsed: XetCasTokenResponse = serde_json::from_slice(&bytes)?;
-        Ok(ScopedToken {
-            token: parsed.access_token,
-            exp: parsed.exp,
-            cas_url: parsed.cas_url,
-        })
+async fn issue_token(
+    client: reqwest::Client,
+    auth: Auth,
+    env: EnvLookup,
+    scope: Scope,
+) -> Result<ScopedToken, AuthError> {
+    let credential = auth.resolve_credential(env.as_ref())?;
+    let url = auth.token_url(scope);
+    let request = client.get(url);
+    let request = apply_credential(request, credential);
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        let message = error_message(response).await;
+        return Err(http_error(status, message));
     }
+    let bytes = read_token_response(response).await?;
+    let parsed: XetCasTokenResponse = serde_json::from_slice(&bytes)?;
+    Ok(ScopedToken {
+        token: parsed.access_token,
+        exp: parsed.exp,
+        cas_url: parsed.cas_url,
+    })
 }
 
 fn cached(scope: Scope, state: &CacheState) -> Option<ScopedToken> {
@@ -1158,6 +1167,74 @@ mod tests {
         let second = service.read_token().await.unwrap();
         assert_eq!(second.token, "token-2");
         assert_eq!(request_count(&server).await, 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_last_refresh_waiter_releases_inner_for_both_scopes() {
+        for scope in [super::Scope::Read, super::Scope::Write] {
+            let server = MockServer::start().await;
+            let now = Arc::new(AtomicU64::new(NOW));
+            Mock::given(method("GET"))
+                .respond_with(
+                    token_response(NOW + 3600, "token", &server.uri())
+                        .set_delay(Duration::from_millis(100)),
+                )
+                .mount(&server)
+                .await;
+            let auth = Auth::new(&server.uri(), repository())
+                .unwrap()
+                .with_token("server-token".to_owned());
+            // Unpolled services have no in-flight future and release normally.
+            let unpolled = service(auth.clone(), &now);
+            let weak = Arc::downgrade(&unpolled.inner);
+            drop(unpolled);
+            assert!(weak.upgrade().is_none());
+
+            let tokens = service(auth.clone(), &now);
+            let weak = Arc::downgrade(&tokens.inner);
+            let mut first = Box::pin(tokens.token(scope));
+            let mut second = Box::pin(tokens.token(scope));
+            assert!(futures_util::poll!(&mut first).is_pending());
+            assert!(futures_util::poll!(&mut second).is_pending());
+            drop(first);
+            assert!(weak.upgrade().is_some());
+            drop(second);
+            drop(tokens);
+            assert!(weak.upgrade().is_none());
+
+            let completed = service(auth, &now);
+            let weak = Arc::downgrade(&completed.inner);
+            assert_eq!(completed.token(scope).await.unwrap().token, "token");
+            drop(completed);
+            assert!(weak.upgrade().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_can_resume_without_duplicate_issuance() {
+        for scope in [super::Scope::Read, super::Scope::Write] {
+            let server = MockServer::start().await;
+            let now = Arc::new(AtomicU64::new(NOW));
+            Mock::given(method("GET"))
+                .respond_with(
+                    token_response(NOW + 3600, "resumed-token", &server.uri())
+                        .set_delay(Duration::from_millis(50)),
+                )
+                .mount(&server)
+                .await;
+            let tokens = service(
+                Auth::new(&server.uri(), repository())
+                    .unwrap()
+                    .with_token("server-token".to_owned()),
+                &now,
+            );
+            let mut initial = Box::pin(tokens.token(scope));
+            assert!(futures_util::poll!(&mut initial).is_pending());
+            drop(initial);
+            assert_eq!(tokens.token(scope).await.unwrap().token, "resumed-token");
+            assert_eq!(tokens.token(scope).await.unwrap().token, "resumed-token");
+            assert_eq!(request_count(&server).await, 1);
+        }
     }
 
     #[tokio::test]
