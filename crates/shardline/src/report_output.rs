@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::path::Path;
 
 use shardline_server::{
@@ -36,110 +37,30 @@ pub fn print_database_migration_summary(report: &DatabaseMigrationReport) {
     }
 }
 
+// Compatibility printers retain their unit-returning APIs. The CLI uses the
+// fallible writer functions below to propagate write and flush failures.
 pub fn print_fsck_summary(report: &LocalFsckReport) {
-    println!("latest_records: {}", report.latest_records);
-    println!("version_records: {}", report.version_records);
-    println!(
-        "inspected_chunk_references: {}",
-        report.inspected_chunk_references
-    );
-    println!(
-        "inspected_dedupe_shard_mappings: {}",
-        report.inspected_dedupe_shard_mappings
-    );
-    println!(
-        "inspected_reconstructions: {}",
-        report.inspected_reconstructions
-    );
-    println!(
-        "inspected_webhook_deliveries: {}",
-        report.inspected_webhook_deliveries
-    );
-    println!(
-        "inspected_provider_repository_states: {}",
-        report.inspected_provider_repository_states
-    );
-    println!("issue_count: {}", report.issue_count());
+    let _output_result = write_fsck_summary(&mut io::stdout().lock(), report);
 }
 
 pub fn print_fsck_cli_summary(report: &LocalFsckReport, root: &Path) {
-    println!("root: {}", root.display());
-    print_fsck_summary(report);
+    let _output_result = write_fsck_cli_summary(&mut io::stdout().lock(), report, root);
 }
 
 pub fn print_fsck_issues(report: &LocalFsckReport) {
-    for issue in &report.issues {
-        eprintln!(
-            "issue: {} location={} detail={}",
-            issue.kind.as_str(),
-            issue.location,
-            issue.detail
-        );
-    }
+    let _output_result = write_fsck_issues(&mut io::stderr().lock(), report);
 }
 
 pub fn print_index_rebuild_summary(report: &LocalIndexRebuildReport) {
-    println!(
-        "scanned_version_records: {}",
-        report.scanned_version_records
-    );
-    println!(
-        "scanned_retained_shards: {}",
-        report.scanned_retained_shards
-    );
-    println!("rebuilt_latest_records: {}", report.rebuilt_latest_records);
-    println!(
-        "unchanged_latest_records: {}",
-        report.unchanged_latest_records
-    );
-    println!(
-        "removed_stale_latest_records: {}",
-        report.removed_stale_latest_records
-    );
-    for location in &report.preserved_latest_records_unreadable_version {
-        println!("kept_latest_record_unreadable_version: {}", location);
-    }
-    println!(
-        "scanned_reconstructions: {}",
-        report.scanned_reconstructions
-    );
-    println!(
-        "unchanged_reconstructions: {}",
-        report.unchanged_reconstructions
-    );
-    println!(
-        "removed_stale_reconstructions: {}",
-        report.removed_stale_reconstructions
-    );
-    println!(
-        "rebuilt_dedupe_shard_mappings: {}",
-        report.rebuilt_dedupe_shard_mappings
-    );
-    println!(
-        "unchanged_dedupe_shard_mappings: {}",
-        report.unchanged_dedupe_shard_mappings
-    );
-    println!(
-        "removed_stale_dedupe_shard_mappings: {}",
-        report.removed_stale_dedupe_shard_mappings
-    );
-    println!("issue_count: {}", report.issue_count());
+    let _output_result = write_index_rebuild_summary(&mut io::stdout().lock(), report);
 }
 
 pub fn print_index_rebuild_cli_summary(report: &LocalIndexRebuildReport, root: &Path) {
-    println!("root: {}", root.display());
-    print_index_rebuild_summary(report);
+    let _output_result = write_index_rebuild_cli_summary(&mut io::stdout().lock(), report, root);
 }
 
 pub fn print_index_rebuild_issues(report: &LocalIndexRebuildReport) {
-    for issue in &report.issues {
-        eprintln!(
-            "issue: {} location={} detail={}",
-            issue.kind.as_str(),
-            issue.location,
-            issue.detail
-        );
-    }
+    let _output_result = write_index_rebuild_issues(&mut io::stderr().lock(), report);
 }
 
 pub fn print_lifecycle_repair_summary(report: &LifecycleRepairReport) {
@@ -206,22 +127,7 @@ pub fn print_lifecycle_repair_cli_summary(
 }
 
 pub fn print_backup_manifest_summary(report: &BackupManifestReport) {
-    println!("manifest_version: {}", report.manifest_version);
-    println!("metadata_backend: {}", report.metadata_backend);
-    println!("object_backend: {}", report.object_backend);
-    println!("object_count: {}", report.object_count);
-    println!("object_bytes: {}", report.object_bytes);
-    println!("latest_records: {}", report.latest_records);
-    println!("version_records: {}", report.version_records);
-    println!("reconstruction_rows: {}", report.reconstruction_rows);
-    println!("dedupe_shard_mappings: {}", report.dedupe_shard_mappings);
-    println!("quarantine_candidates: {}", report.quarantine_candidates);
-    println!("retention_holds: {}", report.retention_holds);
-    println!("webhook_deliveries: {}", report.webhook_deliveries);
-    println!(
-        "provider_repository_states: {}",
-        report.provider_repository_states
-    );
+    let _output_result = write_backup_manifest_summary(&mut io::stdout().lock(), report);
 }
 
 pub fn print_backup_manifest_cli_summary(
@@ -229,9 +135,8 @@ pub fn print_backup_manifest_cli_summary(
     root: &Path,
     output: &Path,
 ) {
-    println!("root: {}", root.display());
-    println!("output: {}", output.display());
-    print_backup_manifest_summary(report);
+    let _output_result =
+        write_backup_manifest_cli_summary(&mut io::stdout().lock(), report, root, output);
 }
 
 pub fn print_storage_migration_summary(report: &StorageMigrationReport) {
@@ -334,8 +239,216 @@ pub fn print_local_gc_cli_summary(
     print_local_gc_summary(report);
 }
 
+pub(crate) fn write_fsck_summary(
+    writer: &mut impl Write,
+    report: &LocalFsckReport,
+) -> io::Result<()> {
+    writeln!(writer, "latest_records: {}", report.latest_records)?;
+    writeln!(writer, "version_records: {}", report.version_records)?;
+    writeln!(
+        writer,
+        "inspected_chunk_references: {}",
+        report.inspected_chunk_references
+    )?;
+    writeln!(
+        writer,
+        "inspected_dedupe_shard_mappings: {}",
+        report.inspected_dedupe_shard_mappings
+    )?;
+    writeln!(
+        writer,
+        "inspected_reconstructions: {}",
+        report.inspected_reconstructions
+    )?;
+    writeln!(
+        writer,
+        "inspected_webhook_deliveries: {}",
+        report.inspected_webhook_deliveries
+    )?;
+    writeln!(
+        writer,
+        "inspected_provider_repository_states: {}",
+        report.inspected_provider_repository_states
+    )?;
+    writeln!(writer, "issue_count: {}", report.issue_count())?;
+
+    writer.flush()
+}
+
+pub(crate) fn write_fsck_cli_summary(
+    writer: &mut impl Write,
+    report: &LocalFsckReport,
+    root: &Path,
+) -> io::Result<()> {
+    writeln!(writer, "root: {}", root.display())?;
+    write_fsck_summary(writer, report)
+}
+
+pub(crate) fn write_fsck_issues(
+    writer: &mut impl Write,
+    report: &LocalFsckReport,
+) -> io::Result<()> {
+    for issue in &report.issues {
+        writeln!(
+            writer,
+            "issue: {} location={} detail={}",
+            issue.kind.as_str(),
+            issue.location,
+            issue.detail
+        )?;
+    }
+
+    writer.flush()
+}
+
+pub(crate) fn write_index_rebuild_summary(
+    writer: &mut impl Write,
+    report: &LocalIndexRebuildReport,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "scanned_version_records: {}",
+        report.scanned_version_records
+    )?;
+    writeln!(
+        writer,
+        "scanned_retained_shards: {}",
+        report.scanned_retained_shards
+    )?;
+    writeln!(
+        writer,
+        "rebuilt_latest_records: {}",
+        report.rebuilt_latest_records
+    )?;
+    writeln!(
+        writer,
+        "unchanged_latest_records: {}",
+        report.unchanged_latest_records
+    )?;
+    writeln!(
+        writer,
+        "removed_stale_latest_records: {}",
+        report.removed_stale_latest_records
+    )?;
+    for location in &report.preserved_latest_records_unreadable_version {
+        writeln!(
+            writer,
+            "kept_latest_record_unreadable_version: {}",
+            location
+        )?;
+    }
+    writeln!(
+        writer,
+        "scanned_reconstructions: {}",
+        report.scanned_reconstructions
+    )?;
+    writeln!(
+        writer,
+        "unchanged_reconstructions: {}",
+        report.unchanged_reconstructions
+    )?;
+    writeln!(
+        writer,
+        "removed_stale_reconstructions: {}",
+        report.removed_stale_reconstructions
+    )?;
+    writeln!(
+        writer,
+        "rebuilt_dedupe_shard_mappings: {}",
+        report.rebuilt_dedupe_shard_mappings
+    )?;
+    writeln!(
+        writer,
+        "unchanged_dedupe_shard_mappings: {}",
+        report.unchanged_dedupe_shard_mappings
+    )?;
+    writeln!(
+        writer,
+        "removed_stale_dedupe_shard_mappings: {}",
+        report.removed_stale_dedupe_shard_mappings
+    )?;
+    writeln!(writer, "issue_count: {}", report.issue_count())?;
+
+    writer.flush()
+}
+
+pub(crate) fn write_index_rebuild_cli_summary(
+    writer: &mut impl Write,
+    report: &LocalIndexRebuildReport,
+    root: &Path,
+) -> io::Result<()> {
+    writeln!(writer, "root: {}", root.display())?;
+    write_index_rebuild_summary(writer, report)
+}
+
+pub(crate) fn write_index_rebuild_issues(
+    writer: &mut impl Write,
+    report: &LocalIndexRebuildReport,
+) -> io::Result<()> {
+    for issue in &report.issues {
+        writeln!(
+            writer,
+            "issue: {} location={} detail={}",
+            issue.kind.as_str(),
+            issue.location,
+            issue.detail
+        )?;
+    }
+
+    writer.flush()
+}
+
+pub(crate) fn write_backup_manifest_summary(
+    writer: &mut impl Write,
+    report: &BackupManifestReport,
+) -> io::Result<()> {
+    writeln!(writer, "manifest_version: {}", report.manifest_version)?;
+    writeln!(writer, "metadata_backend: {}", report.metadata_backend)?;
+    writeln!(writer, "object_backend: {}", report.object_backend)?;
+    writeln!(writer, "object_count: {}", report.object_count)?;
+    writeln!(writer, "object_bytes: {}", report.object_bytes)?;
+    writeln!(writer, "latest_records: {}", report.latest_records)?;
+    writeln!(writer, "version_records: {}", report.version_records)?;
+    writeln!(
+        writer,
+        "reconstruction_rows: {}",
+        report.reconstruction_rows
+    )?;
+    writeln!(
+        writer,
+        "dedupe_shard_mappings: {}",
+        report.dedupe_shard_mappings
+    )?;
+    writeln!(
+        writer,
+        "quarantine_candidates: {}",
+        report.quarantine_candidates
+    )?;
+    writeln!(writer, "retention_holds: {}", report.retention_holds)?;
+    writeln!(writer, "webhook_deliveries: {}", report.webhook_deliveries)?;
+    writeln!(
+        writer,
+        "provider_repository_states: {}",
+        report.provider_repository_states
+    )?;
+
+    writer.flush()
+}
+
+pub(crate) fn write_backup_manifest_cli_summary(
+    writer: &mut impl Write,
+    report: &BackupManifestReport,
+    root: &Path,
+    output: &Path,
+) -> io::Result<()> {
+    writeln!(writer, "root: {}", root.display())?;
+    writeln!(writer, "output: {}", output.display())?;
+    write_backup_manifest_summary(writer, report)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
     use std::path::Path;
 
     use shardline_server::{
@@ -747,5 +860,116 @@ mod tests {
             inspected_provider_repository_states: 0,
             issues: vec![],
         }
+    }
+    struct FailingReportWriter {
+        fail_write: bool,
+        written: Vec<u8>,
+    }
+
+    impl Write for FailingReportWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_write {
+                return Err(io::Error::from_raw_os_error(28));
+            }
+            self.written.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(28))
+        }
+    }
+
+    #[test]
+    fn fallible_cli_summaries_propagate_write_and_flush_errors() {
+        for fail_write in [true, false] {
+            let mut writer = FailingReportWriter {
+                fail_write,
+                written: Vec::new(),
+            };
+            assert_eq!(
+                write_fsck_cli_summary(&mut writer, &empty_fsck_report(), Path::new("/root"))
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(
+                write_index_rebuild_cli_summary(
+                    &mut writer,
+                    &empty_index_rebuild_report(),
+                    Path::new("/root")
+                )
+                .unwrap_err()
+                .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(
+                write_backup_manifest_cli_summary(
+                    &mut writer,
+                    &empty_backup_report(),
+                    Path::new("/root"),
+                    Path::new("/manifest.json")
+                )
+                .unwrap_err()
+                .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(writer.written.is_empty(), fail_write);
+        }
+    }
+
+    #[test]
+    fn fallible_issue_outputs_propagate_write_and_flush_errors() {
+        let fsck = LocalFsckReport {
+            issues: vec![LocalFsckIssue {
+                kind: FsckIssueKind::MissingChunk,
+                location: "chunks/abc".to_owned(),
+                detail: FsckIssueDetail::RecordJsonInvalid,
+            }],
+            ..empty_fsck_report()
+        };
+        let rebuild = LocalIndexRebuildReport {
+            issues: vec![LocalIndexRebuildIssue {
+                kind: LocalIndexRebuildIssueKind::InvalidVersionRecordJson,
+                location: "records/abc".to_owned(),
+                detail: IndexRebuildIssueDetail::RecordJsonInvalid,
+            }],
+            ..empty_index_rebuild_report()
+        };
+        for fail_write in [true, false] {
+            let mut writer = FailingReportWriter {
+                fail_write,
+                written: Vec::new(),
+            };
+            assert_eq!(
+                write_fsck_issues(&mut writer, &fsck)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(
+                write_index_rebuild_issues(&mut writer, &rebuild)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(28)
+            );
+            assert_eq!(writer.written.is_empty(), fail_write);
+        }
+    }
+
+    #[test]
+    fn fallible_cli_summaries_preserve_report_format() {
+        let mut writer = Vec::new();
+        write_backup_manifest_cli_summary(
+            &mut writer,
+            &empty_backup_report(),
+            Path::new("/root"),
+            Path::new("/manifest.json"),
+        )
+        .unwrap();
+        let text = String::from_utf8(writer).unwrap();
+        assert!(text.starts_with("root: /root\noutput: /manifest.json\nmanifest_version: 1\n"));
+        assert!(text.contains("object_count: 0\n"));
+        assert!(text.ends_with("provider_repository_states: 0\n"));
     }
 }

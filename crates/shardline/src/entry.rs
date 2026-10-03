@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use serde_json::to_string_pretty;
@@ -163,44 +164,54 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                 let root = match resolve_root(root.as_deref()) {
                     Ok(path) => path,
                     Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::from(2);
+                        return report_output_error(&error);
                     }
                 };
-                report_output::print_fsck_cli_summary(&report, &root);
+                if let Err(error) =
+                    report_output::write_fsck_cli_summary(&mut io::stdout().lock(), &report, &root)
+                {
+                    return report_output_error(&error);
+                }
                 if report.is_clean() {
                     ExitCode::SUCCESS
                 } else {
-                    report_output::print_fsck_issues(&report);
+                    if let Err(error) =
+                        report_output::write_fsck_issues(&mut io::stderr().lock(), &report)
+                    {
+                        return report_output_error(&error);
+                    }
                     ExitCode::FAILURE
                 }
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::IndexRebuild { root }) => match run_index_rebuild(root.as_deref()).await {
             Ok(report) => {
                 let root = match resolve_root(root.as_deref()) {
                     Ok(path) => path,
                     Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::from(2);
+                        return report_output_error(&error);
                     }
                 };
-                report_output::print_index_rebuild_cli_summary(&report, &root);
+                if let Err(error) = report_output::write_index_rebuild_cli_summary(
+                    &mut io::stdout().lock(),
+                    &report,
+                    &root,
+                ) {
+                    return report_output_error(&error);
+                }
                 if report.is_clean() {
                     ExitCode::SUCCESS
                 } else {
-                    report_output::print_index_rebuild_issues(&report);
+                    if let Err(error) =
+                        report_output::write_index_rebuild_issues(&mut io::stderr().lock(), &report)
+                    {
+                        return report_output_error(&error);
+                    }
                     ExitCode::FAILURE
                 }
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
+            Err(error) => report_output_error(&error),
         },
         Ok(CliCommand::Repair {
             root,
@@ -269,17 +280,20 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                     let root = match resolve_root(root.as_deref()) {
                         Ok(path) => path,
                         Err(error) => {
-                            eprintln!("{error}");
-                            return ExitCode::from(2);
+                            return report_output_error(&error);
                         }
                     };
-                    report_output::print_backup_manifest_cli_summary(&report, &root, &output);
+                    if let Err(error) = report_output::write_backup_manifest_cli_summary(
+                        &mut io::stdout().lock(),
+                        &report,
+                        &root,
+                        &output,
+                    ) {
+                        return report_output_error(&error);
+                    }
                     ExitCode::SUCCESS
                 }
-                Err(error) => {
-                    eprintln!("{error}");
-                    ExitCode::from(2)
-                }
+                Err(error) => report_output_error(&error),
             }
         }
         Ok(CliCommand::StorageMigrate {
@@ -606,6 +620,12 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn report_output_error(error: &impl std::fmt::Display) -> ExitCode {
+    let mut stderr = io::stderr().lock();
+    let _output_result = writeln!(stderr, "{error}").and_then(|()| stderr.flush());
+    ExitCode::from(2)
 }
 
 const fn gc_mode_name(mark: bool, sweep: bool) -> &'static str {
