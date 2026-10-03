@@ -1181,7 +1181,14 @@ fn feed_reader<R: Read + Send + 'static>(
     let mut chunker = Chunker::new(chunk_target);
     let mut buffer = vec![0u8; INGESTION_BLOCK_SIZE];
     loop {
-        let n = reader.read(&mut buffer).map_err(SdxError::Io)?;
+        if tx.is_closed() {
+            return Err(SdxError::UploadSession("ingest channel closed".to_owned()));
+        }
+        let n = match reader.read(&mut buffer) {
+            Ok(n) => n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(SdxError::Io(error)),
+        };
         if n == 0 {
             break;
         }
@@ -1631,6 +1638,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    struct InterruptedReader {
+        source: std::io::Cursor<Vec<u8>>,
+        interrupt_after_data: bool,
+        interrupted: bool,
+    }
+
+    impl std::io::Read for InterruptedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted && (!self.interrupt_after_data || self.source.position() > 0) {
+                self.interrupted = true;
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            let count = buffer.len().min(17);
+            let buffer = buffer
+                .get_mut(..count)
+                .ok_or_else(|| std::io::Error::other("owned short-reader range invalid"))?;
+            std::io::Read::read(&mut self.source, buffer)
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_reader_retries_before_and_between_short_reads() {
+        let (_server, client) = mock_client().await;
+        let session = client.upload_session().unwrap();
+        let payload = vec![42u8; 100];
+        let expected = session
+            .upload_bytes("remote/ordinary.bin", payload.clone())
+            .await
+            .unwrap();
+        for interrupt_after_data in [false, true] {
+            let info = session
+                .upload_stream(
+                    "remote/interrupted.bin",
+                    InterruptedReader {
+                        source: std::io::Cursor::new(payload.clone()),
+                        interrupt_after_data,
+                        interrupted: false,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(info.file_id, expected.file_id);
+            assert_eq!(info.total_bytes, 100);
+            assert_eq!(info.chunk_count, expected.chunk_count);
+        }
+        let report = session.finalize().await.unwrap();
+        assert_eq!(report.files.len(), 3);
+        assert!(
+            report
+                .files
+                .iter()
+                .all(|file| file.total_bytes == 100 && file.file_id == expected.file_id)
+        );
+    }
+
+    struct RepeatedInterruptedReader {
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        dropped: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl std::io::Read for RepeatedInterruptedReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        }
+    }
+
+    impl Drop for RepeatedInterruptedReader {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _ = dropped.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_reader_stops_when_upload_consumer_is_cancelled() {
+        let (_server, client) = mock_client().await;
+        let session = client.upload_session().unwrap();
+        let uploading_session = session.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let upload = tokio::spawn(async move {
+            uploading_session
+                .upload_stream(
+                    "remote/interrupted.bin",
+                    RepeatedInterruptedReader {
+                        started: Some(started_tx),
+                        dropped: Some(dropped_tx),
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
     }
 
     #[tokio::test]
