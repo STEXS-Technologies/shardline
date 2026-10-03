@@ -34,6 +34,12 @@ Inspect migration state:
 shardline db migrate status
 ```
 
+`status` and `verify` use read-only queries and do not acquire the migration
+advisory lock or create the history table. They can run on a read-only connection.
+If the history table is absent, `status` reports all bundled migrations as pending;
+`verify` reports that migration initialization is required. Use `up` to initialize
+the database explicitly.
+
 Revert the newest migration:
 
 ```bash
