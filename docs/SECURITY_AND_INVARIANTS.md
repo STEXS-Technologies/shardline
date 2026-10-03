@@ -36,6 +36,13 @@ These invariants must hold in all builds:
   installed it before its directory synchronization failed. Existing directories
   are synchronized too because a concurrent creator may not have completed its
   parent synchronization; read-only directory walks do not sync.
+- On Unix, a successful local object deletion synchronizes the object unlink and
+  each empty-directory removal before acknowledging it. An already-missing object
+  synchronizes its surviving containing directory, or the nearest surviving ancestor
+  when an intermediate directory is missing, so retries can complete a failed sync.
+  Missing roots remain absent, and missing-path retries create or prune no directories.
+  Removal uses pinned parent descriptors and rejects detected namespace replacements;
+  empty-directory pruning preserves nonempty directories and the configured root.
 - A xorb is stored only if its body parses and its hash matches its content-addressed
   key.
 - A shard is registered only if its body parses and all referenced xorbs exist.
