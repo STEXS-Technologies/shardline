@@ -129,8 +129,36 @@ fn sync_verified_existing_file(anchored: &AnchoredTarget, file: &File) -> io::Re
 
 #[cfg(unix)]
 struct DeleteDirectory {
-    file: File,
     logical_path: std::path::PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl DeleteDirectory {
+    fn snapshot(file: &File, logical_path: std::path::PathBuf) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(Self {
+            logical_path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn ensure_metadata_matches(&self, metadata: &fs::Metadata) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || (metadata.dev(), metadata.ino()) != (self.device, self.inode)
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "local deletion namespace changed",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -146,19 +174,14 @@ fn ensure_delete_namespace_matches(directories: &[DeleteDirectory]) -> io::Resul
             }
         })?;
     for directory in directories {
-        let anchored = AnchoredTarget::new(
-            directory.file.try_clone()?,
-            directory.logical_path.clone(),
-            std::ffi::OsString::new(),
-        );
-        ensure_parent_path_matches_anchor(&anchored)?;
+        directory.ensure_metadata_matches(&fs::symlink_metadata(&directory.logical_path)?)?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
 fn sync_delete_directory(
-    directory: &DeleteDirectory,
+    directory: &File,
     changed_path: &Path,
     directory_name: bool,
 ) -> io::Result<()> {
@@ -174,7 +197,7 @@ fn sync_delete_directory(
         )
     };
     local_publish_failpoint(changed_path, before)?;
-    directory.file.sync_all()?;
+    directory.sync_all()?;
     local_publish_failpoint(changed_path, after)
 }
 
@@ -198,43 +221,38 @@ pub(crate) fn delete_object_durably(root: &Path, path: &Path) -> io::Result<crat
         }
         Err(error) => return Err(error),
     };
-    let mut directories = vec![DeleteDirectory {
-        file: root_file,
-        logical_path: root.to_path_buf(),
-    }];
+    // Keep identities for validation, not open files: legal keys can have
+    // hundreds of components even under a small process descriptor limit.
+    let mut directories = vec![DeleteDirectory::snapshot(&root_file, root.to_path_buf())?];
+    let mut current = root_file.try_clone()?;
     for component in parent.components() {
         let Component::Normal(name) = component else {
             return Err(invalid_local_path_error());
         };
         let containing = directories.last().ok_or_else(invalid_local_path_error)?;
         let logical_path = containing.logical_path.join(name);
-        let file = match open_child_directory_no_follow(&containing.file, name) {
+        let file = match open_child_directory_no_follow(&current, name) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 ensure_delete_namespace_matches(&directories)?;
-                sync_delete_directory(containing, &logical_path, true)?;
+                sync_delete_directory(&current, &logical_path, true)?;
                 ensure_delete_namespace_matches(&directories)?;
                 return Ok(crate::DeleteOutcome::NotFound);
             }
             Err(error) => return Err(error),
         };
-        directories.push(DeleteDirectory { file, logical_path });
+        directories.push(DeleteDirectory::snapshot(&file, logical_path)?);
+        current = file;
     }
-    let containing = directories.last().ok_or_else(invalid_local_path_error)?;
-    let anchored = AnchoredTarget::new(
-        containing.file.try_clone()?,
-        containing.logical_path.clone(),
-        file_name.to_os_string(),
-    );
     run_before_local_write_hook(path);
     ensure_delete_namespace_matches(&directories)?;
     // A missing object may be another writer's not-yet-durable unlink.
-    let outcome = match remove_at(anchored.parent_dir(), file_name) {
+    let outcome = match remove_at(&current, file_name) {
         Ok(()) => crate::DeleteOutcome::Deleted,
         Err(error) if error.kind() == ErrorKind::NotFound => crate::DeleteOutcome::NotFound,
         Err(error) => return Err(error),
     };
-    sync_delete_directory(containing, path, false)?;
+    sync_delete_directory(&current, path, false)?;
     ensure_delete_namespace_matches(&directories)?;
     if outcome == crate::DeleteOutcome::NotFound {
         return Ok(outcome);
@@ -257,18 +275,23 @@ pub(crate) fn delete_object_durably(root: &Path, path: &Path) -> io::Result<crat
                 .get(..=index)
                 .ok_or_else(invalid_local_path_error)?,
         )?;
-        match remove_directory_at(&prune_parent.file, name) {
+        // Ascend through the pinned child. A rename may change '..'; verify
+        // its recorded identity before using it for any namespace mutation.
+        let parent_file = open_child_directory_no_follow(&current, std::ffi::OsStr::new(".."))?;
+        prune_parent.ensure_metadata_matches(&parent_file.metadata()?)?;
+        match remove_directory_at(&parent_file, name) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => break,
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        sync_delete_directory(prune_parent, &removed.logical_path, true)?;
+        sync_delete_directory(&parent_file, &removed.logical_path, true)?;
         ensure_delete_namespace_matches(
             directories
                 .get(..index)
                 .ok_or_else(invalid_local_path_error)?,
         )?;
+        current = parent_file;
     }
     Ok(outcome)
 }
