@@ -9,7 +9,10 @@ use shardline_server::{
 };
 use thiserror::Error;
 
-use crate::{config::load_server_config, local_output::AtomicOutputFile};
+use crate::{
+    config::load_server_config,
+    local_output::{AtomicOutputFile, validate_deployment_output},
+};
 
 /// Backup command runtime failure.
 #[derive(Debug, Error)]
@@ -36,23 +39,7 @@ pub async fn run_backup_manifest(
     output: &Path,
 ) -> Result<BackupManifestReport, BackupRuntimeError> {
     let config = load_server_config(root, None)?;
-    if config.object_storage_adapter() == shardline_server::ObjectStorageAdapter::Local {
-        let object_root = config.root_dir().join("chunks");
-        if object_root.exists() {
-            let object_root = std::fs::canonicalize(object_root)?;
-            let output_parent = output
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            if std::fs::canonicalize(output_parent)?.starts_with(object_root) {
-                return Err(IoError::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "backup manifest output must be outside the local object store",
-                )
-                .into());
-            }
-        }
-    }
+    validate_deployment_output(&config, output)?;
     let mut output_file = AtomicOutputFile::create(output, false)?;
     let report = {
         let mut writer = BufWriter::new(&mut output_file);
@@ -192,6 +179,20 @@ mod tests {
             "run_backup_manifest should succeed on empty deployment: {result:?}"
         );
         assert!(output.exists(), "manifest output file should be created");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reserved_metadata_destination_preserves_database_bytes() {
+        let sandbox = tempfile::tempdir().unwrap();
+        run_backup_manifest(Some(sandbox.path()), &sandbox.path().join("manifest.json"))
+            .await
+            .unwrap();
+        let database = sandbox.path().join("metadata.sqlite3");
+        let previous = std::fs::read(&database).unwrap();
+        assert!(previous.starts_with(b"SQLite format 3"));
+        let result = run_backup_manifest(Some(sandbox.path()), &database).await;
+        assert!(matches!(result, Err(BackupRuntimeError::Io(_))));
+        assert_eq!(std::fs::read(&database).unwrap(), previous);
     }
 
     #[tokio::test]

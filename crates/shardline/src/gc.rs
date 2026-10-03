@@ -8,7 +8,10 @@ use shardline_server::{
 };
 use thiserror::Error;
 
-use crate::{config::load_server_config, local_output::write_output_bytes};
+use crate::{
+    config::load_server_config,
+    local_output::{validate_deployment_output, write_output_bytes},
+};
 
 /// Minimum retention window in seconds for GC quarantine entries.
 ///
@@ -74,6 +77,12 @@ pub async fn run_gc_diagnostics(
     orphan_inventory_path: Option<&Path>,
 ) -> Result<LocalGcDiagnostics, GcRuntimeError> {
     let config = load_server_config(root, None)?;
+    for output in [retention_report_path, orphan_inventory_path]
+        .into_iter()
+        .flatten()
+    {
+        validate_deployment_output(&config, output)?;
+    }
     let options = LocalGcOptions {
         mark,
         sweep,
@@ -321,6 +330,75 @@ mod tests {
         assert!(!display.is_empty());
         let debug = format!("{err:?}");
         assert!(debug.contains("Io("));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reserved_exports_preserve_database_and_objects_before_gc() {
+        let sandbox = tempfile::tempdir().unwrap();
+        crate::backup::run_backup_manifest(
+            Some(sandbox.path()),
+            &sandbox.path().join("manifest.json"),
+        )
+        .await
+        .unwrap();
+        let database = sandbox.path().join("metadata.sqlite3");
+        let database_bytes = std::fs::read(&database).unwrap();
+        let object = sandbox.path().join("chunks/aa/object");
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(&object, b"preserved object").unwrap();
+        for path in [&database, &object] {
+            for retention_export in [true, false] {
+                let result = super::run_gc_diagnostics(
+                    Some(sandbox.path()),
+                    true,
+                    true,
+                    3600,
+                    retention_export.then_some(path.as_path()),
+                    (!retention_export).then_some(path.as_path()),
+                )
+                .await;
+                assert!(matches!(result, Err(super::GcRuntimeError::Io(_))));
+                assert_eq!(std::fs::read(&database).unwrap(), database_bytes);
+                assert_eq!(std::fs::read(&object).unwrap(), b"preserved object");
+            }
+        }
+        // A bad second export must be rejected before creating the first report
+        // or running the collector.
+        let report = sandbox.path().join("reports/retention.json");
+        let result = super::run_gc_diagnostics(
+            Some(sandbox.path()),
+            true,
+            true,
+            3600,
+            Some(&report),
+            Some(&database),
+        )
+        .await;
+        assert!(matches!(result, Err(super::GcRuntimeError::Io(_))));
+        assert!(!report.parent().unwrap().exists());
+        assert_eq!(std::fs::read(&database).unwrap(), database_bytes);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_reports_under_deployment_root_are_supported() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let retention = sandbox.path().join("reports/retention.json");
+        let orphans = sandbox.path().join("reports/orphans.json");
+        super::run_gc_diagnostics(
+            Some(sandbox.path()),
+            false,
+            false,
+            3600,
+            Some(&retention),
+            Some(&orphans),
+        )
+        .await
+        .unwrap();
+        for report in [retention, orphans] {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+            assert!(value.is_array());
+        }
     }
 
     #[tokio::test]
