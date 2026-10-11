@@ -58,7 +58,41 @@ impl TaskEvidenceStore {
     /// # Errors
     /// Returns storage failures; callers must preserve serving/maintenance availability.
     pub fn prune_completed(&self, deployment: Digest, now: u64) -> Result<usize, ServerError> {
-        let prefix = ObjectPrefix::parse(&format!("{}manifests/", super::TASK_EVIDENCE_PREFIX))?;
+        // A retirement marker authorizes only evidence cleanup. It is committed
+        // after native completion verification, before hiding the manifest.
+        // Keep it until all deletes succeed so interrupted cleanup is resumable.
+        let retiring = self.retention_candidates("retiring", deployment, now, 64)?;
+        let mut removed = 0_usize;
+        for identity in retiring.into_values() {
+            self.finish_retirement(&identity)?;
+            removed = removed.saturating_add(1);
+        }
+        if removed == 64 {
+            return Ok(removed);
+        }
+        let candidates = self.retention_candidates(
+            "manifests",
+            deployment,
+            now,
+            64_usize.saturating_sub(removed),
+        )?;
+        for identity in candidates.into_values() {
+            if self.begin_retirement(&identity)? {
+                self.finish_retirement(&identity)?;
+                removed = removed.saturating_add(1);
+            }
+        }
+        Ok(removed)
+    }
+
+    fn retention_candidates(
+        &self,
+        category: &str,
+        deployment: Digest,
+        now: u64,
+        limit: usize,
+    ) -> Result<BTreeMap<(u64, String), TaskRunIdentity>, ServerError> {
+        let prefix = ObjectPrefix::parse(&format!("{}{category}/", super::TASK_EVIDENCE_PREFIX))?;
         let mut candidates = BTreeMap::new();
         self.objects.visit_prefix(&prefix, |metadata| {
             let id = metadata
@@ -67,46 +101,77 @@ impl TaskEvidenceStore {
                 .rsplit('/')
                 .next()
                 .ok_or(ServerError::InvalidPath)?;
-            let Some(bytes) = self.read(&format!("manifests/{id}"), 65536)? else {
+            let Some(bytes) = self.read(&format!("{category}/{id}"), 65536)? else {
                 return Ok::<(), ServerError>(());
             };
-            let identity: TaskRunIdentity = serde_json::from_slice(&bytes)?;
+            let Ok(identity) = serde_json::from_slice::<TaskRunIdentity>(&bytes) else {
+                tracing::warn!(
+                    run = id,
+                    "invalid task retention identity; retaining evidence"
+                );
+                return Ok(());
+            };
             if identity.schema == 1
                 && identity.id == id
+                && !id.is_empty()
+                && id.len() <= 128
+                && identity.scope.definition == identity.definition.fingerprint()
+                && identity.definition.validate().is_ok()
+                && identity.definition.budget.max_history_records <= 4096
                 && identity.deployment == deployment
                 && identity.created_at.saturating_add(30 * 24 * 60 * 60) < now
             {
+                // Retained corrupt/unfinished runs must not monopolize the
+                // bounded candidate page and prevent all later cleanup.
+                if category == "manifests"
+                    && !matches!(
+                        self.state(&identity),
+                        Ok((TaskRunState::Completed | TaskRunState::Failed, _))
+                    )
+                {
+                    return Ok(());
+                }
                 candidates.insert((identity.created_at, identity.id.clone()), identity);
-                if candidates.len() > 64 {
+                if candidates.len() > limit {
                     candidates.pop_last();
                 }
             }
             Ok(())
         })?;
-        let mut removed = 0_usize;
-        for identity in candidates.into_values() {
-            if !matches!(
-                self.state(&identity),
-                Ok((TaskRunState::Completed | TaskRunState::Failed, _))
-            ) {
-                continue;
-            }
-            // Hide the expired history first. Never expose a partly removed run
-            // as current maintenance status if cleanup is interrupted.
-            self.objects
-                .delete_if_present(&Self::key(&format!("manifests/{}", identity.id))?)?;
-            let run_prefix = ObjectPrefix::parse(&format!(
-                "{}runs/{}/",
-                super::TASK_EVIDENCE_PREFIX,
-                identity.id
-            ))?;
-            self.objects.visit_prefix(&run_prefix, |metadata| {
-                self.objects.delete_if_present(metadata.key())?;
-                Ok::<(), ServerError>(())
-            })?;
-            removed = removed.saturating_add(1);
+        Ok(candidates)
+    }
+
+    pub(super) fn begin_retirement(&self, identity: &TaskRunIdentity) -> Result<bool, ServerError> {
+        if !matches!(
+            self.state(identity),
+            Ok((TaskRunState::Completed | TaskRunState::Failed, _))
+        ) {
+            return Ok(false);
         }
-        Ok(removed)
+        self.publish(
+            &format!("retiring/{}", identity.id),
+            &serde_json::to_vec(identity)?,
+        )?;
+        Ok(true)
+    }
+
+    fn finish_retirement(&self, identity: &TaskRunIdentity) -> Result<(), ServerError> {
+        // Hide the expired history first. Status must not advertise a partly
+        // removed native proof; the cleanup marker remains outside status.
+        self.objects
+            .delete_if_present(&Self::key(&format!("manifests/{}", identity.id))?)?;
+        let run_prefix = ObjectPrefix::parse(&format!(
+            "{}runs/{}/",
+            super::TASK_EVIDENCE_PREFIX,
+            identity.id
+        ))?;
+        self.objects.visit_prefix(&run_prefix, |metadata| {
+            self.objects.delete_if_present(metadata.key())?;
+            Ok::<(), ServerError>(())
+        })?;
+        self.objects
+            .delete_if_present(&Self::key(&format!("retiring/{}", identity.id))?)?;
+        Ok(())
     }
 
     /// Lists a bounded page of verified summaries. The store inventory walk is

@@ -41,7 +41,8 @@ invocations can export verified completed evidence without repeating its effects
 GC dry runs and storage-migration dry runs write no shared task history; real
 migration evidence belongs to the destination, preserving read-only source access.
 Finished shared histories older than 30 days are eligible for bounded cleanup;
-unresolved and corrupt histories are retained. These policies do not grant any
+interrupted cleanup resumes later, and unresolved and corrupt histories are
+retained. These policies do not grant any
 extra storage permissions.
 
 With the existing admin read token, `/api/v1/tasks/maintenance` lists verified

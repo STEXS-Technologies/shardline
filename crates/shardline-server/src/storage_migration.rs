@@ -182,7 +182,10 @@ fn is_task_evidence(source: &ServerObjectStore, key: &ObjectKey) -> bool {
     let Some(suffix) = key.as_str().strip_prefix(TASK_EVIDENCE_PREFIX) else {
         return false;
     };
-    let id = if let Some(id) = suffix.strip_prefix("manifests/") {
+    let id = if let Some(id) = suffix
+        .strip_prefix("manifests/")
+        .or_else(|| suffix.strip_prefix("retiring/"))
+    {
         id
     } else if let Some(run) = suffix.strip_prefix("runs/") {
         let Some((id, _rest)) = run.split_once('/') else {
@@ -198,7 +201,12 @@ fn is_task_evidence(source: &ServerObjectStore, key: &ObjectKey) -> bool {
     // A list-only dry run must not gain a mandatory read permission. If the
     // identity cannot be recognized, retain the original inventory behavior.
     let store = TaskEvidenceStore::from_objects(source.clone());
-    let Ok(Some(bytes)) = store.read(&format!("manifests/{id}"), 65536) else {
+    let bytes = store
+        .read(&format!("manifests/{id}"), 65536)
+        .ok()
+        .flatten()
+        .or_else(|| store.read(&format!("retiring/{id}"), 65536).ok().flatten());
+    let Some(bytes) = bytes else {
         return false;
     };
     let Ok(identity) = serde_json::from_slice::<TaskRunIdentity>(&bytes) else {
@@ -484,7 +492,12 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let destination = tempfile::tempdir().unwrap();
         let objects = ServerObjectStore::local(source.path().join("chunks")).unwrap();
-        for suffix in ["manifests/old", "runs/old/payload", "custom/payload"] {
+        for suffix in [
+            "manifests/old",
+            "retiring/old",
+            "runs/old/payload",
+            "custom/payload",
+        ] {
             let key = ObjectKey::parse(&format!("_shardline_tasks/v1/{suffix}")).unwrap();
             let bytes = b"existing user data";
             objects
@@ -514,17 +527,37 @@ mod tests {
             .unwrap()
             .finish(true, b"done")
             .unwrap();
+        // Partly retired native history must also stay with its deployment.
+        let evidence = crate::task_tracking::TaskEvidenceStore::from_config(&config).unwrap();
+        let id = fs::read_dir(source.path().join("chunks/_shardline_tasks/v1/manifests"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .find(|id| id != "old")
+            .unwrap();
+        let identity = evidence
+            .read(&format!("manifests/{id}"), 65536)
+            .unwrap()
+            .unwrap();
+        evidence
+            .publish(&format!("retiring/{id}"), &identity)
+            .unwrap();
+        fs::remove_file(
+            source
+                .path()
+                .join(format!("chunks/_shardline_tasks/v1/manifests/{id}")),
+        )
+        .unwrap();
         let options = StorageMigrationOptions::new(
             StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
             StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
         );
         let dry = run_storage_migration(&options.clone().with_dry_run(true)).unwrap();
-        assert_eq!(dry.scanned_objects, 3);
+        assert_eq!(dry.scanned_objects, 4);
         let copied = run_storage_migration(&options).unwrap();
-        assert_eq!(copied.scanned_objects, 3);
-        assert_eq!(copied.inserted_objects, 3);
+        assert_eq!(copied.scanned_objects, 4);
+        assert_eq!(copied.inserted_objects, 4);
         let repeated = run_storage_migration(&options).unwrap();
-        assert_eq!(repeated.already_present_objects, 3);
+        assert_eq!(repeated.already_present_objects, 4);
         assert_eq!(
             fs::read(
                 destination
