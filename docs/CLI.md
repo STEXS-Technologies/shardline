@@ -38,6 +38,9 @@ Signed command outcomes are exported to `_shardline_tasks/v1/` through the confi
 object adapter. A shared-export failure retains local evidence and logs a warning;
 it does not disable local supervision or change the application's result. Later
 invocations can export verified completed evidence without repeating its effects.
+Completed local evidence can also be exported after a reboot on the same
+identified host. A different host or an unobservable container owner stays
+unconfirmed; its recorded PID does not authorize a retry.
 GC dry runs and storage-migration dry runs write no shared task history; real
 migration evidence belongs to the destination, preserving read-only source access.
 Finished shared histories older than 30 days are eligible for bounded cleanup;

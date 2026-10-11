@@ -923,7 +923,7 @@ fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
         .filter(|path| path.is_file());
     if path.is_none() {
         eprintln!(
-            "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to a built v1.6.0 shardline binary"
+            "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to the adjacent released shardline binary"
         );
     }
     path
@@ -2117,7 +2117,11 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     // proves that the new binary can read state created by the preceding
     // release after the explicit migration boundary.
     let seed_root = TempDir::new().unwrap();
-    let environment = [("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str())];
+    let environment = [
+        ("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str()),
+        ("SHARDLINE_SERVER_FRONTENDS", "s3,lfs"),
+        ("SHARDLINE_ADMIN_READ_TOKEN", ADMIN_READ_TOKEN),
+    ];
     let mut seed_node = DeploymentServer::spawn_at(
         &previous_binary,
         &chaos_bind_addr(),
@@ -2153,6 +2157,151 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     node_b.wait_ready(Duration::from_secs(20)).await;
 
     assert_s3_bytes(&node_b.base_url(), &token, "f-old", &old_bytes, "N-1 peer").await;
+
+    // A format-preserving dependency upgrade needs no migration window. Test
+    // actual overlap and rollback instead of requiring an unknown migration.
+    let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
+    let incremental = shardline_server::check_database_schema_compatibility(&pool)
+        .await
+        .is_ok();
+    pool.close().await;
+    if incremental {
+        drop(node_a);
+        node_a = DeploymentServer::spawn_at(
+            &current_binary,
+            &bind_addr,
+            &environment,
+            new_a_root.path(),
+        );
+        node_a.wait_ready(Duration::from_secs(20)).await;
+        assert_s3_bytes(
+            &node_a.base_url(),
+            &token,
+            "f-old",
+            &old_bytes,
+            "N reads N-1 history",
+        )
+        .await;
+        let new_bytes = deterministic_bytes(114_711, 602);
+        let new_put = s3_put(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            new_bytes.clone(),
+        )
+        .await;
+        assert_eq!(
+            new_put.status().as_u16(),
+            200,
+            "N write during mixed window"
+        );
+        assert_s3_bytes(
+            &node_b.base_url(),
+            &token,
+            "f-incremental-new",
+            &new_bytes,
+            "N-1 reads N write",
+        )
+        .await;
+        let peer_bytes = deterministic_bytes(81_923, 603);
+        let peer_put = s3_put(
+            &node_b.base_url(),
+            &token,
+            "f-incremental-new",
+            peer_bytes.clone(),
+        )
+        .await;
+        assert_eq!(
+            peer_put.status().as_u16(),
+            200,
+            "compatible N-1 writer remains supported"
+        );
+        assert_s3_bytes(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            &peer_bytes,
+            "N reads mixed-window N-1 write",
+        )
+        .await;
+
+        let response = admin_get(
+            &node_a.base_url(),
+            "/api/v1/tasks/maintenance",
+            ADMIN_READ_TOKEN,
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 200);
+        let status: serde_json::Value = response.json().await.unwrap();
+        assert!(
+            status["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["operation"] == "lfs-startup-session-sweep"
+                    && task["state"] == "completed"
+                    && task["owner"]["pid"] == node_a.child.id()),
+            "new startup outcome was not verified: {status}"
+        );
+
+        drop(node_b);
+        node_b = DeploymentServer::spawn_at(
+            &current_binary,
+            &chaos_secondary_bind_addr(),
+            &environment,
+            new_b_root.path(),
+        );
+        node_b.wait_ready(Duration::from_secs(20)).await;
+        assert_s3_bytes(
+            &node_b.base_url(),
+            &token,
+            "f-incremental-new",
+            &peer_bytes,
+            "N peer after full rollout",
+        )
+        .await;
+        drop(node_a);
+        node_a = DeploymentServer::spawn_at(
+            &previous_binary,
+            &bind_addr,
+            &environment,
+            rollback_root.path(),
+        );
+        node_a.wait_ready(Duration::from_secs(20)).await;
+        assert_s3_bytes(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            &peer_bytes,
+            "N-1 rollback reads N history",
+        )
+        .await;
+        let rollback_bytes = deterministic_bytes(74_011, 604);
+        let rollback_put = s3_put(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            rollback_bytes.clone(),
+        )
+        .await;
+        assert_eq!(
+            rollback_put.status().as_u16(),
+            200,
+            "rollback retains compatible writes"
+        );
+        assert_s3_bytes(
+            &node_b.base_url(),
+            &token,
+            "f-incremental-new",
+            &rollback_bytes,
+            "N reads rollback write",
+        )
+        .await;
+        eprintln!(
+            "chaos({drill}): PASS — incremental N-1/N overlap and rollback preserved bytes, compatible writers and native task outcomes without a migration"
+        );
+        return;
+    }
 
     // Drain all N-1 nodes before changing the shared schema. The upgrade is
     // explicit and leaves no unsafe N-1/N overlap across the migration.
