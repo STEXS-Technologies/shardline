@@ -273,9 +273,14 @@ separately, starts two N-1 processes against shared Postgres and S3, then perfor
 N-1 + N-1 -> N + N-1 -> N + N -> N-1 + N
 ```
 
-At every mixed-version stage, each binary reads exact bytes written by the other.
-Writes during the mixed window are issued only through N; the drill also proves that
-an N-1 write is rejected by the reliability gate and cannot alter the materialized
-state. Its transcript and exact N/N-1 commit identities are retained as CI artifacts.
+When both binaries support the same schema, the drill keeps one old node serving
+while replacing its peer. Both versions write and read each other's exact bytes;
+rollback also retains compatible writes. The new node's startup task outcome is
+verified through the existing authenticated admin API.
+
+When the new release adds migrations, the drill drains old nodes before applying
+them. It then checks exact historical bytes and verifies that an older binary
+rejects startup against an unknown migration. The transcript and exact N/N-1
+commit identities are retained as CI artifacts.
 This evidence applies to the tested adjacent release pair; every release reruns the
 automatically advanced pair rather than assuming transitive compatibility.

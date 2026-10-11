@@ -169,60 +169,85 @@ fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> R
 
 #[test]
 fn shared_publication_failure_preserves_existing_command_and_local_supervision() -> Result<()> {
-    let sandbox = tempfile::tempdir()?;
-    let root = sandbox.path().join("deployment");
-    fs::create_dir_all(root.join("chunks/_shardline_tasks/v1"))?;
-    fs::write(
-        root.join("chunks/_shardline_tasks/v1/manifests"),
-        b"blocked publication",
-    )?;
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(&root)
-        .args(["index", "rebuild", "--root"])
-        .arg(&root)
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        root.join("metadata.sqlite3").exists(),
-        "shared audit permissions must not break existing maintenance"
-    );
-    for entry in fs::read_dir(root.join(".shardline-maintenance"))? {
-        let connection = Connection::open_with_flags(
-            entry?.path().join("tasks.sqlite"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    for previous_boot in [false, true] {
+        if previous_boot
+            && shardline_server::task_tracking::TaskOwner::current()
+                .host
+                .is_none()
+        {
+            // A host without stable identity cannot prove a same-host reboot.
+            continue;
+        }
+        let sandbox = tempfile::tempdir()?;
+        let root = sandbox.path().join("deployment");
+        fs::create_dir_all(root.join("chunks/_shardline_tasks/v1"))?;
+        fs::write(
+            root.join("chunks/_shardline_tasks/v1/manifests"),
+            b"blocked publication",
         )?;
+        let output = Command::new(binary())
+            .env_clear()
+            .current_dir(&root)
+            .args(["index", "rebuild", "--root"])
+            .arg(&root)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            root.join("metadata.sqlite3").exists(),
+            "shared audit permissions must not break existing maintenance"
+        );
+        for entry in fs::read_dir(root.join(".shardline-maintenance"))? {
+            let directory = entry?.path();
+            let connection = Connection::open_with_flags(
+                directory.join("tasks.sqlite"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            assert_eq!(
+                connection.query_row("SELECT count(*) FROM penelope_records_v1", [], |row| {
+                    row.get::<_, u32>(0)
+                })?,
+                4
+            );
+            if previous_boot {
+                let path = directory.join("identity.json");
+                let mut identity: shardline_server::task_tracking::TaskRunIdentity =
+                    serde_json::from_slice(&fs::read(&path)?)?;
+                identity.owner.boot = Some("previous-boot".to_owned());
+                identity.owner.namespace = Some(
+                    identity
+                        .owner
+                        .namespace
+                        .unwrap_or_default()
+                        .saturating_add(1),
+                );
+                fs::write(path, serde_json::to_vec(&identity)?)?;
+            }
+        }
+        fs::remove_file(root.join("chunks/_shardline_tasks/v1/manifests"))?;
+        let subsequent = Command::new(binary())
+            .env_clear()
+            .current_dir(&root)
+            .args(["index", "rebuild", "--root"])
+            .arg(&root)
+            .output()?;
+        assert!(
+            subsequent.status.success(),
+            "{}",
+            String::from_utf8_lossy(&subsequent.stderr)
+        );
         assert_eq!(
-            connection.query_row("SELECT count(*) FROM penelope_records_v1", [], |row| {
-                row.get::<_, u32>(0)
-            })?,
-            4
+            fs::read_dir(root.join("chunks/_shardline_tasks/v1/manifests"))?.count(),
+            2
+        );
+        assert_eq!(
+            fs::read_dir(root.join(".shardline-maintenance"))?.count(),
+            0
         );
     }
-    fs::remove_file(root.join("chunks/_shardline_tasks/v1/manifests"))?;
-    let subsequent = Command::new(binary())
-        .env_clear()
-        .current_dir(&root)
-        .args(["index", "rebuild", "--root"])
-        .arg(&root)
-        .output()?;
-    assert!(
-        subsequent.status.success(),
-        "{}",
-        String::from_utf8_lossy(&subsequent.stderr)
-    );
-    assert_eq!(
-        fs::read_dir(root.join("chunks/_shardline_tasks/v1/manifests"))?.count(),
-        2
-    );
-    assert_eq!(
-        fs::read_dir(root.join(".shardline-maintenance"))?.count(),
-        0
-    );
     Ok(())
 }
 

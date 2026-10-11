@@ -8,7 +8,7 @@ criteria; passing the optional runner tests alone does not satisfy them.
 
 ## Validation so far
 
-The workspace suite passed all 9,328 tests, alongside 35 reliability
+The workspace suite passed all 9,330 tests, alongside 35 reliability
 contract tests and 13 release CLI integration tests. Focused tests cover the
 embedded tracker and storage migration, including pre-existing objects under
 the new task-evidence prefix.
@@ -36,9 +36,17 @@ connections, cancellation of partially acquired locks, single-connection pools
 and rejection of a terminated owner's fence. They establish these existing
 coordination contracts, not cluster-wide exactly-once task execution.
 
-Production Postgres/S3 rolling deployment and multi-node fault
-testing also remain outstanding. The checklist below records the full scope;
-these checks do not justify a blanket rollout or exactly-once guarantee.
+The real binary drill passed with released 1.11.3 (`98a4dadb`) and this branch
+against isolated Postgres/S3 storage. It exercises old+old, new+old, new+new and
+old+new rollback. Both versions append to the same object's history and read
+each other's exact bytes. The new node's native startup outcome verifies through
+the authenticated admin API, without a migration or a separate tracker process.
+
+Owner tests distinguish a recorded previous boot on the same identified host
+from a foreign host or container namespace. The CLI export test also exercises
+completed evidence with a simulated previous boot. An actual host reboot,
+cross-host replacement and multi-node fault testing remain outstanding. These
+checks do not justify a blanket rollout or exactly-once guarantee.
 
 ## Default experience
 

@@ -52,6 +52,18 @@ impl TaskOwner {
         #[cfg(target_os = "linux")]
         {
             let here = Self::current();
+            // A process from an earlier boot cannot still own work on this
+            // same identified host. This permits completed local evidence to
+            // be exported after reboot without mistaking a reused PID for it.
+            // Different hosts or PID namespaces within one boot stay unknown.
+            if self.host.is_some()
+                && self.host == here.host
+                && self.boot.is_some()
+                && here.boot.is_some()
+                && self.boot != here.boot
+            {
+                return Some(false);
+            }
             if self.boot.is_none()
                 || self.namespace.is_none()
                 || self.birth.is_none()
@@ -69,6 +81,36 @@ impl TaskOwner {
         }
         #[cfg(not(target_os = "linux"))]
         None
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::TaskOwner;
+
+    #[test]
+    fn prior_boot_on_same_identified_host_has_no_live_owner() {
+        let mut owner = TaskOwner::current();
+        if owner.host.is_none() || owner.boot.is_none() {
+            return;
+        }
+        owner.boot = Some("previous-boot".to_owned());
+        assert_eq!(owner.alive_here(), Some(false));
+    }
+
+    #[test]
+    fn foreign_hosts_and_namespaces_never_establish_local_death() {
+        let mut foreign = TaskOwner::current();
+        foreign.host = Some("another-host".to_owned());
+        foreign.boot = Some("another-boot".to_owned());
+        assert_eq!(foreign.alive_here(), None);
+        let mut namespace = TaskOwner::current();
+        namespace.namespace = Some(namespace.namespace.unwrap_or_default().saturating_add(1));
+        assert_eq!(namespace.alive_here(), None);
+        let mut unidentified = TaskOwner::current();
+        unidentified.host = None;
+        unidentified.boot = Some("unidentified-boot".to_owned());
+        assert_eq!(unidentified.alive_here(), None);
     }
 }
 
