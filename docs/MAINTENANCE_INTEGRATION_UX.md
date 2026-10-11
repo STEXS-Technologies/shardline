@@ -70,10 +70,13 @@ copy.
 
 Not yet. The version and deployment formats remain unchanged on this branch.
 
-A fault test found that rebuild stays active after losing the Postgres connection
-holding its maintenance lock, while another node acquires the lock. The test has
-not demonstrated a conflicting write, but this ownership gap must be closed
-before claiming safe takeover.
+Rebuild now uses the same Postgres connection for its maintenance lock and
+metadata writes. If that connection is lost, the old invocation cannot reconnect
+and continue writing from its earlier scan. A two-machine fault test verifies
+that the original rebuild fails and the waiting node can complete its own run.
+
+Other operations' remote effects and crash boundaries, plus large-deployment
+limits, still need validation before this integration is ready to merge.
 
 Cluster-wide exactly-once execution is not guaranteed. See the
 [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) for remaining work and

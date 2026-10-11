@@ -1,6 +1,10 @@
 use std::{
     fs::{File, TryLockError},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -138,6 +142,67 @@ impl ResourceWriteGuard {
 /// Each backend owns separate bounded GC and resource coordination pools.
 pub(crate) fn postgres_coordination_pool(url: &str) -> Result<PgPool, ServerError> {
     crate::postgres_backend::connect_postgres_metadata_pool(url, 4)
+}
+
+/// A single, non-replaceable metadata session that owns the exclusive barrier.
+///
+/// Rebuild reads and mutations must use this pool, so losing the lock also loses
+/// their database connection. Reconnecting would let an obsolete scan resume
+/// after another owner acquired the barrier. Pool retirement is disabled for
+/// long scans; only a fresh invocation may create another session.
+pub(crate) async fn postgres_exclusive_work_pool(url: &str) -> Result<PgPool, ServerError> {
+    let connected = Arc::new(AtomicBool::new(false));
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .test_before_acquire(true)
+        .after_connect(move |_connection, _metadata| {
+            let first_connection = !connected.swap(true, Ordering::AcqRel);
+            Box::pin(async move {
+                if first_connection {
+                    Ok(())
+                } else {
+                    Err(sqlx::Error::Protocol(
+                        "maintenance session lost; a new invocation must establish ownership"
+                            .into(),
+                    ))
+                }
+            })
+        })
+        .connect_lazy(url)
+        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    let mut connection = pool
+        .acquire()
+        .await
+        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    // An active query waiting on a table lock otherwise may not notice client
+    // death until it next uses the socket. Enable built-in disconnect checks
+    // when supported and disabled; preserve an operator's configured interval.
+    // Older Postgres versions without the setting keep their existing behavior.
+    sqlx::query(
+        "SELECT set_config(name, '1000', false) FROM pg_settings
+         WHERE name = 'client_connection_check_interval' AND setting = '0'",
+    )
+    .execute(&mut *connection)
+    .await
+    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    let mut retry_delay = Duration::from_millis(10);
+    loop {
+        let acquired = query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(GC_WRITE_BARRIER_KEY)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+        if acquired {
+            break;
+        }
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = retry_delay.saturating_mul(2).min(Duration::from_millis(50));
+    }
+    drop(connection);
+    Ok(pool)
 }
 
 fn ordered_resources(keys: &[ResourceLockKey]) -> Vec<ResourceLockKey> {
@@ -349,6 +414,108 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_exclusive_work_session_cannot_reconnect_and_write_after_takeover() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let observer = postgres_coordination_pool(&url).unwrap();
+        let work = postgres_exclusive_work_pool(&url).await.unwrap();
+        let owner = query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&work)
+            .await
+            .unwrap();
+        let scope = format!("work-session-loss-{}", std::process::id());
+        query("INSERT INTO shardline_resource_fences (domain, resource, epoch) VALUES ($1, 'probe', 1)")
+            .bind(&scope).execute(&observer).await.unwrap();
+        let waiter_pool = postgres_coordination_pool(&url).unwrap();
+        let waiter = tokio::spawn(async move { acquire_postgres_exclusive(&waiter_pool).await });
+        let sleeping_work = work.clone();
+        let sleeping =
+            tokio::spawn(
+                async move { query("SELECT pg_sleep(600)").execute(&sleeping_work).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let active = query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'PgSleep')",
+                ).bind(owner).fetch_one(&observer).await.unwrap();
+                if active { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(
+            query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(owner)
+                .fetch_one(&observer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), sleeping)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let replacement = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // Even with ownership now available elsewhere, the old invocation's
+        // pool cannot replace its dead session and apply a stale mutation.
+        assert!(query("UPDATE shardline_resource_fences SET epoch = 99 WHERE domain = $1 AND resource = 'probe'")
+            .bind(&scope).execute(&work).await.is_err());
+        assert_eq!(query_scalar::<_, i64>("SELECT epoch FROM shardline_resource_fences WHERE domain = $1 AND resource = 'probe'")
+            .bind(&scope).fetch_one(&observer).await.unwrap(), 1);
+        query("DELETE FROM shardline_resource_fences WHERE domain = $1")
+            .bind(&scope)
+            .execute(&observer)
+            .await
+            .unwrap();
+        drop(replacement);
+        work.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_exclusive_work_session_closes_and_cancelled_waits_release_sessions() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let work = postgres_exclusive_work_pool(&url).await.unwrap();
+        query("SELECT 1").execute(&work).await.unwrap();
+        let waiter_url = url.clone();
+        let waiter = tokio::spawn(async move { postgres_exclusive_work_pool(&waiter_url).await });
+        let observer = postgres_coordination_pool(&url).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting = query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE query = 'SELECT pg_try_advisory_lock($1)' AND state = 'idle')",
+                ).fetch_one(&observer).await.unwrap();
+                if waiting { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        work.close().await;
+        let next = tokio::time::timeout(Duration::from_secs(2), postgres_exclusive_work_pool(&url))
+            .await
+            .unwrap()
+            .unwrap();
+        let first = query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&next)
+            .await
+            .unwrap();
+        let second = query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&next)
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        next.close().await;
+    }
 
     #[test]
     fn cancelled_local_lock_waits_leave_blocking_pool_and_shutdown_available() {

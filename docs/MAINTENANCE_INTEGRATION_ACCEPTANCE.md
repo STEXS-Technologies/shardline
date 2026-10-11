@@ -9,14 +9,12 @@ This document is for reviewers deciding whether the integration is safe to ship.
 
 ## Known gaps
 
-- **Lost ownership while a command remains alive.** The two-machine
-  `connection-loss` drill terminates only rebuild's Postgres coordination
-  connection. The original rebuild remains active during the 15-second check,
-  while the second node can acquire the released maintenance lock. The metadata
-  scan uses a different connection. This proves loss of the lock does not
-  promptly stop the original command; it has not yet demonstrated a conflicting
-  write. Cancellation alone will not prove stale-write protection: ownership
-  must be enforced at the mutation boundary.
+- **Ownership protection beyond rebuild.** Rebuild now binds its lock and
+  metadata work to one non-replaceable Postgres connection. The two-machine
+  `connection-loss` drill passes, and a database test rejects an old pool's
+  attempted write after takeover. Other entry points that keep coordination
+  separate from effects still require review and fault coverage. Polling or
+  cancellation alone does not establish protection at their mutation boundaries.
 - **Remote effects and acknowledgements.** Local GC crash boundaries have passed.
   Equivalent coverage for other operations and remote effects remains open.
   A missing completion record must never authorize repeating an unknown effect.
@@ -55,7 +53,8 @@ test does not close them.
 | Repeated and concurrent runs | Distinct scheduled runs complete. Concurrent ordinary rebuilds serialize through the existing Postgres barrier; one removes the fixture's stale record and the next removes zero. |
 | Local crash and reboot | GC interrupted after admission, a committed quarantine change, or a printed report stays unresolved. Fresh diagnostics do not replay it. Actual VM resets also preserve the original records. |
 | Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
-| Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, removes one stale record and completes. The lost run remains unresolved. This does not cover loss of only its coordination connection. |
+| Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
+| Connection loss during rebuild | The lock and metadata operations share one non-replaceable connection. The two-machine fault drill terminates that connection, observes a verified failed source run and a completed waiter with one stale-record removal. A separate database test rejects a stale pool's attempted write after takeover. |
 | Mixed versions and rollback | Released/current nodes read and append the same object history in old+old, new+old, new+new and old+new combinations against the same Postgres/S3 deployment. No new metadata migration. |
 | History inspection | Corrupt records remain visible without hiding unrelated runs. Cancelled requests retain their inspection permit until blocking work finishes. History does not certify server health. |
 | Export and cleanup | Export visits at most 64 journals per invocation, makes progress past unfinished entries and does not replay work. Cleanup retains unresolved evidence and has interrupted-deletion coverage. Total unresolved growth remains open. |
@@ -143,4 +142,5 @@ bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE connection
 
 These scripts own disposable KVM guests and isolated fixtures, retain diagnostic
 artifacts and clean up their guests on exit. They do not reboot the workstation.
-The connection-loss drill currently fails and captures the known ownership gap.
+The connection-loss drill now passes for rebuild. It does not establish equivalent
+protection for other operations or remote object-store mutations.
