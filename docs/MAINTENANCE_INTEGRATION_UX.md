@@ -38,7 +38,13 @@ stop a stuck process. Use ordinary commands unless you need that extra control.
 
 Commands retain their existing output and application results. A failure to
 export task history does not change the application result: Shardline keeps
-local evidence and warns that shared completion is unconfirmed.
+local evidence when a local journal is available and warns that shared completion
+is unconfirmed.
+
+Postgres/S3 commands also work when the local filesystem is read-only. They use
+the existing shared store for history. If that store cannot record the outcome,
+the command still uses its existing safety barriers and warns that tracking is
+unavailable. There is no local copy to recover in this case.
 
 A local recording failure is reported as a tracking error. If work had already
 started, inspect its effects before retrying; an error does not prove that no

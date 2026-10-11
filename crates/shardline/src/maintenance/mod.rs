@@ -8,6 +8,7 @@ mod inline;
 mod journal;
 mod outbox;
 mod path_codec;
+mod shared_inline;
 mod verified;
 mod worker;
 

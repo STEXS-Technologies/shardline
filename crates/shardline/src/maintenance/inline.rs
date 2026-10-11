@@ -17,13 +17,25 @@ pub(super) fn run(
     arguments: Vec<OsString>,
 ) -> Result<super::CommandOutput> {
     let config = super::operation_config(operation, true)?;
+    let (input, definition, scope) = prepare(&config, id, operation, command)?;
+    run_prepared(
+        state, id, operation, arguments, &config, &input, definition, scope,
+    )
+}
+
+pub(super) fn prepare(
+    config: &shardline_server::ServerConfig,
+    id: &str,
+    operation: &MaintenanceOperation,
+    command: Vec<Vec<u8>>,
+) -> Result<(Vec<u8>, TaskDefinition, TaskScope)> {
     let input = serde_json::to_vec(&Input {
         schema: 1,
         operation: operation.clone(),
         config: crate::config::selected_config_path(None)
             .map(std::path::absolute)
             .transpose()?,
-        target: target(&config, operation)?,
+        target: target(config, operation)?,
         command_digest: Some(Digest::of(&serde_json::to_vec(&(
             command,
             std::env::current_dir()?.as_os_str().as_encoded_bytes(),
@@ -57,14 +69,28 @@ pub(super) fn run(
         definition: definition.fingerprint(),
         input: TaskInputDigest::from_digest(Digest::of(&input)),
     };
+    Ok((input, definition, scope))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_prepared(
+    state: &Path,
+    id: &str,
+    operation: &MaintenanceOperation,
+    arguments: Vec<OsString>,
+    config: &shardline_server::ServerConfig,
+    input: &[u8],
+    definition: TaskDefinition,
+    scope: TaskScope,
+) -> Result<super::CommandOutput> {
     artifact::private_directory(state)?;
-    let directory = state.join(hex::encode(task.digest().0));
+    let directory = state.join(hex::encode(scope.task.digest().0));
     artifact::private_directory(&directory)?;
     let key = artifact::signer(&directory, true)?.verifying_key();
     let identity = if operation.read_only() {
         None
     } else {
-        let export_config = super::publication_config(operation, &config)?;
+        let export_config = super::publication_config(operation, config)?;
         Some((
             shardline_server::task_tracking::TaskEvidenceStore::from_config(&export_config)?,
             shardline_server::task_tracking::TaskRunIdentity {
@@ -95,10 +121,10 @@ pub(super) fn run(
         &mut projection,
         TaskExecutionEvent::IntentCommitted {
             definition,
-            input: reference(&input)?,
+            input: reference(input)?,
         },
         TaskGeneration::ZERO,
-        Some(&input),
+        Some(input),
     )?;
     let generation = TaskGeneration::new(1);
     commit(

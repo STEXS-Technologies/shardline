@@ -48,6 +48,9 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 
+#[path = "deployment_chaos/readonly_maintenance.rs"]
+mod readonly_maintenance_deployment;
+
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------

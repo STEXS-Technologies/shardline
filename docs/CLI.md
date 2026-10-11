@@ -33,9 +33,12 @@ Local maintenance scratch lives in `.shardline-maintenance` under the existing
 root. Postgres/S3-only administrative invocations use a private directory in the
 standard temporary filesystem. Normal jobs keep inherited host resource limits;
 they do not inherit the advanced runner's time/CPU/report limits below.
+When a Postgres/S3 invocation has a read-only local filesystem, it records native
+history directly in the existing shared object store. No writable mount is added.
+Read-only GC and migration scans do not need a task scratch directory.
 
 Signed command outcomes are exported to `_shardline_tasks/v1/` through the configured
-object adapter. A shared-export failure retains local evidence and logs a warning;
+object adapter. With a local journal, a shared-export failure retains local evidence and logs a warning;
 it does not disable local supervision or change the application's result. Later
 invocations can export verified completed evidence without repeating its effects.
 Verified unfinished history can also be exported for inspection; its local
@@ -51,6 +54,11 @@ Finished shared histories older than 30 days are eligible for bounded cleanup;
 interrupted cleanup resumes later, and unresolved and corrupt histories are
 retained. These policies do not grant any
 extra storage permissions.
+
+Without writable local storage, shared evidence is the only task history. If it
+cannot be recorded, Shardline warns and preserves the original command's result
+under its existing domain barriers. It does not claim verified completion or
+automatically repeat work to recover a missing receipt.
 
 With the existing admin read token, `/api/v1/tasks/maintenance` lists verified
 operation outcomes separately from `/api/v1/tasks` resumable uploads. Remote

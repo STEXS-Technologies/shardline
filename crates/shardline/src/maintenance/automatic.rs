@@ -1,9 +1,6 @@
 use super::{MaintenanceOperation, Result};
 use crate::CliCommand;
-use std::{
-    ffi::OsString,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
-};
+use std::{ffi::OsString, os::unix::ffi::OsStrExt};
 
 pub(crate) fn prepare(command: &CliCommand) -> Result<Option<MaintenanceOperation>> {
     if let CliCommand::StorageMigrate {
@@ -117,16 +114,10 @@ pub(crate) fn run(
     arguments: Vec<OsString>,
 ) -> Result<super::CommandOutput> {
     let config = super::operation_config(operation, true)?;
-    let temporary = if operation.read_only() {
-        Some(
-            tempfile::Builder::new()
-                .prefix("shardline-maintenance-")
-                .permissions(std::fs::Permissions::from_mode(0o700))
-                .tempdir()?,
-        )
-    } else {
-        None
-    };
+    // Read-only diagnostics must not acquire a new filesystem write requirement.
+    if operation.read_only() {
+        return super::shared_inline::run(operation, arguments, &config);
+    }
     let ephemeral = config.index_postgres_url().is_some()
         || matches!(
             operation,
@@ -135,22 +126,40 @@ pub(crate) fn run(
                 ..
             }
         );
-    let state = temporary.as_ref().map_or_else(
-        || {
-            if ephemeral {
-                shardline_server::task_tracking::deployment_fingerprint(&config).map(|deployment| {
-                    std::env::temp_dir().join(format!(
-                        "shardline-maintenance-{}-{}",
-                        rustix::process::geteuid().as_raw(),
-                        hex::encode(deployment.0)
-                    ))
-                })
-            } else {
-                Ok(config.root_dir().join(".shardline-maintenance"))
-            }
-        },
-        |dir| Ok(dir.path().to_path_buf()),
-    )?;
+    let state = {
+        if ephemeral {
+            shardline_server::task_tracking::deployment_fingerprint(&config).map(|deployment| {
+                std::env::temp_dir().join(format!(
+                    "shardline-maintenance-{}-{}",
+                    rustix::process::geteuid().as_raw(),
+                    hex::encode(deployment.0)
+                ))
+            })
+        } else {
+            Ok(config.root_dir().join(".shardline-maintenance"))
+        }
+    }?;
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
+    let id = hex::encode(nonce);
+    let directory = state.join(hex::encode(
+        penelope_core::task::Digest::of(id.as_bytes()).0,
+    ));
+    let writable = super::artifact::private_directory(&state)
+        .and_then(|()| super::artifact::private_directory(&directory));
+    if let Err(error) = writable {
+        if ephemeral
+            && error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(error.raw_os_error(), Some(libc::EROFS | libc::EACCES))
+            })
+        {
+            tracing::debug!(
+                "local task storage is read-only; maintenance evidence uses the existing shared object store"
+            );
+            return super::shared_inline::run(operation, arguments, &config);
+        }
+        return Err(error);
+    }
     if !operation.read_only() {
         let export_config = super::publication_config(operation, &config)?;
         let retry = (|| -> Result<()> {
@@ -171,9 +180,6 @@ pub(crate) fn run(
             tracing::warn!(workspace = %state.display(), "retained evidence could not be inspected or exported; no application retry authorized: {error}");
         }
     }
-    let mut nonce = [0_u8; 16];
-    getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
-    let id = hex::encode(nonce);
     let command = arguments
         .iter()
         .map(|argument| argument.as_os_str().as_bytes().to_vec())
@@ -187,10 +193,6 @@ pub(crate) fn run(
         // store. Open capture descriptors survive removal of the scratch files.
         let digest = penelope_core::task::Digest::of(id.as_bytes());
         std::fs::remove_dir_all(state.join(hex::encode(digest.0)))?;
-    } else if let Some(directory) = temporary {
-        // Retain ambiguous work for inspection, never silently erase its journal.
-        let retained = directory.keep();
-        tracing::warn!(workspace = %retained.display(), "retained maintenance evidence; shared completion is unconfirmed");
     }
     output
 }
