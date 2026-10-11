@@ -157,6 +157,17 @@ Tests exercise real workers, restored-generation fencing, checkpoint pause and
 acknowledgement, kernel CPU limits, watchdog expiry without a controller,
 native-proof tampering, report tampering, and completed-history reuse.
 
+Ordinary CLI commands keep their original process and domain barriers. Local
+journals support later evidence export. If a Postgres/S3 command cannot use its
+existing temporary filesystem, it publishes native intent, start, checkpoint
+and signed outcome records directly to the shared object adapter. Its signing
+key stays in memory; interrupted shared history cannot authorize a restart.
+Read-only GC and migration scans write no task history or scratch files.
+If shared observation is unavailable in a deployment with no writable local
+storage, the command preserves its application result and explicitly warns that
+no verified outcome is available. This preserves existing availability and
+permissions; it does not provide an audit-loss guarantee during storage outages.
+
 Keep large multipart state as bounded integrity snapshots rather than putting
 unbounded part maps into StateChronicle's 64 KiB typed-profile payload boundary.
 Checkpointed rebuilds must retain the maintenance barrier and a coherent scan

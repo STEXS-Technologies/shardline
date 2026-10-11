@@ -8,7 +8,7 @@ criteria; passing the optional runner tests alone does not satisfy them.
 
 ## Validation so far
 
-The workspace suite passed all 9,332 tests, alongside 35 reliability
+The workspace suite passed all 9,334 tests, alongside 35 reliability
 contract tests and 14 release CLI integration tests. Focused tests cover the
 embedded tracker and storage migration, including pre-existing objects under
 the new task-evidence prefix.
@@ -23,6 +23,14 @@ results, read-only dry runs, export failures and later evidence export without
 repeating completed work. A real GC invocation also passed in an unprivileged
 container with a read-only filesystem, no network, no new privileges, writable
 temporary storage and only the existing deployment root writable.
+
+A released/current binary comparison also exercises empty Postgres metadata
+with real S3 storage in unprivileged containers with no writable root or `/tmp`.
+Fsck, rebuild and read-only GC preserve the released output; shared native
+outcomes verify without a local journal. With read-only S3 credentials, fsck
+still succeeds and explicitly reports unavailable tracking, without claiming a
+verified completion or requiring wider permissions. This covers that existing
+deployment shape, not all data sizes or deployment manifests.
 
 A real ordinary rebuild was killed while waiting on the existing GC barrier.
 Its signed history remains unresolved; a later ordinary scan publishes that
