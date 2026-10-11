@@ -165,10 +165,13 @@ acknowledgement, kernel CPU limits, watchdog expiry without a controller,
 native-proof tampering, report tampering, and completed-history reuse.
 
 Ordinary CLI commands keep their original process and domain barriers. Local
-journals support later evidence export. If a Postgres/S3 command cannot use its
-existing temporary filesystem, it publishes native intent, start, checkpoint
-and signed outcome records directly to the shared object adapter. Its signing
-key stays in memory; interrupted shared history cannot authorize a restart.
+journals support later evidence export. If permissions prevent creating private
+task storage, the command publishes native intent, start, checkpoint and signed
+outcome records directly to its existing object adapter. This applies both to
+Postgres/S3 commands without writable temporary storage and local deployments
+whose database, SQLite sidecars and object directories remain writable under a
+non-writable root. It creates no new root entries or mount requirement. Its
+signing key stays in memory; interrupted history cannot authorize a restart.
 Read-only GC and migration scans write no task history or scratch files.
 If shared observation is unavailable in a deployment with no writable local
 storage, the command preserves its application result and explicitly warns that

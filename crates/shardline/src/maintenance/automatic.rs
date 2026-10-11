@@ -185,13 +185,12 @@ fn run_inner(
     let writable = super::artifact::private_directory(&state)
         .and_then(|()| super::artifact::private_directory(&directory));
     if let Err(error) = writable {
-        if ephemeral
-            && error.downcast_ref::<std::io::Error>().is_some_and(|error| {
-                matches!(error.raw_os_error(), Some(libc::EROFS | libc::EACCES))
-            })
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| matches!(error.raw_os_error(), Some(libc::EROFS | libc::EACCES)))
         {
             tracing::debug!(
-                "local task storage is read-only; maintenance evidence uses the existing shared object store"
+                "local task storage is read-only; maintenance evidence uses the existing object store"
             );
             return super::shared_inline::run(operation, arguments, &config);
         }
