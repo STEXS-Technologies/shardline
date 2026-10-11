@@ -4,13 +4,17 @@ Start Shardline and run maintenance as before:
 
 ```bash
 shardline serve
-shardline fsck --root /var/lib/shardline
-shardline gc --root /var/lib/shardline --mark --sweep
+shardline fsck
+shardline gc --mark --sweep
 ```
 
 There is no tracker daemon, extra network port, or task ID to manage. Existing
 GC timers remain responsible for their schedules. Starting the server does not
 start a new GC job.
+
+Keep using the same configuration and root options you use for your deployment.
+A first fsck also initializes tracking on a new local directory with the usual
+storage permissions. Read-only GC does not add audit files.
 
 ## What users get
 

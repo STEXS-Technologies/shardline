@@ -72,9 +72,14 @@ pub(crate) fn prepare(command: &CliCommand) -> Result<Option<PreparedMaintenance
     let config = crate::config::load_server_config(requested_root, None)?;
     let root = config.root_dir().to_path_buf();
     if config.index_postgres_url().is_none() && !root.is_dir() {
-        // Preserve original validation for a missing local deployment. No work
-        // can be authorized against an absent local metadata directory.
-        return Err("local deployment root does not exist".into());
+        // Original local commands bootstrap an empty deployment. Create its
+        // directory with normal storage permissions before private task state;
+        // recursive 0700 task-directory creation must not narrow its parents.
+        // The storage helper rejects symlinked components and makes new names
+        // durable without changing existing directory permissions.
+        let _root = shardline_storage::open_directory_chain(&root, true, None, || {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid deployment root")
+        })?;
     }
     let operation = match command {
         CliCommand::Fsck { .. } => MaintenanceOperation::Fsck { root },
