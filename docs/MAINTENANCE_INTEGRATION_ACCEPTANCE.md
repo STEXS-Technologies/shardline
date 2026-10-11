@@ -20,8 +20,11 @@ This document is for reviewers deciding whether the integration is safe to ship.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.
-- **Remote effects and acknowledgements.** Local GC crash boundaries have passed.
-  Equivalent coverage for other operations and remote effects remains open.
+- **Remote effects and acknowledgements.** Local GC crash boundaries and a real
+  MinIO deletion with its response withheld have passed. The latter preserves
+  unresolved history after killing the original CLI; fresh fsck does not repeat
+  the delete. Delayed remote effects after ownership changes and equivalent
+  coverage for other operations remain open.
   A missing completion record must never authorize repeating an unknown effect.
 - **Large deployments and history growth.** Long operations, large reports and
   total growth of unresolved history still need deployment-scale validation.
@@ -58,6 +61,7 @@ test does not close them.
 | Local root permissions | With an existing writable SQLite database and open WAL/SHM sidecars beneath a mode-0555 root, fsck, rebuild, lifecycle repair and GC mark complete without private task storage. The regression checks four verified completions and unchanged root permissions; the released/current comparison matches stdout, stderr and exit status for all four commands. Fully read-only metadata is outside this proof. |
 | Repeated and concurrent runs | Distinct scheduled runs complete. Concurrent ordinary rebuilds serialize through the existing Postgres barrier; one removes the fixture's stale record and the next removes zero. |
 | Local crash and reboot | GC interrupted after admission, a committed quarantine change, or a printed report stays unresolved. Fresh diagnostics do not replay it. Actual VM resets also preserve the original records. |
+| Remote delete acknowledgement | A proxy forwards the actual S3 deletion to MinIO and withholds only its successful response. The object and candidate are absent while the original ordinary CLI is still alive. Killing that process preserves its three admission records without a completion record. Fresh fsck completes without another delete. This proves unresolved reporting and no diagnostic replay at this boundary; it does not prove fencing of delayed requests during takeover. |
 | Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
 | Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
 | Connection loss during rebuild | The lock and metadata operations share one non-replaceable connection. The two-machine fault drill terminates that connection, observes a verified failed source run and a completed waiter with one stale-record removal. A separate database test rejects a stale pool's attempted write after takeover. |
@@ -165,3 +169,13 @@ bash scripts/shardline/verify_maintenance_local_permissions.sh CURRENT RELEASED
 
 It keeps the fixture database open, prevents new root entries, compares all four
 commands and restores permissions before closing its database process.
+
+The remote acknowledgement drill owns an isolated Docker Compose project and a
+local fault proxy. Set the executable override to the current binary:
+
+```bash
+CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT cargo test -p shardline-server --test deployment_chaos gc_acknowledgement::drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed -- --nocapture
+```
+
+Confirm the log reports a resolved stack and the final MinIO-deletion assertion;
+the drill explicitly reports a skip when its deployment prerequisites are absent.

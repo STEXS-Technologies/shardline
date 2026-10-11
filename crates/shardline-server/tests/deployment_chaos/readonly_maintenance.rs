@@ -12,6 +12,21 @@ async fn readonly_cli(
     command: &[&str],
     readonly_objects: bool,
 ) -> std::process::Output {
+    docker_run_owned(readonly_cli_arguments(
+        binary,
+        stack,
+        command,
+        readonly_objects,
+    ))
+    .await
+}
+
+pub(super) fn readonly_cli_arguments(
+    binary: &Path,
+    stack: &ChaosStack,
+    command: &[&str],
+    readonly_objects: bool,
+) -> Vec<String> {
     let certificate = [
         "/etc/ssl/certs/ca-certificates.crt",
         "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
@@ -64,7 +79,7 @@ async fn readonly_cli(
     }
     args.extend(["debian:13-slim".to_owned(), "/shardline".to_owned()]);
     args.extend(command.iter().map(|argument| (*argument).to_owned()));
-    docker_run_owned(args).await
+    args
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

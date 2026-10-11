@@ -54,6 +54,9 @@ mod readonly_maintenance_deployment;
 #[path = "deployment_chaos/tracker_replacement.rs"]
 mod tracker_replacement;
 
+#[path = "deployment_chaos/gc_acknowledgement.rs"]
+mod gc_acknowledgement;
+
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------
