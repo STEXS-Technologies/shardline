@@ -8,16 +8,25 @@ criteria; passing the optional runner tests alone does not satisfy them.
 
 ## Validation so far
 
-The workspace suite passed all 9,330 tests, alongside 35 reliability
-contract tests and 13 release CLI integration tests. Focused tests cover the
+The workspace suite passed all 9,332 tests, alongside 35 reliability
+contract tests and 14 release CLI integration tests. Focused tests cover the
 embedded tracker and storage migration, including pre-existing objects under
 the new task-evidence prefix.
+
+Two downstream Rust API tests preserve the released exhaustive `CliCommand`
+match and check that legacy parsing rejects managed entry points before loading
+an environment file. Advanced commands use private binary dispatch, so adding
+them does not require existing library callers to change their command matches.
 
 Normal CLI tests check its original PID, fresh consecutive runs, live command
 results, read-only dry runs, export failures and later evidence export without
 repeating completed work. A real GC invocation also passed in an unprivileged
 container with a read-only filesystem, no network, no new privileges, writable
 temporary storage and only the existing deployment root writable.
+
+A real ordinary rebuild was killed while waiting on the existing GC barrier.
+Its signed history remains unresolved; a later ordinary scan publishes that
+history without replaying the rebuild or declaring it completed.
 
 The exact systemd sandbox could not be exercised on the validation host: its
 user manager rejected namespace setup before executing Shardline. Container
@@ -48,6 +57,12 @@ completed evidence with a simulated previous boot. An actual host reboot,
 cross-host replacement and multi-node fault testing remain outstanding. These
 checks do not justify a blanket rollout or exactly-once guarantee.
 
+Native outbox tests cover a completed outcome behind 130 unfinished/corrupt
+entries and a competing exporter that must not wait or delete another
+exporter's state. Export recovery opens at most 64 journals per invocation,
+advances a durable scan cursor and retains unfinished history after publishing
+it for inspection. These records never authorize application retries.
+
 ## Default experience
 
 Operators must continue to start Shardline with `shardline serve` and run the
@@ -55,11 +70,11 @@ existing maintenance commands and installed GC schedules. They must not have
 to launch a tracker, manage another service, select task IDs, provision a second
 state mount, or replace their deployment manifests to obtain task supervision.
 
-The supervisor belongs to the Shardline runtime. It does not require a separate
-tracker PID or network service. A process worker, when an operation requires
-isolation and reliable fencing, is a child managed by Shardline. Worker creation,
-authorization, recovery and shutdown are internal responsibilities. An idle
-sidecar would not establish supervision of the work that actually runs.
+Normal tracking belongs to the Shardline runtime and adds no process or network
+service. Ordinary maintenance runs in its original CLI process. Only the
+explicit advanced runner creates a child, so its controller can stop work and
+enforce resource limits independently. Domain fences remain responsible for
+rejecting stale writes in either mode.
 
 Starting the server must not introduce a new GC schedule, trigger destructive
 maintenance, or replay unknown mutations. Existing systemd GC timers remain the

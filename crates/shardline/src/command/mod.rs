@@ -9,6 +9,7 @@ pub use definition::{BenchMode, CompletionShell};
 pub use error::CliParseError;
 
 pub(crate) use funcs::cli_definition_command;
+pub(crate) use funcs::{ParsedCommand, parse_command};
 
 #[cfg(test)]
 pub(crate) use definition::{

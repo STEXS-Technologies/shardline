@@ -30,20 +30,6 @@ impl fmt::Debug for RedactedDbUrl {
 /// Supported Shardline CLI commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
-    /// Run a durable maintenance task on Linux.
-    #[cfg(target_os = "linux")]
-    Maintenance {
-        state_dir: PathBuf,
-        task_id: String,
-        operation: crate::maintenance::MaintenanceOperation,
-    },
-    /// Internal, durably authorized worker entry point.
-    #[cfg(target_os = "linux")]
-    MaintenanceWorker {
-        journal: PathBuf,
-        scope: String,
-        generation: u32,
-    },
     /// Bootstrap a providerless local source-checkout deployment.
     ProviderlessSetup,
     /// Run the server.
