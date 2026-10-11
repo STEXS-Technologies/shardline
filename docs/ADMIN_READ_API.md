@@ -226,6 +226,10 @@ Pages are ordered by opaque run ID, not creation time. Only `limit` (`1..=100`,
 default `100`) and `cursor` are accepted. State, prefix and capability filters
 are unsupported. Pass the returned cursor unchanged to get the next page.
 
+History inspection shares Shardline's existing admission limit. Under load it
+can return `503`; retry the read later. Closing a request does not free capacity
+while its storage scan is still running. No extra concurrency setting is needed.
+
 ### `GET /api/v1/metrics`
 
 | Field | Type | Scope and meaning |
