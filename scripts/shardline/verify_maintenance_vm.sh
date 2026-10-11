@@ -142,7 +142,7 @@ sudo chown -R fixture:fixture /var/lib/shardline/chunks/ee
 sudo systemd-run --wait --pipe --unit shardline-validation-fsck -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline fsck
 sudo systemd-run --unit shardline-validation-server -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline serve
 test "$(cat /var/lib/shardline/chunks/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)" = orphan-after-reboot
-test -z "$(sudo find /var/lib/shardline/chunks/gc -type f ! -name 'last-gc-clock-*' -print)"
+test "$(sudo sqlite3 -readonly /var/lib/shardline/metadata.sqlite3 'SELECT count(*) FROM shardline_quarantine_candidates')" -eq 0
 for file in /var/lib/shardline/.shardline-maintenance/*/tasks.sqlite; do
     test "$(sudo sqlite3 -readonly "$file" 'SELECT count(*) FROM penelope_records_v1')" -eq 3
 done
@@ -160,4 +160,102 @@ vm_ssh 'sudo systemd-run --wait --pipe --unit shardline-validation-fresh-gc -p E
 grep -Fx 'new_quarantine_candidates: 1' "$fixture/fresh-gc.log"
 history > "$fixture/final.json"
 jq -e --arg id "$run_id" '(.tasks | length) == 5 and ([.tasks[] | select(.id == $id and .state == "needs_reconciliation")] | length) == 1 and all(.tasks[]; if .id == $id then .state == "needs_reconciliation" else .state == "completed" end)' "$fixture/final.json"
-echo 'PASS: unchanged released systemd sandbox, fresh schedules and interrupted history across a real guest reboot'
+# Hold only completion arbitration, allowing the actual GC mutation and report.
+vm_ssh 'bash -s' > "$fixture/report-admission.log" 2>&1 <<'GUEST'
+set -euo pipefail
+sudo mkdir -p /var/lib/shardline/chunks/aa
+printf orphan-before-report-crash | sudo tee /var/lib/shardline/chunks/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null
+sudo chown -R fixture:fixture /var/lib/shardline/chunks/aa
+sudo systemd-run --unit shardline-validation-barrier flock --exclusive /var/lib/shardline/.gc-write-barrier.lock sleep infinity
+for attempt in $(seq 1 20); do
+    if sudo lslocks -n -o COMMAND,TYPE,MODE,PATH | grep -E '^flock +FLOCK +WRITE +/var/lib/shardline/.gc-write-barrier.lock$'; then break; fi
+    sleep 1
+done
+sudo lslocks -n -o COMMAND,TYPE,MODE,PATH | grep -E '^flock +FLOCK +WRITE +/var/lib/shardline/.gc-write-barrier.lock$'
+sudo systemctl start --no-block shardline-gc.service
+GUEST
+for attempt in $(seq 1 30); do
+    if history > "$fixture/report-before.json" && jq -e '(.tasks | length) == 6 and ([.tasks[] | select(.state == "running")] | length) == 1' "$fixture/report-before.json" >/dev/null; then break; fi
+    sleep 1
+done
+report_id=$(jq -er '.tasks[] | select(.state == "running") | .id' "$fixture/report-before.json")
+[[ "$report_id" =~ ^[a-f0-9]{32}$ ]]
+report_pid=$(jq -er '.tasks[] | select(.state == "running") | .owner.pid' "$fixture/report-before.json")
+[[ "$report_pid" =~ ^[0-9]+$ ]]
+vm_ssh "bash -s -- $report_id $report_pid" > "$fixture/mutation-and-report.log" 2>&1 <<'GUEST'
+set -euo pipefail
+id=$1
+pid=$2
+test "$(sudo systemctl show shardline-gc.service -p MainPID --value)" = "$pid"
+directory=''
+for identity in /var/lib/shardline/.shardline-maintenance/*/identity.json; do
+    if sudo grep -Fq "\"id\":\"$id\"" "$identity"; then directory=$(dirname "$identity"); break; fi
+done
+test -n "$directory"
+test "$(sudo sqlite3 -readonly "$directory/tasks.sqlite" 'SELECT count(*) FROM penelope_records_v1')" -eq 3
+sudo tee /tmp/block-completion.sql >/dev/null <<'SQL'
+.bail on
+.timeout 5000
+BEGIN IMMEDIATE;
+.shell touch /run/shardline-completion-blocked
+.shell sleep infinity
+SQL
+sudo systemd-run --unit shardline-validation-completion-writer bash -c "exec sqlite3 '$directory/tasks.sqlite' < /tmp/block-completion.sql"
+for attempt in $(seq 1 100); do
+    if test -f /run/shardline-completion-blocked; then break; fi
+    sleep 0.05
+done
+test -f /run/shardline-completion-blocked
+sudo systemctl stop shardline-validation-barrier
+body=''
+for attempt in $(seq 1 80); do
+    body=$(sudo grep -lFx 'maintenance.success: true' "$directory"/artifacts/* || true)
+    if test -n "$body"; then
+        # Pause this owned process before its five-second SQLite busy timeout;
+        # the reboot, rather than a graceful exit, must interrupt completion.
+        sudo kill -STOP "$pid"
+        break
+    fi
+    sleep 0.025
+done
+test -n "$body"
+test "$(ps -o stat= -p "$pid" | cut -c1)" = T
+sudo journalctl -u shardline-gc.service -o cat --no-pager | grep -Fx 'new_quarantine_candidates: 1'
+sudo sqlite3 -readonly -json /var/lib/shardline/metadata.sqlite3 "SELECT * FROM shardline_quarantine_candidates WHERE object_key='aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'" > /var/tmp/report-candidate-before.json
+test -s /var/tmp/report-candidate-before.json
+sudo cat "$body"
+sudo sha256sum "$body" > /var/tmp/report-body-before.sha256
+sudo find "/var/lib/shardline/chunks/_shardline_tasks/v1/runs/$id/records" -type f -exec sha256sum {} \; | sort > /var/tmp/report-records-before.sha256
+test "$(wc -l < /var/tmp/report-records-before.sha256)" -eq 3
+printf '%s\n' "$directory" > /var/tmp/report-directory
+sync
+GUEST
+printf 'system_reset\n' | socat - "UNIX-CONNECT:$fixture/monitor.sock" > "$fixture/report-reset.log"
+wait_for_guest "$fixture/report-boot-after"
+test "$(head -n 1 "$fixture/boot-after")" != "$(head -n 1 "$fixture/report-boot-after")"
+test "$(tail -n 1 "$fixture/boot-after")" = "$(tail -n 1 "$fixture/report-boot-after")"
+vm_ssh "bash -s -- $report_id" > "$fixture/report-recovery.log" 2>&1 <<'GUEST'
+set -euo pipefail
+id=$1
+sudo mkdir -p /var/lib/shardline/chunks/bb
+printf orphan-after-report-reboot | sudo tee /var/lib/shardline/chunks/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb >/dev/null
+sudo chown -R fixture:fixture /var/lib/shardline/chunks/bb
+sudo systemd-run --wait --pipe --unit shardline-validation-fsck -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline fsck
+sudo systemd-run --unit shardline-validation-server -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline serve
+sudo sqlite3 -readonly -json /var/lib/shardline/metadata.sqlite3 "SELECT * FROM shardline_quarantine_candidates WHERE object_key='aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'" > /var/tmp/report-candidate-after.json
+cmp /var/tmp/report-candidate-before.json /var/tmp/report-candidate-after.json
+test "$(sudo sqlite3 -readonly /var/lib/shardline/metadata.sqlite3 "SELECT count(*) FROM shardline_quarantine_candidates WHERE object_key='bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'")" -eq 0
+test "$(cat /var/lib/shardline/chunks/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)" = orphan-before-report-crash
+test "$(cat /var/lib/shardline/chunks/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)" = orphan-after-report-reboot
+directory=$(cat /var/tmp/report-directory)
+test "$(sudo sqlite3 -readonly "$directory/tasks.sqlite" 'SELECT count(*) FROM penelope_records_v1')" -eq 3
+sudo sha256sum -c /var/tmp/report-body-before.sha256
+sudo find "/var/lib/shardline/chunks/_shardline_tasks/v1/runs/$id/records" -type f -exec sha256sum {} \; | sort > /var/tmp/report-records-after.sha256
+cmp /var/tmp/report-records-before.sha256 /var/tmp/report-records-after.sha256
+GUEST
+for attempt in $(seq 1 20); do
+    if history > "$fixture/report-after.json"; then break; fi
+    sleep 1
+done
+jq -e --arg id "$report_id" --arg old "$run_id" '(.tasks | length) == 7 and ([.tasks[] | select((.id == $id or .id == $old) and .state == "needs_reconciliation")] | length) == 2 and all(.tasks[]; if .id == $id or .id == $old then .state == "needs_reconciliation" else .state == "completed" end)' "$fixture/report-after.json"
+echo 'PASS: unchanged released systemd sandbox and real guest reboots before mutation and after mutation/report'
