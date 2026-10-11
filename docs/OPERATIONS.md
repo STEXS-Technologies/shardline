@@ -2,6 +2,10 @@
 
 This document describes the production operating model for Shardline.
 
+For ordinary maintenance commands, recorded outcomes and what to check after
+a crash, start with [Maintenance without extra services](MAINTENANCE_INTEGRATION_UX.md).
+Normal startup uses an embedded tracker; it requires no additional service.
+
 Shardline is stateless in the request path when it is backed by durable external
 services:
 
