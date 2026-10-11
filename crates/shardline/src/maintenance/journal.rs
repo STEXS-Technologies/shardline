@@ -142,7 +142,7 @@ impl Publication {
     }
 }
 
-/// Retries evidence export only for locally verified completed work. This never
+/// Retries evidence export only for verified history from a gone local owner. This never
 /// starts a worker, changes its pinned request or authorizes an application retry.
 pub(super) fn retry_exports(
     state: &Path,
@@ -152,13 +152,15 @@ pub(super) fn retry_exports(
     if !state.exists() {
         return Ok(());
     }
-    artifact::private_directory(state)?;
-    for entry in std::fs::read_dir(state)?.take(64) {
-        let directory = entry?.path();
+    let Some(batch) = super::outbox::Batch::open(state)? else {
+        return Ok(());
+    };
+    for directory in &batch.jobs {
+        batch.advance(directory)?;
         if !directory.join("identity.json").exists() {
             continue;
         }
-        artifact::private_directory(&directory)?;
+        artifact::private_directory(directory)?;
         let identity: TaskRunIdentity = serde_json::from_slice(&artifact::read_private(
             &directory.join("identity.json"),
             65536,
@@ -171,12 +173,12 @@ pub(super) fn retry_exports(
             // a foreign PID namespace/host as proof that its controller is dead.
             continue;
         }
-        let key = artifact::signer(&directory, false)?.verifying_key();
+        let key = artifact::signer(directory, false)?.verifying_key();
         if key.as_bytes() != &identity.public_key {
             return Err("retained task identity has a different verification key".into());
         }
         let path = directory.join("tasks.sqlite");
-        super::history::verify(&path, &directory, identity.scope, identity.definition, &key)?;
+        super::history::verify(&path, directory, identity.scope, identity.definition, &key)?;
         let mut journal = SqliteTaskJournal::open(&path, identity.scope, identity.definition)?;
         let mut projection =
             penelope_core::task::TaskProjection::new(identity.scope, identity.definition)?;
@@ -185,9 +187,9 @@ pub(super) fn retry_exports(
             projection.apply(&record)?;
             records.push(record);
         }
-        if projection.status() != penelope_core::task::TaskStatus::Completed {
+        let completed = projection.status() == penelope_core::task::TaskStatus::Completed;
+        if !completed {
             tracing::warn!(run = %identity.id, workspace = %directory.display(), "unfinished maintenance evidence retained; inspect domain effects before any recovery; no automatic retry");
-            continue;
         }
         let publication = Publication {
             capture: identity.execution
@@ -231,13 +233,20 @@ pub(super) fn retry_exports(
         })();
         if let Err(error) = exported {
             tracing::warn!(run = %identity.id, workspace = %directory.display(), "retained task export remains unavailable: {error}");
-            break;
+            return Ok(());
         }
         drop(journal);
-        std::fs::remove_dir_all(&directory)?;
+        if completed {
+            std::fs::remove_dir_all(directory)?;
+        }
     }
+    batch.finish()?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "journal_tests.rs"]
+mod tests;
 
 impl TaskJournal for PublishedJournal {
     fn read(

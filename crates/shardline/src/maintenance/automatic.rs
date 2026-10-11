@@ -38,9 +38,7 @@ pub(crate) fn prepare(command: &CliCommand) -> Result<Option<MaintenanceOperatio
         | CliCommand::Gc { root, .. }
         | CliCommand::Repair { root, .. }
         | CliCommand::RepairLifecycle { root, .. } => root.as_deref(),
-        CliCommand::Maintenance { .. }
-        | CliCommand::MaintenanceWorker { .. }
-        | CliCommand::ProviderlessSetup
+        CliCommand::ProviderlessSetup
         | CliCommand::Serve { .. }
         | CliCommand::ConfigCheck
         | CliCommand::DbMigrate { .. }
@@ -92,9 +90,7 @@ pub(crate) fn prepare(command: &CliCommand) -> Result<Option<MaintenanceOperatio
             root,
             webhook_retention_seconds: *webhook_retention_seconds,
         },
-        CliCommand::Maintenance { .. }
-        | CliCommand::MaintenanceWorker { .. }
-        | CliCommand::ProviderlessSetup
+        CliCommand::ProviderlessSetup
         | CliCommand::Serve { .. }
         | CliCommand::ConfigCheck
         | CliCommand::DbMigrate { .. }

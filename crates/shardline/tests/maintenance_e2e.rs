@@ -307,6 +307,117 @@ fn ordinary_commands_preserve_non_utf8_paths() -> Result<()> {
 }
 
 #[test]
+fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Result<()> {
+    use shardline_server::task_tracking::{TaskEvidenceStore, TaskRunIdentity, TaskRunState};
+    struct StopOnDrop(std::process::Child);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            let _kill = self.0.kill();
+            let _wait = self.0.wait();
+        }
+    }
+    let root = tempfile::tempdir()?;
+    let barrier = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.path().join(".gc-write-barrier.lock"))?;
+    barrier.lock()?;
+    let child = Command::new(binary())
+        .env_clear()
+        .current_dir(root.path())
+        .args(["index", "rebuild", "--root"])
+        .arg(root.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut child = StopOnDrop(child);
+    let state = root.path().join(".shardline-maintenance");
+    let mut interrupted = None;
+    wait_for(|| {
+        let Ok(entries) = fs::read_dir(&state) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path().join("tasks.sqlite");
+            let Ok(connection) =
+                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            else {
+                continue;
+            };
+            if connection
+                .query_row("SELECT count(*) FROM penelope_records_v1", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .ok()
+                == Some(3)
+            {
+                interrupted = Some(entry.path());
+                return true;
+            }
+        }
+        false
+    })?;
+    let directory = interrupted.ok_or("no admitted run")?;
+    let identity: TaskRunIdentity =
+        serde_json::from_slice(&fs::read(directory.join("identity.json"))?)?;
+    assert_eq!(identity.owner.pid, child.0.id());
+    child.0.kill()?;
+    let _status = child.0.wait()?;
+    let config = shardline_server::ServerConfig::new(
+        "127.0.0.1:8080".parse()?,
+        "http://localhost:8080".to_owned(),
+        root.path().to_path_buf(),
+        std::num::NonZeroUsize::new(4096).ok_or("chunk size")?,
+    );
+    let store = TaskEvidenceStore::from_config(&config)?;
+    let deployment = shardline_server::task_tracking::deployment_fingerprint(&config)?;
+    assert!(
+        store
+            .summaries(deployment, None, 100)?
+            .iter()
+            .any(|task| task.id == identity.id && task.state == TaskRunState::NeedsReconciliation)
+    );
+    barrier.unlock()?;
+    // An intentional integrity scan may run, but exporting old evidence must
+    // neither retry the interrupted rebuild nor append a success to its journal.
+    let output = Command::new(binary())
+        .env_clear()
+        .current_dir(root.path())
+        .args(["fsck", "--root"])
+        .arg(root.path())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let connection = Connection::open_with_flags(
+        directory.join("tasks.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    assert_eq!(
+        connection.query_row("SELECT count(*) FROM penelope_records_v1", [], |row| row
+            .get::<_, u32>(0))?,
+        3
+    );
+    let summaries = store.summaries(deployment, None, 100)?;
+    assert_eq!(summaries.len(), 2);
+    assert!(
+        summaries
+            .iter()
+            .any(|task| task.id == identity.id && task.state == TaskRunState::NeedsReconciliation)
+    );
+    assert!(
+        summaries
+            .iter()
+            .any(|task| task.id != identity.id && task.state == TaskRunState::Completed)
+    );
+    Ok(())
+}
+
+#[test]
 fn ordinary_maintenance_uses_the_original_cli_process() -> Result<()> {
     let root = tempfile::tempdir()?;
     let mut child = Command::new(binary())

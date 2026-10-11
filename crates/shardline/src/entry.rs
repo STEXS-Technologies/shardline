@@ -44,10 +44,10 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
         return crate::xet::run_xet(xet_args).await;
     }
 
-    let command = CliCommand::parse(args.clone());
+    let command = crate::command::parse_command(args.clone(), true);
     #[cfg(target_os = "linux")]
     if _supervised
-        && let Ok(parsed) = &command
+        && let Ok(crate::command::ParsedCommand::Existing(parsed)) = &command
         && let Ok(Some(operation)) = crate::maintenance::prepare_automatic(parsed)
     {
         return maintenance_status(
@@ -57,29 +57,37 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
             .await,
         );
     }
-    match command {
+    let command = match command {
         #[cfg(target_os = "linux")]
-        Ok(CliCommand::Maintenance {
+        Ok(crate::command::ParsedCommand::Maintenance {
             state_dir,
             task_id,
             operation,
-        }) => maintenance_status(
-            tokio::task::spawn_blocking(move || {
-                crate::maintenance::run(&state_dir, &task_id, operation)
-            })
-            .await,
-        ),
+        }) => {
+            return maintenance_status(
+                tokio::task::spawn_blocking(move || {
+                    crate::maintenance::run(&state_dir, &task_id, operation)
+                })
+                .await,
+            );
+        }
         #[cfg(target_os = "linux")]
-        Ok(CliCommand::MaintenanceWorker {
+        Ok(crate::command::ParsedCommand::MaintenanceWorker {
             journal,
             scope,
             generation,
-        }) => maintenance_status(
-            tokio::task::spawn_blocking(move || {
-                crate::maintenance::run_worker(&journal, scope, generation)
-            })
-            .await,
-        ),
+        }) => {
+            return maintenance_status(
+                tokio::task::spawn_blocking(move || {
+                    crate::maintenance::run_worker(&journal, scope, generation)
+                })
+                .await,
+            );
+        }
+        Ok(crate::command::ParsedCommand::Existing(command)) => Ok(command),
+        Err(error) => Err(error),
+    };
+    match command {
         Ok(CliCommand::ProviderlessSetup) => match run_providerless_setup(None) {
             Ok(report) => output_status(
                 report.write_summary(&mut io::stdout().lock()),

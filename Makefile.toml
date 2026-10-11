@@ -138,7 +138,7 @@ args = ["scripts/verify-release-binary.sh"]
 description = "Exercise durable maintenance, native proofs and interrupted-worker fencing using the release executable"
 workspace = false
 command = "cargo"
-args = ["test", "--release", "-p", "shardline", "--test", "maintenance_e2e", "--locked", "${@}"]
+args = ["test", "--release", "-p", "shardline", "--test", "maintenance_e2e", "--test", "legacy_cli_api", "--locked", "${@}"]
 
 [tasks.publish-order]
 description = "Print the derived crates.io publish order (bottom-up, from cargo metadata)"

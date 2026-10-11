@@ -36,9 +36,17 @@ stop a stuck process. Use ordinary commands unless you need that extra control.
 
 ## When something goes wrong
 
-The command keeps its normal output and exit status. A failure to export task
-history does not change the application result: Shardline keeps local evidence
-and warns that shared completion is unconfirmed.
+Commands retain their existing output and application results. A failure to
+export task history does not change the application result: Shardline keeps
+local evidence and warns that shared completion is unconfirmed.
+
+A local recording failure is reported as a tracking error. If work had already
+started, inspect its effects before retrying; an error does not prove that no
+data changed.
+
+Later invocations can publish retained history without repeating the work.
+Unfinished jobs remain available for inspection; they do not block later
+completed outcomes from becoming visible.
 
 The existing admin API adds `/api/v1/tasks/maintenance`. It distinguishes
 finished work, failed commands, and work needing investigation. It uses the

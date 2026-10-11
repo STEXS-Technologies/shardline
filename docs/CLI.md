@@ -38,6 +38,10 @@ Signed command outcomes are exported to `_shardline_tasks/v1/` through the confi
 object adapter. A shared-export failure retains local evidence and logs a warning;
 it does not disable local supervision or change the application's result. Later
 invocations can export verified completed evidence without repeating its effects.
+Verified unfinished history can also be exported for inspection; its local
+journal stays retained and the export does not authorize an execution retry.
+Recovery examines at most 64 journals per invocation and advances through the
+backlog, so unfinished or corrupt entries do not permanently hide later outcomes.
 Completed local evidence can also be exported after a reboot on the same
 identified host. A different host or an unobservable container owner stays
 unconfirmed; its recorded PID does not authorize a retry.

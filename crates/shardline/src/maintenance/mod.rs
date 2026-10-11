@@ -6,6 +6,7 @@ mod controller;
 mod history;
 mod inline;
 mod journal;
+mod outbox;
 mod path_codec;
 mod verified;
 mod worker;
