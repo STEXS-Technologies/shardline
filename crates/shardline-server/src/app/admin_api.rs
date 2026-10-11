@@ -580,7 +580,7 @@ pub(super) async fn maintenance_tasks(
     let store = crate::task_tracking::TaskEvidenceStore::from_objects(state.backend.object_store());
     let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
     let mut tasks = tokio::task::spawn_blocking(move || {
-        store.summaries(
+        store.inspect_summaries(
             deployment,
             after.as_ref().map(AdminItemKey::as_str),
             limit.saturating_add(1),
@@ -593,7 +593,7 @@ pub(super) async fn maintenance_tasks(
     let next_cursor = if has_more {
         tasks
             .last()
-            .map(|task| encode_cursor(&task.id, &query))
+            .map(|task| encode_cursor(task.id(), &query))
             .transpose()?
     } else {
         None

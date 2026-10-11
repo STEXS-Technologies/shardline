@@ -51,6 +51,28 @@ pub struct TaskRunSummary {
     pub output_verified: Option<bool>,
 }
 
+/// Admin inspection can expose a damaged manifest without inventing its owner,
+/// operation or deployment. Library summaries retain their strict contract.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum TaskEvidenceEntry {
+    Verified(TaskRunSummary),
+    Unreadable {
+        id: String,
+        state: TaskRunState,
+        identity_verified: bool,
+    },
+}
+
+impl TaskEvidenceEntry {
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            Self::Verified(summary) => &summary.id,
+            Self::Unreadable { id, .. } => id,
+        }
+    }
+}
+
 impl TaskEvidenceStore {
     /// Removes at most 64 verified finished histories older than 30 days.
     /// Unfinished, unobservable and corrupt histories are retained for inspection.
@@ -101,8 +123,17 @@ impl TaskEvidenceStore {
                 .rsplit('/')
                 .next()
                 .ok_or(ServerError::InvalidPath)?;
-            let Some(bytes) = self.read(&format!("{category}/{id}"), 65536)? else {
-                return Ok::<(), ServerError>(());
+            let bytes = match self.read(&format!("{category}/{id}"), 65536) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => return Ok::<(), ServerError>(()),
+                Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {
+                    tracing::warn!(
+                        run = id,
+                        "invalid task retention identity; retaining evidence"
+                    );
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
             };
             let Ok(identity) = serde_json::from_slice::<TaskRunIdentity>(&bytes) else {
                 tracing::warn!(
@@ -184,6 +215,21 @@ impl TaskEvidenceStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<TaskRunSummary>, ServerError> {
+        self.inspect_summaries(deployment, after, limit)?
+            .into_iter()
+            .map(|entry| match entry {
+                TaskEvidenceEntry::Verified(summary) => Ok(summary),
+                TaskEvidenceEntry::Unreadable { .. } => Err(invalid("invalid task identity")),
+            })
+            .collect()
+    }
+
+    pub(crate) fn inspect_summaries(
+        &self,
+        deployment: Digest,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskEvidenceEntry>, ServerError> {
         if limit == 0 || limit > 101 || after.is_some_and(|id| id.len() > 128) {
             return Err(ServerError::InvalidPath);
         }
@@ -199,37 +245,59 @@ impl TaskEvidenceStore {
             if after.is_some_and(|after| id <= after) {
                 return Ok::<(), ServerError>(());
             }
-            let Some(bytes) = self.read(&format!("manifests/{id}"), 65536)? else {
-                return Err(invalid("task identity disappeared"));
-            };
-            let identity: TaskRunIdentity = serde_json::from_slice(&bytes)?;
-            if identity.schema != 1
-                || identity.id != id
-                || identity.id.len() > 128
-                || identity.scope.definition != identity.definition.fingerprint()
-                || identity.definition.budget.max_history_records > 4096
-            {
-                return Err(invalid("invalid task identity"));
+            if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+                return Err(invalid("invalid task identity key"));
             }
-            if identity.deployment == deployment {
-                identities.insert(identity.id.clone(), identity);
-                if identities.len() > limit {
-                    identities.pop_last();
-                }
+            let identity = match self.read(&format!("manifests/{id}"), 65536) {
+                // Retention can remove an expired manifest during enumeration.
+                Ok(None) => return Ok(()),
+                Ok(Some(bytes)) => serde_json::from_slice::<TaskRunIdentity>(&bytes).ok(),
+                Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => None,
+                Err(error) => return Err(error),
+            };
+            // A decodable foreign deployment stays outside this page. With an
+            // unreadable manifest its deployment is unknown, so expose only
+            // the incident reference, never a fabricated scoped task identity.
+            if identity
+                .as_ref()
+                .is_some_and(|identity| identity.deployment != deployment)
+            {
+                return Ok(());
+            }
+            let identity = identity.filter(|identity| {
+                identity.schema == 1
+                    && identity.id == id
+                    && identity.scope.definition == identity.definition.fingerprint()
+                    && identity.definition.budget.max_history_records <= 4096
+                    && identity.definition.validate().is_ok()
+            });
+            identities.insert(id.to_owned(), identity);
+            if identities.len() > limit {
+                identities.pop_last();
             }
             Ok(())
         })?;
         identities
-            .into_values()
-            .map(|identity| {
+            .into_iter()
+            .map(|(id, identity)| {
+                let Some(identity) = identity else {
+                    return Ok(TaskEvidenceEntry::Unreadable {
+                        id,
+                        state: TaskRunState::Corrupt,
+                        identity_verified: false,
+                    });
+                };
                 let (state, output_verified) = match self.state(&identity) {
                     Ok(result) => result,
+                    Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {
+                        (TaskRunState::Corrupt, None)
+                    }
                     Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData => {
                         (TaskRunState::Corrupt, None)
                     }
                     Err(error) => return Err(error),
                 };
-                Ok(TaskRunSummary {
+                Ok(TaskEvidenceEntry::Verified(TaskRunSummary {
                     id: identity.id,
                     operation: identity.operation,
                     state,
@@ -237,7 +305,7 @@ impl TaskEvidenceStore {
                     created_at: identity.created_at,
                     owner: identity.owner,
                     output_verified,
-                })
+                }))
             })
             .collect()
     }

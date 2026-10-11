@@ -413,3 +413,124 @@ async fn normal_router_starts_tracker_and_exposes_authenticated_job_status() {
                 && job["owner"]["pid"] == std::process::id())
     );
 }
+
+#[tokio::test]
+async fn corrupt_manifests_remain_visible_without_hiding_healthy_jobs() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path())
+        .with_server_frontends([crate::ServerFrontend::Lfs])
+        .unwrap()
+        .with_admin_read_token(b"test-admin-token".to_vec())
+        .unwrap();
+    let app = crate::app::router(config.clone()).await.unwrap();
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let tracker = EmbeddedTaskTracker::new(object_store_from_config(&config).unwrap(), deployment);
+    for _ in 0..4 {
+        tracker
+            .begin("test-sweep", b"input", MaintenanceArtifactKind::Fsck)
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+    }
+    let original = store.summaries(deployment, None, 100).unwrap();
+    assert!(original.len() >= 4);
+    for (index, job) in original.iter().take(3).enumerate() {
+        let path = root
+            .path()
+            .join(format!("chunks/{TASK_EVIDENCE_PREFIX}manifests/{}", job.id));
+        let bytes = match index {
+            0 => b"broken JSON".to_vec(),
+            1 => {
+                let mut identity: TaskRunIdentity =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                identity.schema = 999;
+                serde_json::to_vec(&identity).unwrap()
+            }
+            _ => vec![b'x'; 65537],
+        };
+        std::fs::write(path, bytes).unwrap();
+    }
+    // Existing library callers still receive an error rather than incomplete
+    // typed summaries. The admin view can explicitly represent unknown identity.
+    assert!(store.summaries(deployment, None, 100).is_err());
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    for index in 0..original.len() {
+        let uri = cursor.as_ref().map_or_else(
+            || "/api/v1/tasks/maintenance?limit=1".to_owned(),
+            |cursor| format!("/api/v1/tasks/maintenance?limit=1&cursor={cursor}"),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("Authorization", "Bearer test-admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let jobs = body["tasks"].as_array().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(body["page"]["returned"], 1);
+        let job = &jobs[0];
+        seen.push(job["id"].as_str().unwrap().to_owned());
+        if index < 3 {
+            assert_eq!(job["state"], "corrupt");
+            assert_eq!(job["identity_verified"], false);
+            for field in ["owner", "operation", "execution", "created_at"] {
+                assert!(job.get(field).is_none());
+            }
+        } else {
+            assert_eq!(job["state"], "completed");
+        }
+        cursor = body["page"]["next_cursor"].as_str().map(str::to_owned);
+        assert_eq!(cursor.is_some(), index + 1 < original.len());
+    }
+    assert_eq!(
+        seen,
+        original
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>()
+    );
+    // Corrupt identities never become evidence-retention authorization.
+    let expired = shardline_protocol::unix_now_seconds_lossy().saturating_add(31 * 24 * 60 * 60);
+    assert_eq!(
+        store.prune_completed(deployment, expired).unwrap(),
+        original.len() - 3
+    );
+    assert_eq!(
+        store
+            .inspect_summaries(deployment, None, 100)
+            .unwrap()
+            .len(),
+        3
+    );
+    // Losing access to the storage namespace is a request failure, not a
+    // collection of corrupt jobs or a reassuring empty history.
+    let chunks = root.path().join("chunks");
+    std::fs::rename(&chunks, root.path().join("chunks-backup")).unwrap();
+    std::fs::write(&chunks, b"not a directory").unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tasks/maintenance")
+                .header("Authorization", "Bearer test-admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_server_error());
+}
