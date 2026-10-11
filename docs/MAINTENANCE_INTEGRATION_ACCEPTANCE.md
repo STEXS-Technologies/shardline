@@ -8,7 +8,7 @@ criteria; passing the optional runner tests alone does not satisfy them.
 
 ## Validation so far
 
-The workspace suite passed all 9,338 tests, alongside 35 reliability
+The workspace suite passed all 9,340 tests, alongside 35 reliability
 contract tests and 15 release CLI integration tests. Focused tests cover the
 embedded tracker and storage migration, including pre-existing objects under
 the new task-evidence prefix.
@@ -31,6 +31,15 @@ signed success and exit-code fields; contradictory fields fail verification.
 The admin API guide now documents maintenance pagination, outcome states and
 recovery actions separately from current server readiness. These checks do not
 establish large-deployment performance or the remaining fault-boundary gates.
+
+The 13 focused server tracking tests also cover malformed, unsupported-version
+and oversized manifests through the authenticated admin route. Each damaged
+manifest occupies a pagination slot with an explicitly unverified identity;
+other verified jobs remain reachable. Unreadable identities retain their
+evidence and do not block retention of unrelated verified completed runs.
+An inaccessible storage namespace fails the request instead of returning an
+empty history. A manifest whose deployment cannot be decoded is shown only as
+an incident reference; it does not establish which deployment owns that run.
 
 Normal CLI tests check its original PID, fresh consecutive runs, live command
 results, read-only dry runs, export failures and later evidence export without

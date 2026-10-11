@@ -199,6 +199,7 @@ curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
 | `tasks[].created_at` | Run creation time in Unix seconds, not its completion time. |
 | `tasks[].owner` | Diagnostic process identity. It is not a cluster lease or permission to retry. |
 | `tasks[].output_verified` | For isolated jobs, whether full captured output was verified. Large streams can be `false` while the signed command outcome is verified. Otherwise `null`. |
+| `tasks[].identity_verified` | Present as `false` when the run manifest cannot be verified. Only `id` and `state: corrupt` are available; owner, operation, execution and creation time are omitted. Its deployment cannot be confirmed, so it may belong to another deployment sharing the evidence store. |
 | `page` | Pagination metadata. An empty page does not prove that all maintenance succeeded or that every job was recorded. |
 
 | State | Meaning and next action |
@@ -215,6 +216,11 @@ This is a read-only inspection endpoint. No state authorizes an automatic retry.
 A failed optional startup job does not by itself mean the server is unhealthy;
 check readiness separately. Tracking warnings in command logs can explain why
 an expected outcome is missing.
+
+A damaged manifest occupies its own pagination slot instead of hiding healthy
+jobs. Preserve its incident reference and investigate the stored evidence.
+Storage access failures still fail the request; they are not reported as an
+empty or successfully inspected history.
 
 Pages are ordered by opaque run ID, not creation time. Only `limit` (`1..=100`,
 default `100`) and `cursor` are accepted. State, prefix and capability filters
