@@ -57,6 +57,10 @@ A local recording failure is reported as a tracking error. If work had already
 started, inspect its effects before retrying; an error does not prove that no
 data changed.
 
+A command can also be interrupted after changing data or printing its report.
+The report alone does not confirm that completion was recorded. Check task
+history and the affected data before repeating a mutation.
+
 Later invocations can publish retained history without repeating the work.
 Unfinished jobs remain available for inspection; they do not block later
 completed outcomes from becoming visible.
