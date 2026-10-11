@@ -8,7 +8,7 @@ criteria; passing the optional runner tests alone does not satisfy them.
 
 ## Validation so far
 
-The repository CI passed, including 9,325 workspace tests, 35 reliability
+The workspace suite passed all 9,328 tests, alongside 35 reliability
 contract tests and 13 release CLI integration tests. Focused tests cover the
 embedded tracker and storage migration, including pre-existing objects under
 the new task-evidence prefix.
@@ -22,7 +22,21 @@ temporary storage and only the existing deployment root writable.
 The exact systemd sandbox could not be exercised on the validation host: its
 user manager rejected namespace setup before executing Shardline. Container
 validation covers similar filesystem restrictions, but does not establish that
-systemd gate. Production Postgres/S3 rolling deployment and multi-node fault
+systemd gate. All 52 Postgres/S3 HTTP integration tests passed. A new
+Docker-backed Postgres/MinIO test checks shared verified
+startup outcomes across API, transfer and combined roles with different local
+roots. Tracking adds no local journal to these server instances; Xet-only
+startup also works without creating a local state root. Cleanup recovery tests
+cover four interrupted deletion boundaries and retention with more than 64
+unfinished histories ahead of a completed run.
+
+All five existing Postgres barrier/fence tests also passed against a freshly
+migrated database, with `DATABASE_URL` explicitly set. They exercise competing
+connections, cancellation of partially acquired locks, single-connection pools
+and rejection of a terminated owner's fence. They establish these existing
+coordination contracts, not cluster-wide exactly-once task execution.
+
+Production Postgres/S3 rolling deployment and multi-node fault
 testing also remain outstanding. The checklist below records the full scope;
 these checks do not justify a blanket rollout or exactly-once guarantee.
 

@@ -197,6 +197,132 @@ fn evidence_retention_removes_only_verified_finished_runs() {
 }
 
 #[test]
+fn interrupted_evidence_cleanup_resumes_without_replaying_work() {
+    use penelope_core::task::Digest;
+    use shardline_storage::{ObjectPrefix, ObjectStore};
+    // Crash after the marker, after hiding status, during artifact deletion,
+    // and after all run objects were deleted but before clearing the marker.
+    for boundary in 0..4 {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let deployment = deployment_fingerprint(&config).unwrap();
+        let store = TaskEvidenceStore::from_config(&config).unwrap();
+        let objects = object_store_from_config(&config).unwrap();
+        let tracker = EmbeddedTaskTracker::new(objects.clone(), deployment);
+        tracker
+            .begin(
+                "finished",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+        let id = store.summaries(deployment, None, 10).unwrap()[0].id.clone();
+        let identity: TaskRunIdentity = serde_json::from_slice(
+            &store
+                .read(&format!("manifests/{id}"), 65536)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(store.begin_retirement(&identity).unwrap());
+        let run_prefix = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}runs/{id}/")).unwrap();
+        if boundary >= 1 {
+            std::fs::remove_file(
+                root.path()
+                    .join(format!("chunks/{TASK_EVIDENCE_PREFIX}manifests/{id}")),
+            )
+            .unwrap();
+        }
+        if boundary >= 2 {
+            std::fs::remove_file(root.path().join(format!(
+                "chunks/{TASK_EVIDENCE_PREFIX}runs/{id}/artifacts/{}",
+                hex::encode(penelope_core::task::Digest::of(b"complete").0)
+            )))
+            .unwrap();
+        }
+        if boundary >= 3 {
+            objects
+                .visit_prefix(&run_prefix, |metadata| {
+                    objects.delete_if_present(metadata.key()).unwrap();
+                    Ok::<(), ServerError>(())
+                })
+                .unwrap();
+        }
+        let reopened = TaskEvidenceStore::from_config(&config).unwrap();
+        let expired = identity.created_at.saturating_add(31 * 24 * 60 * 60);
+        assert_eq!(
+            reopened
+                .prune_completed(Digest::of(b"another-deployment"), expired)
+                .unwrap(),
+            0
+        );
+        assert_eq!(reopened.prune_completed(deployment, expired).unwrap(), 1);
+        assert!(reopened.summaries(deployment, None, 10).unwrap().is_empty());
+        assert!(
+            reopened
+                .read(&format!("retiring/{id}"), 65536)
+                .unwrap()
+                .is_none()
+        );
+        let mut remaining = 0;
+        objects
+            .visit_prefix(&run_prefix, |_metadata| {
+                remaining += 1;
+                Ok::<(), ServerError>(())
+            })
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(reopened.prune_completed(deployment, expired).unwrap(), 0);
+    }
+}
+
+#[test]
+fn unfinished_history_does_not_starve_finished_history_retention() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let tracker = EmbeddedTaskTracker::new(object_store_from_config(&config).unwrap(), deployment);
+    for _ in 0..65 {
+        drop(
+            tracker
+                .begin(
+                    "unfinished",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap(),
+        );
+    }
+    for summary in store.summaries(deployment, None, 100).unwrap() {
+        let path = root.path().join(format!(
+            "chunks/{TASK_EVIDENCE_PREFIX}manifests/{}",
+            summary.id
+        ));
+        let mut identity: TaskRunIdentity =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        identity.created_at = 0;
+        std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    }
+    tracker
+        .begin(
+            "finished",
+            b"input",
+            MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap()
+        .finish(true, b"complete")
+        .unwrap();
+    let now = shardline_protocol::unix_now_seconds_lossy().saturating_add(31 * 24 * 60 * 60);
+    assert_eq!(store.prune_completed(deployment, now).unwrap(), 1);
+    let remaining = store.summaries(deployment, None, 100).unwrap();
+    assert_eq!(remaining.len(), 65);
+    assert!(remaining.iter().all(|task| task.operation == "unfinished"));
+}
+
+#[test]
 fn credential_source_changes_do_not_change_a_shared_deployment_target() {
     use shardline_protocol::SecretString;
     let root = tempfile::tempdir().unwrap();
