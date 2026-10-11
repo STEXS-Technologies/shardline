@@ -90,6 +90,15 @@ shared_hashes() {
 }
 sql() { compose exec -T chaos-postgres psql -U shardline -d shardline -At -v ON_ERROR_STOP=1 -c "$1"; }
 barrier_filter="locktype = 'advisory' AND objsubid = 1 AND classid::bigint = (x'5348415244474301'::bit(64)::bigint >> 32) AND objid::bigint = (x'5348415244474301'::bit(64)::bigint & 4294967295)"
+contended_barrier() {
+    # Acquisition may wait in Postgres or poll cooperatively. In either case,
+    # require one owner and one distinct contender, not just two admitted tasks.
+    sql "SELECT (SELECT COUNT(*) FROM pg_locks WHERE $barrier_filter AND granted)=1
+        AND ((SELECT COUNT(*) FROM pg_locks WHERE $barrier_filter AND NOT granted)
+            + (SELECT COUNT(*) FROM pg_stat_activity activity
+               WHERE query='SELECT pg_try_advisory_lock(\$1)'
+                 AND NOT EXISTS (SELECT 1 FROM pg_locks WHERE $barrier_filter AND granted AND pid=activity.pid)))=1"
+}
 for node in 0 1; do
     for attempt in $(seq 1 60); do
         kill -0 "${vm_pids[$node]}" || { cat "$fixture/$node/qemu.log" >&2; exit 1; }
@@ -180,17 +189,18 @@ jq -e --arg id "$source_run" --argjson pid "$source_cli_pid" 'any(.tasks[]; .id 
 shared_hashes "$source_run" '0000000000 0000000001 0000000002' > "$fixture/source-cli-records-before"
 vm_ssh 1 'sudo systemd-run --unit shardline-validation-waiter-rebuild -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline index rebuild'
 for attempt in $(seq 1 30); do
-    if test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=1 FROM pg_locks WHERE $barrier_filter")" = t; then break; fi
+    if test "$(contended_barrier)" = t; then break; fi
     sleep 1
 done
-test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=1 FROM pg_locks WHERE $barrier_filter")" = t
+test "$(contended_barrier)" = t
+source_coordinator=$(sql "SELECT pid FROM pg_locks WHERE $barrier_filter AND granted")
 history > "$fixture/contended.json"
 waiter_run=$(jq -er --arg host "$(head -n 1 "$fixture/1/identity")" '.tasks[] | select(.execution == "inline" and .owner.host == $host and .state == "running") | .id' "$fixture/contended.json")
 [[ "$waiter_run" =~ ^[a-f0-9]{32}$ ]]
 test "$waiter_run" != "$source_run"
 if test "$mode" = connection-loss; then
-    # Terminate only the source's lock-owning connection. Its metadata scan and
-    # original process remain alive; losing ownership must cancel their work.
+    # Terminate only the source's lock-owning connection, keeping its VM alive.
+    # Losing ownership must fail the original command, not reconnect its scan.
     coordinator=$(sql "SELECT pid FROM pg_locks WHERE $barrier_filter AND granted")
     [[ "$coordinator" =~ ^[0-9]+$ ]]
     test "$(sql "SELECT pg_terminate_backend($coordinator)")" = t
@@ -236,17 +246,23 @@ fi
 kill -0 "${vm_pids[0]}"
 history > "$fixture/partitioned.json"
 jq -e --arg id "$id" --arg source "$source_run" --arg waiter "$waiter_run" '(.tasks | length) == 3 and all(.tasks[]; if .id == $waiter then .state == "running" else (.id == $id or .id == $source) and .state == "running_or_interrupted" end)' "$fixture/partitioned.json"
-test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=1 FROM pg_locks WHERE $barrier_filter")" = t
+sql "SELECT pid, granted FROM pg_locks WHERE $barrier_filter ORDER BY pid" > "$fixture/partition-locks.log"
+sql "SELECT pid, state, wait_event, query FROM pg_stat_activity WHERE datname=current_database() ORDER BY pid" > "$fixture/partition-activity.log"
+test "$(contended_barrier)" = t
 kill -KILL "${vm_pids[0]}"
 wait "${vm_pids[0]}" 2>/dev/null || true
 vm_pids[0]=''
 # Backend session death releases the source's barrier. The already admitted
 # waiter now owns it; no task history or local PID observation grants ownership.
 for attempt in $(seq 1 30); do
-    if test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=0 FROM pg_locks WHERE $barrier_filter")" = t; then break; fi
+    replacement_coordinator=$(sql "SELECT pid FROM pg_locks WHERE $barrier_filter AND granted")
+    if [[ "$replacement_coordinator" =~ ^[0-9]+$ ]] && test "$replacement_coordinator" != "$source_coordinator"; then break; fi
     sleep 1
 done
+sql "SELECT pid, granted FROM pg_locks WHERE $barrier_filter ORDER BY pid" > "$fixture/node-loss-locks.log"
+sql "SELECT pid, state, wait_event, query FROM pg_stat_activity WHERE datname=current_database() ORDER BY pid" > "$fixture/node-loss-activity.log"
 test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=0 FROM pg_locks WHERE $barrier_filter")" = t
+test "$replacement_coordinator" != "$source_coordinator"
 test "$(sql "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event='relation' AND query LIKE '%shardline_file_records%')")" = t
 test "$(sql "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='shardline-vm-scan-blocker'")" = t
 wait "$blocker_pid" 2>/dev/null || true

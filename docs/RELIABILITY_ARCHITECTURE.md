@@ -3,8 +3,9 @@
 For commands, benefits and crash recovery, start with the
 [operator guide](MAINTENANCE_INTEGRATION_UX.md). This page describes implementation
 details. The [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) records
-remaining gaps, including loss of a Postgres maintenance lock while its command
-remains alive. The integration does not yet establish safe takeover for that case.
+remaining gaps. Rebuild's lock and metadata work now share one non-replaceable
+Postgres connection; other operations' ownership and remote-effect boundaries
+still need validation.
 
 The 0.2.0 integration includes an embedded server tracker and automatic Linux
 maintenance tracking, with an explicit bounded runner for advanced use. Default
@@ -173,6 +174,25 @@ If shared observation is unavailable in a deployment with no writable local
 storage, the command preserves its application result and explicitly warns that
 no verified outcome is available. This preserves existing availability and
 permissions; it does not provide an audit-loss guarantee during storage outages.
+
+Postgres rebuild uses a single session for its exclusive maintenance lock and
+all metadata reads and writes. Its private pool rejects replacement connections:
+losing that session cannot let an old scan reconnect after takeover. The lock
+uses the existing advisory key and remains held across individual metadata
+transactions. Normal completion closes the pool; cancelling acquisition drops
+the session. Idle and lifetime retirement are disabled for this invocation so
+long scans do not lose ownership merely because a pool timer expires. Failure
+may leave earlier committed changes; it does not imply rollback of the entire
+rebuild or authorize an automatic retry. This protection covers rebuild's
+metadata mutations, not other operations' remote object-store effects.
+
+For that session, rebuild enables PostgreSQL's
+[`client_connection_check_interval`](https://www.postgresql.org/docs/16/runtime-config-connection.html)
+at one second when the setting exists and is disabled. An already configured
+interval is preserved. This allows a query blocked on a metadata lock to notice
+a closed client connection and release ownership. It does not set a query
+timeout, and it does not bound detection of every network partition. Older
+servers without the setting retain their existing disconnect-detection behavior.
 
 An ordinary invocation carries one resolved command/configuration through
 evidence production and the original handlers. Migration source and destination

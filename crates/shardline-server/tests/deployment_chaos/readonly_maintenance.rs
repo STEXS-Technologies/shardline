@@ -268,7 +268,16 @@ async fn drill_concurrent_ordinary_rebuilds_keep_shared_ownership() {
         || async {
             let locks = sqlx::query_scalar::<_, bool>(
                 "SELECT COUNT(*) FILTER (WHERE granted) = 1
-                     AND COUNT(*) FILTER (WHERE NOT granted) = 1
+                     AND (COUNT(*) FILTER (WHERE NOT granted)
+                         + (SELECT COUNT(*) FROM pg_stat_activity activity
+                            WHERE query = 'SELECT pg_try_advisory_lock($1)'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM pg_locks held
+                                  WHERE held.pid = activity.pid AND held.granted
+                                    AND held.locktype = 'advisory'
+                                    AND held.classid::bigint = (($1::bigint >> 32) & 4294967295)
+                                    AND held.objid::bigint = ($1::bigint & 4294967295)
+                              ))) = 1
                  FROM pg_locks
                  WHERE locktype = 'advisory'
                    AND classid::bigint = (($1::bigint >> 32) & 4294967295)
