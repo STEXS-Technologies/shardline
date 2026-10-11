@@ -68,7 +68,11 @@ impl ReliabilityMerkleCommit {
         signing_key: &SigningKey,
         key_id: KeyId,
     ) -> Result<Signed<Commit>, ReliabilityError> {
-        sign_commit(&self.body, signing_key, key_id)
+        // Retain the v2 key type in this public API. Both libraries accept the
+        // same Ed25519 seed; zeroize the temporary copy after conversion.
+        let seed = zeroize::Zeroizing::new(signing_key.to_bytes());
+        let protocol_key = statechronicle_ed25519::SigningKey::from_bytes(&seed);
+        sign_commit(&self.body, &protocol_key, key_id)
             .map_err(|error| ReliabilityError::Merkle(error.to_string()))
     }
 }
@@ -290,7 +294,9 @@ mod tests {
         let key_id = KeyId::new(String::from("shardline-test-key")).unwrap();
         let signed = commit.sign(&signing_key, key_id).unwrap();
         let verifying_key = VerifyingKey::from(&signing_key);
-        verify_commit(&signed, &verifying_key).unwrap();
+        let protocol_key =
+            statechronicle_ed25519::VerifyingKey::from_bytes(&verifying_key.to_bytes()).unwrap();
+        verify_commit(&signed, &protocol_key).unwrap();
     }
 
     #[test]

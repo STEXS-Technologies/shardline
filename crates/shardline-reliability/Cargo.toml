@@ -7,20 +7,41 @@ repository.workspace = true
 homepage.workspace = true
 description = "Durable lifecycle identities and compatibility boundaries for Shardline."
 
+[features]
+default = []
+task-journal = ["dep:penelope-core", "dep:penelope-executor", "dep:penelope-statechronicle", "dep:rusqlite", "dep:hex"]
+process-runtime = ["task-journal", "dep:rustix", "dep:libc", "dep:hex"]
+
 [dependencies]
 chrono.workspace = true
 ed25519-dalek.workspace = true
 penelope-domain.workspace = true
+penelope-core = { workspace = true, optional = true }
+penelope-executor = { workspace = true, optional = true }
+penelope-statechronicle = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 statechronicle-commit.workspace = true
 statechronicle-core.workspace = true
 statechronicle-domain.workspace = true
+statechronicle-ed25519.workspace = true
+statechronicle-profile.workspace = true
+statechronicle-profiles.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[example]]
+name = "process_test_worker"
+required-features = ["process-runtime"]

@@ -53,6 +53,12 @@ pub(crate) enum CliDefinitionCommand {
     Admin(AdminCommandArgs),
     /// Verify object-store and metadata integrity.
     Fsck(RootArgs),
+    /// Run durable, bounded maintenance with signed result artifacts (Linux).
+    #[cfg(target_os = "linux")]
+    Maintenance(MaintenanceArgs),
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    MaintenanceWorker(MaintenanceWorkerArgs),
     /// Rebuild mutable indexes from immutable version state.
     Index(IndexCommandArgs),
     /// Repair lifecycle metadata and webhook delivery state.
@@ -73,6 +79,30 @@ pub(crate) enum CliDefinitionCommand {
     Completion(CompletionArgs),
     /// Generate a manpage for packaged or self-hosted deployments.
     Manpage(ManpageArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct MaintenanceArgs {
+    /// Private state directory outside the deployment root; retain for recovery.
+    #[arg(long)]
+    pub(crate) state_dir: PathBuf,
+    /// Stable task identity. Repeating it resumes the original pinned task.
+    #[arg(long)]
+    pub(crate) task_id: String,
+    #[command(subcommand)]
+    pub(crate) command: crate::maintenance::MaintenanceOperation,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct MaintenanceWorkerArgs {
+    #[arg(long)]
+    pub(crate) journal: PathBuf,
+    #[arg(long)]
+    pub(crate) scope: String,
+    #[arg(long)]
+    pub(crate) generation: u32,
 }
 
 // ── Providerless ────────────────────────────────────────────────────────

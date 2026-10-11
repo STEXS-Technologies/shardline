@@ -4,6 +4,47 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Upgrade StateChronicle and Penelope integration dependencies to 0.2.0 while
+  preserving existing reliability evidence encodings, Merkle envelopes, database
+  schemas, and upload/session recovery behavior.
+- Adapt StateChronicle signing keys internally while retaining the existing
+  public Ed25519 key API and zeroizing the temporary seed copy.
+
+### Added
+
+- Embedded server task observation and automatic Linux maintenance tracking through
+  existing commands, preserving their process, live output and result interfaces.
+  Durable local journals export signed outcomes through the existing object adapter;
+  export failure retains evidence without adding required S3 write permissions.
+  Administrative task status distinguishes completion, failed outcomes and
+  unresolved ownership. Verified finished evidence has a retention policy.
+- Opt-in Linux `shardline maintenance` execution for fsck, index rebuild, GC,
+  lifecycle repair and storage migration with durable Penelope supervision and
+  separate native StateChronicle checkpoint/result proofs. Trusted-key and
+  materialized-report verification precede acceptance; interrupted mutations
+  with unknown effects remain blocked. Existing commands retain their behavior.
+
+- Native StateChronicle upload and resumable lifecycle profiles now validate
+  event creation and historical verification with the existing transition rules.
+  Explicit typed adapters provide separate domains, schema and payload bounds,
+  namespaced operations, expected-state checks, and required authority.
+- An opt-in `task-journal` feature provides a bounded SQLite Penelope task journal
+  with atomic history/blob persistence, scoped sequence/generation arbitration,
+  verified immutable blobs, and restart replay. It does not activate task workers
+  or change existing metadata databases.
+- The `process-runtime` feature adds a Linux hosted worker port with durable
+  start authorization, owner-only storage, controller/generation leases,
+  pidfd fencing, executable/definition pins, kernel CPU limits and an independent
+  deadline watchdog. Its boot clock expires unfinished work after reboot.
+- Frozen deployment compatibility vectors produced with the 0.1.0 dependencies
+  cover all eleven evidence families, historical encodings, commitments, and
+  signatures. Tests reject missing commitments, altered roots, and rewritten
+  storage sequences, and verify older envelopes without schema markers.
+
 ## [1.11.3] - 2026-10-03
 
 This patch hardens storage, recovery, protocol handling, and the SDK, while reducing

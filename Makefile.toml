@@ -78,6 +78,19 @@ install_crate_args = ["--locked", "--force"]
 command = "cargo"
 args = ["nextest", "run", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
 
+[tasks.test-reliability-contracts]
+description = "Verify historical evidence, native profiles and durable task recovery without external services"
+workspace = false
+dependencies = ["build-reliability-runtime-fixture"]
+command = "cargo"
+args = ["test", "-p", "shardline-reliability", "--all-features", "--locked", "--test", "deployment_compatibility", "--test", "native_profiles", "--test", "task_journal", "--test", "process_runtime", "--test", "task_artifact", "${@}"]
+
+[tasks.build-reliability-runtime-fixture]
+description = "Build the real child-process fixture for reliability runtime contracts"
+workspace = false
+command = "cargo"
+args = ["build", "-p", "shardline-reliability", "--features", "process-runtime", "--locked", "--example", "process_test_worker"]
+
 [tasks.test-postgres]
 description = "Run Postgres-gated tests (requires DATABASE_URL env var)"
 workspace = false
@@ -120,6 +133,12 @@ description = "Build the release shardline binary and smoke-test the packaged en
 workspace = false
 command = "bash"
 args = ["scripts/verify-release-binary.sh"]
+
+[tasks.test-maintenance-contracts]
+description = "Exercise durable maintenance, native proofs and interrupted-worker fencing using the release executable"
+workspace = false
+command = "cargo"
+args = ["test", "--release", "-p", "shardline", "--test", "maintenance_e2e", "--locked", "${@}"]
 
 [tasks.publish-order]
 description = "Print the derived crates.io publish order (bottom-up, from cargo metadata)"
@@ -331,7 +350,7 @@ args = ["scripts/check_coverage_ratchet.sh"]
 [tasks.ci]
 description = "Run the core contributor CI checks"
 workspace = false
-dependencies = ["format-check", "clippy", "check-dependency-exceptions", "deny", "test", "verify-release-binary", "check-migration-sync"]
+dependencies = ["format-check", "clippy", "check-dependency-exceptions", "deny", "test", "test-reliability-contracts", "test-maintenance-contracts", "verify-release-binary", "check-migration-sync"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"
