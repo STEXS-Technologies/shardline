@@ -1,6 +1,6 @@
 # Maintenance without extra services
 
-Start Shardline and run maintenance as before:
+Keep using your existing configuration and commands:
 
 ```bash
 shardline serve
@@ -8,83 +8,78 @@ shardline fsck
 shardline gc --mark --sweep
 ```
 
-There is no tracker daemon, extra network port, or task ID to manage. Existing
-GC timers remain responsible for their schedules. Starting the server does not
-start a new GC job.
+There is no tracker service, extra port, task ID or new state mount to manage.
+Your existing GC timers still control the schedule. Starting the server does
+not start GC.
 
-Keep using the same configuration and root options you use for your deployment.
-A first fsck also initializes tracking on a new local directory with the usual
-storage permissions. Read-only GC does not add audit files.
+## What you get
 
-## What users get
+Shardline records maintenance and verifies its recorded results. You can see
+which run finished, failed or needs investigation after a crash.
 
-Shardline records which maintenance ran and whether it finished. It checks
-signed results before accepting them. Upload and resumable-session history
-keeps its existing format and gains native StateChronicle validation.
+Each intentional command performs a fresh run. Yesterday's successful scan
+does not replace today's work. A command keeps the configuration it started
+with; changes apply to the next command.
 
-An interrupted operation is not treated as successful. If its effects are
-uncertain, Shardline retains the evidence instead of automatically repeating
-the mutation. Existing database transactions and maintenance barriers remain
-responsible for protecting deployment data.
+Existing storage transactions and safety barriers still protect your data.
+Upload and resumable-session history keeps its existing format and receives
+additional validation. Read-only GC does not create task history.
 
-A running command keeps the configuration and migration targets chosen at
-startup. Configuration changes apply to the next command.
+## Why this helps with several nodes
 
-## Why a worker process exists
+In a Postgres/S3 deployment, recorded history uses the existing shared store.
+A replacement node can inspect it without copying a private tracker directory
+from the old container.
 
-Normal startup and maintenance do not add a process. The tracker runs inside
-Shardline; a maintenance command runs in its original CLI process with live
-output.
+Suppose GC changes data and dies before recording completion. Its run stays
+unresolved, even if GC printed a successful report. Starting a replacement
+server does not mark that old run successful or repeat it automatically.
 
-Only the advanced `shardline maintenance ...` runner starts a child. Its
-controller can stop stuck work and enforce resource limits. Idempotency keys
-and fencing protect against duplicate effects and stale writes; they do not
-stop a stuck process. Use ordinary commands unless you need that extra control.
+History cannot tell you whether an unreachable node is still working. Inspect
+the affected data and establish ownership before repeating an uncertain mutation.
 
-## When something goes wrong
+## Does it start another process?
 
-Commands retain their existing output and application results. A failure to
-export task history does not change the application result: Shardline keeps
-local evidence when a local journal is available and warns that shared completion
-is unconfirmed.
+Normal startup uses an embedded tracker. Ordinary maintenance runs in its
+original CLI process with live output.
 
-Postgres/S3 commands also work when the local filesystem is read-only. They use
-the existing shared store for history. If that store cannot record the outcome,
-the command still uses its existing safety barriers and warns that tracking is
-unavailable. There is no local copy to recover in this case.
+Only the optional `shardline maintenance ...` runner starts a child process.
+Its controller can stop stuck work and enforce resource limits. Ordinary
+commands do not need that process.
 
-A local recording failure is reported as a tracking error. If work had already
-started, inspect its effects before retrying; an error does not prove that no
-data changed.
+Idempotency keys prevent duplicate effects where an operation supports them.
+Fencing rejects stale owners' writes. Both work without a separate worker.
+A child process adds isolation; it does not provide exactly-once execution.
 
-A command can also be interrupted after changing data or printing its report.
-The report alone does not confirm that completion was recorded. Check task
-history and the affected data before repeating a mutation.
+## Where to check a run
 
-Later invocations can publish retained history without repeating the work.
-Unfinished jobs remain available for inspection; they do not block later
-completed outcomes from becoming visible.
+Use `/api/v1/tasks/maintenance` with your existing admin token:
 
-The existing admin API adds `/api/v1/tasks/maintenance`. It distinguishes
-finished work, failed commands, and work needing investigation. It uses the
-same admin token. A result from yesterday is history, not proof that the
-deployment is healthy today.
+| Result | Meaning and next action |
+| --- | --- |
+| `completed` | The recorded result verified. Read the report. |
+| `failed` | Follow the command's diagnostics; some data may have changed. |
+| `needs_reconciliation` | Inspect affected data before repeating a mutation. |
+| `running_or_interrupted` | The owner's state is unknown here. Do not assume a retry is safe. |
+| `corrupt` | The history could not verify. Investigate before relying on it. |
 
-Check `/api/v1/status` for this server's readiness. Check maintenance history
-when investigating a particular job. The [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
-shows how to list jobs and explains each state and the next action.
+Use `/api/v1/status` for this server's readiness. Past maintenance success does
+not prove current deployment health. See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
+for pagination and all states.
 
-A `failed` outcome means the command finished and reported a problem. Follow
-its usual diagnostics. `needs_reconciliation` means the effects are uncertain:
-inspect the affected data before repeating a mutation. `running_or_interrupted`
-means this node cannot confirm the owner's state; it does not authorize a retry.
+## If tracking fails
+
+Shardline reports tracking failures. Later commands can export retained local
+evidence without repeating the work.
+
+Postgres/S3 tracking does not require a writable local filesystem. If shared
+history is unavailable, commands warn and keep their existing behavior and
+safety barriers. There is no local recovery copy in that case. An unconfirmed
+outcome is not a verified success.
 
 ## Upgrade status
 
-This branch keeps the existing version and deployment formats. It is still
-under verification; it is not a claim of cluster-wide exactly-once execution
-or a completed rollout guarantee.
-
-Maintainers can find the remaining checks in
-[the acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) and the
-[technical reliability reference](RELIABILITY_ARCHITECTURE.md).
+The version and deployment formats remain unchanged on this branch.
+Verification is still in progress. Cluster-wide exactly-once execution is
+not guaranteed. Maintainers can review the remaining [acceptance checks](MAINTENANCE_INTEGRATION_ACCEPTANCE.md)
+and [technical reference](RELIABILITY_ARCHITECTURE.md).
