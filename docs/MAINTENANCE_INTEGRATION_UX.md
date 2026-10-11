@@ -46,8 +46,9 @@ request. Those effects need their own protection.
 
 ## After a crash
 
-Suppose GC changes data and dies before recording completion. A replacement
-server leaves the run unresolved and does not repeat it automatically.
+S3 can delete an object before GC receives its reply. If GC dies then, history
+stays unresolved. A replacement server does not repeat that uncertain work
+automatically. A missing reply is not proof that nothing changed.
 
 Inspect `/api/v1/tasks/maintenance` with your existing admin token:
 
