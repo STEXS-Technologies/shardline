@@ -25,6 +25,20 @@ The ordinary handler runs under the admitted configuration instead of parsing
 its environment file again. Failed tracking preparation produces an explicit
 warning while preserving the original validation status.
 
+The release CLI selection now passes 16 maintenance tests and both Rust API
+compatibility tests. First-run coverage exercises fsck, rebuild, GC mark and
+lifecycle repair against an absent nested local root: each publishes a verified
+completion, keeps normal deployment-directory permissions and confines private
+tracking state to mode 0700. GC dry-run coverage also exercises a fresh root and
+checks that no task audit files are created.
+
+A released/current binary comparison passed all 15 combinations of these four
+commands plus GC dry-run under umasks 022, 002 and 077. It uses the same root path
+for both binaries and compares exact stdout, stderr, successful exit status and
+the modes of the deployment directory and its new parents. This closes the
+missing-root tracking gap for that deployment shape; broader filesystem and
+deployment acceptance gates below still apply.
+
 All 12 focused server tracking tests passed after tightening large-report
 inspection. Reports beyond the status download bound still require consistent
 signed success and exit-code fields; contradictory fields fail verification.

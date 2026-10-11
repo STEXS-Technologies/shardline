@@ -37,6 +37,76 @@ fn binary() -> std::ffi::OsString {
 }
 
 #[test]
+fn first_maintenance_initializes_tracking_without_narrowing_deployment_permissions() -> Result<()> {
+    use shardline_server::task_tracking::{TaskEvidenceStore, TaskRunState};
+    use std::os::unix::fs::PermissionsExt;
+    for arguments in [
+        vec!["fsck"],
+        vec!["index", "rebuild"],
+        vec!["gc", "--mark"],
+        vec!["repair", "lifecycle"],
+    ] {
+        let sandbox = tempfile::tempdir()?;
+        let reference = sandbox.path().join("reference/nested/deployment");
+        fs::create_dir_all(&reference)?;
+        let expected_mode = fs::metadata(&reference)?.permissions().mode() & 0o777;
+        let root = sandbox.path().join("actual/nested/deployment");
+        let output = Command::new(binary())
+            .env_clear()
+            .current_dir(sandbox.path())
+            .args(arguments)
+            .arg("--root")
+            .arg(&root)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for directory in [
+            root.clone(),
+            root.parent().ok_or("parent")?.to_path_buf(),
+            root.parent()
+                .and_then(Path::parent)
+                .ok_or("ancestor")?
+                .to_path_buf(),
+        ] {
+            assert_eq!(
+                fs::metadata(directory)?.permissions().mode() & 0o777,
+                expected_mode
+            );
+        }
+        assert_eq!(
+            fs::metadata(root.join(".shardline-maintenance"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let config = shardline_server::ServerConfig::new(
+            "127.0.0.1:8080".parse()?,
+            "http://localhost:8080".to_owned(),
+            root,
+            std::num::NonZeroUsize::new(4096).ok_or("chunk size")?,
+        );
+        let store = TaskEvidenceStore::from_config(&config)?;
+        let deployment = shardline_server::task_tracking::deployment_fingerprint(&config)?;
+        let tasks = store.summaries(deployment, None, 100)?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.first().ok_or("missing task")?.state,
+            TaskRunState::Completed
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn failed_tracking_preparation_is_visible_and_preserves_original_validation_status() -> Result<()> {
     let sandbox = tempfile::tempdir()?;
     let root = sandbox.path().join("not-a-directory");
@@ -300,6 +370,27 @@ fn ordinary_gc_dry_run_does_not_require_or_write_deployment_audit_storage() -> R
         fs::read(root.path().join("chunks/_shardline_tasks/v1/manifests"))?,
         b"unwritable audit namespace"
     );
+    let fresh = root.path().join("fresh/nested/deployment");
+    let fresh_output = Command::new(binary())
+        .env_clear()
+        .current_dir(root.path())
+        .args(["gc", "--root"])
+        .arg(&fresh)
+        .output()?;
+    assert!(
+        fresh_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fresh_output.stderr)
+    );
+    assert!(
+        fresh_output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&fresh_output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&fresh_output.stdout).contains("mode: dry-run"));
+    assert!(fresh.is_dir());
+    assert!(!fresh.join(".shardline-maintenance").exists());
+    assert!(!fresh.join("chunks/_shardline_tasks").exists());
     Ok(())
 }
 
