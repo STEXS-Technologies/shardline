@@ -261,7 +261,7 @@ matches your role.
 - [DuckDB integration](docs/DUCKDB.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Operations](docs/OPERATIONS.md)
-- [Maintenance without extra services](docs/MAINTENANCE_INTEGRATION_UX.md)
+- [Maintenance: same commands, clearer results](docs/MAINTENANCE_INTEGRATION_UX.md)
 - [Read-only Administration API](docs/ADMIN_READ_API.md)
 - [Security and Invariants](docs/SECURITY_AND_INVARIANTS.md)
 - [Protocol Conformance](docs/PROTOCOL_CONFORMANCE.md)

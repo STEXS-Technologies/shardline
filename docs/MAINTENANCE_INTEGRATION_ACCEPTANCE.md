@@ -1,349 +1,146 @@
-# Maintenance integration: maintainer acceptance checklist
+# Maintenance integration: merge checklist
 
-Status: automatic integration implemented, deployment acceptance in progress.
-The embedded server tracker, ordinary Linux CLI tracking with live output,
-durable local journals, signed shared evidence, export recovery and retention
-are present. The requirements and acceptance gates below remain the completion
-criteria; passing the optional runner tests alone does not satisfy them.
+This branch adds automatic task history to existing startup and maintenance.
+It is **not ready to merge**. The version stays unchanged; a version bump belongs
+in a separate PR.
 
-## Validation so far
+Operators should start with the [maintenance guide](MAINTENANCE_INTEGRATION_UX.md).
+This document is for reviewers deciding whether the integration is safe to ship.
 
-The latest full workspace run passed all 9,340 tests, alongside 35 reliability
-contract tests and 15 release CLI integration tests. Focused tests cover the
-embedded tracker and storage migration, including pre-existing objects under
-the new task-evidence prefix.
+## Known gaps
 
-Two downstream Rust API tests preserve the released exhaustive `CliCommand`
-match and check that legacy parsing rejects managed entry points before loading
-an environment file. Advanced commands use private binary dispatch, so adding
-them does not require existing library callers to change their command matches.
+- **Lost ownership while a command remains alive.** The two-machine
+  `connection-loss` drill terminates only rebuild's Postgres coordination
+  connection. The original rebuild remains active during the 15-second check,
+  while the second node can acquire the released maintenance lock. The metadata
+  scan uses a different connection. This proves loss of the lock does not
+  promptly stop the original command; it has not yet demonstrated a conflicting
+  write. Cancellation alone will not prove stale-write protection: ownership
+  must be enforced at the mutation boundary.
+- **Remote effects and acknowledgements.** Local GC crash boundaries have passed.
+  Equivalent coverage for other operations and remote effects remains open.
+  A missing completion record must never authorize repeating an unknown effect.
+- **Large deployments and history growth.** Long operations, large reports and
+  total growth of unresolved history still need deployment-scale validation.
+  Unfinished evidence is retained, so completed-history cleanup alone does not
+  establish a total storage bound.
+- **Remaining compatibility coverage.** Passing deployment fixtures establish
+  those configurations. They do not establish compatibility for every filesystem,
+  permission layout or deployment manifest.
 
-Invocation tests also freeze the original command, resolved configuration and
-migration endpoints across config/env-file changes. Concurrent execution scopes
-keep separate targets, and scopes restore after errors and panic unwinding.
-The ordinary handler runs under the admitted configuration instead of parsing
-its environment file again. Failed tracking preparation produces an explicit
-warning while preserving the original validation status.
+These are merge requirements. A passing dependency upgrade or optional worker
+test does not close them.
 
-The release CLI selection now passes 16 maintenance tests and both Rust API
-compatibility tests. First-run coverage exercises fsck, rebuild, GC mark and
-lifecycle repair against an absent nested local root: each publishes a verified
-completion, keeps normal deployment-directory permissions and confines private
-tracking state to mode 0700. GC dry-run coverage also exercises a fresh root and
-checks that no task audit files are created.
+## Experience that must remain simple
 
-A released/current binary comparison passed all 15 combinations of these four
-commands plus GC dry-run under umasks 022, 002 and 077. It uses the same root path
-for both binaries and compares exact stdout, stderr, successful exit status and
-the modes of the deployment directory and its new parents. This closes the
-missing-root tracking gap for that deployment shape; broader filesystem and
-deployment acceptance gates below still apply.
+- Existing `shardline serve`, maintenance commands and installed GC timers work
+  without a tracker service, extra port, operator-selected task ID or new mount.
+- Server tracking is embedded. Ordinary maintenance stays in its original CLI
+  process, with live stdout/stderr and the existing command interface.
+- Each scheduled invocation performs fresh work. A completed historical task
+  must not replace today's scan.
+- Starting a server does not introduce a GC schedule or retry uncertain mutations.
+- Postgres/S3 deployments retain their existing filesystem requirements.
+- The optional `maintenance --state-dir ... --task-id ...` runner may create a
+  child for cancellation and resource limits. Its extra setup and limits must
+  not become requirements for ordinary commands.
 
-All 12 focused server tracking tests passed after tightening large-report
-inspection. Reports beyond the status download bound still require consistent
-signed success and exit-code fields; contradictory fields fail verification.
-The admin API guide now documents maintenance pagination, outcome states and
-recovery actions separately from current server readiness. These checks do not
-establish large-deployment performance or the remaining fault-boundary gates.
+## What has been tested
 
-The 13 focused server tracking tests also cover malformed, unsupported-version
-and oversized manifests through the authenticated admin route. Each damaged
-manifest occupies a pagination slot with an explicitly unverified identity;
-other verified jobs remain reachable. Unreadable identities retain their
-evidence and do not block retention of unrelated verified completed runs.
-An inaccessible storage namespace fails the request instead of returning an
-empty history. A manifest whose deployment cannot be decoded is shown only as
-an incident reference; it does not establish which deployment owns that run.
+| Area | Evidence and limit |
+| --- | --- |
+| Existing command and Rust interfaces | Released/current output, exit status, umask and fresh-root comparisons; exhaustive public command matches; configuration pinned through execution. Broader permission layouts remain open. |
+| Generated GC service | An isolated Debian 13 guest runs the unchanged service generated by released 1.11.3 before and after replacing the binary, with its original systemd restrictions. |
+| Read-only Postgres/S3 containers | Ordinary fsck, rebuild and GC dry runs use existing shared storage without a writable local root or temporary mount. Read-only S3 fsck warns when tracking cannot publish. This does not promise mutating commands work with read-only credentials. |
+| Repeated and concurrent runs | Distinct scheduled runs complete. Concurrent ordinary rebuilds serialize through the existing Postgres barrier; one removes the fixture's stale record and the next removes zero. |
+| Local crash and reboot | GC interrupted after admission, a committed quarantine change, or a printed report stays unresolved. Fresh diagnostics do not replay it. Actual VM resets also preserve the original records. |
+| Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
+| Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, removes one stale record and completes. The lost run remains unresolved. This does not cover loss of only its coordination connection. |
+| Mixed versions and rollback | Released/current nodes read and append the same object history in old+old, new+old, new+new and old+new combinations against the same Postgres/S3 deployment. No new metadata migration. |
+| History inspection | Corrupt records remain visible without hiding unrelated runs. Cancelled requests retain their inspection permit until blocking work finishes. History does not certify server health. |
+| Export and cleanup | Export visits at most 64 journals per invocation, makes progress past unfinished entries and does not replay work. Cleanup retains unresolved evidence and has interrupted-deletion coverage. Total unresolved growth remains open. |
 
-Subsequent focused admin API checks cover cancellation at the blocking
-inspection boundary: cancelling the caller keeps capacity occupied until the
-scan finishes. The existing endpoint matrix includes maintenance history for
-disabled-route concealment, authentication, read-only methods, response
-pagination and concurrent polling. This bounds concurrent admitted inspections;
-it does not bound the duration of a single scan or prove multi-node failover.
+The detailed test counts are intentionally omitted: they change as the branch
+evolves and do not establish these deployment guarantees by themselves.
+Historical evidence compatibility is protected by the frozen vectors in
+`crates/shardline-reliability/tests/fixtures`.
 
-Normal CLI tests check its original PID, fresh consecutive runs, live command
-results, read-only dry runs, export failures and later evidence export without
-repeating completed work. A real GC invocation also passed in an unprivileged
-container with a read-only filesystem, no network, no new privileges, writable
-temporary storage and only the existing deployment root writable.
+## Ownership and recovery rules
 
-A released/current binary comparison also exercises empty Postgres metadata
-with real S3 storage in unprivileged containers with no writable root or `/tmp`.
-Fsck, rebuild and read-only GC preserve the released output; shared native
-outcomes verify without a local journal. With read-only S3 credentials, fsck
-still succeeds and explicitly reports unavailable tracking, without claiming a
-verified completion or requiring wider permissions. This covers that existing
-deployment shape, not all data sizes or deployment manifests.
+Task history reports what happened. Storage transactions, locks and
+operation-specific fencing decide who may change data.
 
-A real ordinary rebuild was killed while waiting on the existing GC barrier.
-Its signed history remains unresolved; a later ordinary scan publishes that
-history without replaying the rebuild or declaring it completed.
+An idempotency key protects a retry only when the effect and duplicate check
+commit together. A fencing token protects takeover only when the effect rejects
+an obsolete owner atomically. A separate worker PID supplies isolation and
+termination; it supplies neither of these storage guarantees.
 
-The release CLI selection now passes 17 maintenance tests and both Rust API
-compatibility tests. A real ordinary GC was also killed after a verified
-quarantine mutation and, separately, after its printed report and local outcome
-body were available. A competing SQLite writer prevented completion recording;
-the test observes the actual CLI PID and committed native history. Both runs
-remain `needs_reconciliation` immediately after death and after a fresh fsck.
-The old journal retains only its three admission records. A second orphan added
-after the crash stays unmarked during the fresh diagnostic, so an unnoticed GC
-replay would be observable. This establishes those default local boundaries,
-not every publication acknowledgement, remote replacement or failover case.
+| Work | Owner and recovery rule |
+| --- | --- |
+| Fsck, rebuild, GC, repair, migration | Existing CLI invocation; existing timer owns scheduled GC. Preserve barriers and command results. Unknown mutations need operation-specific inspection before retry. |
+| S3/LFS startup cleanup | Server startup owns the existing sweep. A replacement records its own run and leaves uncertain foreign history unresolved. |
+| Hub webhook-secret upgrade | Server startup owns the sweep; retain lazy per-row upgrade. Skipped failures prevent certifying complete success. |
+| Webhook delivery | The durable delivery record remains authoritative. A remote receiver may already have accepted a request whose acknowledgement was lost. |
+| JWKS/OIDC refresh | The provider owns its refresh loop and cached keys. A refresh failure must not trigger data maintenance retries. |
+| Request-bound work and cache heartbeats | Existing request and cache owners retain cancellation and lease rules. Every background task need not become a durable job. |
 
-The validation workstation's user manager rejected systemd namespace setup
-before executing Shardline. A subsequent isolated Debian 13 KVM guest exercised
-the exact GC unit generated by released 1.11.3: its SHA-256 stayed unchanged
-after replacing the binary, and the baseline plus two upgraded runs exited 0.
-`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges` and the
-original sole `ReadWritePaths=/var/lib/shardline` remained enabled. The two
-upgraded schedules produced distinct verified completions. This establishes
-the generated-unit gate on that guest, without relaxing its sandbox; it does
-not establish every host's systemd configuration.
+A recorded foreign PID is not a lease. A signed result authenticates the recorded
+result, not current readiness, cluster-wide health or exactly-once execution.
+Keep readiness, failed optional work and uncertain maintenance distinguishable.
 
-All 52 Postgres/S3 HTTP integration tests passed. A new
-Docker-backed Postgres/MinIO test checks shared verified
-startup outcomes across API, transfer and combined roles with different local
-roots. Tracking adds no local journal to these server instances; Xet-only
-startup also works without creating a local state root. Cleanup recovery tests
-cover four interrupted deletion boundaries and retention with more than 64
-unfinished histories ahead of a completed run.
+Normal commands retain their original output, diagnostics export paths and
+configuration handling. Existing upload/session formats remain readable by old
+nodes. Changes to configuration or executable must not silently change an
+admitted request.
 
-All five existing Postgres barrier/fence tests also passed against a freshly
-migrated database, with `DATABASE_URL` explicitly set. They exercise competing
-connections, cancellation of partially acquired locks, single-connection pools
-and rejection of a terminated owner's fence. They establish these existing
-coordination contracts, not cluster-wide exactly-once task execution.
+Private task state must fit existing writable resources and stay separate from
+object inventory, GC and storage migration. Local locks do not coordinate hosts.
+Copying an advanced runner's private SQLite state to another pod is not supported
+recovery. Advanced deadlines, CPU limits and report ceilings must not silently
+limit ordinary maintenance. Library embedding must not require a hidden CLI
+worker executable.
 
-A further real deployment drill runs two ordinary rebuild CLIs concurrently
-in separate unprivileged, read-only containers against the same Postgres/S3
-deployment. A fixture table lock holds the first inside its scan while it owns
-the exclusive maintenance barrier. Postgres reports exactly one granted barrier
-and one waiter; both native task histories remain unresolved. After releasing
-the scan, the first removes one stale latest record and the second reports zero
-removals. Both distinct inline runs publish verified completion. This exercises
-default CLI contention and an observable metadata effect without a tracker
-mount or managed worker; it does not establish cross-host partitions or crash
-recovery during that effect.
+Tracking failures must be visible. A command that preserves its existing
+behavior when observation fails must not claim a verified outcome. Unresolved
+work and its verification keys must survive retention. Establish ownership and
+verify durable effects before any continuation; a new task ID does not make an
+unsafe retry safe.
 
-The real binary drill passed with released 1.11.3 (`98a4dadb`) and this branch
-against isolated Postgres/S3 storage. It exercises old+old, new+old, new+new and
-old+new rollback. Both versions append to the same object's history and read
-each other's exact bytes. The new node's native startup outcome verifies through
-the authenticated admin API, without a migration or a separate tracker process.
+## Eight merge gates
 
-Owner tests distinguish a recorded previous boot on the same identified host
-from a foreign host or container namespace. The CLI export test also exercises
-completed evidence with a simulated previous boot.
+All eight remain the completion criteria:
 
-A real Docker replacement drill now kills a server while its recorded LFS
-startup sweep is blocked on the existing session lock. A replacement runs as
-PID 1 in a different PID namespace, with a fresh local root and the same
-Postgres/S3 deployment. Its startup completes and readiness returns while the
-old run stays unresolved. The container has only one server process and no
-private tracker directory. A normal SIGTERM then exits successfully, and a
-third fresh container records a new startup without altering either earlier
-run's journal. The test holds the old namespace open to prevent Linux inode
-reuse and deliberately exercise foreign-owner observation.
+1. Unmodified server commands and manifests initialize tracking automatically.
+   Cover local metadata, Postgres/S3, server roles and library embedding without
+   an operator-managed daemon or new mount.
+2. Preserve stdout/stderr, exit codes, configuration handling, diagnostics exports
+   and safety barriers. Run the released GC service with its existing restrictions.
+3. Consecutive schedules execute fresh scans. Concurrent invocations have defined
+   ownership; completed history is never reused as a fresh reachability snapshot.
+4. Large, long-running operations retain supported behavior. Budgets, report
+   handling, retention and cleanup cause no undocumented limits or unbounded growth.
+5. Interrupt controllers and workers at admission, checkpoint, external mutation,
+   report proposal and completion acknowledgement. Recovery cannot falsely report
+   completion, repeat an unknown mutation or permit an ownerless stale writer.
+6. Test shutdown, reboot, container replacement, cross-host replacement and
+   competing shared owners. Include coordination-connection loss while the old
+   process remains alive. Specify what may continue and what must reconcile.
+7. Mixed old/new nodes and rollback preserve history, domain formats and metadata
+   arbitration. New records must not make old binaries misinterpret domain state.
+8. Operators distinguish server readiness, failed optional jobs and maintenance
+   needing reconciliation without understanding dependency internals.
 
-A real KVM guest reset also interrupted an ordinary scheduled GC after its
-three admission records, while a test-owned flock held the existing GC barrier.
-The boot ID changed and machine ID stayed fixed. After boot, a fresh fsck
-completed, the old run reported `needs_reconciliation`, and its three published
-records remained byte-for-byte identical. The retained local journal also had
-only its three admission records. An orphan added after boot stayed unmarked;
-an explicit later GC mark discovered it, making an unnoticed replay observable.
-The VM drill also resets the guest after an actual GC quarantine mutation and
-its printed successful report. A competing writer blocks only task-journal
-completion; the original CLI PID is paused before its SQLite timeout expires.
-After boot, a fresh fsck completes, the complete quarantine row is unchanged,
-and the original chunk bytes survive. A second orphan added after reboot has
-no quarantine row, so recovery did not silently repeat GC. The local journal
-and shared history still contain only the three admission records, while the
-uncommitted positive outcome body retains its exact hash. Both interrupted runs
-report `needs_reconciliation`; a printed report does not authorize completion.
+## Reproducing the machine tests
 
-These checks establish the tested local GC reboot boundaries, including a
-committed metadata effect and report before completion acknowledgement.
-Other operations' remote mutation and reboot cases remain outstanding. These
-checks do not justify a blanket rollout or exactly-once guarantee.
+`CURRENT` and `RELEASED` are Linux binaries. `IMAGE` is a locally verified
+Debian 13 generic cloud qcow2 image.
 
-A separate cross-machine drill now boots two isolated KVM guests with distinct
-machine and boot IDs against one fresh Postgres/S3 deployment. An embedded LFS
-startup task on the source waits on its existing session lock; its recorded PID
-matches the source service's actual main process. The other guest observes the
-run as `running_or_interrupted` while the source is alive. Disconnecting the
-source's virtual network makes SSH unreachable while its VM process remains
-alive, and does not change that task state. After the source VM is killed, the
-replacement's own startup verifies as completed while the source run remains
-unresolved. The source's two native records have identical hashes before and
-after replacement. The replacement is ready, runs one Shardline process and
-has no private maintenance journal or copied source state.
+```bash
+bash scripts/shardline/verify_maintenance_vm.sh CURRENT RELEASED IMAGE
+bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE
+bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE connection-loss
+```
 
-This establishes the tested cross-machine startup replacement and network-loss
-boundary. It does not establish shared-mutation ownership under every partition
-or permit completing a foreign task from a recorded PID.
-
-The cross-machine drill also admits two ordinary rebuild CLIs. The source owns
-the existing Postgres maintenance barrier while a fixture table lock blocks its
-version scan; the second machine waits on that same barrier. Both CLI identities
-are distinct, and the source's recorded PID matches its original service main
-process. While the source network is disconnected but its VM is alive, Postgres
-still reports one owner and one waiter. Killing the source VM closes its backend
-session, allowing the already admitted waiter to acquire ownership. After the
-fixture scan lock is released, that waiter removes one stale latest record and
-publishes verified completion. The lost source run stays `running_or_interrupted`
-and retains its exact three native admission records. This establishes that
-source-machine-loss boundary for the ordinary shared-metadata entry point; it
-does not establish safety after only the coordination connection is lost while
-the old process continues, or every domain-write/publication fault boundary.
-
-Maintainers can reproduce the generated-unit and reboot checks with
-`bash scripts/shardline/verify_maintenance_vm.sh CURRENT RELEASED IMAGE`.
-`CURRENT` and `RELEASED` are the two Linux binaries; `IMAGE` is a locally verified
-Debian 13 generic cloud qcow2 image. The script boots its own disposable KVM
-guest, retains small diagnostic artifacts and shuts the guest down on exit.
-It does not reboot the workstation or change its services.
-
-The cross-machine drill is
-`bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE`.
-It owns two disposable guests and an isolated Compose project, cleans up both
-on exit and retains small history and diagnostic artifacts.
-
-Native outbox tests cover a completed outcome behind 130 unfinished/corrupt
-entries and a competing exporter that must not wait or delete another
-exporter's state. Export recovery opens at most 64 journals per invocation,
-advances a durable scan cursor and retains unfinished history after publishing
-it for inspection. These records never authorize application retries.
-
-## Default experience
-
-Operators must continue to start Shardline with `shardline serve` and run the
-existing maintenance commands and installed GC schedules. They must not have
-to launch a tracker, manage another service, select task IDs, provision a second
-state mount, or replace their deployment manifests to obtain task supervision.
-
-Normal tracking belongs to the Shardline runtime and adds no process or network
-service. Ordinary maintenance runs in its original CLI process. Only the
-explicit advanced runner creates a child, so its controller can stop work and
-enforce resource limits independently. Domain fences remain responsible for
-rejecting stale writes in either mode.
-
-Starting the server must not introduce a new GC schedule, trigger destructive
-maintenance, or replay unknown mutations. Existing systemd GC timers remain the
-schedule owner. Server startup owns only the work already associated with that
-startup and the lifecycle of its background services.
-
-## Compatibility constraints
-
-The advanced `maintenance` command requires `--state-dir` and `--task-id`.
-Normal commands allocate those internally; `serve` uses an embedded observer for
-existing S3/LFS startup sweeps and the Hub webhook-secret upgrade sweep. Existing
-upload/session journals, webhook delivery ownership and provider refresh loops
-retain their own authority. Task observation does not automatically make all
-Tokio tasks durable, restartable jobs.
-
-These concrete constraints prevent promoting the optional controller unchanged:
-
-- Generated GC units use `ProtectSystem=strict` and grant `ReadWritePaths` only
-  for the existing working directory. The optional controller requires state
-  outside the deployment root. Existing timers must work without reinstalling
-  units or expanding filesystem permissions.
-- Its 30-minute deadline, 15-minute timeout, 600 CPU seconds per generation and
-  64 MiB report ceiling are new limits. Existing maintenance must not silently
-  inherit them when processing a large deployment.
-- It binds live runtime state to a machine and PID namespace. Container restart
-  and pod replacement need an explicit ownership/reconciliation path; copying
-  that SQLite state to a replacement pod is not supported recovery.
-- Reusing a completed task ID returns the recorded result. A scheduled run must
-  perform fresh work rather than return yesterday's successful scan.
-- Optional reports differ from existing command output. Normal stdout, stderr,
-  exit codes and GC diagnostic export destinations are existing interfaces.
-- Library users may run an executable with no hidden maintenance-worker entry
-  point. A server library must not assume its host is the Shardline CLI binary.
-
-## Work ownership
-
-Before default activation, every relevant entry point needs a specified owner,
-completion rule and recovery rule:
-
-| Work | Existing owner | Required integration |
-| --- | --- | --- |
-| Fsck, rebuild, GC, lifecycle repair and storage migration | CLI invocation; systemd timer for scheduled GC | Automatic run identity and durable supervision through the existing entry point; preserve command interfaces and application barriers. |
-| Hub webhook-secret upgrade sweep | Server startup blocking task | Track actual scan outcomes and lifecycle. The current sweep skips some failures and returns no result, so returning from it cannot certify complete success. Preserve lazy per-row upgrade. |
-| Hub webhook delivery | Request-launched asynchronous delivery | Retain the durable delivery record as effect authority. Interrupted delivery can have succeeded remotely; tracking must not imply exactly-once delivery or authorize a duplicate automatically. |
-| JWKS/OIDC refresh | Provider-owned asynchronous loop | Preserve provider ownership, refresh policy and cached-key availability. Distinguish service liveness from a durable maintenance job; a network refresh failure is not a reason to restart data mutations. |
-| Request-bound blocking work and cache loader heartbeats | Request/cache owner | Preserve request cancellation, resource limits and cache leases. Do not create a durable restartable job for every Tokio task. |
-
-Task records must describe completed, failed, running and needs-reconciliation
-outcomes truthfully. A signed result authenticates that result, not current
-deployment health or cluster-wide completion.
-
-## Persistence and recovery
-
-Automatic persistence must fit the deployment's existing writable resources.
-Its placement must be validated against object inventory, GC, backup/export,
-storage migration and report output paths. It must not make a writable local
-filesystem a new requirement for a Postgres-backed deployment that previously
-did not need one. The existing optional private runner store can remain an
-advanced interface, but is not a deployment default by itself.
-
-Run identities are allocated internally. Separate intentional invocations get
-fresh runs; continuation of interrupted work attaches to the appropriate
-unfinished run under exclusive ownership. Changes to configuration, executable
-or task definition cannot silently replace the pinned request. History and
-artifact retention must be bounded without deleting unresolved work or keys
-needed to verify retained evidence.
-
-Keep domain transactions, resource fences and local/Postgres maintenance barriers
-authoritative. Local worker locks do not coordinate several nodes. For shared
-metadata, claim/recovery decisions need ownership that competing nodes can
-arbitrate. A replacement node may reconcile durable domain effects, but cannot
-claim that it fenced a process on another host solely from a local journal.
-
-Shutdown stops admission and follows the existing drain policy. Any work that
-outlives its controller must remain fenced or explicitly unresolved. After a
-crash, verify durable evidence and establish ownership before resuming. A fresh
-fsck may be repeatable; unknown GC, rebuild, repair, migration or webhook effects
-require their operation-specific reconciliation rules. Changing the task ID
-must not be presented as a recovery mechanism that makes unknown effects safe.
-
-Expose useful operation names, progress, outcomes and actionable recovery
-messages through existing logs and operator surfaces. Internal digests, proof
-paths and generation numbers belong in diagnostic detail. Tracking failures
-must be visible; silently falling back to an untracked mutation must not produce
-a supervised-success claim. Availability behavior must be specified separately
-for essential serving, optional background acceleration and administrative work.
-
-## Merge acceptance
-
-Default integration remains unverified until tests establish all of these:
-
-1. Unmodified server commands and deployment manifests initialize the intended
-   supervision automatically, without an operator-managed daemon or new mount.
-   Exercise local metadata, Postgres/S3, server roles and library embedding.
-2. Existing maintenance commands preserve stdout/stderr, exit codes, global
-   configuration handling, diagnostics exports and safety barriers. Run the
-   previously generated GC service under its existing filesystem restrictions.
-3. Consecutive scheduled runs execute fresh scans. Concurrent invocations have
-   defined ownership and contention behavior; completed history is not reused
-   as a fresh reachability snapshot.
-4. Large, long-running operations retain supported behavior. Default budgets,
-   report streaming, history retention and artifact cleanup do not impose
-   undocumented regressions or unbounded disk growth.
-5. Kill a controller and a worker at admission, checkpoint, external mutation,
-   report proposal and completion acknowledgement. Recovery never falsely
-   reports completion, silently repeats an unknown mutation or leaves an
-   unowned worker authorized to continue.
-6. Exercise graceful shutdown, reboot, same-host container replacement,
-   replacement on another host and two nodes claiming shared work. Explain and
-   test which work can continue, which must reconcile and which stays blocked.
-7. Roll old and new nodes together against the same deployment. Historical
-   evidence, existing deployment formats and metadata arbitration stay valid.
-   New supervision records cannot make old binaries misinterpret domain state.
-8. Operators can distinguish a healthy server, a failed optional background job
-   and a maintenance operation awaiting reconciliation without understanding
-   Penelope or StateChronicle internals.
-
-The dependency compatibility fixtures and optional runner tests remain valuable
-prerequisites. They do not establish these default-operation guarantees.
+These scripts own disposable KVM guests and isolated fixtures, retain diagnostic
+artifacts and clean up their guests on exit. They do not reboot the workstation.
+The connection-loss drill currently fails and captures the known ownership gap.
