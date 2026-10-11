@@ -153,9 +153,21 @@ completed, the old run reported `needs_reconciliation`, and its three published
 records remained byte-for-byte identical. The retained local journal also had
 only its three admission records. An orphan added after boot stayed unmarked;
 an explicit later GC mark discovered it, making an unnoticed replay observable.
-These checks cover that local reboot boundary. Cross-host replacement,
-multi-node faults and reboot after external mutation remain outstanding.
-They do not justify a blanket rollout or exactly-once guarantee.
+The VM drill also resets the guest after an actual GC quarantine mutation and
+its printed successful report. A competing writer blocks only task-journal
+completion; the original CLI PID is paused before its SQLite timeout expires.
+After boot, a fresh fsck completes, the complete quarantine row is unchanged,
+and the original chunk bytes survive. A second orphan added after reboot has
+no quarantine row, so recovery did not silently repeat GC. The local journal
+and shared history still contain only the three admission records, while the
+uncommitted positive outcome body retains its exact hash. Both interrupted runs
+report `needs_reconciliation`; a printed report does not authorize completion.
+
+These checks establish the tested local GC reboot boundaries, including a
+committed metadata effect and report before completion acknowledgement.
+Cross-host replacement, multi-node faults and other operations' remote mutation
+and reboot cases remain outstanding. They do not justify a blanket rollout or
+exactly-once guarantee.
 
 Maintainers can reproduce the generated-unit and reboot checks with
 `bash scripts/shardline/verify_maintenance_vm.sh CURRENT RELEASED IMAGE`.
