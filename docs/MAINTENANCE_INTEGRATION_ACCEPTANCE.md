@@ -182,8 +182,21 @@ has no private maintenance journal or copied source state.
 
 This establishes the tested cross-machine startup replacement and network-loss
 boundary. It does not establish shared-mutation ownership under every partition
-or permit completing a foreign task from a recorded PID. Additional multi-node
-faults around domain writes and publication acknowledgement remain outstanding.
+or permit completing a foreign task from a recorded PID.
+
+The cross-machine drill also admits two ordinary rebuild CLIs. The source owns
+the existing Postgres maintenance barrier while a fixture table lock blocks its
+version scan; the second machine waits on that same barrier. Both CLI identities
+are distinct, and the source's recorded PID matches its original service main
+process. While the source network is disconnected but its VM is alive, Postgres
+still reports one owner and one waiter. Killing the source VM closes its backend
+session, allowing the already admitted waiter to acquire ownership. After the
+fixture scan lock is released, that waiter removes one stale latest record and
+publishes verified completion. The lost source run stays `running_or_interrupted`
+and retains its exact three native admission records. This establishes that
+source-machine-loss boundary for the ordinary shared-metadata entry point; it
+does not establish safety after only the coordination connection is lost while
+the old process continues, or every domain-write/publication fault boundary.
 
 Maintainers can reproduce the generated-unit and reboot checks with
 `bash scripts/shardline/verify_maintenance_vm.sh CURRENT RELEASED IMAGE`.
