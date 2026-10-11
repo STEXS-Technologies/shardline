@@ -51,6 +51,9 @@ use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 #[path = "deployment_chaos/readonly_maintenance.rs"]
 mod readonly_maintenance_deployment;
 
+#[path = "deployment_chaos/tracker_replacement.rs"]
+mod tracker_replacement;
+
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------

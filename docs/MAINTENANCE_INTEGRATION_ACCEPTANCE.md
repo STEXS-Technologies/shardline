@@ -116,9 +116,21 @@ the authenticated admin API, without a migration or a separate tracker process.
 
 Owner tests distinguish a recorded previous boot on the same identified host
 from a foreign host or container namespace. The CLI export test also exercises
-completed evidence with a simulated previous boot. An actual host reboot,
-cross-host replacement and multi-node fault testing remain outstanding. These
-checks do not justify a blanket rollout or exactly-once guarantee.
+completed evidence with a simulated previous boot.
+
+A real Docker replacement drill now kills a server while its recorded LFS
+startup sweep is blocked on the existing session lock. A replacement runs as
+PID 1 in a different PID namespace, with a fresh local root and the same
+Postgres/S3 deployment. Its startup completes and readiness returns while the
+old run stays unresolved. The container has only one server process and no
+private tracker directory. A normal SIGTERM then exits successfully, and a
+third fresh container records a new startup without altering either earlier
+run's journal. The test holds the old namespace open to prevent Linux inode
+reuse and deliberately exercise foreign-owner observation.
+
+An actual host reboot, cross-host replacement and multi-node fault testing
+remain outstanding. These checks do not justify a blanket rollout or
+exactly-once guarantee.
 
 Native outbox tests cover a completed outcome behind 130 unfinished/corrupt
 entries and a competing exporter that must not wait or delete another
