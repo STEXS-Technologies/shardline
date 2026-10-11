@@ -1,5 +1,5 @@
-//! Observation for deployments whose existing local filesystem is read-only.
-//! Shared receipts are durable evidence; domain fences still authorize effects.
+//! Observation without requiring writable private task storage.
+//! Object-store receipts are durable evidence; domain fences authorize effects.
 use super::{MaintenanceOperation, Result};
 use ed25519_dalek::SigningKey;
 use penelope_core::task::{

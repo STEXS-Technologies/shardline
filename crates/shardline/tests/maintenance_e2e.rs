@@ -36,6 +36,82 @@ fn binary() -> std::ffi::OsString {
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_shardline").into())
 }
 
+#[test]
+fn ordinary_maintenance_preserves_existing_writable_files_under_read_only_root() -> Result<()> {
+    use shardline_server::task_tracking::{TaskEvidenceStore, TaskRunState};
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().as_raw() == 0 {
+        eprintln!("skipping permission regression: root bypasses directory permissions");
+        return Ok(());
+    }
+    let sandbox = tempfile::tempdir()?;
+    let root = sandbox.path().join("deployment");
+    let bootstrap = Command::new(binary())
+        .env_clear()
+        .current_dir(sandbox.path())
+        .args(["index", "rebuild", "--root"])
+        .arg(&root)
+        .output()?;
+    assert!(bootstrap.status.success(), "{bootstrap:?}");
+    fs::remove_dir_all(root.join(".shardline-maintenance"))?;
+    // A running deployment keeps its SQLite sidecars open. The database and
+    // sidecars remain writable even when operators disallow new root entries.
+    let connection = Connection::open(root.join("metadata.sqlite3"))?;
+    connection.execute_batch("PRAGMA journal_mode=WAL; SELECT COUNT(*) FROM sqlite_master;")?;
+    assert!(root.join("metadata.sqlite3-wal").is_file());
+    assert!(root.join("metadata.sqlite3-shm").is_file());
+    let config = shardline_server::ServerConfig::new(
+        "127.0.0.1:8080".parse()?,
+        "http://localhost:8080".to_owned(),
+        root.clone(),
+        std::num::NonZeroUsize::new(4096).ok_or("chunk size")?,
+    );
+    let store = TaskEvidenceStore::from_config(&config)?;
+    let deployment = shardline_server::task_tracking::deployment_fingerprint(&config)?;
+    let previous = store.summaries(deployment, None, 20)?.len();
+    struct RestorePermissions(std::path::PathBuf);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            let _ignored = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _restore = RestorePermissions(root.clone());
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o555))?;
+    assert_eq!(
+        fs::create_dir(root.join("permission-probe"))
+            .err()
+            .ok_or("fixture must deny new root entries")?
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    for arguments in [
+        vec!["fsck"],
+        vec!["index", "rebuild"],
+        vec!["repair", "lifecycle"],
+        vec!["gc", "--mark"],
+    ] {
+        let output = Command::new(binary())
+            .env_clear()
+            .current_dir(sandbox.path())
+            .args(&arguments)
+            .arg("--root")
+            .arg(&root)
+            .output()?;
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+        assert!(!root.join(".shardline-maintenance").exists());
+        assert_eq!(fs::metadata(&root)?.permissions().mode() & 0o777, 0o555);
+    }
+    let summaries = store.summaries(deployment, None, 20)?;
+    assert_eq!(summaries.len(), previous + 4);
+    assert!(
+        summaries
+            .iter()
+            .all(|run| run.state == TaskRunState::Completed)
+    );
+    Ok(())
+}
+
 fn admitted_inline_directory(state: &Path) -> Option<std::path::PathBuf> {
     for entry in fs::read_dir(state).ok()?.flatten() {
         let path = entry.path().join("tasks.sqlite");

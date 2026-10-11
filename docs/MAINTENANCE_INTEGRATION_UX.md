@@ -10,6 +10,8 @@ shardline gc --mark --sweep
 
 There is no tracker service, extra port or new mount to manage. Your existing
 GC timers still control the schedule. Starting the server does not start GC.
+Tracking uses your existing storage. You do not need to loosen deployment-root
+permissions to create a separate tracking directory.
 
 ## What changes for you
 
