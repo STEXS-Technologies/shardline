@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Real machine identities, shared evidence, partition and replacement.
-# Usage: bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss]
+# Usage: bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss]
 set -euo pipefail
-test "$#" -ge 2 && test "$#" -le 3 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss]' >&2; exit 2; }
+test "$#" -ge 2 && test "$#" -le 3 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss]' >&2; exit 2; }
 mode=${3:-node-loss}
-test "$mode" = node-loss || test "$mode" = connection-loss
+test "$mode" = node-loss || test "$mode" = connection-loss || test "$mode" = repair-connection-loss
 current=$(realpath "$1")
 image=$(realpath "$2")
 repository=$(cd "$(dirname "$0")/../.." && pwd)
@@ -156,8 +156,15 @@ id=$(jq -er '.tasks[0] | select(.state == "running_or_interrupted") | .id' "$fix
 source_pid=$(vm_ssh 0 'sudo systemctl show shardline-validation-startup -p MainPID --value')
 jq -e --arg host "$(head -n 1 "$fixture/0/identity")" --argjson pid "$source_pid" '.tasks[0].owner.host == $host and .tasks[0].owner.pid == $pid' "$fixture/started.json"
 shared_hashes "$id" > "$fixture/records-before"
-# A normal source CLI owns the existing global barrier while its version scan
+# A normal source CLI owns the existing global barrier while its record scan
 # waits on a fixture table lock. The other machine admits its own distinct run.
+source_command='index rebuild'
+if test "$mode" = repair-connection-loss; then
+    source_command='repair lifecycle'
+    vm_ssh 0 'sudo systemd-run --wait --pipe --unit shardline-validation-expired-hold -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline hold set --object-key retention/repair-owner --reason ownership-regression --ttl-seconds 0' > "$fixture/expired-hold.log"
+    test "$(sql "SELECT COUNT(*) FROM shardline_retention_holds WHERE object_key='retention/repair-owner' AND release_after_unix_seconds <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint")" = 1
+    sql "SELECT row_to_json(hold)::text FROM shardline_retention_holds hold WHERE object_key='retention/repair-owner'" > "$fixture/expired-hold-before.json"
+fi
 sql "INSERT INTO shardline_file_records (record_key, record_kind, scope_key, file_id, content_hash, record) VALUES ('6:latest8:6:global9:stale.bin', 'latest', '6:global', 'stale.bin', repeat('0',64), jsonb_build_object('file_id','stale.bin','content_hash',repeat('0',64),'total_bytes',0,'chunk_size',128,'storage_repr','fixed_chunk_v1','repository_scope',NULL,'chunks','[]'::jsonb))" > "$fixture/stale-fixture.log"
 test "$(sql "SELECT COUNT(*) FROM shardline_file_records WHERE file_id='stale.bin'")" = 1
 compose exec -T chaos-postgres psql -U shardline -d shardline -v ON_ERROR_STOP=1 -c \
@@ -168,13 +175,18 @@ for attempt in $(seq 1 20); do
     sleep 1
 done
 test "$(sql "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name='shardline-vm-scan-blocker' AND wait_event='PgSleep')")" = t
-vm_ssh 0 'sudo systemd-run --unit shardline-validation-source-rebuild -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline index rebuild'
+vm_ssh 0 "sudo systemd-run --unit shardline-validation-source-rebuild -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline $source_command"
 for attempt in $(seq 1 30); do
     if test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 FROM pg_locks WHERE $barrier_filter")" = t \
         && test "$(sql "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event='relation' AND query LIKE '%shardline_file_records%')")" = t; then break; fi
     sleep 1
 done
-test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 FROM pg_locks WHERE $barrier_filter")" = t
+if test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 FROM pg_locks WHERE $barrier_filter")" != t; then
+    vm_ssh 0 'sudo journalctl -u shardline-validation-source-rebuild -o cat --no-pager' > "$fixture/source-admission-failure.log"
+    sql 'SELECT pid, wait_event, query FROM pg_stat_activity' > "$fixture/source-admission-database.log"
+    echo 'source maintenance command did not acquire its barrier; see source-admission diagnostics' >&2
+    exit 1
+fi
 test "$(sql "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event='relation' AND query LIKE '%shardline_file_records%')")" = t
 history > "$fixture/source-rebuild.json"
 source_host=$(head -n 1 "$fixture/0/identity")
@@ -194,7 +206,7 @@ history > "$fixture/contended.json"
 waiter_run=$(jq -er --arg host "$(head -n 1 "$fixture/1/identity")" '.tasks[] | select(.execution == "inline" and .owner.host == $host and .state == "running") | .id' "$fixture/contended.json")
 [[ "$waiter_run" =~ ^[a-f0-9]{32}$ ]]
 test "$waiter_run" != "$source_run"
-if test "$mode" = connection-loss; then
+if test "$mode" != node-loss; then
     # Terminate only the source's lock-owning connection, keeping its VM alive.
     # Losing ownership must fail the original command, not reconnect its scan.
     coordinator=$(sql "SELECT pid FROM pg_locks WHERE $barrier_filter AND granted")
@@ -228,6 +240,13 @@ if test "$mode" = connection-loss; then
     vm_ssh 1 'sudo journalctl -u shardline-validation-waiter-rebuild -o cat --no-pager' > "$fixture/connection-waiter-report.log"
     grep -Fx 'removed_stale_latest_records: 1' "$fixture/connection-waiter-report.log"
     test "$(sql "SELECT COUNT(*) FROM shardline_file_records WHERE file_id='stale.bin'")" = 0
+    if test "$mode" = repair-connection-loss; then
+        sql "SELECT row_to_json(hold)::text FROM shardline_retention_holds hold WHERE object_key='retention/repair-owner'" > "$fixture/expired-hold-after.json"
+        cmp "$fixture/expired-hold-before.json" "$fixture/expired-hold-after.json"
+        test "$(sql "SELECT COUNT(*) FROM shardline_retention_holds WHERE object_key='retention/repair-owner'")" = 1
+        echo 'PASS: repair stops after ownership connection loss; the expired hold remains unchanged during takeover'
+        exit 0
+    fi
     echo 'PASS: coordinator loss stops the original command; the separately admitted waiter completes'
     exit 0
 fi

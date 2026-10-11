@@ -3,10 +3,9 @@
 For commands, benefits and crash recovery, start with the
 [operator guide](MAINTENANCE_INTEGRATION_UX.md). This page describes implementation
 details. The [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) records
-remaining gaps. Rebuild and retention hold updates keep their locks and metadata
-work on non-replaceable Postgres connections; other operations' ownership and
-remote-effect boundaries
-still need validation.
+remaining gaps. Rebuild, lifecycle repair and retention hold updates keep their
+locks and metadata work on non-replaceable Postgres connections. Other
+operations' ownership and remote-effect boundaries still need validation.
 
 The 0.2.0 integration includes an embedded server tracker and automatic Linux
 maintenance tracking, with an explicit bounded runner for advanced use. Default
@@ -193,6 +192,13 @@ The hold factory still runs after acquiring the barrier, so relative expiration
 retains its existing meaning. A lost session cannot reconnect to apply a late
 hold change while GC has taken exclusive ownership.
 
+Lifecycle repair also binds its shared barrier, metadata scan and metadata
+changes to one non-replaceable session. Losing that session stops repair before
+it can reconnect and prune holds or quarantine records during another owner's
+exclusive run. Object-store access in this operation reads reachability; this
+binding does not establish fencing for other operations' remote writes or deletes.
+Earlier committed repair changes may remain after a failure.
+
 Both modes use PostgreSQL's advisory-lock wait queue. A queued exclusive owner
 blocks later shared acquisitions. During acquisition, cancellation closes the
 connection instead of leaving a detached pool-return operation queued on the
@@ -200,7 +206,7 @@ lock. Successful acquisition explicitly hands that same session back to its
 private pool; normal completion closes it. These are internal changes and add
 no worker process or deployment configuration.
 
-For that session, rebuild enables PostgreSQL's
+For these bound work sessions, Shardline enables PostgreSQL's
 [`client_connection_check_interval`](https://www.postgresql.org/docs/16/runtime-config-connection.html)
 at one second when the setting exists and is disabled. An already configured
 interval is preserved. This allows a query blocked on a metadata lock to notice
