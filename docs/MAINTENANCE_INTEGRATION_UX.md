@@ -75,6 +75,9 @@ metadata writes. If that connection is lost, the old invocation cannot reconnect
 and continue writing from its earlier scan. A two-machine fault test verifies
 that the original rebuild fails and the waiting node can complete its own run.
 
+Retention hold updates use the same protection: if their database ownership is
+lost, they fail rather than applying a late change during GC's exclusive run.
+
 Other operations' remote effects and crash boundaries, plus large-deployment
 limits, still need validation before this integration is ready to merge.
 

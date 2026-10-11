@@ -1,10 +1,7 @@
 use shardline_index::{AsyncIndexStore, LocalIndexStore, PostgresIndexStore, RetentionHold};
 use shardline_storage::ObjectKey;
 
-use crate::{
-    ServerConfig, ServerError, maintenance_barrier,
-    postgres_backend::connect_postgres_metadata_pool,
-};
+use crate::{ServerConfig, ServerError, maintenance_barrier};
 
 /// A shared GC/write barrier held until this guard is dropped.
 ///
@@ -75,16 +72,14 @@ where
     E: From<ServerError>,
 {
     if let Some(url) = config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(url, 4)?;
-        let _barrier = maintenance_barrier::acquire_postgres_shared(
-            &maintenance_barrier::postgres_coordination_pool(url)?,
-        )
-        .await?;
+        let pool = maintenance_barrier::postgres_shared_work_pool(url).await?;
         let hold = build_hold()?;
-        PostgresIndexStore::new(pool)
+        let result = PostgresIndexStore::new(pool.clone())
             .upsert_retention_hold(&hold)
             .await
-            .map_err(ServerError::from)?;
+            .map_err(ServerError::from);
+        pool.close().await;
+        result?;
         Ok(hold)
     } else {
         let _barrier = maintenance_barrier::acquire_local_shared(config.root_dir()).await?;
@@ -109,14 +104,13 @@ pub async fn release_retention_hold(
     object_key: &ObjectKey,
 ) -> Result<bool, ServerError> {
     if let Some(url) = config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(url, 4)?;
-        let _barrier = maintenance_barrier::acquire_postgres_shared(
-            &maintenance_barrier::postgres_coordination_pool(url)?,
-        )
-        .await?;
-        Ok(PostgresIndexStore::new(pool)
+        let pool = maintenance_barrier::postgres_shared_work_pool(url).await?;
+        let result = PostgresIndexStore::new(pool.clone())
             .delete_retention_hold(object_key)
-            .await?)
+            .await
+            .map_err(ServerError::from);
+        pool.close().await;
+        result
     } else {
         let _barrier = maintenance_barrier::acquire_local_shared(config.root_dir()).await?;
         Ok(LocalIndexStore::new(config.root_dir().to_path_buf())?
@@ -318,12 +312,187 @@ mod tests {
                 .unwrap()
         );
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_hold_cannot_commit_after_barrier_connection_is_lost() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let _test_guard = POSTGRES_TEST_LOCK.lock().await;
+        let storage = tempfile::tempdir().unwrap();
+        let config = config(storage.path())
+            .with_index_postgres_url(url.clone())
+            .unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let index = PostgresIndexStore::new(pool.clone());
+        let hold = RetentionHold::new(
+            ObjectKey::parse(&format!("retention/lost-owner-{}", std::process::id())).unwrap(),
+            "lost owner regression".to_owned(),
+            shardline_protocol::unix_now_seconds_lossy(),
+            None,
+        )
+        .unwrap();
+        index
+            .delete_retention_hold(hold.object_key())
+            .await
+            .unwrap();
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let factory_entered = entered.clone();
+        let (resume, paused) = std::sync::mpsc::channel();
+        let task_hold = hold.clone();
+        let setter = tokio::spawn(async move {
+            set_retention_hold_with(&config, move || {
+                factory_entered.store(true, std::sync::atomic::Ordering::Release);
+                tokio::task::block_in_place(|| {
+                    paused.recv_timeout(Duration::from_secs(5)).unwrap();
+                });
+                Ok::<_, ServerError>(task_hold)
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !entered.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let owner = sqlx::query_scalar::<_, i32>(
+            "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted
+             AND objsubid = 1
+             AND classid::bigint = (($1::bigint >> 32) & 4294967295)
+             AND objid::bigint = ($1::bigint & 4294967295)",
+        )
+        .bind(0x5348_4152_4447_4301_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintenance_barrier::acquire_postgres_exclusive(&pool),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        resume.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), setter)
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = index.retention_hold(hold.object_key()).await.unwrap();
+        drop(replacement);
+        index
+            .delete_retention_hold(hold.object_key())
+            .await
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "a former shared-barrier owner committed during exclusive takeover"
+        );
+        assert!(
+            observed.is_none(),
+            "the stale retention hold became visible"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_hold_release_cannot_delete_after_ownership_connection_is_lost() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let _test_guard = POSTGRES_TEST_LOCK.lock().await;
+        let storage = tempfile::tempdir().unwrap();
+        let config = config(storage.path())
+            .with_index_postgres_url(url.clone())
+            .unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let index = PostgresIndexStore::new(pool.clone());
+        let hold = RetentionHold::new(
+            ObjectKey::parse(&format!("retention/lost-release-{}", std::process::id())).unwrap(),
+            "release ownership regression".to_owned(),
+            shardline_protocol::unix_now_seconds_lossy(),
+            None,
+        )
+        .unwrap();
+        index.upsert_retention_hold(&hold).await.unwrap();
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE shardline_retention_holds IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let key = hold.object_key().clone();
+        let releaser = tokio::spawn(async move { release_retention_hold(&config, &key).await });
+        let owner = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let owner = sqlx::query_scalar::<_, i32>(
+                    "SELECT locks.pid FROM pg_locks locks JOIN pg_stat_activity activity USING (pid)
+                     WHERE locks.locktype = 'advisory' AND locks.granted AND locks.objsubid = 1
+                       AND locks.classid::bigint = (($1::bigint >> 32) & 4294967295)
+                       AND locks.objid::bigint = ($1::bigint & 4294967295)
+                       AND activity.wait_event = 'relation'
+                       AND activity.query LIKE '%shardline_retention_holds%'",
+                ).bind(0x5348_4152_4447_4301_i64).fetch_optional(&pool).await.unwrap();
+                if let Some(owner) = owner {
+                    break owner;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintenance_barrier::acquire_postgres_exclusive(&pool),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        blocker.rollback().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), releaser)
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = index.retention_hold(hold.object_key()).await.unwrap();
+        drop(replacement);
+        index
+            .delete_retention_hold(hold.object_key())
+            .await
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "the old release continued after losing its owning session"
+        );
+        assert_eq!(observed, Some(hold), "the protected hold was removed");
+    }
+
     async fn acknowledged_hold_protects_oci_bytes(config: &ServerConfig) {
         use shardline_index::{OciObjectKey, OciObjectKind, OciObjectStore};
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
         let object = OciObjectKey {
             scope_namespace: "global".to_owned(),
-            repository: "retention/barrier".to_owned(),
+            // Each temporary storage root gets a distinct immutable OCI
+            // history, including when the fixture database is reused.
+            repository: format!(
+                "retention/barrier-{}",
+                shardline_index::xet_hash_hex_string(shardline_server_core::chunk_hash(
+                    config.root_dir().as_os_str().as_encoded_bytes()
+                ))
+            ),
             kind: OciObjectKind::Blob,
             digest_hex: "ab".repeat(32),
         };

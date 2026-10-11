@@ -138,8 +138,8 @@ impl ResourceWriteGuard {
     }
 }
 
-/// Long-lived advisory guards must never borrow from the metadata work pool.
-/// Each backend owns separate bounded GC and resource coordination pools.
+/// Separate pools for guards that keep their connection checked out.
+/// Bound work sessions below instead return their locked connection to a private pool.
 pub(crate) fn postgres_coordination_pool(url: &str) -> Result<PgPool, ServerError> {
     crate::postgres_backend::connect_postgres_metadata_pool(url, 4)
 }
@@ -151,6 +151,15 @@ pub(crate) fn postgres_coordination_pool(url: &str) -> Result<PgPool, ServerErro
 /// after another owner acquired the barrier. Pool retirement is disabled for
 /// long scans; only a fresh invocation may create another session.
 pub(crate) async fn postgres_exclusive_work_pool(url: &str) -> Result<PgPool, ServerError> {
+    postgres_work_pool(url, true).await
+}
+
+/// Shares the maintenance barrier on the same session used for metadata writes.
+pub(crate) async fn postgres_shared_work_pool(url: &str) -> Result<PgPool, ServerError> {
+    postgres_work_pool(url, false).await
+}
+
+async fn postgres_work_pool(url: &str, exclusive: bool) -> Result<PgPool, ServerError> {
     let connected = Arc::new(AtomicBool::new(false));
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
@@ -177,6 +186,10 @@ pub(crate) async fn postgres_exclusive_work_pool(url: &str) -> Result<PgPool, Se
         .acquire()
         .await
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    // Cancellation while queued must close the session, not start a detached
+    // pool-return ping that waits behind the same lock. Successful acquisition
+    // explicitly returns the live connection below.
+    connection.close_on_drop();
     // An active query waiting on a table lock otherwise may not notice client
     // death until it next uses the socket. Enable built-in disconnect checks
     // when supported and disabled; preserve an operator's configured interval.
@@ -188,20 +201,19 @@ pub(crate) async fn postgres_exclusive_work_pool(url: &str) -> Result<PgPool, Se
     .execute(&mut *connection)
     .await
     .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-    let mut retry_delay = Duration::from_millis(10);
-    loop {
-        let acquired = query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-            .bind(GC_WRITE_BARRIER_KEY)
-            .fetch_one(&mut *connection)
-            .await
-            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-        if acquired {
-            break;
-        }
-        tokio::time::sleep(retry_delay).await;
-        retry_delay = retry_delay.saturating_mul(2).min(Duration::from_millis(50));
-    }
-    drop(connection);
+    // Use Postgres's wait queue: later readers must not leapfrog a queued
+    // exclusive owner and indefinitely postpone maintenance.
+    let lock_query = if exclusive {
+        "SELECT pg_advisory_lock($1)"
+    } else {
+        "SELECT pg_advisory_lock_shared($1)"
+    };
+    sqlx::query(lock_query)
+        .bind(GC_WRITE_BARRIER_KEY)
+        .execute(&mut *connection)
+        .await
+        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    connection.return_to_pool().await;
     Ok(pool)
 }
 
@@ -416,6 +428,63 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_queued_exclusive_work_does_not_let_later_readers_leapfrog() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let first_reader = postgres_shared_work_pool(&url).await.unwrap();
+        let observer = postgres_coordination_pool(&url).unwrap();
+        let writer_url = url.clone();
+        let writer = tokio::spawn(async move { postgres_exclusive_work_pool(&writer_url).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let queued = query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks
+                     WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1
+                       AND classid::bigint = (($1::bigint >> 32) & 4294967295)
+                       AND objid::bigint = ($1::bigint & 4294967295))",
+                )
+                .bind(GC_WRITE_BARRIER_KEY)
+                .fetch_one(&observer)
+                .await
+                .unwrap();
+                if queued {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let reader_url = url.clone();
+        let mut later_reader =
+            tokio::spawn(async move { postgres_shared_work_pool(&reader_url).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut later_reader)
+                .await
+                .is_err()
+        );
+        first_reader.close().await;
+        let writer = tokio::time::timeout(Duration::from_secs(2), writer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut later_reader)
+                .await
+                .is_err()
+        );
+        writer.close().await;
+        let reader = tokio::time::timeout(Duration::from_secs(2), later_reader)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        reader.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn postgres_exclusive_work_session_cannot_reconnect_and_write_after_takeover() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
@@ -492,7 +561,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let waiting = query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE query = 'SELECT pg_try_advisory_lock($1)' AND state = 'idle')",
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE query = 'SELECT pg_advisory_lock($1)' AND wait_event = 'advisory')",
                 ).fetch_one(&observer).await.unwrap();
                 if waiting { break; }
                 tokio::task::yield_now().await;

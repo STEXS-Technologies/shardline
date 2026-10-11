@@ -9,10 +9,13 @@ This document is for reviewers deciding whether the integration is safe to ship.
 
 ## Known gaps
 
-- **Ownership protection beyond rebuild.** Rebuild now binds its lock and
-  metadata work to one non-replaceable Postgres connection. The two-machine
+- **Ownership protection for other operations.** Rebuild and retention hold
+  updates bind their locks and metadata work to non-replaceable Postgres
+  connections. The two-machine
   `connection-loss` drill passes, and a database test rejects an old pool's
-  attempted write after takeover. Other entry points that keep coordination
+  attempted write after takeover. Retention fault tests cover setting a hold
+  after losing its barrier and releasing a hold during a blocked database query.
+  Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.
 - **Remote effects and acknowledgements.** Local GC crash boundaries have passed.
@@ -55,6 +58,8 @@ test does not close them.
 | Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
 | Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
 | Connection loss during rebuild | The lock and metadata operations share one non-replaceable connection. The two-machine fault drill terminates that connection, observes a verified failed source run and a completed waiter with one stale-record removal. A separate database test rejects a stale pool's attempted write after takeover. |
+| Retention ownership | Hold setting and release use the same session for the shared barrier and metadata writes. Fault tests reject a late setting after exclusive takeover and preserve an active hold when a blocked release loses its connection. Normal hold/GC contention and physical OCI protection also pass. |
+| Lock ordering | A queued exclusive owner blocks later shared readers. Cancelling an acquisition closes its session; completed metadata work releases it. |
 | Mixed versions and rollback | Released/current nodes read and append the same object history in old+old, new+old, new+new and old+new combinations against the same Postgres/S3 deployment. No new metadata migration. |
 | History inspection | Corrupt records remain visible without hiding unrelated runs. Cancelled requests retain their inspection permit until blocking work finishes. History does not certify server health. |
 | Export and cleanup | Export visits at most 64 journals per invocation, makes progress past unfinished entries and does not replay work. Cleanup retains unresolved evidence and has interrupted-deletion coverage. Total unresolved growth remains open. |
