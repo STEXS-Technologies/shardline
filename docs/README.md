@@ -13,7 +13,7 @@ docs that match your use case.
 - [Getting Started](GETTING_STARTED.md)
 - [Deployment](DEPLOYMENT.md)
 - [Operations](OPERATIONS.md)
-- [Maintenance without extra services](MAINTENANCE_INTEGRATION_UX.md)
+- [Maintenance: same commands, clearer results](MAINTENANCE_INTEGRATION_UX.md)
 - [Architecture](ARCHITECTURE.md)
 - [Compatibility Status](COMPATIBILITY_STATUS.md)
 - [Stability Graduation Policy](STABILITY_GRADUATION.md)

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Real machine identities, shared evidence, partition and replacement.
-# Usage: bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE
+# Usage: bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss]
 set -euo pipefail
-test "$#" -eq 2 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE' >&2; exit 2; }
+test "$#" -ge 2 && test "$#" -le 3 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss]' >&2; exit 2; }
+mode=${3:-node-loss}
+test "$mode" = node-loss || test "$mode" = connection-loss
 current=$(realpath "$1")
 image=$(realpath "$2")
 repository=$(cd "$(dirname "$0")/../.." && pwd)
@@ -186,6 +188,43 @@ history > "$fixture/contended.json"
 waiter_run=$(jq -er --arg host "$(head -n 1 "$fixture/1/identity")" '.tasks[] | select(.execution == "inline" and .owner.host == $host and .state == "running") | .id' "$fixture/contended.json")
 [[ "$waiter_run" =~ ^[a-f0-9]{32}$ ]]
 test "$waiter_run" != "$source_run"
+if test "$mode" = connection-loss; then
+    # Terminate only the source's lock-owning connection. Its metadata scan and
+    # original process remain alive; losing ownership must cancel their work.
+    coordinator=$(sql "SELECT pid FROM pg_locks WHERE $barrier_filter AND granted")
+    [[ "$coordinator" =~ ^[0-9]+$ ]]
+    test "$(sql "SELECT pg_terminate_backend($coordinator)")" = t
+    for attempt in $(seq 1 15); do
+        replacement_coordinator=$(sql "SELECT pid FROM pg_locks WHERE $barrier_filter AND granted")
+        if [[ "$replacement_coordinator" =~ ^[0-9]+$ ]] && test "$replacement_coordinator" != "$coordinator"; then break; fi
+        sleep 1
+    done
+    [[ "$replacement_coordinator" =~ ^[0-9]+$ ]]
+    test "$replacement_coordinator" != "$coordinator"
+    sql "SELECT pid, granted FROM pg_locks WHERE $barrier_filter ORDER BY pid" > "$fixture/connection-loss-locks.log"
+    for attempt in $(seq 1 15); do
+        if history > "$fixture/connection-lost.json" && jq -e --arg id "$source_run" 'any(.tasks[]; .id == $id and .state == "failed")' "$fixture/connection-lost.json" >/dev/null; then break; fi
+        sleep 1
+    done
+    if ! jq -e --arg id "$source_run" 'any(.tasks[]; .id == $id and .state == "failed")' "$fixture/connection-lost.json"; then
+        echo 'lost coordinator did not stop the still-live source command' >&2
+        vm_ssh 0 'sudo systemctl show shardline-validation-source-rebuild -p MainPID -p ActiveState' >&2
+        exit 1
+    fi
+    test "$(sql "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='shardline-vm-scan-blocker'")" = t
+    wait "$blocker_pid" 2>/dev/null || true
+    blocker_pid=''
+    for attempt in $(seq 1 30); do
+        if history > "$fixture/connection-waiter.json" && jq -e --arg id "$waiter_run" 'any(.tasks[]; .id == $id and .state == "completed")' "$fixture/connection-waiter.json" >/dev/null; then break; fi
+        sleep 1
+    done
+    jq -e --arg id "$waiter_run" --arg source "$source_run" 'any(.tasks[]; .id == $id and .state == "completed") and any(.tasks[]; .id == $source and .state == "failed")' "$fixture/connection-waiter.json"
+    vm_ssh 1 'sudo journalctl -u shardline-validation-waiter-rebuild -o cat --no-pager' > "$fixture/connection-waiter-report.log"
+    grep -Fx 'removed_stale_latest_records: 1' "$fixture/connection-waiter-report.log"
+    test "$(sql "SELECT COUNT(*) FROM shardline_file_records WHERE file_id='stale.bin'")" = 0
+    echo 'PASS: coordinator loss stops the original command; the separately admitted waiter completes'
+    exit 0
+fi
 # Disconnect the source machine while its kernel and original process remain
 # alive. The observer cannot promote a foreign PID observation into a lease.
 printf 'set_link nic0 off\n' | socat - "UNIX-CONNECT:$fixture/0/monitor.sock" > "$fixture/partition.log"

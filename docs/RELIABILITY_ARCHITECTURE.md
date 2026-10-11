@@ -1,5 +1,11 @@
 # Shardline reliability architecture
 
+For commands, benefits and crash recovery, start with the
+[operator guide](MAINTENANCE_INTEGRATION_UX.md). This page describes implementation
+details. The [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) records
+remaining gaps, including loss of a Postgres maintenance lock while its command
+remains alive. The integration does not yet establish safe takeover for that case.
+
 The 0.2.0 integration includes an embedded server tracker and automatic Linux
 maintenance tracking, with an explicit bounded runner for advanced use. Default
 deployment acceptance is still under verification; see
