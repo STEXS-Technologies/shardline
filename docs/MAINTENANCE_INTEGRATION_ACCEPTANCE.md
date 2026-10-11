@@ -25,6 +25,13 @@ The ordinary handler runs under the admitted configuration instead of parsing
 its environment file again. Failed tracking preparation produces an explicit
 warning while preserving the original validation status.
 
+All 12 focused server tracking tests passed after tightening large-report
+inspection. Reports beyond the status download bound still require consistent
+signed success and exit-code fields; contradictory fields fail verification.
+The admin API guide now documents maintenance pagination, outcome states and
+recovery actions separately from current server readiness. These checks do not
+establish large-deployment performance or the remaining fault-boundary gates.
+
 Normal CLI tests check its original PID, fresh consecutive runs, live command
 results, read-only dry runs, export failures and later evidence export without
 repeating completed work. A real GC invocation also passed in an unprivileged
