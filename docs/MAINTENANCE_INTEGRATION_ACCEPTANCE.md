@@ -165,9 +165,25 @@ report `needs_reconciliation`; a printed report does not authorize completion.
 
 These checks establish the tested local GC reboot boundaries, including a
 committed metadata effect and report before completion acknowledgement.
-Cross-host replacement, multi-node faults and other operations' remote mutation
-and reboot cases remain outstanding. They do not justify a blanket rollout or
-exactly-once guarantee.
+Other operations' remote mutation and reboot cases remain outstanding. These
+checks do not justify a blanket rollout or exactly-once guarantee.
+
+A separate cross-machine drill now boots two isolated KVM guests with distinct
+machine and boot IDs against one fresh Postgres/S3 deployment. An embedded LFS
+startup task on the source waits on its existing session lock; its recorded PID
+matches the source service's actual main process. The other guest observes the
+run as `running_or_interrupted` while the source is alive. Disconnecting the
+source's virtual network makes SSH unreachable while its VM process remains
+alive, and does not change that task state. After the source VM is killed, the
+replacement's own startup verifies as completed while the source run remains
+unresolved. The source's two native records have identical hashes before and
+after replacement. The replacement is ready, runs one Shardline process and
+has no private maintenance journal or copied source state.
+
+This establishes the tested cross-machine startup replacement and network-loss
+boundary. It does not establish shared-mutation ownership under every partition
+or permit completing a foreign task from a recorded PID. Additional multi-node
+faults around domain writes and publication acknowledgement remain outstanding.
 
 Maintainers can reproduce the generated-unit and reboot checks with
 `bash scripts/shardline/verify_maintenance_vm.sh CURRENT RELEASED IMAGE`.
@@ -175,6 +191,11 @@ Maintainers can reproduce the generated-unit and reboot checks with
 Debian 13 generic cloud qcow2 image. The script boots its own disposable KVM
 guest, retains small diagnostic artifacts and shuts the guest down on exit.
 It does not reboot the workstation or change its services.
+
+The cross-machine drill is
+`bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE`.
+It owns two disposable guests and an isolated Compose project, cleans up both
+on exit and retains small history and diagnostic artifacts.
 
 Native outbox tests cover a completed outcome behind 130 unfinished/corrupt
 entries and a competing exporter that must not wait or delete another
