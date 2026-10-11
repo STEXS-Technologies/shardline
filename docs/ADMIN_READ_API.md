@@ -66,7 +66,8 @@ and a restrictive Content Security Policy. `GET` and the normal body-free
 `TRACE` do not reach mutation code and return `405`. Browser preflight may
 return `200`, but credentialed CORS is not enabled.
 
-Operational-state fields use exactly these values:
+Readiness fields use exactly these values. Maintenance history uses the separate
+outcome states described below.
 
 | Value | Meaning |
 | --- | --- |
@@ -176,6 +177,49 @@ reset on restart and are not cluster totals.
 
 Pagination is keyset-ordered by session id and pushed into the store query, so a filtered page always returns a full bounded window of matching sessions; terminal sessions interleaved in id order never truncate a page or falsify the end of the list.
 
+### `GET /api/v1/tasks/maintenance`
+
+Use `/api/v1/status` to check this server's readiness. Use this endpoint to
+inspect recorded maintenance outcomes. A completed job is historical evidence;
+it does not establish current server health or completion across every node.
+No tracker service or extra token is required.
+
+```bash
+curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
+  'https://cas.example.com/api/v1/tasks/maintenance?limit=20'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `supervision` | `embedded`: tracking is integrated into Shardline. Individual jobs can use other execution modes. |
+| `tasks[].id` | Opaque incident reference; keep it when investigating a run. |
+| `tasks[].operation` | Name of the recorded maintenance operation. |
+| `tasks[].state` | What the available evidence establishes; see the table below. |
+| `tasks[].execution` | `embedded` for server-owned work, `inline` for ordinary CLI commands, or `isolated` for the explicit advanced runner. |
+| `tasks[].created_at` | Run creation time in Unix seconds, not its completion time. |
+| `tasks[].owner` | Diagnostic process identity. It is not a cluster lease or permission to retry. |
+| `tasks[].output_verified` | For isolated jobs, whether full captured output was verified. Large streams can be `false` while the signed command outcome is verified. Otherwise `null`. |
+| `page` | Pagination metadata. An empty page does not prove that all maintenance succeeded or that every job was recorded. |
+
+| State | Meaning and next action |
+| --- | --- |
+| `pending` | Execution has not been committed. No completion claim is available. |
+| `running` | The recorded local owner is alive; completion is unconfirmed. |
+| `running_or_interrupted` | This node cannot observe the owner. Check the owning node and command logs before deciding what happened. |
+| `completed` | The recorded result verified as successful. No recovery action is implied. |
+| `failed` | The command finished with a verified nonzero exit status. Follow its normal diagnostics; it may have made partial changes. |
+| `needs_reconciliation` | The outcome or effects need investigation. Inspect the affected data before repeating a mutation. |
+| `corrupt` | Stored evidence failed verification. Preserve the evidence and investigate storage and command logs; do not treat it as a successful run. |
+
+This is a read-only inspection endpoint. No state authorizes an automatic retry.
+A failed optional startup job does not by itself mean the server is unhealthy;
+check readiness separately. Tracking warnings in command logs can explain why
+an expected outcome is missing.
+
+Pages are ordered by opaque run ID, not creation time. Only `limit` (`1..=100`,
+default `100`) and `cursor` are accepted. State, prefix and capability filters
+are unsupported. Pass the returned cursor unchanged to get the next page.
+
 ### `GET /api/v1/metrics`
 
 | Field | Type | Scope and meaning |
@@ -222,7 +266,9 @@ This endpoint returns a bounded dashboard summary of process-lifetime integer co
 
 ## Cursor pagination and filtering
 
-`nodes` and `tasks` are keyset-paginated. Other endpoints reject all query
+`nodes`, resumable `tasks` and maintenance history are keyset-paginated. The
+maintenance endpoint has the narrower limits documented above; the table below
+describes `nodes` and resumable `tasks`. Other endpoints reject all query
 parameters.
 
 | Parameter | Applicable endpoints | Contract |

@@ -446,16 +446,18 @@ impl TaskEvidenceStore {
         if manifest.schema != 1 || manifest.exit_code > 2 {
             return Err(invalid("invalid command outcome"));
         }
-        // Status is a bounded inspection, not an unbounded report download.
-        if manifest.stdout.bytes.saturating_add(manifest.stderr.bytes) > 8 * 1024 * 1024 {
-            return Ok((manifest.exit_code == 0, false));
-        }
         if materialized.get(..split)
             != Some(format!("maintenance.success: {}", manifest.exit_code == 0).as_bytes())
         {
             return Err(invalid(
                 "command outcome header does not match its signed manifest",
             ));
+        }
+        // Status is a bounded inspection, not an unbounded report download.
+        // The signed outcome must still be consistent when streams are too
+        // large to inspect here.
+        if manifest.stdout.bytes.saturating_add(manifest.stderr.bytes) > 8 * 1024 * 1024 {
+            return Ok((manifest.exit_code == 0, false));
         }
         for (name, stream) in [("stdout", manifest.stdout), ("stderr", manifest.stderr)] {
             let mut hash = Sha256::new();
@@ -516,4 +518,65 @@ fn inline_outcome(materialized: &[u8]) -> Result<u8, ServerError> {
         return Err(invalid("invalid signed command outcome"));
     }
     Ok(outcome.exit_code)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::{ServerConfig, task_tracking::EmbeddedTaskTracker};
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn large_output_still_requires_a_consistent_signed_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://localhost:8080".to_owned(),
+            root.path().to_path_buf(),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        let deployment = super::super::deployment_fingerprint(&config).unwrap();
+        let store = TaskEvidenceStore::from_config(&config).unwrap();
+        let tracker = EmbeddedTaskTracker::new(
+            super::super::object_store_from_config(&config).unwrap(),
+            deployment,
+        );
+        let receipt = tracker
+            .begin(
+                "large-output",
+                b"input",
+                shardline_reliability::MaintenanceArtifactKind::Fsck,
+            )
+            .unwrap();
+        let id = store.summaries(deployment, None, 1).unwrap()[0].id.clone();
+        let identity: TaskRunIdentity = serde_json::from_slice(
+            &store
+                .read(&format!("manifests/{id}"), 65536)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        // No stream objects exist: large output inspection must remain bounded,
+        // while contradictory outcome metadata must fail before that shortcut.
+        for exit_code in [0_u8, 1, 2] {
+            let manifest = serde_json::json!({
+                "schema": 1,
+                "exit_code": exit_code,
+                "stdout": {"digest": Digest::of(b"stdout"), "bytes": 8 * 1024 * 1024 + 1},
+                "stderr": {"digest": Digest::of(b"stderr"), "bytes": 0},
+            });
+            let report = format!("maintenance.success: {}\n{manifest}", exit_code == 0);
+            assert_eq!(
+                store.verify_streams(&identity, report.as_bytes()).unwrap(),
+                (exit_code == 0, false)
+            );
+            let contradictory = format!("maintenance.success: {}\n{manifest}", exit_code != 0);
+            assert!(matches!(
+                store.verify_streams(&identity, contradictory.as_bytes()),
+                Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData
+            ));
+        }
+        drop(receipt);
+    }
 }

@@ -62,6 +62,10 @@ finished work, failed commands, and work needing investigation. It uses the
 same admin token. A result from yesterday is history, not proof that the
 deployment is healthy today.
 
+Check `/api/v1/status` for this server's readiness. Check maintenance history
+when investigating a particular job. The [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
+shows how to list jobs and explains each state and the next action.
+
 A `failed` outcome means the command finished and reported a problem. Follow
 its usual diagnostics. `needs_reconciliation` means the effects are uncertain:
 inspect the affected data before repeating a mutation. `running_or_interrupted`
