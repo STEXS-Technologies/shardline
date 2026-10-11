@@ -80,6 +80,17 @@ A real ordinary rebuild was killed while waiting on the existing GC barrier.
 Its signed history remains unresolved; a later ordinary scan publishes that
 history without replaying the rebuild or declaring it completed.
 
+The release CLI selection now passes 17 maintenance tests and both Rust API
+compatibility tests. A real ordinary GC was also killed after a verified
+quarantine mutation and, separately, after its printed report and local outcome
+body were available. A competing SQLite writer prevented completion recording;
+the test observes the actual CLI PID and committed native history. Both runs
+remain `needs_reconciliation` immediately after death and after a fresh fsck.
+The old journal retains only its three admission records. A second orphan added
+after the crash stays unmarked during the fresh diagnostic, so an unnoticed GC
+replay would be observable. This establishes those default local boundaries,
+not every publication acknowledgement, remote replacement or failover case.
+
 The exact systemd sandbox could not be exercised on the validation host: its
 user manager rejected namespace setup before executing Shardline. Container
 validation covers similar filesystem restrictions, but does not establish that
