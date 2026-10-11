@@ -2,6 +2,7 @@
 mod artifact;
 mod automatic;
 mod capture;
+pub(crate) mod configuration;
 mod controller;
 mod history;
 mod inline;
@@ -201,6 +202,9 @@ fn operation_config(
     operation: &MaintenanceOperation,
     automatic: bool,
 ) -> Result<shardline_server::ServerConfig> {
+    if automatic && let Some(config) = configuration::config() {
+        return Ok(config);
+    }
     if automatic
         && let MaintenanceOperation::StorageMigrate {
             from, from_root, ..
@@ -208,28 +212,35 @@ fn operation_config(
     {
         let source =
             crate::storage_migration::endpoint(from.adapter(), from_root.as_deref(), "source")?;
-        let root = match &source {
-            shardline_server::StorageMigrationEndpoint::LocalStateRoot(root) => root.clone(),
-            shardline_server::StorageMigrationEndpoint::S3(_) => operation.root().to_path_buf(),
-        };
-        let root = crate::local_output::resolved_output_path(&root)?;
-        let config = shardline_server::ServerConfig::new(
-            "127.0.0.1:0".parse()?,
-            "http://localhost".to_owned(),
-            root,
-            std::num::NonZeroUsize::new(4096).ok_or("invalid maintenance chunk size")?,
-        );
-        return Ok(match source {
-            shardline_server::StorageMigrationEndpoint::LocalStateRoot(_) => config,
-            shardline_server::StorageMigrationEndpoint::S3(s3) => {
-                config.with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3))
-            }
-        });
+        return source_config(operation.root(), source);
     }
     Ok(crate::config::load_server_config(
         Some(operation.root()),
         None,
     )?)
+}
+
+fn source_config(
+    fallback_root: &std::path::Path,
+    source: shardline_server::StorageMigrationEndpoint,
+) -> Result<shardline_server::ServerConfig> {
+    let root = match &source {
+        shardline_server::StorageMigrationEndpoint::LocalStateRoot(root) => root.clone(),
+        shardline_server::StorageMigrationEndpoint::S3(_) => fallback_root.to_path_buf(),
+    };
+    let root = crate::local_output::resolved_output_path(&root)?;
+    let config = shardline_server::ServerConfig::new(
+        "127.0.0.1:0".parse()?,
+        "http://localhost".to_owned(),
+        root,
+        std::num::NonZeroUsize::new(4096).ok_or("invalid maintenance chunk size")?,
+    );
+    Ok(match source {
+        shardline_server::StorageMigrationEndpoint::LocalStateRoot(_) => config,
+        shardline_server::StorageMigrationEndpoint::S3(s3) => {
+            config.with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3))
+        }
+    })
 }
 
 fn publication_config(

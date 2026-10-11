@@ -23,6 +23,9 @@ uncertain, Shardline retains the evidence instead of automatically repeating
 the mutation. Existing database transactions and maintenance barriers remain
 responsible for protecting deployment data.
 
+A running command keeps the configuration and migration targets chosen at
+startup. Configuration changes apply to the next command.
+
 ## Why a worker process exists
 
 Normal startup and maintenance do not add a process. The tracker runs inside

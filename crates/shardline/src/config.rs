@@ -29,6 +29,10 @@ pub(crate) fn set_cli_config_override(path: Option<PathBuf>) {
 }
 
 pub(crate) fn selected_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(path) = crate::maintenance::configuration::config_path() {
+        return path;
+    }
     if let Some(path) = explicit {
         return Some(path.to_path_buf());
     }
@@ -79,6 +83,12 @@ pub fn load_server_config(
     root_override: Option<&Path>,
     config_override: Option<&Path>,
 ) -> Result<ServerConfig, ServerConfigError> {
+    #[cfg(target_os = "linux")]
+    if let Some(config) = crate::maintenance::configuration::config() {
+        ensure_directory_path_components_are_not_symlinked(config.root_dir())
+            .map_err(ServerConfigError::RootDir)?;
+        return Ok(config);
+    }
     let config_path = selected_config_path(config_override);
     let config = match load_toml_config(config_path.as_deref())
         .map_err(ServerConfigError::ConfigFileError)?
