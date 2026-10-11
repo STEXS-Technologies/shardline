@@ -3,8 +3,9 @@
 For commands, benefits and crash recovery, start with the
 [operator guide](MAINTENANCE_INTEGRATION_UX.md). This page describes implementation
 details. The [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) records
-remaining gaps. Rebuild's lock and metadata work now share one non-replaceable
-Postgres connection; other operations' ownership and remote-effect boundaries
+remaining gaps. Rebuild and retention hold updates keep their locks and metadata
+work on non-replaceable Postgres connections; other operations' ownership and
+remote-effect boundaries
 still need validation.
 
 The 0.2.0 integration includes an embedded server tracker and automatic Linux
@@ -185,6 +186,19 @@ long scans do not lose ownership merely because a pool timer expires. Failure
 may leave earlier committed changes; it does not imply rollback of the entire
 rebuild or authorize an automatic retry. This protection covers rebuild's
 metadata mutations, not other operations' remote object-store effects.
+
+Retention hold setting and release use the same connection binding with a shared
+barrier. Their domain transaction and reliability evidence commit on that session.
+The hold factory still runs after acquiring the barrier, so relative expiration
+retains its existing meaning. A lost session cannot reconnect to apply a late
+hold change while GC has taken exclusive ownership.
+
+Both modes use PostgreSQL's advisory-lock wait queue. A queued exclusive owner
+blocks later shared acquisitions. During acquisition, cancellation closes the
+connection instead of leaving a detached pool-return operation queued on the
+lock. Successful acquisition explicitly hands that same session back to its
+private pool; normal completion closes it. These are internal changes and add
+no worker process or deployment configuration.
 
 For that session, rebuild enables PostgreSQL's
 [`client_connection_check_interval`](https://www.postgresql.org/docs/16/runtime-config-connection.html)

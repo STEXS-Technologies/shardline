@@ -91,13 +91,9 @@ shared_hashes() {
 sql() { compose exec -T chaos-postgres psql -U shardline -d shardline -At -v ON_ERROR_STOP=1 -c "$1"; }
 barrier_filter="locktype = 'advisory' AND objsubid = 1 AND classid::bigint = (x'5348415244474301'::bit(64)::bigint >> 32) AND objid::bigint = (x'5348415244474301'::bit(64)::bigint & 4294967295)"
 contended_barrier() {
-    # Acquisition may wait in Postgres or poll cooperatively. In either case,
-    # require one owner and one distinct contender, not just two admitted tasks.
-    sql "SELECT (SELECT COUNT(*) FROM pg_locks WHERE $barrier_filter AND granted)=1
-        AND ((SELECT COUNT(*) FROM pg_locks WHERE $barrier_filter AND NOT granted)
-            + (SELECT COUNT(*) FROM pg_stat_activity activity
-               WHERE query='SELECT pg_try_advisory_lock(\$1)'
-                 AND NOT EXISTS (SELECT 1 FROM pg_locks WHERE $barrier_filter AND granted AND pid=activity.pid)))=1"
+    # Require one owner and one queued contender, not just two admitted tasks.
+    sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=1
+         FROM pg_locks WHERE $barrier_filter"
 }
 for node in 0 1; do
     for attempt in $(seq 1 60); do
