@@ -168,6 +168,13 @@ storage, the command preserves its application result and explicitly warns that
 no verified outcome is available. This preserves existing availability and
 permissions; it does not provide an audit-loss guarantee during storage outages.
 
+An ordinary invocation carries one resolved command/configuration through
+evidence production and the original handlers. Migration source and destination
+configurations are captured together. The blocking-thread scope restores on
+return or unwind; it does not change the configuration of another invocation.
+Handlers do not reparse an environment file or reopen the selected configuration
+to choose a different target after admission.
+
 Keep large multipart state as bounded integrity snapshots rather than putting
 unbounded part maps into StateChronicle's 64 KiB typed-profile payload boundary.
 Checkpointed rebuilds must retain the maintenance barrier and a coherent scan

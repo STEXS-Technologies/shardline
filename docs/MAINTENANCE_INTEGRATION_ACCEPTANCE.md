@@ -8,8 +8,8 @@ criteria; passing the optional runner tests alone does not satisfy them.
 
 ## Validation so far
 
-The workspace suite passed all 9,334 tests, alongside 35 reliability
-contract tests and 14 release CLI integration tests. Focused tests cover the
+The workspace suite passed all 9,338 tests, alongside 35 reliability
+contract tests and 15 release CLI integration tests. Focused tests cover the
 embedded tracker and storage migration, including pre-existing objects under
 the new task-evidence prefix.
 
@@ -17,6 +17,13 @@ Two downstream Rust API tests preserve the released exhaustive `CliCommand`
 match and check that legacy parsing rejects managed entry points before loading
 an environment file. Advanced commands use private binary dispatch, so adding
 them does not require existing library callers to change their command matches.
+
+Invocation tests also freeze the original command, resolved configuration and
+migration endpoints across config/env-file changes. Concurrent execution scopes
+keep separate targets, and scopes restore after errors and panic unwinding.
+The ordinary handler runs under the admitted configuration instead of parsing
+its environment file again. Failed tracking preparation produces an explicit
+warning while preserving the original validation status.
 
 Normal CLI tests check its original PID, fresh consecutive runs, live command
 results, read-only dry runs, export failures and later evidence export without

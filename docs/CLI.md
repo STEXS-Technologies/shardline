@@ -28,6 +28,9 @@ in their existing CLI process. Keep using `fsck`, `index rebuild`,
 Their original handlers provide stdout, stderr, exit codes and diagnostic exports.
 There is no tracker service to start. `serve` owns an embedded tracker for its
 existing startup sweeps; it does not start a new maintenance schedule.
+Each ordinary maintenance invocation resolves its configuration and migration
+endpoints once. Changing a config or credential file does not redirect work
+already admitted; the next invocation reads the new configuration.
 
 Local maintenance scratch lives in `.shardline-maintenance` under the existing
 root. Postgres/S3-only administrative invocations use a private directory in the

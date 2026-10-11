@@ -26,6 +26,9 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn run_direct(args: impl Iterator<Item = OsString>) -> ExitCode {
+    if let Some(command) = crate::maintenance::configuration::command() {
+        return execute_command(Ok(command)).await;
+    }
     run_inner(args, false).await
 }
 
@@ -46,16 +49,21 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
 
     let command = crate::command::parse_command(args.clone(), true);
     #[cfg(target_os = "linux")]
-    if _supervised
-        && let Ok(crate::command::ParsedCommand::Existing(parsed)) = &command
-        && let Ok(Some(operation)) = crate::maintenance::prepare_automatic(parsed)
-    {
-        return maintenance_status(
-            tokio::task::spawn_blocking(move || {
-                crate::maintenance::run_automatic(&operation, args)
-            })
-            .await,
-        );
+    if _supervised && let Ok(crate::command::ParsedCommand::Existing(parsed)) = &command {
+        match crate::maintenance::prepare_automatic(parsed) {
+            Ok(Some(operation)) => {
+                return maintenance_status(
+                    tokio::task::spawn_blocking(move || {
+                        crate::maintenance::run_automatic(&operation, args)
+                    })
+                    .await,
+                );
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "warning: maintenance tracking could not initialize; the existing command will report its result without a verified task outcome: {error}"
+            ),
+        }
     }
     let command = match command {
         #[cfg(target_os = "linux")]
@@ -87,6 +95,10 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
         Ok(crate::command::ParsedCommand::Existing(command)) => Ok(command),
         Err(error) => Err(error),
     };
+    execute_command(command).await
+}
+
+async fn execute_command(command: Result<CliCommand, crate::CliParseError>) -> ExitCode {
     match command {
         Ok(CliCommand::ProviderlessSetup) => match run_providerless_setup(None) {
             Ok(report) => output_status(

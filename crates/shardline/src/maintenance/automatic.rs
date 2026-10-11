@@ -2,7 +2,12 @@ use super::{MaintenanceOperation, Result};
 use crate::CliCommand;
 use std::{ffi::OsString, os::unix::ffi::OsStrExt};
 
-pub(crate) fn prepare(command: &CliCommand) -> Result<Option<MaintenanceOperation>> {
+pub(crate) struct PreparedMaintenance {
+    operation: MaintenanceOperation,
+    configuration: super::configuration::Configuration,
+}
+
+pub(crate) fn prepare(command: &CliCommand) -> Result<Option<PreparedMaintenance>> {
     if let CliCommand::StorageMigrate {
         from,
         from_root,
@@ -13,13 +18,13 @@ pub(crate) fn prepare(command: &CliCommand) -> Result<Option<MaintenanceOperatio
     } = command
     {
         let source = crate::storage_migration::endpoint(*from, from_root.as_deref(), "source")?;
-        let _destination =
+        let destination =
             crate::storage_migration::endpoint(*to, to_root.as_deref(), "destination")?;
-        let root = match source {
-            shardline_server::StorageMigrationEndpoint::LocalStateRoot(root) => root,
+        let root = match &source {
+            shardline_server::StorageMigrationEndpoint::LocalStateRoot(root) => root.clone(),
             shardline_server::StorageMigrationEndpoint::S3(_) => std::env::current_dir()?,
         };
-        return Ok(Some(MaintenanceOperation::StorageMigrate {
+        let operation = MaintenanceOperation::StorageMigrate {
             root,
             from: super::MaintenanceStorageAdapter::from_adapter(*from),
             from_root: from_root.clone(),
@@ -27,6 +32,15 @@ pub(crate) fn prepare(command: &CliCommand) -> Result<Option<MaintenanceOperatio
             to_root: to_root.clone(),
             prefix: prefix.clone(),
             dry_run: *dry_run,
+        };
+        return Ok(Some(PreparedMaintenance {
+            configuration: super::configuration::Configuration {
+                config: super::source_config(operation.root(), source.clone())?,
+                command: command.clone(),
+                config_path: crate::config::selected_config_path(None),
+                migration: Some((source, destination)),
+            },
+            operation,
         }));
     }
     let requested_root = match command {
@@ -62,7 +76,7 @@ pub(crate) fn prepare(command: &CliCommand) -> Result<Option<MaintenanceOperatio
         // can be authorized against an absent local metadata directory.
         return Err("local deployment root does not exist".into());
     }
-    Ok(Some(match command {
+    let operation = match command {
         CliCommand::Fsck { .. } => MaintenanceOperation::Fsck { root },
         CliCommand::IndexRebuild { .. } => MaintenanceOperation::IndexRebuild { root },
         CliCommand::Gc {
@@ -106,10 +120,28 @@ pub(crate) fn prepare(command: &CliCommand) -> Result<Option<MaintenanceOperatio
         | CliCommand::Health { .. }
         | CliCommand::Completion { .. }
         | CliCommand::Manpage { .. } => return Ok(None),
+    };
+    Ok(Some(PreparedMaintenance {
+        operation,
+        configuration: super::configuration::Configuration {
+            config,
+            command: command.clone(),
+            config_path: crate::config::selected_config_path(None),
+            migration: None,
+        },
     }))
 }
 
 pub(crate) fn run(
+    prepared: &PreparedMaintenance,
+    arguments: Vec<OsString>,
+) -> Result<super::CommandOutput> {
+    super::configuration::scope(prepared.configuration.clone(), || {
+        run_inner(&prepared.operation, arguments)
+    })
+}
+
+fn run_inner(
     operation: &MaintenanceOperation,
     arguments: Vec<OsString>,
 ) -> Result<super::CommandOutput> {

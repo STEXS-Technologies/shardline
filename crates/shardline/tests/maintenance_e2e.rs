@@ -36,6 +36,30 @@ fn binary() -> std::ffi::OsString {
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_shardline").into())
 }
 
+#[test]
+fn failed_tracking_preparation_is_visible_and_preserves_original_validation_status() -> Result<()> {
+    let sandbox = tempfile::tempdir()?;
+    let root = sandbox.path().join("not-a-directory");
+    fs::write(&root, b"existing deployment diagnostic fixture")?;
+    let output = Command::new(binary())
+        .env_clear()
+        .current_dir(sandbox.path())
+        .args(["fsck", "--root"])
+        .arg(&root)
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("maintenance tracking could not initialize"));
+    assert!(
+        stderr.lines().count() >= 2,
+        "retain the original diagnostic after the tracking warning: {stderr}"
+    );
+    assert_eq!(fs::read(&root)?, b"existing deployment diagnostic fixture");
+    assert!(!sandbox.path().join(".shardline-maintenance").exists());
+    Ok(())
+}
+
 fn wait_for(mut check: impl FnMut() -> bool) -> Result<()> {
     let start = Instant::now();
     while !check() {
