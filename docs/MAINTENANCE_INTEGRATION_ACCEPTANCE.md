@@ -8,7 +8,7 @@ criteria; passing the optional runner tests alone does not satisfy them.
 
 ## Validation so far
 
-The workspace suite passed all 9,340 tests, alongside 35 reliability
+The latest full workspace run passed all 9,340 tests, alongside 35 reliability
 contract tests and 15 release CLI integration tests. Focused tests cover the
 embedded tracker and storage migration, including pre-existing objects under
 the new task-evidence prefix.
@@ -40,6 +40,13 @@ evidence and do not block retention of unrelated verified completed runs.
 An inaccessible storage namespace fails the request instead of returning an
 empty history. A manifest whose deployment cannot be decoded is shown only as
 an incident reference; it does not establish which deployment owns that run.
+
+Subsequent focused admin API checks cover cancellation at the blocking
+inspection boundary: cancelling the caller keeps capacity occupied until the
+scan finishes. The existing endpoint matrix includes maintenance history for
+disabled-route concealment, authentication, read-only methods, response
+pagination and concurrent polling. This bounds concurrent admitted inspections;
+it does not bound the duration of a single scan or prove multi-node failover.
 
 Normal CLI tests check its original PID, fresh consecutive runs, live command
 results, read-only dry runs, export failures and later evidence export without

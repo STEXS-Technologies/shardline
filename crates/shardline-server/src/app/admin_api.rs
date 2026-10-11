@@ -547,6 +547,19 @@ pub(super) async fn nodes(
     }))
 }
 
+/// Keeps admission charged while a detached blocking inspection is still running.
+fn spawn_maintenance_inspection<T: Send + 'static>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    inspect: impl FnOnce() -> Result<T, ServerError> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<T, ServerError>> {
+    tokio::task::spawn_blocking(move || {
+        // A disconnected request cannot stop an already running blocking scan.
+        // Keep its capacity charged to the scan, rather than the HTTP future.
+        let _permit = permit;
+        inspect()
+    })
+}
+
 /// Lists deployment maintenance evidence with bounded memory and admission-gated
 /// store enumeration. This is separate from the existing resumable-upload API.
 pub(super) async fn maintenance_tasks(
@@ -570,7 +583,7 @@ pub(super) async fn maintenance_tasks(
         .transpose()?
         .map(|cursor| cursor.after);
     let limit = query.limit.map_or(DEFAULT_PAGE_LIMIT, AdminPageLimit::get);
-    let _permit = state
+    let permit = state
         .admission
         .try_acquire(weights::STATS)
         .ok_or(ServerError::WorkQueueSaturated)?;
@@ -579,7 +592,7 @@ pub(super) async fn maintenance_tasks(
     }
     let store = crate::task_tracking::TaskEvidenceStore::from_objects(state.backend.object_store());
     let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
-    let mut tasks = tokio::task::spawn_blocking(move || {
+    let mut tasks = spawn_maintenance_inspection(permit, move || {
         store.inspect_summaries(
             deployment,
             after.as_ref().map(AdminItemKey::as_str),
@@ -751,13 +764,14 @@ mod tests {
     use crate::{DeploymentMode, ServerConfig, ServerFrontend, ServerRole, app::router};
 
     const ADMIN_TOKEN: &str = "admin-read-secret";
-    const ADMIN_PATHS: [&str; 7] = [
+    const ADMIN_PATHS: [&str; 8] = [
         "/api/v1/status",
         "/api/v1/storage",
         "/api/v1/gc",
         "/api/v1/integrity",
         "/api/v1/nodes",
         "/api/v1/tasks",
+        "/api/v1/tasks/maintenance",
         "/api/v1/metrics",
     ];
 
@@ -864,13 +878,15 @@ mod tests {
     #[tokio::test]
     async fn admin_api_rejects_missing_and_wrong_credentials() {
         let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
-        for token in [None, Some("wrong-token")] {
-            let response = app
-                .clone()
-                .oneshot(request(Method::GET, ADMIN_PATHS[0], token))
-                .await
-                .expect("response");
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        for path in ADMIN_PATHS {
+            for token in [None, Some("wrong-token")] {
+                let response = app
+                    .clone()
+                    .oneshot(request(Method::GET, path, token))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+            }
         }
     }
 
@@ -891,7 +907,13 @@ mod tests {
             );
             let body = json_body(get_response).await;
             assert_eq!(body["api_version"], ADMIN_API_VERSION, "{path}");
-            if ["/api/v1/nodes", "/api/v1/tasks"].contains(&path) {
+            if [
+                "/api/v1/nodes",
+                "/api/v1/tasks",
+                "/api/v1/tasks/maintenance",
+            ]
+            .contains(&path)
+            {
                 assert_eq!(body["page"]["limit"], DEFAULT_PAGE_LIMIT, "{path}");
                 assert!(body["page"]["returned"].is_number(), "{path}");
                 assert!(body["page"]["next_cursor"].is_null(), "{path}");
@@ -1104,6 +1126,41 @@ mod tests {
                 "unexpected bounded-poll status {status}"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_maintenance_poll_keeps_running_scan_admission_charged() {
+        let admission = crate::admission::WeightedAdmission::new(NonZeroUsize::MIN);
+        let permit = admission.try_acquire(weights::STATS).expect("first scan");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = spawn_maintenance_inspection(permit, move || {
+            let _sent = started_tx.send(());
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| ServerError::Io(std::io::Error::other(error)))
+        });
+        let observer = worker.abort_handle();
+        let caller = tokio::spawn(worker);
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("scan starts")
+            .expect("start notification");
+        assert!(admission.try_acquire(weights::STATS).is_none());
+        caller.abort();
+        assert!(caller.await.expect_err("cancelled poll").is_cancelled());
+        // The cancelled HTTP future is gone, but the scan still owns capacity.
+        assert!(!observer.is_finished());
+        assert!(admission.try_acquire(weights::STATS).is_none());
+        release_tx.send(()).expect("finish scan");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !observer.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scan finishes");
+        assert!(admission.try_acquire(weights::STATS).is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
