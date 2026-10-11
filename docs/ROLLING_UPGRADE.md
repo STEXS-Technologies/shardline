@@ -15,6 +15,46 @@ connections to finish; allow enough runtime termination grace for those transfer
 If an embedding application sets `ServerConfig::with_shutdown_timeout`, give the
 runtime a longer grace period so the server's deadline runs before SIGKILL.
 
+## StateChronicle/Penelope 0.2.0 dependency upgrade
+
+The branch is not yet ready for rollout as a complete automatic supervision
+upgrade. The compatibility guidance below describes the implemented dependency
+and optional-runner changes. Default integration must also satisfy the
+[deployment acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
+
+The incremental reliability dependency upgrade planned for the next patch
+preserves the evidence formats written by 1.11.3. It adds no database migration
+or new persistent session format and requires no new environment variables or
+signing keys. The version bump and release tag are prepared separately.
+
+For deployments already on 1.11.3, the dependency upgrade itself does not add a
+same-key write restriction: both versions use the same state machine, journal
+keys, digest encodings, and Merkle projection. Follow the normal role-by-role
+drain and readiness procedure. Existing maintenance coordination remains in
+force. Deployments upgrading from earlier versions must still follow every
+applicable schema, session, writer-routing, GC, and repair restriction below;
+this dependency upgrade does not remove those requirements.
+
+Native lifecycle semantics now validate the existing evidence without changing
+its encoding. Typed lifecycle resources remain additive APIs; existing deployment
+writers retain their historical envelopes. Server startup initializes an embedded
+tracker and observes its existing sweeps, without starting a separate worker
+service. Normal Linux maintenance stays in its original CLI process with live
+output and private evidence within the existing writable root or temporary
+filesystem. Shared evidence export
+is additive and does not replace the authoritative metadata journals or barriers.
+Linux operators can also opt into
+`shardline maintenance` using a separate owner-only state directory; see
+[durable maintenance](CLI.md#durable-maintenance-linux). Keep that directory and
+the original signing key when resuming. A task ID pins its request, deployment,
+executable and original deadline. New binaries may fence and verify old work,
+but cannot execute an older pinned definition. Reboot expires unfinished tasks;
+moving live task state across machines or PID namespaces is unsupported.
+Use a new task ID for an intentional new run after inspecting ambiguous effects.
+Original maintenance handlers and server owners remain responsible for domain
+effects. Interrupted mutations are not automatically re-executed; shared task
+history and local PID observations are not distributed leases.
+
 ## Roles And Upgrade Units
 
 `shardline serve` pins a process to a role:
@@ -77,11 +117,13 @@ API replicas run the new version; this avoids two software versions using differ
 authoritative tag-pointer stores or bypassing repository-scoped locks during the brief
 mixed-version window.
 
-The same routing constraint applies to every evidence-bound logical resource. Do not
-let N-1 overwrite an S3 object, OCI tag, Hub ref, or resumable session after N has
-written it. N-1 may read it, but same-key writes must be drained or routed to N until
-the rollout is complete; testing a different key is not evidence that same-key
-compatibility exists.
+The same routing constraint applies to every evidence-bound logical resource when
+the older writers lack the evidence or authoritative-store behavior introduced by
+the upgrade. Do not let such N-1 writers overwrite an S3 object, OCI tag, Hub ref,
+or resumable session after N has written it. N-1 may read it, but same-key writes
+must be drained or routed to N until the rollout is complete; testing a different
+key is not evidence that same-key compatibility exists. The format-preserving
+dependency upgrade from 1.11.3 described above does not introduce this restriction.
 
 The durable resumable-session migration is also additive, but session formats are not
 shared across versions. Before replacing the API class, stop admitting new Git LFS

@@ -798,9 +798,11 @@ pub(crate) fn set_before_local_object_read_hook(
     });
 }
 
-pub(crate) fn object_store_from_config(
-    config: &ServerConfig,
-) -> Result<ServerObjectStore, ServerError> {
+/// Constructs the deployment's immutable object store without initializing metadata.
+///
+/// # Errors
+/// Returns an error when the configured adapter cannot be initialized.
+pub fn object_store_from_config(config: &ServerConfig) -> Result<ServerObjectStore, ServerError> {
     match config.object_storage_adapter() {
         ObjectStorageAdapter::Local => {
             Ok(ServerObjectStore::local(config.root_dir().join("chunks"))?)

@@ -37,14 +37,46 @@ pub fn upgrade_webhook_secrets(
     store: &shardline_index::hub::BoxedHubStore,
     cipher: &WebhookSecretCipher,
 ) {
-    let Ok(repos) = store.list_repos() else {
-        return;
+    let _report = upgrade_webhook_secrets_with_report(store, cipher);
+}
+
+/// Outcome of an upgrade scan. Failures leave lazy per-row upgrade available.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WebhookSecretUpgradeReport {
+    /// Rows inspected, including rows that need no upgrade.
+    pub inspected: u64,
+    /// Plaintext secrets successfully replaced by ciphertext.
+    pub upgraded: u64,
+    /// Failed reads, encryption attempts or writes; an incomplete scan is not success.
+    pub failures: u64,
+}
+
+/// Runs the same best-effort sweep and reports whether it completed without errors.
+/// Secret values are never included in the report or logs.
+pub fn upgrade_webhook_secrets_with_report(
+    store: &shardline_index::hub::BoxedHubStore,
+    cipher: &WebhookSecretCipher,
+) -> WebhookSecretUpgradeReport {
+    let mut report = WebhookSecretUpgradeReport::default();
+    let repos = match store.list_repos() {
+        Ok(repos) => repos,
+        Err(error) => {
+            tracing::warn!("failed to list repositories for webhook-secret upgrade: {error}");
+            report.failures = 1;
+            return report;
+        }
     };
     for repo in repos {
-        let Ok(webhooks) = store.list_webhooks(&repo.repo_id) else {
-            continue;
+        let webhooks = match store.list_webhooks(&repo.repo_id) {
+            Ok(webhooks) => webhooks,
+            Err(error) => {
+                report.failures = report.failures.saturating_add(1);
+                tracing::warn!("failed to list webhooks for secret upgrade: {error}");
+                continue;
+            }
         };
         for webhook in webhooks {
+            report.inspected = report.inspected.saturating_add(1);
             let Some(stored) = webhook.secret.as_ref() else {
                 continue;
             };
@@ -56,18 +88,26 @@ pub fn upgrade_webhook_secrets(
             }
             match cipher.encrypt(&webhook.repo_id, stored.expose_secret()) {
                 Ok(encrypted) => {
-                    if let Err(e) =
-                        store.update_webhook_secret(&webhook.repo_id, &webhook.id, Some(&encrypted))
-                    {
-                        tracing::warn!("failed to upgrade webhook secret {}: {e}", webhook.id);
+                    match store.update_webhook_secret(
+                        &webhook.repo_id,
+                        &webhook.id,
+                        Some(&encrypted),
+                    ) {
+                        Ok(()) => report.upgraded = report.upgraded.saturating_add(1),
+                        Err(e) => {
+                            report.failures = report.failures.saturating_add(1);
+                            tracing::warn!("failed to upgrade webhook secret {}: {e}", webhook.id);
+                        }
                     }
                 }
                 Err(e) => {
+                    report.failures = report.failures.saturating_add(1);
                     tracing::warn!("failed to encrypt webhook secret {}: {e}", webhook.id);
                 }
             }
         }
     }
+    report
 }
 
 #[cfg(test)]
@@ -103,7 +143,24 @@ mod tests {
             )
             .expect("seed legacy webhook");
 
-        upgrade_webhook_secrets(&store, &cipher);
+        let report = upgrade_webhook_secrets_with_report(&store, &cipher);
+        assert_eq!(
+            report,
+            WebhookSecretUpgradeReport {
+                inspected: 1,
+                upgraded: 1,
+                failures: 0
+            }
+        );
+        let repeated = upgrade_webhook_secrets_with_report(&store, &cipher);
+        assert_eq!(
+            repeated,
+            WebhookSecretUpgradeReport {
+                inspected: 1,
+                upgraded: 0,
+                failures: 0
+            }
+        );
 
         let webhooks = store.list_webhooks("org/sweep").expect("list webhooks");
         assert_eq!(webhooks.len(), 1);

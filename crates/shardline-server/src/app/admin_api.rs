@@ -547,14 +547,72 @@ pub(super) async fn nodes(
     }))
 }
 
-/// Lists the current process's in-flight durable resumable upload sessions as
-/// bounded, keyset-paginated admin tasks.
-///
-/// Unlike the authoritative `/api/v1/storage` inventory (an O(N) store walk
-/// that is admission-gated at `weights::STATS`), this handler issues a bounded
-/// primary-key keyset query (at most `MAX_PAGE_LIMIT + 1` rows). Bounded admin
-/// reads are controlled by query/cursor/page bounds rather than weighted
-/// admission; only the unbounded authoritative-inventory scan takes a permit.
+/// Lists deployment maintenance evidence with bounded memory and admission-gated
+/// store enumeration. This is separate from the existing resumable-upload API.
+pub(super) async fn maintenance_tasks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Result<AdminJson<serde_json::Value>, ServerError> {
+    authorize_admin(&state, &headers)?;
+    let query = parse_collection_query(
+        raw_query.as_deref(),
+        AllowedFilters {
+            state: false,
+            prefix: false,
+            capability: false,
+        },
+    )?;
+    let after = query
+        .cursor
+        .as_ref()
+        .map(|cursor| decode_cursor(cursor.as_str(), &query))
+        .transpose()?
+        .map(|cursor| cursor.after);
+    let limit = query.limit.map_or(DEFAULT_PAGE_LIMIT, AdminPageLimit::get);
+    let _permit = state
+        .admission
+        .try_acquire(weights::STATS)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    if limit > 100 {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let store = crate::task_tracking::TaskEvidenceStore::from_objects(state.backend.object_store());
+    let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
+    let mut tasks = tokio::task::spawn_blocking(move || {
+        store.summaries(
+            deployment,
+            after.as_ref().map(AdminItemKey::as_str),
+            limit.saturating_add(1),
+        )
+    })
+    .await
+    .map_err(|error| ServerError::Io(std::io::Error::other(error)))??;
+    let has_more = tasks.len() > limit;
+    tasks.truncate(limit);
+    let next_cursor = if has_more {
+        tasks
+            .last()
+            .map(|task| encode_cursor(&task.id, &query))
+            .transpose()?
+    } else {
+        None
+    };
+    let page = AdminPage {
+        limit,
+        returned: tasks.len(),
+        next_cursor,
+    };
+    Ok(admin_json(serde_json::json!({
+        "api_version": ADMIN_API_VERSION,
+        "observed_at_unix_seconds": observed_at()?,
+        "supervision": "embedded",
+        "tasks": tasks,
+        "page": page,
+    })))
+}
+
+/// Lists in-flight durable resumable uploads using bounded metadata keyset reads.
 pub(super) async fn tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

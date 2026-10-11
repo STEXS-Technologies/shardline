@@ -147,7 +147,7 @@ pub fn run_storage_migration(
     Ok(run_server_storage_migration(&options)?)
 }
 
-fn endpoint(
+pub(crate) fn endpoint(
     adapter: ObjectStorageAdapter,
     root: Option<&Path>,
     side: &'static str,

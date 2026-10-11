@@ -21,6 +21,15 @@ use crate::{
 };
 
 pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
+    run_inner(args, true).await
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn run_direct(args: impl Iterator<Item = OsString>) -> ExitCode {
+    run_inner(args, false).await
+}
+
+async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> ExitCode {
     // Embedders may already own the process-wide subscriber, and this public
     // entry point can be called more than once. Keep their subscriber in place.
     let _initialization = tracing_subscriber::fmt()
@@ -35,7 +44,42 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         return crate::xet::run_xet(xet_args).await;
     }
 
-    match CliCommand::parse(args) {
+    let command = CliCommand::parse(args.clone());
+    #[cfg(target_os = "linux")]
+    if _supervised
+        && let Ok(parsed) = &command
+        && let Ok(Some(operation)) = crate::maintenance::prepare_automatic(parsed)
+    {
+        return maintenance_status(
+            tokio::task::spawn_blocking(move || {
+                crate::maintenance::run_automatic(&operation, args)
+            })
+            .await,
+        );
+    }
+    match command {
+        #[cfg(target_os = "linux")]
+        Ok(CliCommand::Maintenance {
+            state_dir,
+            task_id,
+            operation,
+        }) => maintenance_status(
+            tokio::task::spawn_blocking(move || {
+                crate::maintenance::run(&state_dir, &task_id, operation)
+            })
+            .await,
+        ),
+        #[cfg(target_os = "linux")]
+        Ok(CliCommand::MaintenanceWorker {
+            journal,
+            scope,
+            generation,
+        }) => maintenance_status(
+            tokio::task::spawn_blocking(move || {
+                crate::maintenance::run_worker(&journal, scope, generation)
+            })
+            .await,
+        ),
         Ok(CliCommand::ProviderlessSetup) => match run_providerless_setup(None) {
             Ok(report) => output_status(
                 report.write_summary(&mut io::stdout().lock()),
@@ -530,6 +574,45 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         },
         Err(error) if error.is_help() => stdout_text(format_args!("{error}")),
         Err(error) => diagnostic_text(format_args!("{error}"), ExitCode::from(2)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn maintenance_status(
+    result: Result<
+        Result<crate::maintenance::CommandOutput, Box<dyn std::error::Error + Send + Sync>>,
+        tokio::task::JoinError,
+    >,
+) -> ExitCode {
+    match result {
+        Ok(Ok(output)) if output.exit_code.is_some() => {
+            ExitCode::from(output.exit_code.unwrap_or(2))
+        }
+        Ok(Ok(mut output)) if output.capture.is_some() => {
+            let Some(mut capture) = output.capture.take() else {
+                return ExitCode::FAILURE;
+            };
+            if let Err(error) = std::io::copy(&mut capture.stdout, &mut io::stdout().lock()) {
+                return report_output_error(&error);
+            }
+            if let Err(error) = std::io::copy(&mut capture.stderr, &mut io::stderr().lock()) {
+                return report_output_error(&error);
+            }
+            ExitCode::from(capture.exit_code)
+        }
+        Ok(Ok(output)) => output_status(
+            write!(io::stdout().lock(), "{}", output.text),
+            if output.success {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            },
+        ),
+        Ok(Err(error)) => {
+            let _written = writeln!(io::stderr().lock(), "maintenance failed: {error}");
+            ExitCode::FAILURE
+        }
+        Err(error) => error_chain_status(&error, ExitCode::FAILURE),
     }
 }
 

@@ -51,6 +51,10 @@ mod gc_schedule;
 mod hold;
 mod hub_repair;
 mod lfs_repair;
+#[cfg(target_os = "linux")]
+mod maintenance;
+#[cfg(target_os = "linux")]
+pub use maintenance::{MaintenanceOperation, MaintenanceStorageAdapter};
 pub mod local_output;
 pub mod local_path;
 mod providerless;

@@ -136,6 +136,18 @@ impl TryFrom<CliDefinition> for CliCommand {
 
     fn try_from(value: CliDefinition) -> Result<Self, Self::Error> {
         match value.command {
+            #[cfg(target_os = "linux")]
+            CliDefinitionCommand::Maintenance(args) => Ok(Self::Maintenance {
+                state_dir: args.state_dir,
+                task_id: args.task_id,
+                operation: args.command,
+            }),
+            #[cfg(target_os = "linux")]
+            CliDefinitionCommand::MaintenanceWorker(args) => Ok(Self::MaintenanceWorker {
+                journal: args.journal,
+                scope: args.scope,
+                generation: args.generation,
+            }),
             CliDefinitionCommand::Providerless(args) => match args.command {
                 ProviderlessSubcommand::Setup => Ok(Self::ProviderlessSetup),
             },

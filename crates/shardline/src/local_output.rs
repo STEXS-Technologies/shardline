@@ -102,6 +102,7 @@ pub(crate) fn validate_deployment_output(
         "gc",
         "hub",
         ".resource-locks",
+        ".shardline-maintenance",
         "tmp",
     ];
     let state_files = [
@@ -158,7 +159,7 @@ fn reserved_deployment_output_error() -> io::Error {
 
 // Resolve existing ancestors without creating directories. This also catches
 // aliases into state trees and protects names whose directories do not yet exist.
-fn resolved_output_path(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn resolved_output_path(path: &Path) -> io::Result<PathBuf> {
     use std::path::Component;
     let absolute = if path.is_absolute() {
         path.to_path_buf()

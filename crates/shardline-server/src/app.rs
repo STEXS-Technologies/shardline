@@ -65,8 +65,9 @@ use crate::{
     },
 };
 use admin_api::{
-    gc as admin_gc, integrity as admin_integrity, metrics as admin_metrics, nodes as admin_nodes,
-    status as admin_status, storage as admin_storage, tasks as admin_tasks,
+    gc as admin_gc, integrity as admin_integrity, maintenance_tasks as admin_maintenance_tasks,
+    metrics as admin_metrics, nodes as admin_nodes, status as admin_status,
+    storage as admin_storage, tasks as admin_tasks,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use admin_api::{parse_admin_cursor_for_fuzzing, parse_admin_query_for_fuzzing};
@@ -207,6 +208,22 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     let provider_webhook_body_limit =
         bounded_api_body_limit(max_request_body_bytes, MAX_PROVIDER_WEBHOOK_BODY_BYTES);
     let backend = ServerBackend::from_config(&config).await?;
+    let task_tracker = Arc::new(crate::task_tracking::EmbeddedTaskTracker::new(
+        backend.object_store(),
+        crate::task_tracking::deployment_fingerprint(&config)?,
+    ));
+    let retention_store =
+        crate::task_tracking::TaskEvidenceStore::from_objects(backend.object_store());
+    let retention_deployment = crate::task_tracking::deployment_fingerprint(&config)?;
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = retention_store.prune_completed(
+            retention_deployment,
+            shardline_protocol::unix_now_seconds_lossy(),
+        ) {
+            tracing::warn!("task evidence retention unavailable; serving continues: {error}");
+        }
+    });
+    tracing::info!("embedded task tracker initialized; no separate tracker service required");
     let auth = build_auth_provider(&config).await?;
     let config_secret_cipher = config.config_secret_key().map_or_else(
         || {
@@ -297,12 +314,31 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .any(|frontend| matches!(frontend, ServerFrontend::S3))
         && !state.backend.supports_fenced_s3_publication()
     {
-        match shardline_s3_adapter::sweep_expired_sessions(
+        let tracking = task_tracker
+            .begin_async(
+                "s3-startup-session-sweep",
+                b"s3-startup-session-sweep.v1".to_vec(),
+                shardline_reliability::MaintenanceArtifactKind::GarbageCollection,
+            )
+            .await;
+        if let Err(error) = &tracking {
+            crate::task_tracking::embedded::tracking_error(error.as_ref());
+        }
+        let result = shardline_s3_adapter::sweep_expired_sessions(
             state.config.root_dir(),
             state.config.s3_upload_session_ttl_seconds(),
         )
-        .await
-        {
+        .await;
+        if let Ok(receipt) = tracking {
+            receipt
+                .finish_async(
+                    result.is_ok(),
+                    format!("removed: {}", result.as_ref().copied().unwrap_or_default())
+                        .into_bytes(),
+                )
+                .await;
+        }
+        match result {
             Ok(removed) => {
                 tracing::info!(
                     removed,
@@ -324,10 +360,30 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .iter()
         .any(|frontend| matches!(frontend, ServerFrontend::Lfs))
     {
-        match protocol_routes::sweep_lfs_patch_sessions(
+        let tracking = task_tracker
+            .begin_async(
+                "lfs-startup-session-sweep",
+                b"lfs-startup-session-sweep.v1".to_vec(),
+                shardline_reliability::MaintenanceArtifactKind::GarbageCollection,
+            )
+            .await;
+        if let Err(error) = &tracking {
+            crate::task_tracking::embedded::tracking_error(error.as_ref());
+        }
+        let result = protocol_routes::sweep_lfs_patch_sessions(
             state.config.root_dir(),
             state.config.lfs_patch_ttl_seconds(),
-        ) {
+        );
+        if let Ok(receipt) = tracking {
+            receipt
+                .finish_async(
+                    result.is_ok(),
+                    format!("removed: {}", result.as_ref().copied().unwrap_or_default())
+                        .into_bytes(),
+                )
+                .await;
+        }
+        match result {
             Ok(removed) => {
                 tracing::info!(
                     removed,
@@ -371,6 +427,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/api/v1/integrity", get(admin_integrity))
         .route("/api/v1/nodes", get(admin_nodes))
         .route("/api/v1/tasks", get(admin_tasks))
+        .route("/api/v1/tasks/maintenance", get(admin_maintenance_tasks))
         .route("/api/v1/metrics", get(admin_metrics));
     if role.serves_api() {
         app = app
@@ -406,7 +463,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     for frontend in state.config.server_frontends() {
         match frontend {
             ServerFrontend::Hub => {
-                hub_state = Some(build_hub_state(&state)?);
+                hub_state = Some(build_hub_state(&state, task_tracker.clone())?);
             }
             ServerFrontend::Xet => {
                 xet_frontend_enabled = true;
@@ -425,6 +482,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     }
 
     let app = app
+        .layer(axum::Extension(task_tracker))
         .layer(DefaultBodyLimit::max(max_request_body_bytes.get()))
         .with_state(state.clone());
 
@@ -786,6 +844,7 @@ pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: us
 
 fn build_hub_state(
     app_state: &AppState,
+    task_tracker: Arc<crate::task_tracking::EmbeddedTaskTracker>,
 ) -> Result<shardline_hub_api::routes::HubState, ServerError> {
     let hub_auth = app_state
         .auth
@@ -849,12 +908,27 @@ fn build_hub_state(
                     let sweep_store = store.clone();
                     let sweep_cipher = cipher.clone();
                     let _sweep_handle = tokio::task::spawn_blocking(move || {
+                        let tracking = task_tracker.begin("hub-webhook-secret-upgrade", b"hub-webhook-secret-upgrade.v1",
+                            shardline_reliability::MaintenanceArtifactKind::LifecycleRepair);
+                        if let Err(error) = &tracking { crate::task_tracking::embedded::tracking_error(error.as_ref()); }
                         tracing::info!("starting background webhook-secret upgrade sweep");
-                        shardline_hub_api::secrets::upgrade_webhook_secrets(
+                        let report = shardline_hub_api::secrets::upgrade_webhook_secrets_with_report(
                             &sweep_store,
                             &sweep_cipher,
                         );
-                        tracing::info!("background webhook-secret upgrade sweep completed");
+                        if let Ok(receipt) = tracking
+                            && let Err(error) = receipt.finish(report.failures == 0,
+                                format!("inspected: {}\nupgraded: {}\nfailures: {}", report.inspected, report.upgraded, report.failures).as_bytes()) {
+                                crate::task_tracking::embedded::tracking_error(error.as_ref());
+                        }
+                        if report.failures == 0 {
+                            tracing::info!(inspected = report.inspected, upgraded = report.upgraded,
+                                "background webhook-secret upgrade sweep completed");
+                        } else {
+                            tracing::warn!(inspected = report.inspected, upgraded = report.upgraded,
+                                failures = report.failures,
+                                "background webhook-secret upgrade sweep incomplete; lazy per-row upgrade remains available");
+                        }
                     });
                     Some(cipher)
                 }

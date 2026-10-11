@@ -20,6 +20,85 @@ shardline gc schedule install --help
 shardline bench --help
 ```
 
+## Durable Maintenance (Linux)
+
+Normal Linux maintenance commands allocate their own run identities and execute
+in their existing CLI process. Keep using `fsck`, `index rebuild`,
+`gc`, `repair`, `repair lifecycle`, and `storage migrate` with their existing flags.
+Their original handlers provide stdout, stderr, exit codes and diagnostic exports.
+There is no tracker service to start. `serve` owns an embedded tracker for its
+existing startup sweeps; it does not start a new maintenance schedule.
+
+Local maintenance scratch lives in `.shardline-maintenance` under the existing
+root. Postgres/S3-only administrative invocations use a private directory in the
+standard temporary filesystem. Normal jobs keep inherited host resource limits;
+they do not inherit the advanced runner's time/CPU/report limits below.
+
+Signed command outcomes are exported to `_shardline_tasks/v1/` through the configured
+object adapter. A shared-export failure retains local evidence and logs a warning;
+it does not disable local supervision or change the application's result. Later
+invocations can export verified completed evidence without repeating its effects.
+GC dry runs and storage-migration dry runs write no shared task history; real
+migration evidence belongs to the destination, preserving read-only source access.
+Finished shared histories older than 30 days are eligible for bounded cleanup;
+unresolved and corrupt histories are retained. These policies do not grant any
+extra storage permissions.
+
+With the existing admin read token, `/api/v1/tasks/maintenance` lists verified
+operation outcomes separately from `/api/v1/tasks` resumable uploads. Remote
+ownership can be `running_or_interrupted`; it is never declared dead from a PID
+on another host. Normal live output is not collected into shared storage; its
+signed outcome records the exit status. Completion is historical evidence, not
+a current health certificate.
+
+Default deployment and interruption verification is still in progress; see
+[maintenance integration and operator experience](MAINTENANCE_INTEGRATION_UX.md).
+The explicit interface below remains available for advanced bounded jobs:
+
+Use a private state directory outside the deployment root for bounded, durable
+maintenance with native signed checkpoints and reports:
+
+```bash
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id fsck-2026-10-11 \
+  fsck --root /var/lib/shardline
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id rebuild-2026-10-11 \
+  index-rebuild --root /var/lib/shardline
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id gc-2026-10-11 \
+  gc --root /var/lib/shardline --mark --sweep --retention-seconds 86400
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id repair-2026-10-11 \
+  lifecycle-repair --root /var/lib/shardline
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id copy-2026-10-11 \
+  storage-migrate --root /var/lib/shardline --from local --from-root /var/lib/shardline \
+  --to local --to-root /var/lib/shardline-copy --dry-run
+```
+
+Create local migration roots before invoking this workflow. S3 endpoints use
+the existing `SHARDLINE_MIGRATE_FROM_S3_*` and `SHARDLINE_MIGRATE_TO_S3_*`
+configuration. Global `--config` and `--env-file` options work as usual.
+
+Repeat the exact command and task ID to restore its history or verify an already
+completed report. A new ID starts an intentional new run. Keep the state
+directory, journal, artifacts and owner-only signing key; do not copy live task
+state between hosts or PID namespaces. The printed public key is the verifier's
+trust input and should be retained independently for external auditing.
+
+Tasks have a 30-minute original deadline, 15-minute execution timeouts,
+600 CPU seconds per generation, at most two attempts, four checkpoints and
+128 history records. Reports are limited to 64 MiB and proof blobs to 64 KiB.
+Restarting a controller does not reset these limits. A reboot expires unfinished
+work; changed requests, targets or executable definitions cannot be substituted.
+
+Recovery fences surviving workers before deciding what happened. A signed,
+materialized final report can establish completion. Fsck can retry a full scan;
+other interrupted workflows without a verified result stop with unknown effects.
+Inspect the deployment before choosing a new task ID for such work. Existing
+barriers, GC holds, reachability and retention checks still apply. A completed
+fsck or rebuild report with integrity issues returns failure. The report proves
+what that run published, not the deployment's current health.
+
+Normal server startup and existing direct maintenance commands keep their
+behavior. This workflow introduces no deployment metadata migration.
+
 ## Shell Completions
 
 Generate one completion script for a supported shell:

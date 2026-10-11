@@ -136,6 +136,11 @@ pub fn run_storage_migration(
     const MAX_BUFFERED_MIGRATION_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 
     visit_object_prefix(&source, &prefix, |metadata| {
+        // Exclude recognized host evidence, while preserving older arbitrary
+        // objects that happen to use the newly introduced namespace.
+        if is_task_evidence(&source, metadata.key()) {
+            return Ok(());
+        }
         report.scanned_objects = checked_add(report.scanned_objects, 1)?;
         report.scanned_bytes = checked_add(report.scanned_bytes, metadata.length())?;
         if options.dry_run {
@@ -170,6 +175,38 @@ pub fn run_storage_migration(
     })?;
 
     Ok(report)
+}
+
+fn is_task_evidence(source: &ServerObjectStore, key: &ObjectKey) -> bool {
+    use crate::task_tracking::{TASK_EVIDENCE_PREFIX, TaskEvidenceStore, TaskRunIdentity};
+    let Some(suffix) = key.as_str().strip_prefix(TASK_EVIDENCE_PREFIX) else {
+        return false;
+    };
+    let id = if let Some(id) = suffix.strip_prefix("manifests/") {
+        id
+    } else if let Some(run) = suffix.strip_prefix("runs/") {
+        let Some((id, _rest)) = run.split_once('/') else {
+            return false;
+        };
+        id
+    } else {
+        return false;
+    };
+    if id.is_empty() || id.len() > 128 || id.contains('/') {
+        return false;
+    }
+    // A list-only dry run must not gain a mandatory read permission. If the
+    // identity cannot be recognized, retain the original inventory behavior.
+    let store = TaskEvidenceStore::from_objects(source.clone());
+    let Ok(Some(bytes)) = store.read(&format!("manifests/{id}"), 65536) else {
+        return false;
+    };
+    let Ok(identity) = serde_json::from_slice::<TaskRunIdentity>(&bytes) else {
+        return false;
+    };
+    identity.schema == 1
+        && identity.id == id
+        && identity.scope.definition == identity.definition.fingerprint()
 }
 
 fn validate_source_object_matches_content_addressed_key(
@@ -441,6 +478,63 @@ mod tests {
     }
 
     // ── validate_source_object_matches_content_addressed_key ─────────────
+
+    #[test]
+    fn migration_preserves_existing_objects_in_new_evidence_namespace() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let objects = ServerObjectStore::local(source.path().join("chunks")).unwrap();
+        for suffix in ["manifests/old", "runs/old/payload", "custom/payload"] {
+            let key = ObjectKey::parse(&format!("_shardline_tasks/v1/{suffix}")).unwrap();
+            let bytes = b"existing user data";
+            objects
+                .put_if_absent(
+                    &key,
+                    ObjectBody::from_slice(bytes),
+                    &ObjectIntegrity::new(chunk_hash(bytes), bytes.len() as u64),
+                )
+                .unwrap();
+        }
+        let config = crate::ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://localhost:8080".to_owned(),
+            source.path().to_path_buf(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        let tracker = crate::task_tracking::EmbeddedTaskTracker::new(
+            objects,
+            crate::task_tracking::deployment_fingerprint(&config).unwrap(),
+        );
+        tracker
+            .begin(
+                "test-sweep",
+                b"input",
+                shardline_reliability::MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"done")
+            .unwrap();
+        let options = StorageMigrationOptions::new(
+            StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
+            StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
+        );
+        let dry = run_storage_migration(&options.clone().with_dry_run(true)).unwrap();
+        assert_eq!(dry.scanned_objects, 3);
+        let copied = run_storage_migration(&options).unwrap();
+        assert_eq!(copied.scanned_objects, 3);
+        assert_eq!(copied.inserted_objects, 3);
+        let repeated = run_storage_migration(&options).unwrap();
+        assert_eq!(repeated.already_present_objects, 3);
+        assert_eq!(
+            fs::read(
+                destination
+                    .path()
+                    .join("chunks/_shardline_tasks/v1/runs/old/payload")
+            )
+            .unwrap(),
+            b"existing user data"
+        );
+    }
 
     #[test]
     fn validate_source_ok_for_non_content_addressed_key() {
