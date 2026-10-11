@@ -108,6 +108,17 @@ connections, cancellation of partially acquired locks, single-connection pools
 and rejection of a terminated owner's fence. They establish these existing
 coordination contracts, not cluster-wide exactly-once task execution.
 
+A further real deployment drill runs two ordinary rebuild CLIs concurrently
+in separate unprivileged, read-only containers against the same Postgres/S3
+deployment. A fixture table lock holds the first inside its scan while it owns
+the exclusive maintenance barrier. Postgres reports exactly one granted barrier
+and one waiter; both native task histories remain unresolved. After releasing
+the scan, the first removes one stale latest record and the second reports zero
+removals. Both distinct inline runs publish verified completion. This exercises
+default CLI contention and an observable metadata effect without a tracker
+mount or managed worker; it does not establish cross-host partitions or crash
+recovery during that effect.
+
 The real binary drill passed with released 1.11.3 (`98a4dadb`) and this branch
 against isolated Postgres/S3 storage. It exercises old+old, new+old, new+new and
 old+new rollback. Both versions append to the same object's history and read

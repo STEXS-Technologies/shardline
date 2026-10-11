@@ -176,3 +176,149 @@ async fn drill_readonly_postgres_cli_preserves_released_commands() {
         "chaos({drill}): PASS — released/current fsck, rebuild and read-only GC preserve output without a writable root or /tmp; native outcomes verify"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill_concurrent_ordinary_rebuilds_keep_shared_ownership() {
+    use shardline_index::{FileRecord, PostgresRecordStore, RecordMutation, StorageRepresentation};
+
+    let drill = "drill_concurrent_ordinary_rebuilds_keep_shared_ownership";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} — current executable unavailable");
+        return;
+    };
+    migrate_chaos_postgres(&stack.pg_url).await;
+    let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
+    let records = PostgresRecordStore::new(pool.clone());
+    records
+        .write_latest_record(&FileRecord {
+            file_id: "stale.bin".to_owned(),
+            content_hash: "00".repeat(32),
+            total_bytes: 0,
+            chunk_size: 128,
+            storage_repr: StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let s3 = S3ObjectStoreConfig::new(OBJECT_BUCKET.to_owned(), "us-east-1".to_owned())
+        .with_endpoint(Some(stack.s3_endpoint.clone()))
+        .with_credentials(
+            Some(SecretString::from_secret("shardline")),
+            Some(SecretString::from_secret("shardline-dev-password")),
+            None,
+        )
+        .with_allow_http(true);
+    let config = ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/var/lib/shardline"),
+        NonZeroUsize::new(CHUNK_SIZE).unwrap(),
+    )
+    .with_index_postgres_url(stack.pg_url.clone())
+    .unwrap()
+    .with_object_storage(ObjectStorageAdapter::S3, Some(s3));
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let deployment = deployment_fingerprint(&config).unwrap();
+
+    // Block the actual version scan after the first CLI owns the maintenance
+    // barrier. The fixture transaction owns only the table lock, not that barrier.
+    let mut scan_blocker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE shardline_file_records IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *scan_blocker)
+        .await
+        .unwrap();
+    let first = readonly_cli(&binary, &stack, &["index", "rebuild"], false);
+    tokio::pin!(first);
+    let first_inside = wait_for(
+        "first rebuild holds shared deployment ownership",
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_locks AS lock
+                    WHERE lock.locktype = 'advisory' AND lock.granted
+                      AND lock.classid::bigint = (($1::bigint >> 32) & 4294967295)
+                      AND lock.objid::bigint = ($1::bigint & 4294967295)
+                ) AND EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE wait_event_type = 'Lock' AND wait_event = 'relation'
+                      AND query LIKE '%shardline_file_records%'
+                )",
+            )
+            .bind(0x5348_4152_4447_4301_i64)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        },
+        Duration::from_secs(20),
+    );
+    tokio::select! {
+        output = &mut first => panic!("first rebuild exited before held scan: {output:?}"),
+        () = first_inside => {}
+    }
+
+    let second = readonly_cli(&binary, &stack, &["index", "rebuild"], false);
+    tokio::pin!(second);
+    let both_admitted = wait_for(
+        "second rebuild waits while both runs stay unresolved",
+        || async {
+            let locks = sqlx::query_scalar::<_, bool>(
+                "SELECT COUNT(*) FILTER (WHERE granted) = 1
+                     AND COUNT(*) FILTER (WHERE NOT granted) = 1
+                 FROM pg_locks
+                 WHERE locktype = 'advisory'
+                   AND classid::bigint = (($1::bigint >> 32) & 4294967295)
+                   AND objid::bigint = ($1::bigint & 4294967295)",
+            )
+            .bind(0x5348_4152_4447_4301_i64)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let tasks = store.summaries(deployment, None, 10).unwrap();
+            locks
+                && tasks.len() == 2
+                && tasks.iter().all(|task| {
+                    matches!(
+                        task.state,
+                        TaskRunState::Running | TaskRunState::RunningOrInterrupted
+                    )
+                })
+        },
+        Duration::from_secs(20),
+    );
+    tokio::select! {
+        output = &mut first => panic!("first rebuild bypassed held scan: {output:?}"),
+        output = &mut second => panic!("second rebuild bypassed ownership: {output:?}"),
+        () = both_admitted => {}
+    }
+    scan_blocker.rollback().await.unwrap();
+    let (first, second) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .expect("both original CLI processes finish after releasing the scan");
+    assert!(first.status.success(), "first: {first:?}");
+    assert!(second.status.success(), "second: {second:?}");
+    assert!(String::from_utf8_lossy(&first.stdout).contains("removed_stale_latest_records: 1"));
+    assert!(String::from_utf8_lossy(&second.stdout).contains("removed_stale_latest_records: 0"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_file_records")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let tasks = store.summaries(deployment, None, 10).unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_ne!(tasks[0].id, tasks[1].id);
+    assert!(
+        tasks
+            .iter()
+            .all(|task| task.state == TaskRunState::Completed
+                && task.execution == TaskExecutionMode::Inline)
+    );
+}
