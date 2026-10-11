@@ -645,6 +645,98 @@ mod tests {
             .unwrap()
             .unwrap();
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_lifecycle_repair_cannot_mutate_after_barrier_connection_is_lost() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let _test_guard = POSTGRES_TEST_LOCK.lock().await;
+        let storage = tempfile::tempdir().unwrap();
+        let config = config(storage.path())
+            .with_index_postgres_url(url.clone())
+            .unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let index = PostgresIndexStore::new(pool.clone());
+        let now = shardline_protocol::unix_now_seconds_lossy();
+        let hold = RetentionHold::new(
+            ObjectKey::parse(&format!("retention/repair-owner-{}", std::process::id())).unwrap(),
+            "repair ownership regression".to_owned(),
+            now.saturating_sub(100),
+            Some(now.saturating_sub(10)),
+        )
+        .unwrap();
+        index.upsert_retention_hold(&hold).await.unwrap();
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE shardline_file_records IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let repair = tokio::spawn(async move {
+            crate::run_lifecycle_repair(config, crate::LifecycleRepairOptions::default()).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let blocked = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'relation'
+                     AND query LIKE '%shardline_file_records%')",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let owner = sqlx::query_scalar::<_, i32>(
+            "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND objsubid = 1
+             AND classid::bigint = (($1::bigint >> 32) & 4294967295)
+             AND objid::bigint = ($1::bigint & 4294967295)",
+        )
+        .bind(0x5348_4152_4447_4301_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintenance_barrier::acquire_postgres_exclusive(&pool),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        blocker.rollback().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), repair)
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = index.retention_hold(hold.object_key()).await.unwrap();
+        drop(replacement);
+        index
+            .delete_retention_hold(hold.object_key())
+            .await
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "the former repair owner mutated metadata during GC takeover"
+        );
+        assert_eq!(
+            observed,
+            Some(hold),
+            "the expired hold was removed without ownership"
+        );
+    }
+
     #[tokio::test]
     async fn hold_factory_error_is_preserved_and_absolute_expiration_is_unchanged() {
         let root = tempfile::tempdir().unwrap();

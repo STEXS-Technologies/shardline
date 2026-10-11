@@ -9,12 +9,14 @@ This document is for reviewers deciding whether the integration is safe to ship.
 
 ## Known gaps
 
-- **Ownership protection for other operations.** Rebuild and retention hold
+- **Ownership protection for other operations.** Rebuild, lifecycle repair and retention hold
   updates bind their locks and metadata work to non-replaceable Postgres
   connections. The two-machine
   `connection-loss` drill passes, and a database test rejects an old pool's
   attempted write after takeover. Retention fault tests cover setting a hold
   after losing its barrier and releasing a hold during a blocked database query.
+  Repair fault tests preserve an expired hold after connection loss during its
+  scan, including a two-machine CLI run with a competing rebuild.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.
@@ -59,6 +61,7 @@ test does not close them.
 | Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
 | Connection loss during rebuild | The lock and metadata operations share one non-replaceable connection. The two-machine fault drill terminates that connection, observes a verified failed source run and a completed waiter with one stale-record removal. A separate database test rejects a stale pool's attempted write after takeover. |
 | Retention ownership | Hold setting and release use the same session for the shared barrier and metadata writes. Fault tests reject a late setting after exclusive takeover and preserve an active hold when a blocked release loses its connection. Normal hold/GC contention and physical OCI protection also pass. |
+| Repair ownership | A database regression first demonstrated repair removing an expired hold after losing its separate lock connection during GC takeover. Repair now binds its scan and metadata changes to the lock-owning session. The database regression and two-machine `repair-connection-loss` drill pass: the source records failure, the waiting rebuild completes, and the expired hold remains unchanged. This covers metadata changes, not remote mutations by other operations. |
 | Lock ordering | A queued exclusive owner blocks later shared readers. Cancelling an acquisition closes its session; completed metadata work releases it. |
 | Mixed versions and rollback | Released/current nodes read and append the same object history in old+old, new+old, new+new and old+new combinations against the same Postgres/S3 deployment. No new metadata migration. |
 | History inspection | Corrupt records remain visible without hiding unrelated runs. Cancelled requests retain their inspection permit until blocking work finishes. History does not certify server health. |
@@ -143,9 +146,11 @@ Debian 13 generic cloud qcow2 image.
 bash scripts/shardline/verify_maintenance_vm.sh CURRENT RELEASED IMAGE
 bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE
 bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE connection-loss
+bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE repair-connection-loss
 ```
 
 These scripts own disposable KVM guests and isolated fixtures, retain diagnostic
 artifacts and clean up their guests on exit. They do not reboot the workstation.
-The connection-loss drill now passes for rebuild. It does not establish equivalent
-protection for other operations or remote object-store mutations.
+The connection-loss drills pass for rebuild and lifecycle repair. They do not
+establish equivalent protection for other operations or remote object-store
+mutations.

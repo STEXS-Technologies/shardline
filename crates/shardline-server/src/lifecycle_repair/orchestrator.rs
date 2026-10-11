@@ -11,7 +11,7 @@ use crate::{
     clock::unix_now_seconds_checked,
     object_store::{ServerObjectStore, object_store_from_config},
     overflow::checked_increment,
-    postgres_backend::{connect_postgres_metadata_pool, postgres_unix_now_seconds},
+    postgres_backend::postgres_unix_now_seconds,
     record_store::LocalRecordStore,
 };
 
@@ -36,14 +36,14 @@ pub async fn run_lifecycle_repair(
     config: ServerConfig,
     options: LifecycleRepairOptions,
 ) -> Result<LifecycleRepairReport, ServerError> {
-    let _barrier = crate::acquire_metadata_write_barrier(&config).await?;
-    let object_store = object_store_from_config(&config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
+        let pool =
+            crate::maintenance_barrier::postgres_shared_work_pool(index_postgres_url).await?;
+        let object_store = object_store_from_config(&config)?;
         let index_store = PostgresIndexStore::new(pool.clone());
         let record_store = PostgresRecordStore::new(pool.clone());
         let now_unix_seconds = postgres_unix_now_seconds(&pool).await?;
-        return run_lifecycle_repair_with_stores_at_time(
+        let result = run_lifecycle_repair_with_stores_at_time(
             &record_store,
             &index_store,
             &object_store,
@@ -52,8 +52,12 @@ pub async fn run_lifecycle_repair(
             now_unix_seconds,
         )
         .await;
+        pool.close().await;
+        return result;
     }
 
+    let _barrier = crate::acquire_metadata_write_barrier(&config).await?;
+    let object_store = object_store_from_config(&config)?;
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
     let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
     run_lifecycle_repair_with_stores(
