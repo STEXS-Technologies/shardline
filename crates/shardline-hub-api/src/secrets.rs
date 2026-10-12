@@ -53,9 +53,32 @@ pub struct WebhookSecretUpgradeReport {
 
 /// Runs the same best-effort sweep and reports whether it completed without errors.
 /// Secret values are never included in the report or logs.
+#[allow(
+    clippy::must_use_candidate,
+    reason = "preserve the existing public API's ignored-report behavior"
+)]
 pub fn upgrade_webhook_secrets_with_report(
     store: &shardline_index::hub::BoxedHubStore,
     cipher: &WebhookSecretCipher,
+) -> WebhookSecretUpgradeReport {
+    upgrade_with_report(store, cipher, false)
+}
+
+/// Stops the sweep on its first storage failure without replacing its store.
+/// Intended for a non-replaceable maintenance work session. Encryption failures
+/// remain per-row failures, as in the original best-effort API.
+#[must_use]
+pub fn upgrade_webhook_secrets_with_report_fail_fast(
+    store: &shardline_index::hub::BoxedHubStore,
+    cipher: &WebhookSecretCipher,
+) -> WebhookSecretUpgradeReport {
+    upgrade_with_report(store, cipher, true)
+}
+
+fn upgrade_with_report(
+    store: &shardline_index::hub::BoxedHubStore,
+    cipher: &WebhookSecretCipher,
+    stop_on_storage_error: bool,
 ) -> WebhookSecretUpgradeReport {
     let mut report = WebhookSecretUpgradeReport::default();
     let repos = match store.list_repos() {
@@ -72,6 +95,9 @@ pub fn upgrade_webhook_secrets_with_report(
             Err(error) => {
                 report.failures = report.failures.saturating_add(1);
                 tracing::warn!("failed to list webhooks for secret upgrade: {error}");
+                if stop_on_storage_error {
+                    return report;
+                }
                 continue;
             }
         };
@@ -102,10 +128,16 @@ pub fn upgrade_webhook_secrets_with_report(
                                 webhook_id = webhook.id,
                                 "webhook secret upgrade requires atomic storage comparison"
                             );
+                            if stop_on_storage_error {
+                                return report;
+                            }
                         }
                         Err(e) => {
                             report.failures = report.failures.saturating_add(1);
                             tracing::warn!("failed to upgrade webhook secret {}: {e}", webhook.id);
+                            if stop_on_storage_error {
+                                return report;
+                            }
                         }
                     }
                 }

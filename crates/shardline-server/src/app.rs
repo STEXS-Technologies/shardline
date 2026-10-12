@@ -915,28 +915,11 @@ fn build_hub_state(
                     // rotation or removal is never overwritten by a stale read.
                     let sweep_store = store.clone();
                     let sweep_cipher = cipher.clone();
+                    let sweep_config = app_state.config.clone();
                     let _sweep_handle = tokio::task::spawn_blocking(move || {
-                        let tracking = task_tracker.begin("hub-webhook-secret-upgrade", b"hub-webhook-secret-upgrade.v1",
-                            shardline_reliability::MaintenanceArtifactKind::LifecycleRepair);
-                        if let Err(error) = &tracking { crate::task_tracking::embedded::tracking_error(error.as_ref()); }
-                        tracing::info!("starting background webhook-secret upgrade sweep");
-                        let report = shardline_hub_api::secrets::upgrade_webhook_secrets_with_report(
-                            &sweep_store,
-                            &sweep_cipher,
-                        );
-                        if let Ok(receipt) = tracking
-                            && let Err(error) = receipt.finish(report.failures == 0,
-                                format!("inspected: {}\nupgraded: {}\nfailures: {}", report.inspected, report.upgraded, report.failures).as_bytes()) {
-                                crate::task_tracking::embedded::tracking_error(error.as_ref());
-                        }
-                        if report.failures == 0 {
-                            tracing::info!(inspected = report.inspected, upgraded = report.upgraded,
-                                "background webhook-secret upgrade sweep completed");
-                        } else {
-                            tracing::warn!(inspected = report.inspected, upgraded = report.upgraded,
-                                failures = report.failures,
-                                "background webhook-secret upgrade sweep incomplete; lazy per-row upgrade remains available");
-                        }
+                        crate::hub_secret_upgrade::run(
+                            &sweep_config, &sweep_store, &sweep_cipher, &task_tracker,
+                        )
                     });
                     Some(cipher)
                 }

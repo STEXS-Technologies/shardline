@@ -31,6 +31,10 @@ behavior. You cannot then rely on a verified history result.
 Webhook secret encryption also preserves a secret rotated or removed by another
 node. Background and lazy upgrades change only the exact value they read; a
 concurrent change wins without extra configuration or a worker service.
+The startup sweep stays inside the server process. It uses one temporary
+database connection, records that connection's actual history scope, and stops
+if the connection is lost. Ordinary requests keep using their existing pool;
+lazy encryption remains available after a failed sweep.
 
 ## When a delete is interrupted
 

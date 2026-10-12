@@ -86,6 +86,7 @@ mod fsck;
 mod fuzz;
 pub(crate) mod gc;
 mod gc_runtime;
+mod hub_secret_upgrade;
 mod ingest_bench;
 mod jwks_provider;
 mod jwt_algorithm;

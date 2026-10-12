@@ -50,6 +50,11 @@ impl EmbeddedTaskTracker {
         self
     }
 
+    pub(crate) const fn without_history_scope(mut self) -> Self {
+        self.history_scope = None;
+        self
+    }
+
     pub(crate) async fn begin_async(
         &self,
         operation: &'static str,
