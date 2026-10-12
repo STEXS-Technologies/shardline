@@ -46,7 +46,10 @@ This document is for reviewers deciding whether the integration is safe to ship.
   The existing owner-run `db migrate up` installs functions and a retention
   trigger atomically, keeping the 35 released migration records and their
   checksums unchanged. The trigger also checks older retention writers.
-  No runtime fence-table grant is required. Other object/reference publication
+  A dedupe-table trigger also rejects inserts and updates that reference a
+  pending physical shard key, including unchanged released SQL writers. It
+  requires no new retention or fence-table privileges for mapping writers.
+  Other object/reference publication
   paths, a supported reconciliation path for uncertain markers, protection when
   an older GC binary issues the delete, and remote coverage for other operations
   remain required work. A missing completion record never authorizes replay.
@@ -96,6 +99,7 @@ test does not close them.
 | Retention ownership | Hold setting and release use the same session for the shared barrier and metadata writes. Fault tests reject a late setting after exclusive takeover and preserve an active hold when a blocked release loses its connection. Normal hold/GC contention and physical OCI protection also pass. |
 | Pending delete primitives | Nine actual Postgres tests cover durable markers, absent-row serialization, unique concurrent admission identities, stale completion rejection, overflow, unchanged retention metadata/evidence on rejection, refusal without an installed trigger, cross-schema rejection, and safe installation with quotes, backslashes and template tokens in schema names. |
 | Single-attempt S3 client | A real HTTP fixture returns a retryable server error or drops the response after receiving the delete. Both cases return an error after exactly one request. Existing clients keep their retry policy for other operations. |
+| Dedupe publication during a pending delete | Real PostgreSQL tests reject direct SQL inserts and updates to a pending physical shard key, preserve the previous mapping, and roll back an entire multi-row insert. Unrelated mappings and publication after proven settlement succeed. A restricted mapping writer needs no retention or fence-table grant. This does not cover file-record or reconstruction publication. |
 | Existing retention role and mixed writers | Released 1.11.3 and current native binaries use the same restricted role with no fence-table grant. Both work before and after the normal owner-run upgrade, reject a fixture-only pending delete, and work again after its settlement. The current error explains that retry must wait for reconciliation. Released migration verification accepts the upgraded schema. This checks hold commands, not every publication path or released-server startup. |
 | Existing GC role | Released 1.11.3 and current native binaries both mark and physically sweep an expired MinIO object using a role with no fence-table access. Current GC records verified completion, settles its marker, and admits a later hold. This regression failed before admission/settlement moved behind the scoped, authorized database functions. |
 | Repair ownership | A database regression first demonstrated repair removing an expired hold after losing its separate lock connection during GC takeover. Repair now binds its scan and metadata changes to the lock-owning session. The database regression and two-machine `repair-connection-loss` drill pass: the source records failure, the waiting rebuild completes, and the expired hold remains unchanged. This covers metadata changes, not remote mutations by other operations. |

@@ -126,7 +126,9 @@ impl PostgresIndexStore {
              AND to_regprocedure('shardline_remote_delete_begin_v1(text,text)') IS NOT NULL
              AND to_regprocedure('shardline_remote_delete_finish_v1(text,text,bigint)') IS NOT NULL
              AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_retention_holds'::regclass
-                        AND tgname='shardline_retention_remote_delete_v1' AND tgenabled='O')",
+                        AND tgname='shardline_retention_remote_delete_v1' AND tgenabled='O')
+             AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_dedupe_shards'::regclass
+                        AND tgname='shardline_dedupe_remote_delete_v1' AND tgenabled='O')",
         )
         .fetch_one(&mut *transaction)
         .await?;
@@ -229,6 +231,149 @@ mod tests {
     use crate::{AsyncIndexStore, RetentionHold};
 
     #[tokio::test]
+    async fn dedupe_publication_holds_the_delete_lock_until_transaction_completion() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let key = ObjectKey::parse("shards/default/aa/concurrent.shard").unwrap();
+        let mut publication = pool.begin().await.unwrap();
+        query("INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key) VALUES ('concurrent', $1)")
+            .bind(key.as_str()).execute(&mut *publication).await.unwrap();
+        let mut admission = Box::pin(store.begin_remote_delete(&key));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut admission)
+                .await
+                .is_err()
+        );
+        publication.rollback().await.unwrap();
+        let permit = tokio::time::timeout(std::time::Duration::from_secs(5), admission)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_dedupe_publication_rejects_pending_delete_and_preserves_previous_mapping() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let key = ObjectKey::parse("shards/default/aa/pending.shard").unwrap();
+        let insert = "INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key)
+                      VALUES ($1, $2) ON CONFLICT(chunk_hash)
+                      DO UPDATE SET shard_object_key=EXCLUDED.shard_object_key";
+        query(insert)
+            .bind("existing")
+            .bind("safe/shard")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let permit = store.begin_remote_delete(&key).await.unwrap();
+        for hash in ["new", "existing"] {
+            let error = query(insert)
+                .bind(hash)
+                .bind(key.as_str())
+                .execute(&pool)
+                .await
+                .unwrap_err();
+            assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+        }
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT chunk_hash, shard_object_key FROM shardline_dedupe_shards")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![("existing".to_owned(), "safe/shard".to_owned())]);
+        let error = query(
+            "INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key)
+             VALUES ('batch-safe', 'safe/batch'), ('batch-pending', $1)",
+        )
+        .bind(key.as_str())
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+        let batch_rows: i64 = query_scalar(
+            "SELECT COUNT(*) FROM shardline_dedupe_shards WHERE chunk_hash LIKE 'batch-%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(batch_rows, 0);
+        query(insert)
+            .bind("unrelated")
+            .bind("safe/other")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        query(insert)
+            .bind("new")
+            .bind(key.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dedupe_writer_needs_no_new_retention_or_fence_privileges() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let schema: String = query_scalar("SELECT current_schema()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let role = format!("{schema}_writer");
+        let identifier = format!("\"{}\"", schema.replace('"', "\"\""));
+        let role_identifier = format!("\"{}\"", role.replace('"', "\"\""));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE ROLE {role_identifier};
+             GRANT USAGE ON SCHEMA {identifier} TO {role_identifier};
+             GRANT SELECT, INSERT, UPDATE ON {identifier}.shardline_dedupe_shards TO {role_identifier};"
+        ))).execute(&pool).await.unwrap();
+        let key = ObjectKey::parse("shards/default/aa/limited.shard").unwrap();
+        let permit = store.begin_remote_delete(&key).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        query(sqlx::AssertSqlSafe(format!(
+            "SET SESSION AUTHORIZATION {role_identifier}"
+        )))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        let insert =
+            "INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key) VALUES ($1, $2)";
+        query(insert)
+            .bind("unrelated")
+            .bind("safe/shard")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let error = query(insert)
+            .bind("pending")
+            .bind(key.as_str())
+            .execute(&mut *connection)
+            .await
+            .unwrap_err();
+        assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+        query("RESET SESSION AUTHORIZATION")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "DROP OWNED BY {role_identifier}; DROP ROLE {role_identifier};"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn installed_guard_rejects_cross_schema_admission_and_settlement() {
         let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
@@ -264,6 +409,7 @@ mod tests {
             "shardline_retention_holds",
             "shardline_quarantine_candidates",
             "shardline_resource_fences",
+            "shardline_dedupe_shards",
         ] {
             query(sqlx::AssertSqlSafe(format!(
                 "CREATE TABLE {identifier}.{table} (LIKE {table} INCLUDING ALL)"

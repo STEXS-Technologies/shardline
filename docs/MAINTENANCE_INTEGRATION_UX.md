@@ -56,11 +56,13 @@ Retrying must not acknowledge protection until the earlier delete is settled.
 Postgres/S3 GC now records the pending delete before sending its request. A
 successful reply clears that marker while GC still owns its database session.
 If the reply or ownership is lost, the marker stays pending. A replacement GC
-does not repeat it, and later holds receive the retryable error.
+does not repeat it, and later holds receive the retryable error. Publishing a
+dedupe mapping to that object also returns the retryable error; a rejected
+update preserves the previous mapping.
 
 The usual owner-run `db migrate up` installs the guard for both current and older
-hold writers. There is no new fence-table grant, service or configuration to
-manage. Other object writes and safe reconciliation of uncertain markers still
+hold and dedupe-mapping writers. There is no new fence-table grant, service or
+configuration to manage. Other object writes and safe reconciliation of uncertain markers still
 need work before this integration is ready to ship.
 
 Inspect `/api/v1/tasks/maintenance` with your existing admin token:
