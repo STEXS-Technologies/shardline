@@ -845,3 +845,16 @@ unchanged, and server child-process snapshots remain empty.
 These checks cover the owned fixture's roles and storage, not every deployment.
 An absent history notice selects a metadata route; it does not certify future
 publication, current cluster health or exactly-once effects.
+
+## Large native diagnostic exports
+
+The released/current mark-only GC comparison passes with 4,096 synthetic orphan
+files. Both retention and orphan exports exceed 1 MiB and retain every entry.
+Standard output, standard error, exit status, payload bytes and the post-baseline
+filename inventory match. Retention comparison excludes only the naturally
+time-dependent `seconds_until_delete` field; persisted timestamps still match.
+Current GC also records its own completed run without payload control objects.
+
+This checks report compatibility, not verified chunk identities, reclamation,
+production latency or unlimited workload size. The reproducible fixture is
+`scripts/shardline/verify_maintenance_large_diagnostics.sh`.

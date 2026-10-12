@@ -465,5 +465,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "tree_registration_tests.rs"]
 mod registration_tests;
