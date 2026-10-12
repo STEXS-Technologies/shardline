@@ -420,7 +420,39 @@ impl super::PostgresRecordStore {
         records: &[FileRecord],
         dedupe_mappings: &[DedupeShardMapping],
     ) -> Result<(), PostgresMetadataStoreError> {
+        self.commit_native_shard_metadata_with_remote_delete_references(
+            records,
+            dedupe_mappings,
+            &[],
+        )
+        .await
+    }
+
+    /// Publishes native metadata with the physical references derived from
+    /// validated xorb payloads. Pending-delete checks and all metadata writes
+    /// share one transaction. The existing method retains its signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns a retryable pending-delete error or a database failure. On
+    /// schemas predating the compatibility guard, behavior remains unchanged;
+    /// guarded GC refuses remote-delete admission until the owner-run upgrade.
+    pub async fn commit_native_shard_metadata_with_remote_delete_references(
+        &self,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+    ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = self.pool.begin().await?;
+        if !references.is_empty()
+            && query_scalar::<_, bool>(
+                "SELECT to_regprocedure('shardline_reference_keys_remote_delete_v1(text,text[])') IS NOT NULL",
+            ).fetch_one(&mut *transaction).await?
+        {
+            let keys: Vec<_> = references.iter().map(shardline_storage::ObjectKey::as_str).collect();
+            query("SELECT shardline_reference_keys_remote_delete_v1(current_schema(), $1)")
+                .bind(keys).execute(&mut *transaction).await?;
+        }
         for record in records {
             let locator = self.version_record_locator(record);
             upsert_record_in_transaction(&mut transaction, &locator, record).await?;

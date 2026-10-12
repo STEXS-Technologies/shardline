@@ -218,6 +218,48 @@ BEGIN
 END;
 $references$;
 
+-- Payload-derived references are supplied by the native xorb validator and
+-- checked inside the metadata publication transaction, never as a preflight.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_reference_keys_remote_delete_v1(
+    index_schema TEXT, object_keys TEXT[]
+) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $member_references$
+DECLARE keys TEXT[]; lock_slot INTEGER; pending BOOLEAN;
+BEGIN
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF NOT has_schema_privilege(session_user, index_schema, 'USAGE') OR NOT (
+        has_column_privilege(session_user, format('%I.shardline_file_records', index_schema), 'record', 'INSERT')
+        OR has_column_privilege(session_user, format('%I.shardline_file_records', index_schema), 'record', 'UPDATE')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'file publication access is required for reference checks';
+    END IF;
+    SELECT array_agg(DISTINCT physical) INTO keys FROM (
+        SELECT unnest(object_keys) AS physical
+        UNION
+        SELECT mapping.shard_object_key FROM shardline_dedupe_shards mapping
+        JOIN unnest(object_keys) member_key
+          ON member_key ~ '^[0-9a-f]{2}/[0-9a-f]{64}$'
+         AND mapping.chunk_hash = right(member_key, 64)
+    ) references_to_check;
+    FOR lock_slot IN SELECT DISTINCT
+        (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
+        FROM unnest(keys) physical ORDER BY slot LOOP
+        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+    END LOOP;
+    SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
+                  WHERE domain='maintenance-remote-delete' AND resource=ANY(keys)) INTO pending;
+    IF pending THEN
+        RAISE EXCEPTION USING ERRCODE = 'SLD01',
+            MESSAGE = 'object has an unresolved remote delete; retry after reconciliation';
+    END IF;
+END;
+$member_references$;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_reference_keys_remote_delete_v1(TEXT, TEXT[]) TO PUBLIC;
+
 -- This read-only check validates the caller's existing schema/retention access.
 -- Keep it usable even with restrictive default function privileges.
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_remote_delete_guard_v1(TEXT, TEXT) TO PUBLIC;

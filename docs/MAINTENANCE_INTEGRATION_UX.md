@@ -62,8 +62,10 @@ returns the retryable error. Rejected updates preserve the previous metadata.
 
 The usual owner-run `db migrate up` installs the guard for both current and older
 hold, dedupe-mapping and direct-reference writers. There is no new fence-table
-grant, service or configuration to manage. References hidden inside xorb
-payloads, other object writes and safe reconciliation of uncertain markers still
+grant, service or configuration to manage. Current native Xet uploads also
+check the chunks inside their xorbs before making the file visible. The
+optional chunk cache cannot bypass this check. Older writers, other object
+writes and safe recovery of uncertain deletes still
 need work before this integration is ready to ship.
 
 Inspect `/api/v1/tasks/maintenance` with your existing admin token:
