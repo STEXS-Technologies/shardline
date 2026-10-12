@@ -55,6 +55,11 @@ Recovery verifies the saved reply and clears only its matching pending delete.
 It does not delete the object again or resume the failed GC process. The original
 run stays failed even if recovery later settles its delete.
 
+On upgraded Postgres/S3 deployments, saving and cleaning up a successful reply
+adds one receipt write and one receipt cleanup request per deleted object.
+This can increase GC runtime, especially when object storage is far away.
+Your existing GC command and timer remain in charge.
+
 Each command checks up to 64 saved replies and logs the counts. Repeated runs
 advance through the backlog. Invalid or conflicting evidence is retained for
 investigation. There is no recovery worker to start.

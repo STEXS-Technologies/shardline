@@ -46,7 +46,7 @@ pub async fn delete_with_postgres_guard(
         // background delete here could outlive cancellation of this future.
         return Ok(ObjectStore::delete_if_present(objects, key)?);
     };
-    let signing_key = if index.remote_delete_receipt_namespace().await?.is_some() {
+    let signing_key = if index.supports_remote_delete_receipts().await? {
         let mut seed = [0_u8; 32];
         getrandom::fill(&mut seed).map_err(|_error| {
             PostgresMetadataStoreError::Unsupported(

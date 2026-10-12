@@ -90,8 +90,13 @@ This document is for reviewers deciding whether the integration is safe to ship.
   remain required work. A missing completion record never authorizes replay.
 - **Large deployments and history growth.** Long operations, large reports and
   total growth of unresolved history still need deployment-scale validation.
-  Saved-reply publication and cleanup add object-storage requests; their impact
-  on large GC batches still needs measurement.
+  Saved-reply publication and cleanup add object-storage requests. An initial
+  release-profile PostgreSQL/HTTP drill covers 1, 64 and 1,024 deletions, verifies
+  one user delete plus two receipt requests per object, and leaves no pending
+  marker or saved reply. The 1,024-object local run took 2.12 seconds for a guarded
+  baseline without saved replies and 3.11 seconds with them. These are local
+  boundary measurements, not released-binary, cloud or whole-GC benchmarks.
+  Provider latency, large inventories and end-to-end GC cost still need measurement.
   Unfinished evidence is retained, so completed-history cleanup alone does not
   establish a total storage bound.
 - **Remaining compatibility coverage.** Passing deployment fixtures establish
@@ -164,6 +169,7 @@ test does not close them.
 | Saved reply during database outage | Real PostgreSQL/MinIO drills stop the database before releasing the successful delete reply. The source saves evidence and fails. After restart, holds remain blocked until ordinary repair or a fresh sweep verifies the reply and settles the marker; neither recovery sends another user-object DELETE. Missing replies remain unresolved. |
 | Bounded saved-reply recovery | Real PostgreSQL replay advances past 64 malformed records, settles the later valid reply after source-session closure, retains missing-reply markers and retires already-settled evidence. Scan counts and per-record reads are bounded; total unresolved storage growth and deployment-scale cost remain open. |
 | Optional receipt writes | A native GC drill actually denies saved-reply writes, yet preserves successful ordinary settlement and completion. It establishes no new S3 write requirement for existing GC; without a saved reply or database settlement, recovery remains unavailable. |
+| Saved-reply request cost | The release-profile `remote_delete_request_cost` drill uses actual guarded PostgreSQL transactions and a counted HTTP fixture for batches of 1, 64 and 1,024 objects. Healthy deletes send one single-attempt user DELETE, one conditional receipt PUT and one receipt cleanup request. No HEAD, duplicate user delete, leftover receipt or pending marker is observed. Admission pins the namespace in its transaction; normal GC no longer reads it separately before admission. Cloud latency and whole-GC performance remain open. |
 | Concurrent webhook secret upgrades | SQLite and PostgreSQL use an atomic comparison against the observed secret. Concurrent upgrades allow one winner; stale upgrades preserve rotation, removal, deletion and repository isolation. A real PostgreSQL sweep waits at its conditional UPDATE while another transaction rotates the secret; the resumed upgrade preserves it and reports zero changes. A lazy delivery regression preserves a secret rotated after its snapshot. Existing custom store implementations compile with an explicit unsupported result instead of an unchecked fallback. |
 | Hub background work session | A real PostgreSQL test uses a runtime role with a different default schema from the startup inspection connection and no fence-table access. Both successful and interrupted sweep history bind to the actual work target in the original PID. Terminating the source while its SELECT is blocked leaves the secret unchanged, records reconciliation required and opens no replacement work session. No global worker lock, service or configuration is added. |
 | Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
@@ -256,6 +262,19 @@ All eight remain the completion criteria:
    needing reconciliation without understanding dependency internals.
 
 ## Reproducing the machine tests
+
+For the saved-reply request-count drill, point `DATABASE_URL` at an isolated,
+owner-accessible PostgreSQL fixture initialized by `shardline db migrate up`:
+
+```bash
+cargo test -p shardline-server --release --all-features \
+  --test remote_delete_request_cost -- --ignored --nocapture
+```
+
+The drill creates and removes its own schema and HTTP fixture. It prints batch
+timings and request counts and asserts exact requests and cleared markers.
+It compares a guarded baseline without saved replies against the current
+delete boundary; it does not benchmark the complete GC command or a cloud provider.
 
 `CURRENT` and `RELEASED` are Linux binaries. `IMAGE` is a locally verified
 Debian 13 generic cloud qcow2 image.

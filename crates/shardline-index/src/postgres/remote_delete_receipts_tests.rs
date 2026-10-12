@@ -17,6 +17,7 @@ async fn older_owner_installation_preserves_legacy_admission_without_receipt_fun
     .await
     .unwrap();
     let store = PostgresIndexStore::new(pool.clone());
+    assert!(!store.supports_remote_delete_receipts().await.unwrap());
     assert_eq!(store.remote_delete_receipt_namespace().await.unwrap(), None);
     let object = ObjectKey::parse("receipt/older-owner-installation").unwrap();
     let permit = store.begin_remote_delete(&object).await.unwrap();
@@ -30,6 +31,7 @@ async fn older_owner_installation_preserves_legacy_admission_without_receipt_fun
     // The same owner upgrade enables receipts without rewriting pending history
     // or requiring runtime schema creation.
     store.initialize_remote_delete_guard().await.unwrap();
+    assert!(store.supports_remote_delete_receipts().await.unwrap());
     assert!(
         store
             .remote_delete_receipt_namespace()
