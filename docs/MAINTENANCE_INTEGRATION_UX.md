@@ -14,6 +14,10 @@ Normal startup tracks work inside the server. Maintenance keeps its original
 process and live output. Starting the server does not start GC.
 Local deployments without Postgres save new history in the existing metadata
 database, so payload copies do not include it. Earlier history stays readable.
+After the usual owner upgrade, new server history also uses the existing
+Postgres database. It needs no extra connection pool or service.
+This uses existing metadata permissions; accounts with narrower access keep
+legacy tracking.
 
 ## What you gain
 
@@ -155,7 +159,9 @@ process separation.
 missing replies, older GC sources, remaining write paths,
 storage-copy rollback isolation and deployment-scale limits still need work.
 New local history now stays out of released payload copies. Earlier object-backed
-history and Postgres/S3 history still need that isolation before the upgrade is ready.
+history, Postgres/S3 CLI history and storage-copy endpoints still need that
+isolation before the upgrade is ready. Server history now uses Postgres metadata;
+CLI and library readers still need integration with that storage.
 
 The usual owner-run `shardline db migrate up` installs the protection functions,
 even with no pending migration entries. Runtime accounts need no new fence-table

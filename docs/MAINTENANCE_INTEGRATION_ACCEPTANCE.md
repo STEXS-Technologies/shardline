@@ -237,7 +237,7 @@ This document is for reviewers deciding whether the integration is safe to ship.
   clean copy, current recopy and released rollback match payload bytes and
   output while ten current task artifacts stay outside payload inventory.
   Existing object-backed history is not moved or discarded. Such history can
-  still contaminate a released copy, and PostgreSQL/S3 configurations still
+  still contaminate a released copy, and PostgreSQL/S3 CLI configurations still
   publish object-backed evidence. Those cases, S3-only copy endpoints and
   deployment permissions remain required work before the full isolation gate
   passes. No database service or mount was added for the local backend.
@@ -249,9 +249,26 @@ This document is for reviewers deciding whether the integration is safe to ship.
   reliability-metadata access. Publishing and retention check their respective
   existing maintenance permissions. Real PostgreSQL tests cover writer, reader,
   GC and denied accounts, concurrent conflicts, paging, reinstallation and RLS
-  rejection. These are storage primitives: the server and CLI still use
-  object-backed PostgreSQL/S3 evidence. Selecting the new backend, legacy reads,
-  connection/resource limits and supported row-scoped history remain unfinished.
+  rejection. New server-owned evidence now uses that table after the owner
+  upgrade. Server startup, retention and admin readers reuse the existing
+  backend pool and runtime. They select a verified metadata identity and schema;
+  each operation verifies and uses the same checkout, with a five-second total
+  timeout. No new pool or runtime is created. Legacy object history remains
+  readable, and retention removes both formats. Unsupported owner installations
+  and row-scoped schemas retain legacy behavior. Unexpected metadata failures
+  return an inspection error, while startup preserves serving availability.
+  CLI and configuration-only library stores still use object-backed PostgreSQL/S3
+  evidence. Their routing, full connection/resource limits and supported
+  row-scoped history remain unfinished.
+  All 22 server task-tracking tests pass against an owned PostgreSQL fixture
+  bootstrapped by released 1.11.3. New tests close the original backend pool,
+  verify completed history and reports from a fresh backend, retain and retire
+  legacy and metadata records together, reject conflicting and oversized reads,
+  and reject a changed metadata identity without publishing payload artifacts.
+  Normal router startup publishes its completed LFS sweep in PostgreSQL; the
+  authenticated list/report endpoints verify it while payload inventory stays
+  empty. Unauthenticated inspection remains rejected. Existing cross-login
+  grouping survives restricted artifact permissions. Strict server Clippy passes.
   Runtime routing must follow the work session's resolved metadata target;
   another connection guessed from configuration does not establish that match.
   The artifact API now accepts that actual connection for publication, reads,
@@ -263,8 +280,10 @@ This document is for reviewers deciding whether the integration is safe to ship.
   schema differs from its pool default, publication and deletion rollback,
   recovery after a conflicting publication, and lock contention under a
   100 ms work timeout. Strict index Clippy also passes.
-  This provides the connection API needed for tracker routing; the tracker has
-  not switched its PostgreSQL/S3 storage backend yet.
+  Server stores reject a signed work-scope binding that differs from their
+  selected metadata target. Jobs whose work target differs from the server's
+  inspection target still need source-specific storage routing; this change
+  does not establish that association or switch CLI/runner storage.
   The native mixed-version OCI/S3 drill passes with this owner extension: the
   released ledger and original table grants are unchanged, the existing writer
   has no direct artifact-table access, and prior publication/crash guarantees
