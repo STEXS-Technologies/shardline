@@ -12,6 +12,7 @@ use shardline_oci_adapter::{
 use shardline_server_core::{
     ServerObjectStore, parse_stored_file_record_bytes, protocol_support::protocol_object_file_id,
 };
+#[cfg(test)]
 use shardline_storage::ObjectStore as _;
 
 use crate::{
@@ -75,11 +76,30 @@ impl OciRecordReclaimer for PostgresRecordStore {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn reclaim_oci_tombstones<RecordAdapter, IndexAdapter>(
     record_store: &RecordAdapter,
     index_store: &IndexAdapter,
     object_store: &ServerObjectStore,
     options: LocalGcOptions,
+) -> Result<OciTombstoneGcReport, GcError>
+where
+    RecordAdapter: RecordStore + OciRecordReclaimer + Sync,
+    RecordAdapter::Error: Into<GcError>,
+    IndexAdapter: shardline_index::AsyncIndexStore
+        + OciObjectStore<Error = <IndexAdapter as shardline_index::AsyncIndexStore>::Error>
+        + Sync,
+    <IndexAdapter as shardline_index::AsyncIndexStore>::Error: Into<GcError>,
+{
+    reclaim_oci_tombstones_with_guard(record_store, index_store, object_store, options, None).await
+}
+
+pub(crate) async fn reclaim_oci_tombstones_with_guard<RecordAdapter, IndexAdapter>(
+    record_store: &RecordAdapter,
+    index_store: &IndexAdapter,
+    object_store: &ServerObjectStore,
+    options: LocalGcOptions,
+    remote_guard: Option<&shardline_index::PostgresIndexStore>,
 ) -> Result<OciTombstoneGcReport, GcError>
 where
     RecordAdapter: RecordStore + OciRecordReclaimer + Sync,
@@ -145,9 +165,8 @@ where
                     &key.digest_hex,
                     &key.scope_namespace,
                 )?;
-                object_store
-                    .delete_if_present(&object_key)
-                    .map_err(GcError::ObjectStore)?;
+                crate::remote_delete::delete_gc_object(object_store, &object_key, remote_guard)
+                    .await?;
                 let file_id = protocol_object_file_id(&object_key);
                 if let Some(record) = latest_records.remove(&file_id) {
                     record_store.delete_protocol_record(&record).await?;
@@ -159,17 +178,15 @@ where
                     &key.digest_hex,
                     &key.scope_namespace,
                 )?;
-                object_store
-                    .delete_if_present(&manifest_key)
-                    .map_err(GcError::ObjectStore)?;
+                crate::remote_delete::delete_gc_object(object_store, &manifest_key, remote_guard)
+                    .await?;
                 let media_type_key = oci_manifest_media_type_key_from_namespace(
                     &key.repository,
                     &key.digest_hex,
                     &key.scope_namespace,
                 )?;
-                object_store
-                    .delete_if_present(&media_type_key)
-                    .map_err(GcError::ObjectStore)?;
+                crate::remote_delete::delete_gc_object(object_store, &media_type_key, remote_guard)
+                    .await?;
             }
         }
 

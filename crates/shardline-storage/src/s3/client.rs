@@ -9,7 +9,30 @@ use super::{S3ObjectStoreConfig, S3ObjectStoreError};
 pub(crate) fn build_amazon_s3_client(
     config: &S3ObjectStoreConfig,
 ) -> Result<AmazonS3, S3ObjectStoreError> {
+    build_client(config, object_store::RetryConfig::default(), false)
+}
+
+pub(crate) fn build_single_attempt_client(
+    config: &S3ObjectStoreConfig,
+) -> Result<AmazonS3, S3ObjectStoreError> {
+    build_client(
+        config,
+        object_store::RetryConfig {
+            max_retries: 0,
+            ..object_store::RetryConfig::default()
+        },
+        true,
+    )
+}
+
+fn build_client(
+    config: &S3ObjectStoreConfig,
+    retry: object_store::RetryConfig,
+    single_delete: bool,
+) -> Result<AmazonS3, S3ObjectStoreError> {
     let mut builder = AmazonS3Builder::new()
+        .with_retry(retry)
+        .with_disable_bulk_delete(single_delete)
         .with_bucket_name(config.bucket.clone())
         .with_region(config.region.clone())
         .with_allow_http(config.allow_http)

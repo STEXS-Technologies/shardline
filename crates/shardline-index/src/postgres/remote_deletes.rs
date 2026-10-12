@@ -1,5 +1,3 @@
-use std::io::{Error as IoError, ErrorKind};
-
 use shardline_storage::ObjectKey;
 use sqlx::{Postgres, Transaction, query, query_scalar};
 use thiserror::Error;
@@ -8,7 +6,9 @@ use super::{PostgresIndexStore, PostgresMetadataStoreError};
 
 // Distinct domains preserve existing resource fences. Completed per-object
 // rows can be removed: one persistent sequence prevents reuse of old permits.
+#[cfg(test)]
 const REMOTE_DELETE_DOMAIN: &str = "maintenance-remote-delete";
+#[cfg(test)]
 const REMOTE_DELETE_SEQUENCE_DOMAIN: &str = "maintenance-remote-delete-sequence";
 
 /// Identity of one durably admitted remote delete.
@@ -71,35 +71,13 @@ impl PostgresMetadataStoreError {
     }
 }
 
-fn pending_error(object_key: &ObjectKey) -> PostgresMetadataStoreError {
-    sqlx::Error::Io(IoError::new(
-        ErrorKind::WouldBlock,
-        RemoteDeletePending {
-            object_key: object_key.clone(),
-        },
-    ))
-    .into()
-}
-
-async fn lock_object(
-    transaction: &mut Transaction<'_, Postgres>,
-    object_key: &ObjectKey,
-) -> Result<(), PostgresMetadataStoreError> {
-    // The transaction lock also protects an absent marker. Writers must retain
-    // this lock through publication, not check in a separate transaction.
-    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("shardline:remote-delete:{}", object_key.as_str()))
-        .execute(&mut **transaction)
-        .await?;
-    Ok(())
-}
-
 impl PostgresIndexStore {
     /// Installs the compatibility guard using the existing migration-owner role.
     ///
     /// Called by `db migrate up` after the released schema is complete. This
-    /// preserves the migration catalog and existing writer grants. The read-only
-    /// function has a fixed search path; the trigger also protects old binaries.
+    /// preserves the migration catalog and existing writer grants. The functions
+    /// validate existing permissions and their installed schema with fixed
+    /// search paths; the trigger also protects older retention writers.
     /// Installation commits atomically. Runtime writer roles need no DDL rights.
     ///
     /// # Errors
@@ -111,9 +89,16 @@ impl PostgresIndexStore {
             .fetch_one(&mut *transaction)
             .await?;
         let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
-        // Only an escaped catalog identifier replaces SQL header placeholders;
-        // no identifier is interpolated into either dollar-quoted function body.
-        let sql = include_str!("remote_delete_guard.sql").replace("@SCHEMA@", &quoted_schema);
+        let schema_literal = format!("E'{}'", schema.replace('\\', "\\\\").replace('\'', "\\'"));
+        // Escaped identifiers and literals replace SQL header placeholders;
+        // no catalog text is interpolated into dollar-quoted function bodies.
+        // Expand only tokens from the original template. A schema name may
+        // itself contain either token; never expand inserted catalog text.
+        let sql = include_str!("remote_delete_guard.sql")
+            .split("@SCHEMA@")
+            .map(|part| part.replace("@SCHEMA_LITERAL@", &schema_literal))
+            .collect::<Vec<_>>()
+            .join(&quoted_schema);
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&mut *transaction)
             .await?;
@@ -138,6 +123,8 @@ impl PostgresIndexStore {
         let mut transaction = self.pool.begin().await?;
         let initialized = query_scalar::<_, bool>(
             "SELECT to_regprocedure('shardline_remote_delete_guard_v1(text,text)') IS NOT NULL
+             AND to_regprocedure('shardline_remote_delete_begin_v1(text,text)') IS NOT NULL
+             AND to_regprocedure('shardline_remote_delete_finish_v1(text,text,bigint)') IS NOT NULL
              AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_retention_holds'::regclass
                         AND tgname='shardline_retention_remote_delete_v1' AND tgenabled='O')",
         )
@@ -148,38 +135,25 @@ impl PostgresIndexStore {
                 "remote delete protection requires the existing db migrate up command".to_owned(),
             ));
         }
-        lock_object(&mut transaction, object_key).await?;
-        let pending = query_scalar::<_, i64>(
-            "SELECT epoch FROM shardline_resource_fences WHERE domain=$1 AND resource=$2 FOR UPDATE",
-        ).bind(REMOTE_DELETE_DOMAIN).bind(object_key.as_str())
-            .fetch_optional(&mut *transaction).await?;
-        if pending.is_some() {
-            return Err(pending_error(object_key));
-        }
-        // Object lock first, then sequence lock, including first creation.
-        // The sequence and pending marker commit atomically; no request may be
-        // issued before that commit. Settlement needs only the object lock.
-        query(
-            "SELECT pg_advisory_xact_lock(hashtextextended('shardline:remote-delete-sequence', 0))",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        let current = query_scalar::<_, i64>(
-            "SELECT epoch FROM shardline_resource_fences WHERE domain=$1 AND resource='global' FOR UPDATE",
-        ).bind(REMOTE_DELETE_SEQUENCE_DOMAIN).fetch_optional(&mut *transaction).await?;
-        let epoch = current.unwrap_or(0).checked_add(1).ok_or_else(|| {
-            PostgresMetadataStoreError::IntegerOutOfRange("remote delete epoch".to_owned())
-        })?;
-        query("INSERT INTO shardline_resource_fences (domain, resource, epoch) VALUES ($1,'global',$2)
-               ON CONFLICT (domain, resource) DO UPDATE SET epoch=EXCLUDED.epoch")
-            .bind(REMOTE_DELETE_SEQUENCE_DOMAIN).bind(epoch)
-            .execute(&mut *transaction).await?;
-        query("INSERT INTO shardline_resource_fences (domain, resource, epoch) VALUES ($1,$2,$3)")
-            .bind(REMOTE_DELETE_DOMAIN)
-            .bind(object_key.as_str())
-            .bind(epoch)
-            .execute(&mut *transaction)
-            .await?;
+        let epoch =
+            query_scalar::<_, i64>("SELECT shardline_remote_delete_begin_v1(current_schema(), $1)")
+                .bind(object_key.as_str())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    if error
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .as_deref()
+                        == Some("SLD02")
+                    {
+                        PostgresMetadataStoreError::IntegerOutOfRange(
+                            "remote delete epoch".to_owned(),
+                        )
+                    } else {
+                        PostgresMetadataStoreError::from(error)
+                    }
+                })?;
         transaction.commit().await?;
         Ok(PostgresRemoteDeletePermit {
             object_key: object_key.clone(),
@@ -204,18 +178,15 @@ impl PostgresIndexStore {
         permit: &PostgresRemoteDeletePermit,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = self.pool.begin().await?;
-        lock_object(&mut transaction, permit.object_key()).await?;
-        let changed = query(
-            "DELETE FROM shardline_resource_fences
-                             WHERE domain=$1 AND resource=$2 AND epoch=$3",
+        let changed = query_scalar::<_, bool>(
+            "SELECT shardline_remote_delete_finish_v1(current_schema(), $1, $2)",
         )
-        .bind(REMOTE_DELETE_DOMAIN)
         .bind(permit.object_key().as_str())
         .bind(permit.epoch())
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(changed.rows_affected() == 1)
+        Ok(changed)
     }
 
     /// Rejects a pending delete in the same transaction as a later publication.
@@ -256,6 +227,68 @@ impl PostgresIndexStore {
 mod tests {
     use super::*;
     use crate::{AsyncIndexStore, RetentionHold};
+
+    #[tokio::test]
+    async fn installed_guard_rejects_cross_schema_admission_and_settlement() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        for sql in [
+            "SELECT shardline_remote_delete_guard_v1('public', 'remote-delete/scope')",
+            "SELECT shardline_remote_delete_begin_v1('public', 'remote-delete/scope')",
+            "SELECT shardline_remote_delete_finish_v1('public', 'remote-delete/scope', 1)",
+        ] {
+            let error = query(sql).execute(&pool).await.unwrap_err();
+            assert_eq!(
+                error.as_database_error().unwrap().code().as_deref(),
+                Some("42501")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_installation_safely_quotes_schema_identifiers_literals_and_template_tokens() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let name = format!(
+            "shardline_test_{}_\"'\\$guard$@SCHEMA@@SCHEMA_LITERAL@",
+            std::process::id()
+        );
+        let identifier = format!("\"{}\"", name.replace('"', "\"\""));
+        query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {identifier}")))
+            .execute(&pool)
+            .await
+            .unwrap();
+        for table in [
+            "shardline_retention_holds",
+            "shardline_quarantine_candidates",
+            "shardline_resource_fences",
+        ] {
+            query(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE {identifier}.{table} (LIKE {table} INCLUDING ALL)"
+            )))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let options = pool.options().clone().after_connect(move |connection, _| {
+            let sql = format!("SET search_path TO {identifier}, public");
+            Box::pin(async move {
+                query(sqlx::AssertSqlSafe(sql)).execute(connection).await?;
+                Ok(())
+            })
+        });
+        let scoped = options
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let store = PostgresIndexStore::new(scoped);
+        store.initialize_remote_delete_guard().await.unwrap();
+        let key = ObjectKey::parse("remote-delete/schema-escaping").unwrap();
+        let permit = store.begin_remote_delete(&key).await.unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+    }
 
     #[tokio::test]
     async fn missing_retention_trigger_disables_delete_admission_without_breaking_holds() {

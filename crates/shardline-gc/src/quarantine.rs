@@ -331,6 +331,7 @@ where
 /// parameters bundle the store context plus the per-cycle state, so the
 /// `too_many_arguments` default warning is intentionally suppressed.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) async fn sweep_quarantine_entries<RecordAdapter, IndexAdapter>(
     record_store: &RecordAdapter,
     object_store: &ServerObjectStore,
@@ -340,6 +341,38 @@ pub(super) async fn sweep_quarantine_entries<RecordAdapter, IndexAdapter>(
     now_unix_seconds: u64,
     quarantine_entries: &mut HashMap<String, QuarantineCandidate>,
     report: &mut LocalGcReport,
+) -> Result<(), GcError>
+where
+    RecordAdapter: RecordStore + Sync,
+    RecordAdapter::Error: Into<GcError>,
+    IndexAdapter: AsyncIndexStore + Sync,
+    IndexAdapter::Error: Into<GcError>,
+{
+    sweep_quarantine_entries_with_guard(
+        record_store,
+        object_store,
+        index_store,
+        frontends,
+        orphan_objects,
+        now_unix_seconds,
+        quarantine_entries,
+        report,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn sweep_quarantine_entries_with_guard<RecordAdapter, IndexAdapter>(
+    record_store: &RecordAdapter,
+    object_store: &ServerObjectStore,
+    index_store: &IndexAdapter,
+    frontends: &[ServerFrontend],
+    orphan_objects: &HashMap<String, OrphanObject>,
+    now_unix_seconds: u64,
+    quarantine_entries: &mut HashMap<String, QuarantineCandidate>,
+    report: &mut LocalGcReport,
+    remote_guard: Option<&shardline_index::PostgresIndexStore>,
 ) -> Result<(), GcError>
 where
     RecordAdapter: RecordStore + Sync,
@@ -506,9 +539,9 @@ where
             continue;
         }
 
-        let _outcome = object_store
-            .delete_if_present(&orphan.object_key)
-            .map_err(GcError::ObjectStore)?;
+        let _outcome =
+            crate::remote_delete::delete_gc_object(object_store, &orphan.object_key, remote_guard)
+                .await?;
 
         // When a xorb container is swept, also remove its chunk-hash cache
         // sidecar (_xorb_chunks/{prefix}/{hash}) so orphaned cache entries
@@ -517,9 +550,12 @@ where
             && let Ok(cache_key) =
                 ObjectKey::parse(&format!("_xorb_chunks/{}/{}", &hash[..2], hash))
         {
-            let _cache_outcome = object_store
-                .delete_if_present(&cache_key)
-                .map_err(GcError::ObjectStore);
+            let cache_outcome =
+                crate::remote_delete::delete_gc_object(object_store, &cache_key, remote_guard)
+                    .await;
+            if remote_guard.is_some() && matches!(object_store, ServerObjectStore::S3(_)) {
+                cache_outcome?;
+            }
         }
 
         report.deleted_chunks = checked_increment(report.deleted_chunks)?;

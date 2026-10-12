@@ -229,11 +229,12 @@ the connection-loss protection automatically. Dropping the barrier closes its
 pool to new acquisitions, including retained clones; graceful connection cleanup
 then releases ownership. This does not establish fencing of remote requests.
 
-The real delayed-delete regression confirms this boundary. It pauses a request
-before MinIO applies it, terminates GC's database owner, acknowledges a new hold
-while the bytes still exist, and then releases the former owner's request. The
-object is removed even though the hold remains and GC records failure. A signed
-failure describes the outcome; it does not protect the bytes retroactively.
+The real delayed-delete regression originally reproduced this boundary: after
+GC lost its database owner, a later hold was acknowledged before the old request
+removed the bytes. With durable admission, the same regression now rejects the
+later hold with the typed retryable error and prevents a replacement GC from
+issuing a second delete. The old request can finish, but its unknown settlement
+keeps the marker pending and its source records failure.
 
 An ETag precondition alone cannot establish Shardline ownership. Amazon S3's
 [conditional-delete contract](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.html)
@@ -246,7 +247,8 @@ The protocol needs a durable effect gate: an uncertain issued delete
 must prevent a later successful hold or reference publication from racing with
 it. Later requests for the affected object must return a clear retryable error
 instead of waiting indefinitely or acknowledging protection. This is the chosen
-behavior, not a guarantee provided by the current implementation. Clearing that
+behavior. Retention writers now enforce it; other publication paths still need
+their transaction checks. Clearing that
 gate requires proof that issued requests have settled, rather
 than merely an expired timer, a dead PID or a lost database session. This must
 also work during mixed-version operation and rollback. An additive database
@@ -264,19 +266,33 @@ publication. Exact-epoch settlement removes the marker; one persistent sequence
 prevents an old completion from matching a later attempt. Neither process death
 nor connection loss clears an unresolved marker.
 
-The existing owner-run `db migrate up` installs the read-only check and a
-retention trigger in one transaction, without adding migration-history records
-or changing released checksums. Runtime retention roles keep their existing
-grants. The trigger protects older hold writers too. Delete admission refuses
+The existing owner-run `db migrate up` installs the read check, admission and
+settlement functions, and retention trigger in one transaction, without adding
+migration-history records or changing released checksums. The functions check
+the original session role's existing retention and GC metadata permissions;
+runtime roles need no direct fence-table grant. Each function is bound to its
+installed schema, so a caller cannot redirect definer access to another schema.
+The trigger protects older hold writers too. Delete admission refuses
 to create a marker if the guard and trigger are missing. The definer functions
 use fixed search paths with temporary schemas last, following the
 [Postgres function guidance](https://www.postgresql.org/docs/16/sql-createfunction.html).
 
-Normal GC does not yet use this admission/settlement protocol. Other object
-publication paths also need transactional enforcement, and remote settlement
-requires proof that all issued attempts have settled. A successful retry cannot
-prove that an earlier request will never apply later. The explicitly ignored
-takeover regression must pass before this integration is ready to merge.
+Normal Postgres/S3 GC uses this protocol for quarantine, OCI tombstone and
+resumable-staging deletion. The guarded client sends a single-object DELETE with
+retries disabled, following the dependency's
+[retry configuration contract](https://docs.rs/object_store/0.14.0/object_store/struct.RetryConfig.html).
+A successful response permits exact-epoch settlement only on the original work
+session. Remote errors, cancellation and lost ownership retain the marker.
+The generic legacy GC library entry points preserve their signatures; embedders
+wanting this boundary use `run_postgres_gc_with_remote_delete_protection` with
+the same ownership-bound record and index adapters.
+
+Other object publication paths need transactional enforcement, and recovery of
+uncertain markers needs a supported proof of settlement. A successful retry
+cannot prove that an earlier request will never apply later. Older GC binaries
+do not create these markers; mixed-version protection for those sources also
+remains a merge requirement. Reserved S3 upload-temp cleanup retains its existing
+path; these generated keys are outside the user-object namespace.
 
 Both modes use PostgreSQL's advisory-lock wait queue. A queued exclusive owner
 blocks later shared acquisitions. During acquisition, cancellation closes the

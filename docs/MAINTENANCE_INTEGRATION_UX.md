@@ -16,8 +16,8 @@ permissions to create a separate tracking directory.
 ## What changes for you
 
 - A history showing which maintenance runs completed, failed or need investigation.
-- In a Postgres/S3 deployment, another node can inspect a run after its original
-  node disappears. You do not need to recover the old container's files.
+- With the same Postgres/S3 configuration, another node can inspect a run after
+  its original node disappears. You do not need to recover the old container's files.
 - Safer crash reporting: a printed report alone does not make an interrupted
   operation count as completed.
 
@@ -53,11 +53,15 @@ automatically. A missing reply is not proof that nothing changed.
 The intended behavior is a clear retryable error for a later hold or write to
 an object whose earlier delete is unresolved. Other objects remain available.
 Retrying must not acknowledge protection until the earlier delete is settled.
-The database guard is implemented for retention holds, including older hold
-writers after the usual owner-run `db migrate up`. It needs no new permissions
-for the existing retention writer role. GC still needs to record the pending
-delete before sending its S3 request, so the current branch has the race
-described below. This is not ready to rely on in production yet.
+Postgres/S3 GC now records the pending delete before sending its request. A
+successful reply clears that marker while GC still owns its database session.
+If the reply or ownership is lost, the marker stays pending. A replacement GC
+does not repeat it, and later holds receive the retryable error.
+
+The usual owner-run `db migrate up` installs the guard for both current and older
+hold writers. There is no new fence-table grant, service or configuration to
+manage. Other object writes and safe reconciliation of uncertain markers still
+need work before this integration is ready to ship.
 
 Inspect `/api/v1/tasks/maintenance` with your existing admin token:
 
@@ -81,6 +85,11 @@ deployments have no local backup of an unpublished result.
 
 Not yet. The version and deployment formats remain unchanged on this branch.
 
+For a Postgres upgrade, run the existing `shardline db migrate up` step with your
+migration-owner credentials, even if there are no pending migration entries.
+It installs the delete guard; runtime accounts need no new fence-table grant.
+The [database migration guide](DATABASE_MIGRATIONS.md) has the normal commands.
+
 In Postgres deployments, rebuild, lifecycle repair, Hub tree repair, GC and
 retention hold updates stop their database writes if they lose the connection holding their
 maintenance lock. This prevents an old invocation from reconnecting to continue
@@ -88,8 +97,9 @@ database work after another node takes over.
 
 Other operations' remote effects and crash boundaries, plus large-deployment
 limits, still need validation before this integration is ready to merge.
-A confirmed S3 race can still remove an object after a new retention hold is
-acknowledged. That must be fixed before upgrading with the stronger guarantees.
+The hold/delete takeover race now passes its production-style fault test.
+That does not establish protection for all object/reference writes or deletes
+issued by older GC binaries during a rolling upgrade.
 
 Cluster-wide exactly-once execution is not guaranteed. See the
 [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) for remaining work and

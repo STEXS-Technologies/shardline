@@ -144,7 +144,7 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
     admin_pool.close().await;
 
     let search_path = format!("SET search_path TO {schema}, public");
-    Some(fixture_stage(
+    let pool = fixture_stage(
         PgPoolOptions::new()
             .max_connections(8)
             .after_connect(move |connection, _metadata| {
@@ -159,5 +159,12 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
             .connect(&database_url)
             .await,
         "isolated connection pool/search path",
-    ))
+    );
+    fixture_stage(
+        super::PostgresIndexStore::new(pool.clone())
+            .initialize_remote_delete_guard()
+            .await,
+        "isolated remote delete guard",
+    );
+    Some(pool)
 }

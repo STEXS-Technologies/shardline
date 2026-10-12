@@ -32,33 +32,33 @@ This document is for reviewers deciding whether the integration is safe to ship.
 - **Remote effects and acknowledgements.** Local GC crash boundaries and a real
   MinIO deletion with its response withheld have passed. The latter preserves
   unresolved history after killing the original CLI; fresh fsck does not repeat
-  the delete. Delayed remote effects after ownership changes and equivalent
-  coverage for other operations remain open.
-  The delayed-delete takeover regression has now been run and fails: after
-  terminating GC's database owner, a new hold is acknowledged while the bytes
-  still exist, then the paused S3 request removes those bytes. The hold remains
-  and GC reports failure. Accurate history does not prevent that data loss.
-  A missing completion record must never authorize repeating an unknown effect.
-  The chosen behavior is a clear retryable error for a later hold or write to the
-  affected object until the earlier delete is settled. The regression requires
-  rejection of the racing hold; the current implementation still acknowledges it.
-  A durable per-object marker and transactional retention guard now provide the
-  first part of the fix. Markers survive connection replacement; stale completion
-  attempts cannot clear newer markers. Completed markers are removed and one
-  persistent sequence prevents identity reuse. GC does not yet publish these
-  markers around its remote requests, so this does **not** close the S3 race.
+  the delete. The previously failing hold/delete takeover regression now passes:
+  terminating GC's database owner while its S3 delete is paused makes the later
+  hold return a typed retryable error. A replacement ordinary GC also rejects
+  the pending object without sending a second delete. The old request can still
+  finish, but it cannot erase newly acknowledged hold protection. Its source
+  records failure and its original marker remains unresolved.
+  Normal Postgres/S3 GC now admits quarantine, OCI tombstone and resumable-staging
+  deletes durably, sends each through a client with mutation retries disabled,
+  and settles only a successful response on the original ownership session.
+  Completed markers are removed; one sequence prevents stale identity reuse.
+  A normal-completion drill verifies marker removal and subsequent hold admission.
   The existing owner-run `db migrate up` installs functions and a retention
   trigger atomically, keeping the 35 released migration records and their
   checksums unchanged. The trigger also checks older retention writers.
-  No runtime fence-table grant is required. Other object publication paths and
-  safe settlement of remote attempts remain required work.
+  No runtime fence-table grant is required. Other object/reference publication
+  paths, a supported reconciliation path for uncertain markers, protection when
+  an older GC binary issues the delete, and remote coverage for other operations
+  remain required work. A missing completion record never authorizes replay.
 - **Large deployments and history growth.** Long operations, large reports and
   total growth of unresolved history still need deployment-scale validation.
   Unfinished evidence is retained, so completed-history cleanup alone does not
   establish a total storage bound.
 - **Remaining compatibility coverage.** Passing deployment fixtures establish
   those configurations. They do not establish compatibility for every filesystem,
-  permission layout or deployment manifest.
+  permission layout or deployment manifest. History across different database
+  logins still needs review: the current deployment fingerprint includes the
+  login name. The existing-role drill inspects history using that role's scope.
 
 These are merge requirements. A passing dependency upgrade or optional worker
 test does not close them.
@@ -88,13 +88,16 @@ test does not close them.
 | Repeated and concurrent runs | Distinct scheduled runs complete. Concurrent ordinary rebuilds serialize through the existing Postgres barrier; one removes the fixture's stale record and the next removes zero. |
 | Local crash and reboot | GC interrupted after admission, a committed quarantine change, or a printed report stays unresolved. Fresh diagnostics do not replay it. Actual VM resets also preserve the original records. |
 | Remote delete acknowledgement | A proxy forwards the actual S3 deletion to MinIO and withholds only its successful response. The object and candidate are absent while the original ordinary CLI is still alive. Killing that process preserves its three admission records without a completion record. Fresh fsck completes without another delete. This proves unresolved reporting and no diagnostic replay at this boundary; it does not prove fencing of delayed requests during takeover. |
-| Delayed delete during takeover: failing | A proxy pauses the request before MinIO applies it. GC's lock-owning backend is terminated, a new hold succeeds while the bytes exist, and releasing the old request deletes the held object. GC's recorded failure and the surviving hold are verified before the protection assertion fails. This is an explicit merge blocker, not a passing safety guarantee. |
+| Delayed delete during takeover | Real Postgres/MinIO regression passes: the paused old request has a durable marker; killing only GC's owner rejects the later hold with the typed retryable error. A replacement ordinary GC sends no duplicate delete. Releasing the old request records source failure and preserves its marker. This covers current GC and retention writers, not every publication path or an older GC source. |
+| Acknowledged remote delete | Ordinary Postgres/S3 GC records verified completion after the single-attempt response and marker settlement. Exactly one delete is applied, no object marker remains, and a later hold succeeds. |
 | Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
 | Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
 | Connection loss during rebuild | The lock and metadata operations share one non-replaceable connection. The two-machine fault drill terminates that connection, observes a verified failed source run and a completed waiter with one stale-record removal. A separate database test rejects a stale pool's attempted write after takeover. |
 | Retention ownership | Hold setting and release use the same session for the shared barrier and metadata writes. Fault tests reject a late setting after exclusive takeover and preserve an active hold when a blocked release loses its connection. Normal hold/GC contention and physical OCI protection also pass. |
-| Pending delete primitives | Seven actual Postgres tests cover durable markers, absent-row serialization, unique concurrent admission identities, stale completion rejection, overflow, unchanged retention metadata/evidence on rejection, and refusal of delete admission without an installed trigger. These are primitive tests; normal GC still needs to use the protocol at its remote effect boundary. |
+| Pending delete primitives | Nine actual Postgres tests cover durable markers, absent-row serialization, unique concurrent admission identities, stale completion rejection, overflow, unchanged retention metadata/evidence on rejection, refusal without an installed trigger, cross-schema rejection, and safe installation with quotes, backslashes and template tokens in schema names. |
+| Single-attempt S3 client | A real HTTP fixture returns a retryable server error or drops the response after receiving the delete. Both cases return an error after exactly one request. Existing clients keep their retry policy for other operations. |
 | Existing retention role and mixed writers | Released 1.11.3 and current native binaries use the same restricted role with no fence-table grant. Both work before and after the normal owner-run upgrade, reject a fixture-only pending delete, and work again after its settlement. The current error explains that retry must wait for reconciliation. Released migration verification accepts the upgraded schema. This checks hold commands, not every publication path or released-server startup. |
+| Existing GC role | Released 1.11.3 and current native binaries both mark and physically sweep an expired MinIO object using a role with no fence-table access. Current GC records verified completion, settles its marker, and admits a later hold. This regression failed before admission/settlement moved behind the scoped, authorized database functions. |
 | Repair ownership | A database regression first demonstrated repair removing an expired hold after losing its separate lock connection during GC takeover. Repair now binds its scan and metadata changes to the lock-owning session. The database regression and two-machine `repair-connection-loss` drill pass: the source records failure, the waiting rebuild completes, and the expired hold remains unchanged. This covers metadata changes, not remote mutations by other operations. |
 | GC database ownership | A real database regression first reproduced GC completing its blocked scan after losing the coordination connection during exclusive takeover. Mutating GC now binds its metadata work to that connection. The regression rejects continuation, creates no quarantine row or clock anchor, and leaves the fixture object intact. The two-machine `gc-connection-loss` drill records a failed source GC and a completed waiting rebuild with one stale-record removal. This does not establish atomic fencing of remote requests already issued or delayed during takeover. |
 | Lock ordering | A queued exclusive owner blocks later shared readers. Cancelling an acquisition closes its session; completed metadata work releases it. |
@@ -211,12 +214,18 @@ CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT cargo test -p shardline-server
 Confirm the log reports a resolved stack and the final MinIO-deletion assertion;
 the drill explicitly reports a skip when its deployment prerequisites are absent.
 
-The delayed-delete regression is explicitly ignored in normal test runs because
-the required remote fence is not implemented. It was executed against real
-Postgres/MinIO and fails at the held-object protection assertion. Run it with:
+The delayed-delete regression now passes against real Postgres/MinIO and is
+included in normal test runs. Run it directly with:
 
 ```bash
-CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT cargo test -p shardline-server --test deployment_chaos gc_acknowledgement::drill_gc_delayed_delete_rejects_hold_after_takeover -- --ignored --nocapture
+CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT cargo test -p shardline-server --test deployment_chaos gc_acknowledgement::drill_gc_delayed_delete_rejects_hold_after_takeover -- --nocapture
 ```
 
-This test must pass and its ignore marker must be removed before merging.
+Run all remote-delete drills, including the existing-role comparison, with:
+
+```bash
+CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT SHARDLINE_N_MINUS_ONE_BINARY=/absolute/path/to/RELEASED cargo test -p shardline-server --test deployment_chaos gc_acknowledgement:: -- --nocapture --test-threads=1
+```
+
+Check that no drill was skipped. These passing boundaries do not close the other
+publication, reconciliation and deployment-scale requirements above.
