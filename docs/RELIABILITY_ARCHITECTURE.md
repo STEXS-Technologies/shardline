@@ -317,6 +317,13 @@ The generic legacy GC library entry points preserve their signatures; embedders
 wanting this boundary use `run_postgres_gc_with_remote_delete_protection` with
 the same ownership-bound record and index adapters.
 
+The dedupe trigger checks both the mapped shard key and the physical chunk key
+derived from a canonical 64-character lowercase hash. It locks their distinct
+bounded slots in sorted order before checking exact markers. Inserts and hash
+updates from older SQL writers therefore participate without new grants.
+Malformed legacy hashes retain their prior behavior. This does not establish
+protection for other chunk members hidden in an older writer's xorb payload.
+
 The existing admin server exposes read-only pending-marker inspection at
 `/api/v1/tasks/maintenance/deletes`. A schema-bound security-definer function
 requires the caller's existing maintenance read privileges and refuses to

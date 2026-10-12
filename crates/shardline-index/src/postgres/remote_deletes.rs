@@ -469,7 +469,7 @@ mod tests {
         query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ('large','version','global','large','content',$1)")
             .bind(sqlx::types::Json(record)).execute(&mut *transaction).await.unwrap();
         query("INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key)
-               SELECT ordinal::text, 'large/shard/' || ordinal::text FROM generate_series(1, 20000) ordinal")
+               SELECT lpad(to_hex(ordinal), 64, '0'), 'large/shard/' || ordinal::text FROM generate_series(1, 20000) ordinal")
             .execute(&mut *transaction).await.unwrap();
         let locks: i64 = query_scalar(
             "SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory'",
@@ -705,6 +705,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_dedupe_publication_guards_chunk_identity_and_preserves_previous_mapping() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let hash = "ab".repeat(32);
+        let safe_hash = "cd".repeat(32);
+        let key = ObjectKey::parse(&format!("ab/{hash}")).unwrap();
+        query("INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key) VALUES ($1, 'safe/original')")
+            .bind(&safe_hash).execute(&pool).await.unwrap();
+        let permit = store.begin_remote_delete(&key).await.unwrap();
+        let error = query("INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key) VALUES ($1, 'safe/new')")
+            .bind(&hash).execute(&pool).await.unwrap_err();
+        assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+        let update_error =
+            query("UPDATE shardline_dedupe_shards SET chunk_hash=$1 WHERE chunk_hash=$2")
+                .bind(&hash)
+                .bind(&safe_hash)
+                .execute(&pool)
+                .await
+                .unwrap_err();
+        assert!(PostgresMetadataStoreError::from(update_error).is_remote_delete_pending());
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT chunk_hash, shard_object_key FROM shardline_dedupe_shards")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(safe_hash, "safe/original".to_owned())]);
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        let mut publication = pool.begin().await.unwrap();
+        query("INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key) VALUES ($1, 'safe/new')")
+            .bind(&hash).execute(&mut *publication).await.unwrap();
+        let mut admission = Box::pin(store.begin_remote_delete(&key));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut admission)
+                .await
+                .is_err()
+        );
+        publication.commit().await.unwrap();
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), admission)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store.finish_remote_delete(&next).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn legacy_dedupe_publication_rejects_pending_delete_and_preserves_previous_mapping() {
         let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
@@ -796,6 +843,9 @@ mod tests {
         let hash = "ab".repeat(32);
         let container = ObjectKey::parse(&format!("xorbs/default/ab/{hash}.xorb")).unwrap();
         let container_permit = store.begin_remote_delete(&container).await.unwrap();
+        let chunk_hash = "ef".repeat(32);
+        let chunk = ObjectKey::parse(&format!("ef/{chunk_hash}")).unwrap();
+        let chunk_permit = store.begin_remote_delete(&chunk).await.unwrap();
         let mut connection = pool.acquire().await.unwrap();
         query(sqlx::AssertSqlSafe(format!(
             "SET SESSION AUTHORIZATION {role_identifier}"
@@ -818,6 +868,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+        let chunk_error = query(insert)
+            .bind(&chunk_hash)
+            .bind("safe/chunk-shard")
+            .execute(&mut *connection)
+            .await
+            .unwrap_err();
+        assert!(PostgresMetadataStoreError::from(chunk_error).is_remote_delete_pending());
         for hash_to_publish in ["cd".repeat(32), hash.clone()] {
             let record =
                 serde_json::json!({"chunk_size": 0, "chunks": [{"hash": hash_to_publish}]});
@@ -851,6 +908,7 @@ mod tests {
         drop(connection);
         assert!(store.finish_remote_delete(&permit).await.unwrap());
         assert!(store.finish_remote_delete(&container_permit).await.unwrap());
+        assert!(store.finish_remote_delete(&chunk_permit).await.unwrap());
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "DROP OWNED BY {role_identifier}; DROP ROLE {role_identifier};"
         )))
