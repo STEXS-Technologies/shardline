@@ -858,3 +858,19 @@ Current GC also records its own completed run without payload control objects.
 This checks report compatibility, not verified chunk identities, reclamation,
 production latency or unlimited workload size. The reproducible fixture is
 `scripts/shardline/verify_maintenance_large_diagnostics.sh`.
+
+## Saved-reply recovery preserves user objects
+
+The PostgreSQL `remote_delete_reply_recovery` integration test passes against
+an owned fixture bootstrapped with released 1.11.3 migrations. It now places
+user-object bytes at both the acknowledged-delete key and the unresolved key.
+After advancing past 64 invalid replies and settling the valid reply, both
+objects remain byte-for-byte unchanged. Reprocessing the same saved reply
+retires its evidence without deleting either user object. The missing-reply
+attempt remains pending until the fixture explicitly settles it.
+
+The original work pool is closed before recovery, and its old settlement call
+still fails. This proves the tested recovery path consumes evidence rather than
+replaying a user delete. Storage in this test is local; it does not establish
+remote-request behavior or safety for uncovered publication paths. Targeted
+strict Clippy and workspace formatting checks also pass.

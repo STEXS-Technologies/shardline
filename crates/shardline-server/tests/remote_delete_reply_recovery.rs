@@ -35,6 +35,16 @@ fn save(objects: &ServerObjectStore, receipt: &RemoteDeleteReceipt) -> ObjectKey
     key
 }
 
+fn read(objects: &ServerObjectStore, key: &ObjectKey) -> Vec<u8> {
+    let length = objects.metadata(key).unwrap().unwrap().length();
+    objects
+        .read_range(
+            key,
+            shardline_protocol::ByteRange::new(0, length.saturating_sub(1)).unwrap(),
+        )
+        .unwrap()
+}
+
 async fn schema_pool(url: &str, schema: String) -> PgPool {
     PgPoolOptions::new()
         .max_connections(1)
@@ -122,6 +132,12 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
     let unknown_permit = work.begin_remote_delete(&unknown).await.unwrap();
     let directory = tempfile::tempdir().unwrap();
     let objects = ServerObjectStore::local(directory.path().to_path_buf()).unwrap();
+    // Recovery may only consume reply evidence. Even a user object recreated
+    // outside a covered write path must never be deleted by reconciliation.
+    let known_payload = b"user bytes present during saved-reply recovery";
+    let unknown_payload = b"user bytes protected by an unresolved attempt";
+    write(&objects, &object, known_payload);
+    write(&objects, &unknown, unknown_payload);
     let receipt_key = save(&objects, &receipt);
     // End the source session before recovery; no private key or source process
     // is needed to settle the persisted observation.
@@ -167,6 +183,8 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
             .is_remote_delete_pending()
     );
     assert!(objects.contains(poison_keys.first().unwrap()).unwrap());
+    assert_eq!(read(&objects, &object), known_payload);
+    assert_eq!(read(&objects, &unknown), unknown_payload);
     assert!(work.finish_remote_delete(&permit).await.is_err());
     for poison in poison_keys {
         objects.delete_if_present(&poison).unwrap();
@@ -182,6 +200,8 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
         (1, 0, 1)
     );
     assert!(!objects.contains(&receipt_key).unwrap());
+    assert_eq!(read(&objects, &object), known_payload);
+    assert_eq!(read(&objects, &unknown), unknown_payload);
     assert!(
         replay
             .begin_remote_delete(&unknown)
