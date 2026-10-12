@@ -18,9 +18,11 @@ const REMOTE_DELETE_SEQUENCE_DOMAIN: &str = "maintenance-remote-delete-sequence"
 #[derive(Debug)]
 #[must_use = "retain this permit until the remote delete is proved settled"]
 pub struct PostgresRemoteDeletePermit {
-    object_key: ObjectKey,
-    epoch: i64,
-    schema: String,
+    pub(super) object_key: ObjectKey,
+    pub(super) epoch: i64,
+    pub(super) schema: String,
+    pub(super) receipt_key: Option<[u8; 32]>,
+    pub(super) receipt_namespace: Option<String>,
 }
 
 impl PostgresRemoteDeletePermit {
@@ -148,7 +150,12 @@ impl PostgresIndexStore {
         // no catalog text is interpolated into dollar-quoted function bodies.
         // Expand only tokens from the original template. A schema name may
         // itself contain either token; never expand inserted catalog text.
-        let sql = include_str!("remote_delete_guard.sql")
+        let template = format!(
+            "{}\n{}",
+            include_str!("remote_delete_guard.sql"),
+            include_str!("remote_delete_receipts.sql")
+        );
+        let sql = template
             .split("@SCHEMA@")
             .map(|part| part.replace("@SCHEMA_LITERAL@", &schema_literal))
             .collect::<Vec<_>>()
@@ -175,6 +182,14 @@ impl PostgresIndexStore {
         &self,
         object_key: &ObjectKey,
     ) -> Result<PostgresRemoteDeletePermit, PostgresMetadataStoreError> {
+        self.begin_remote_delete_with_key(object_key, None).await
+    }
+
+    pub(super) async fn begin_remote_delete_with_key(
+        &self,
+        object_key: &ObjectKey,
+        receipt_key: Option<[u8; 32]>,
+    ) -> Result<PostgresRemoteDeletePermit, PostgresMetadataStoreError> {
         let mut transaction = self.pool.begin().await?;
         let initialized = query_scalar::<_, bool>(
             "SELECT to_regprocedure('shardline_remote_delete_guard_v1(text,text)') IS NOT NULL
@@ -198,29 +213,38 @@ impl PostgresIndexStore {
                 "remote delete protection requires the existing db migrate up command".to_owned(),
             ));
         }
-        let (schema, epoch) = sqlx::query_as::<_, (String, i64)>(
-            "SELECT current_schema(), shardline_remote_delete_begin_v1(current_schema(), $1)",
-        )
-        .bind(object_key.as_str())
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(|error| {
-            if error
-                .as_database_error()
-                .and_then(|error| error.code())
-                .as_deref()
-                == Some("SLD02")
-            {
-                PostgresMetadataStoreError::IntegerOutOfRange("remote delete epoch".to_owned())
-            } else {
-                PostgresMetadataStoreError::from(error)
-            }
-        })?;
+        let begin = if receipt_key.is_some() {
+            "SELECT current_schema(), shardline_remote_delete_receipt_begin_v1(current_schema(), $1, $2), shardline_task_history_scope_v1(current_schema())"
+        } else {
+            "SELECT current_schema(), shardline_remote_delete_begin_v1(current_schema(), $1), NULL::TEXT"
+        };
+        let mut begin = sqlx::query_as::<_, (String, i64, Option<String>)>(sqlx::AssertSqlSafe(
+            begin.to_owned(),
+        ))
+        .bind(object_key.as_str());
+        if let Some(receipt_key) = receipt_key {
+            begin = begin.bind(hex::encode(receipt_key));
+        }
+        let (schema, epoch, receipt_namespace) =
+            begin.fetch_one(&mut *transaction).await.map_err(|error| {
+                if error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref()
+                    == Some("SLD02")
+                {
+                    PostgresMetadataStoreError::IntegerOutOfRange("remote delete epoch".to_owned())
+                } else {
+                    PostgresMetadataStoreError::from(error)
+                }
+            })?;
         transaction.commit().await?;
         Ok(PostgresRemoteDeletePermit {
             object_key: object_key.clone(),
             epoch,
             schema,
+            receipt_key,
+            receipt_namespace,
         })
     }
 
@@ -242,14 +266,32 @@ impl PostgresIndexStore {
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = self.pool.begin().await?;
         let quoted_schema = format!("\"{}\"", permit.schema.replace('"', "\"\""));
-        let changed = query_scalar::<_, bool>(sqlx::AssertSqlSafe(format!(
-            "SELECT {quoted_schema}.shardline_remote_delete_finish_v1($1, $2, $3)"
-        )))
-        .bind(&permit.schema)
-        .bind(permit.object_key().as_str())
-        .bind(permit.epoch())
-        .fetch_one(&mut *transaction)
-        .await?;
+        if permit.receipt_key.is_some() {
+            let namespace = query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+                "SELECT {quoted_schema}.shardline_task_history_scope_v1($1)"
+            )))
+            .bind(&permit.schema)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if permit.receipt_namespace.as_ref() != Some(&namespace) {
+                return Ok(false);
+            }
+        }
+        let finish = if permit.receipt_key.is_some() {
+            format!(
+                "SELECT {quoted_schema}.shardline_remote_delete_receipt_finish_v1($1, $2, $3, $4)"
+            )
+        } else {
+            format!("SELECT {quoted_schema}.shardline_remote_delete_finish_v1($1, $2, $3)")
+        };
+        let mut finish = query_scalar::<_, bool>(sqlx::AssertSqlSafe(finish))
+            .bind(&permit.schema)
+            .bind(permit.object_key().as_str())
+            .bind(permit.epoch());
+        if let Some(key) = permit.receipt_key {
+            finish = finish.bind(hex::encode(key));
+        }
+        let changed = finish.fetch_one(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(changed)
     }

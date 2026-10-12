@@ -100,6 +100,10 @@ BEGIN
         'DELETE FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=$2 AND epoch=$3', index_schema
     ) USING 'maintenance-remote-delete', object_key, expected_epoch;
     GET DIAGNOSTICS changed = ROW_COUNT;
+    IF changed = 1 THEN
+        EXECUTE format('DELETE FROM %I.shardline_resource_fences WHERE domain=$1 AND epoch=$2', index_schema)
+          USING 'maintenance-remote-delete-receipt-key', expected_epoch;
+    END IF;
     RETURN changed = 1;
 END;
 $finish_delete$;
