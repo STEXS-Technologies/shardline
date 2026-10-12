@@ -12,7 +12,7 @@ pub(crate) use path::parse_oci_path;
 pub(crate) use token::oci_registry_token;
 
 #[cfg(test)]
-mod test_helpers;
+pub(crate) mod test_helpers;
 
 #[cfg(test)]
 mod tests;

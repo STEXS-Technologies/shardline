@@ -33,6 +33,11 @@ secret rotation and removal. Its startup sweep runs inside the server and stops
 if its database connection is lost. A failed sweep leaves ordinary request
 handling and lazy encryption enabled.
 
+On Postgres, provider callbacks save their delivery ID and repository changes
+together. If the database lock owner disappears before the change commits,
+neither is saved: the provider can retry the same delivery. Successful retries
+are deduplicated. This needs no extra process or configuration.
+
 ## When a delete is interrupted
 
 A later hold or covered write to an object with an unresolved delete returns a
