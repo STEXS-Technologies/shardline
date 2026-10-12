@@ -12,6 +12,205 @@ const REPO: &str = "team/assets";
 const TAG: &str = "latest";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_ordinary_gc_reclaims_abandoned_manifest_after_hold_release() {
+    use shardline_index::{AsyncIndexStore as _, OciObjectStore as _};
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&url).await.unwrap();
+    let schema = format!(
+        "staged_gc_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut scoped_url = url::Url::parse(&url).unwrap();
+    let old_options = scoped_url
+        .query_pairs()
+        .find(|(key, _)| key == "options")
+        .map_or_else(String::new, |(_, value)| value.into_owned());
+    let other_parameters: Vec<_> = scoped_url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    scoped_url.set_query(None);
+    scoped_url
+        .query_pairs_mut()
+        .extend_pairs(other_parameters)
+        .append_pair("options", &format!("{old_options} -csearch_path={schema}"));
+    let url = scoped_url.as_str();
+    let bootstrap = sqlx::PgPool::connect(url).await.unwrap();
+    crate::apply_database_migrations(&bootstrap).await.unwrap();
+    bootstrap.close().await;
+    let cluster = super::test_helpers::build_oci_postgres_test_cluster_for_url(url)
+        .await
+        .unwrap();
+    let backend = match &cluster.node_a.backend {
+        crate::ServerBackend::Postgres(backend) => Some(backend),
+        crate::ServerBackend::Local(_) => None,
+    }
+    .unwrap();
+    let store = backend.index_store();
+    store.initialize_remote_delete_guard().await.unwrap();
+    let app = oci_test_router(&cluster.node_a);
+    let repository = format!("abandoned/manifest-{}", std::process::id());
+    let config = upload_blob(&app, &repository, b"{}").await;
+    let layer = upload_blob(&app, &repository, b"layr").await;
+    let document = test_manifest_json(&config, &layer);
+    let digest = sha256_hex(document.as_bytes());
+    let key = shardline_index::OciObjectKey {
+        scope_namespace: "global".to_owned(),
+        repository: repository.clone(),
+        kind: shardline_index::OciObjectKind::Manifest,
+        digest_hex: digest.clone(),
+    };
+    let repository_id = sha256_hex(repository.as_bytes());
+    let physical = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/manifests/{digest}"
+    ))
+    .unwrap();
+    let media = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/manifest-media-types/{digest}"
+    ))
+    .unwrap();
+    let mut connection = store.pool().acquire().await.unwrap();
+    store
+        .stage_oci_object_on_connection(&mut connection, &key, &[])
+        .await
+        .unwrap();
+    drop(connection);
+    cluster
+        .node_a
+        .backend
+        .put_object_bytes_if_absent(&physical, document.as_bytes().to_vec())
+        .await
+        .unwrap();
+    cluster
+        .node_a
+        .backend
+        .put_object_bytes_if_absent(&media, MANIFEST_MEDIA_TYPE.as_bytes().to_vec())
+        .await
+        .unwrap();
+    let mut published: serde_json::Value = serde_json::from_str(&document).unwrap();
+    published.as_object_mut().unwrap().insert(
+        "annotations".to_owned(),
+        serde_json::json!({"status": "published"}),
+    );
+    assert_eq!(
+        send_with_content_type(
+            &app,
+            Method::PUT,
+            &format!("/v2/{repository}/manifests/keep"),
+            Body::from(published.to_string()),
+            MANIFEST_MEDIA_TYPE
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    let hold = shardline_index::RetentionHold::new(
+        physical.clone(),
+        "keep staged bytes".to_owned(),
+        shardline_protocol::unix_now_seconds_lossy(),
+        None,
+    )
+    .unwrap();
+    let shared = crate::maintenance_barrier::postgres_shared_work_pool(url)
+        .await
+        .unwrap();
+    shardline_index::PostgresIndexStore::new(shared.clone())
+        .upsert_retention_hold(&hold)
+        .await
+        .unwrap();
+    shared.close().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let options = crate::LocalGcOptions {
+        sweep: true,
+        retention_seconds: 0,
+        ..crate::LocalGcOptions::default()
+    };
+    for held in [true, false] {
+        if !held {
+            let shared = crate::maintenance_barrier::postgres_shared_work_pool(url)
+                .await
+                .unwrap();
+            assert!(
+                shardline_index::PostgresIndexStore::new(shared.clone())
+                    .delete_retention_hold(&physical)
+                    .await
+                    .unwrap()
+            );
+            shared.close().await;
+        }
+        let work = crate::maintenance_barrier::postgres_exclusive_work_pool(url)
+            .await
+            .unwrap();
+        let report = shardline_gc::run_postgres_gc_with_remote_delete_protection(
+            &shardline_index::PostgresRecordStore::new(work.clone()),
+            &shardline_index::PostgresIndexStore::new(work.clone()),
+            &backend.object_store(),
+            &[crate::ServerFrontend::Oci],
+            options,
+        )
+        .await
+        .unwrap();
+        work.close().await;
+        assert_eq!(report.report.reclaimed_oci_tombstones, u64::from(!held));
+        if held {
+            assert!(
+                cluster
+                    .node_a
+                    .backend
+                    .object_length(&physical)
+                    .await
+                    .is_ok()
+            );
+            assert!(cluster.node_a.backend.object_length(&media).await.is_ok());
+        } else {
+            assert!(matches!(
+                cluster.node_a.backend.object_length(&physical).await,
+                Err(crate::ServerError::NotFound)
+            ));
+            assert!(matches!(
+                cluster.node_a.backend.object_length(&media).await,
+                Err(crate::ServerError::NotFound)
+            ));
+        }
+        assert_eq!(
+            send(
+                &app,
+                Method::GET,
+                &format!("/v2/{repository}/manifests/keep"),
+                Body::empty()
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+    assert!(
+        !store
+            .list_oci_object_tombstones()
+            .await
+            .unwrap()
+            .iter()
+            .any(|entry| entry.key == key)
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_interrupted_manifest_bytes_stay_hidden_until_publication() {
     if std::env::var("DATABASE_URL").is_err() {
         return;

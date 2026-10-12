@@ -27,16 +27,22 @@ pub(crate) struct OciPostgresTestCluster {
 
 pub(crate) async fn build_oci_postgres_test_cluster() -> Option<OciPostgresTestCluster> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
+    build_oci_postgres_test_cluster_for_url(&database_url).await
+}
+
+pub(crate) async fn build_oci_postgres_test_cluster_for_url(
+    database_url: &str,
+) -> Option<OciPostgresTestCluster> {
     let temp = tempfile::tempdir().ok()?;
     let shared_store = crate::ServerObjectStore::local(temp.path().join("objects")).ok()?;
     let node_a = build_oci_postgres_state(
-        &database_url,
+        database_url,
         temp.path().join("node-a"),
         shared_store.clone(),
     )
     .await?;
     let node_b =
-        build_oci_postgres_state(&database_url, temp.path().join("node-b"), shared_store).await?;
+        build_oci_postgres_state(database_url, temp.path().join("node-b"), shared_store).await?;
     Some(OciPostgresTestCluster {
         _temp: temp,
         node_a,

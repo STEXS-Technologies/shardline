@@ -56,6 +56,10 @@ upload is interrupted after storing bytes, those bytes remain hidden from
 manifest reads; a successful retry can publish them. Existing published
 manifests remain visible during retries. This uses the existing verified
 journal and adds a storage existence check, with no extra service or grants.
+The usual owner-run database upgrade adds hidden manifests to the existing OCI
+deletion inventory. Ordinary GC can then reclaim abandoned uploads after the
+configured retention period, while preserving active holds. Cleanup under
+row-scoped database permissions still needs additional coverage.
 
 If GC received a successful delete reply, it tries to save that reply in your
 existing object storage before recording completion in the database. The next
