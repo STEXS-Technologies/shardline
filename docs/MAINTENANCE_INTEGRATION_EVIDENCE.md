@@ -706,3 +706,23 @@ an internal cleanup change, with no additional process or operator configuration
 All 18 focused maintenance tests pass with owned PostgreSQL bootstrapped by
 released 1.11.3. Strict CLI/server Clippy, native local and restricted-S3 copies,
 and all four read-only-root command comparisons also pass.
+
+## Public-library local startup
+
+`embedded_task_history` constructs the public router directly with the existing
+local configuration and an application-owned logging subscriber. For All, Api
+and Transfer roles, it starts the router twice against the same metadata. Each
+startup removes a newly introduced expired legacy LFS staging session and saves
+a distinct verified completion, retaining the previous run. Recorded ownership
+uses the application PID. Startup creates no CLI maintenance directory or task
+objects in payload storage, and the application's logging subscriber still
+receives its events afterward.
+The integration test and strict Clippy check for its target pass.
+
+```bash
+cargo test -p shardline-server --test embedded_task_history
+```
+
+This proves the tested local library configuration, not arbitrary embedded
+Postgres routing, row policies or remote storage layouts. Those checks remain
+part of the deployment gates.
