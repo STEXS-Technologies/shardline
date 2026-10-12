@@ -254,6 +254,17 @@ This document is for reviewers deciding whether the integration is safe to ship.
   connection/resource limits and supported row-scoped history remain unfinished.
   Runtime routing must follow the work session's resolved metadata target;
   another connection guessed from configuration does not establish that match.
+  The artifact API now accepts that actual connection for publication, reads,
+  paging and deletion. These methods preserve its schema and transaction;
+  successful evidence writes inside a work transaction remain subject to its
+  rollback. Evidence conflicts roll back their own savepoint, and the original
+  statement timeout is restored. Existing pool-based methods remain available.
+  Six real PostgreSQL artifact tests pass, including a borrowed session whose
+  schema differs from its pool default, publication and deletion rollback,
+  recovery after a conflicting publication, and lock contention under a
+  100 ms work timeout. Strict index Clippy also passes.
+  This provides the connection API needed for tracker routing; the tracker has
+  not switched its PostgreSQL/S3 storage backend yet.
   The native mixed-version OCI/S3 drill passes with this owner extension: the
   released ledger and original table grants are unchanged, the existing writer
   has no direct artifact-table access, and prior publication/crash guarantees
