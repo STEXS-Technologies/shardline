@@ -27,6 +27,24 @@ impl fmt::Debug for PostgresTaskMetadata {
 }
 
 impl TaskEvidenceStore {
+    /// Keeps the verified target while separating final evidence from the work
+    /// session. The lazy pool opens no connection until the work pool is closed.
+    pub(super) fn detach_work_history(&mut self) -> Result<(), ServerError> {
+        let Some(metadata) = &mut self.postgres_metadata else {
+            return Ok(());
+        };
+        let url = metadata.config.index_postgres_url().ok_or_else(|| {
+            ServerError::Io(std::io::Error::other("missing task metadata target"))
+        })?;
+        metadata.pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy(url)
+            .map_err(PostgresMetadataStoreError::from)?;
+        metadata.close_after_io = true;
+        Ok(())
+    }
+
     /// Reuses a backend and the configuration used to create it. Selects
     /// metadata only after resolving an actual backend session. Older
     /// owner installations retain legacy reads and publication. No pool,
@@ -84,7 +102,7 @@ impl TaskEvidenceStore {
             .await
     }
 
-    async fn with_postgres_pool(
+    pub(super) async fn with_postgres_pool(
         mut self,
         config: &ServerConfig,
         pool: &PgPool,

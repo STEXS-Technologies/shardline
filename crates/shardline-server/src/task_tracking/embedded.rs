@@ -34,6 +34,43 @@ pub(crate) struct TaskReceipt {
 type TrackingResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 impl EmbeddedTaskTracker {
+    pub(crate) async fn for_work_pool(
+        &self,
+        config: &crate::ServerConfig,
+        pool: &sqlx::PgPool,
+    ) -> Result<Self, crate::ServerError> {
+        let (mut store, history_scope) = TaskEvidenceStore::from_config(config)?
+            .with_postgres_pool(config, pool, false)
+            .await?;
+        if store.postgres_metadata.is_some() {
+            let publication = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut connection = pool.acquire().await?;
+                sqlx::query("SELECT shardline_task_artifact_access_v1(current_schema(), 'publish')")
+                    .execute(&mut *connection)
+                    .await
+            })
+            .await
+            .map_err(|error| crate::ServerError::Io(std::io::Error::other(error)))?;
+            if let Err(error) = publication {
+                if error
+                    .as_database_error()
+                    .is_some_and(|database| database.code().as_deref() == Some("42501"))
+                {
+                    // Read access alone must not redirect an existing Hub
+                    // writer to metadata it cannot publish. No new grant.
+                    store.postgres_metadata = None;
+                } else {
+                    return Err(shardline_index::PostgresMetadataStoreError::from(error).into());
+                }
+            }
+        }
+        Ok(Self {
+            store,
+            deployment: self.deployment,
+            history_scope,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) const fn new(objects: ServerObjectStore, deployment: Digest) -> Self {
         Self::from_store(TaskEvidenceStore::from_objects(objects), deployment)
@@ -170,6 +207,11 @@ fn blob(bytes: &[u8]) -> TrackingResult<BlobRef> {
 }
 
 impl TaskReceipt {
+    pub(crate) fn detach_work_history(&mut self) -> TrackingResult<()> {
+        self.store.detach_work_history()?;
+        Ok(())
+    }
+
     pub(crate) fn bind_history_scope(&self, scope: Digest) -> TrackingResult<()> {
         self.store
             .publish_history_scope_binding(&self.identity, &self.key, scope)?;

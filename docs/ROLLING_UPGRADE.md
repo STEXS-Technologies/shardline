@@ -23,15 +23,21 @@ and optional-runner changes. Default integration must also satisfy the
 [deployment acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
 
 The incremental reliability dependency upgrade planned for the next patch
-preserves the evidence formats written by 1.11.3. It adds no database migration
-or new persistent session format and requires no new environment variables or
-signing keys. The version bump and release tag are prepared separately.
+preserves the evidence formats written by 1.11.3. The dependency change requires
+no new environment variables, signing keys or persistent session format.
+The integration also installs optional metadata and protection functions through
+the usual owner-run `shardline db migrate up`, even when the migration ledger has
+no pending entries. See the [database migration guide](DATABASE_MIGRATIONS.md).
+The version bump and release tag are prepared separately.
 
 For deployments already on 1.11.3, the dependency upgrade itself does not add a
 same-key write restriction: both versions use the same state machine, journal
 keys, digest encodings, and Merkle projection. Follow the normal role-by-role
 drain and readiness procedure. Existing maintenance coordination remains in
-force. Deployments upgrading from earlier versions must still follow every
+force. This describes the dependencies themselves; the integration's protection
+for uncertain remote deletes can reject covered writes until reconciliation.
+See the [maintenance guide](MAINTENANCE_INTEGRATION_UX.md).
+Deployments upgrading from earlier versions must still follow every
 applicable schema, session, writer-routing, GC, and repair restriction below;
 this dependency upgrade does not remove those requirements.
 
