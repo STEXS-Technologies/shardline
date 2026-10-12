@@ -50,6 +50,10 @@ These are scoped results, not a claim that every deployment is compatible:
   replies can settle the matching delete without sending another user delete.
 - History distinguishes completed, failed and unresolved runs. Signed records
   and reports are verified; unfinished and corrupt evidence is retained.
+- A mark-only GC comparison preserves released output, status and payload bytes
+  with 4,096 synthetic orphan entries. Both diagnostic exports exceed 1 MiB;
+  all entries and persisted timestamps match. This does not establish reclamation
+  safety or production performance.
 
 See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
 and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)
@@ -66,7 +70,7 @@ The following still need implementation or stronger evidence before merge:
   object blocked. Object absence alone cannot safely clear it. Recovery and
   remote effects outside the covered paths need further checks.
 - **Scale and retained history.** Bounded pages are tested; whole-operation cost,
-  large reports, broad deployment performance and total unresolved-history
+  larger reports, broad deployment performance and total unresolved-history
   growth are not fully established. A 132-run metadata fixture drains completed
   history in batches while retaining unfinished and corrupt history, but
   retention and legacy inspection still walk the inventory. Metadata inspection
