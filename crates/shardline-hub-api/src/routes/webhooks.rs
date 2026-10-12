@@ -132,15 +132,24 @@ fn resolve_webhook_secret(
     };
     let repo_id = &webhook.repo_id;
     let decrypted = cipher.decrypt(repo_id, stored.expose_secret())?;
-    if decrypted.needs_upgrade {
+    if decrypted.needs_upgrade
+        && let Ok(encrypted) = cipher.encrypt(repo_id, decrypted.secret.expose_secret())
+    {
         // Rewrite the legacy plaintext row as ciphertext (best-effort).
-        if let Ok(encrypted) = cipher.encrypt(repo_id, decrypted.secret.expose_secret())
-            && let Err(e) =
-                state
-                    .store
-                    .update_webhook_secret(repo_id, &webhook.id, Some(&encrypted))
-        {
-            tracing::warn!("failed to upgrade webhook secret for {}: {e}", webhook.id);
+        match state.store.compare_and_swap_webhook_secret(
+            repo_id,
+            &webhook.id,
+            stored.expose_secret(),
+            Some(&encrypted),
+        ) {
+            Ok(Some(_)) => {}
+            Ok(None) => tracing::warn!(
+                webhook_id = webhook.id,
+                "webhook secret upgrade requires atomic storage comparison"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, webhook_id=webhook.id, "failed to upgrade webhook secret")
+            }
         }
     }
     Ok(Some(decrypted.secret))
@@ -816,6 +825,49 @@ mod tests {
         actual.update(body);
         let actual_sig = format!("sha256={}", hex::encode(actual.finalize().into_bytes()));
         assert_eq!(expected_sig, actual_sig);
+    }
+
+    #[test]
+    fn lazy_upgrade_preserves_a_secret_rotated_after_the_delivery_snapshot() {
+        let (_ts, state) = make_encrypted_state(&ENC_KEY);
+        let repo = "org/enc";
+        let hook = state
+            .store
+            .create_webhook(
+                repo,
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some("legacy-secret"),
+            )
+            .unwrap();
+        state
+            .store
+            .update_webhook_secret(repo, &hook.id, Some("rotated-secret"))
+            .unwrap();
+        let resolved = resolve_webhook_secret(&state, &hook).unwrap().unwrap();
+        assert_eq!(resolved.expose_secret(), "legacy-secret");
+        let current = state.store.list_webhooks(repo).unwrap().remove(0);
+        assert_eq!(
+            current.secret.as_ref().unwrap().expose_secret(),
+            "rotated-secret"
+        );
+        state
+            .store
+            .update_webhook_secret(repo, &hook.id, None)
+            .unwrap();
+        resolve_webhook_secret(&state, &hook).unwrap();
+        assert!(
+            state
+                .store
+                .list_webhooks(repo)
+                .unwrap()
+                .remove(0)
+                .secret
+                .is_none()
+        );
+        state.store.delete_webhook(repo, &hook.id).unwrap();
+        resolve_webhook_secret(&state, &hook).unwrap();
+        assert!(state.store.list_webhooks(repo).unwrap().is_empty());
     }
 
     #[test]

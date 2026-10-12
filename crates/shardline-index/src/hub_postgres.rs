@@ -1207,6 +1207,27 @@ impl HubStore for PostgresIndexStore {
         })
     }
 
+    fn compare_and_swap_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        expected_secret: &str,
+        secret: Option<&str>,
+    ) -> Result<Option<bool>, Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let webhook_id = webhook_id.to_owned();
+        let expected_secret = SecretString::from_secret(expected_secret);
+        let secret = secret.map(SecretString::from_secret);
+        block_on_async(async {
+            let changed = sqlx::query(
+                "UPDATE shardline_hub_webhooks SET secret=$1 WHERE repo_id=$2 AND id=$3 AND secret COLLATE pg_catalog.\"C\"=$4",
+            ).bind(secret.as_ref().map(SecretString::as_ref)).bind(&repo_id).bind(&webhook_id)
+                .bind(expected_secret.as_ref()).execute(&pool).await?.rows_affected();
+            Ok(Some(changed == 1))
+        })
+    }
+
     fn webhooks_for_event(
         &self,
         repo_id: &str,
@@ -2083,16 +2104,19 @@ mod tests {
             "bounded/Case",
             "bounded/cap",
             "bounded/duplicate",
+            "atomic-secret/target",
         ] {
             cleanup_repo(&store, repo).await;
         }
         crate::hub::assert_atomic_webhook_registration(&store);
+        crate::hub::assert_atomic_webhook_secret_upgrade(&store);
         eprintln!("PostgreSQL atomic webhook boundary and concurrency checks executed");
         for repo in [
             "bounded/case",
             "bounded/Case",
             "bounded/cap",
             "bounded/duplicate",
+            "atomic-secret/target",
         ] {
             cleanup_repo(&store, repo).await;
         }

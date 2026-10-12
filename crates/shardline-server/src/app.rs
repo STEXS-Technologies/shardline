@@ -861,8 +861,8 @@ fn build_hub_state(
         .map(|sa| shardline_hub_api::auth::HubAuth::from_arc(sa.provider_arc()));
 
     // Create a HubStore from the configured backend.
-    // When using Postgres, share the main server's pool so Hub API and the core
-    // server operate on the same database connection pool (multi-process safe).
+    // Postgres Hub requests use their own pool on the configured database.
+    // This is not the startup metadata pool or a maintenance ownership session.
     let root_dir = app_state.config.root_dir();
     let store: shardline_index::hub::BoxedHubStore =
         app_state.config.index_postgres_url().map_or_else(
@@ -910,10 +910,9 @@ fn build_hub_state(
                     // Run the sweep as a background task so startup latency stays
                     // bounded regardless of repository count. This is purely an
                     // accelerator — the delivery path already upgrades lazily per
-                    // row — and it is idempotent vs. that lazy path: both write
-                    // the same valid ciphertext under the same key, and since the
-                    // nonce is random a concurrent write just replaces one valid
-                    // blob with another (last-write-wins is harmless).
+                    // row. Both paths compare the exact observed secret in their
+                    // update, so one upgrader wins and a concurrent secret
+                    // rotation or removal is never overwritten by a stale read.
                     let sweep_store = store.clone();
                     let sweep_cipher = cipher.clone();
                     let _sweep_handle = tokio::task::spawn_blocking(move || {

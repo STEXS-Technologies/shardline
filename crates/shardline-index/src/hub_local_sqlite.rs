@@ -869,6 +869,21 @@ impl HubStore for LocalIndexStore {
         Ok(())
     }
 
+    fn compare_and_swap_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        expected_secret: &str,
+        secret: Option<&str>,
+    ) -> Result<Option<bool>, Self::Error> {
+        let conn = open_hub_connection_rw(self.root())?;
+        let changed = conn.execute(
+            "UPDATE shardline_hub_webhooks SET secret=?1 WHERE repo_id=?2 AND id=?3 AND secret=?4 COLLATE BINARY",
+            params![secret, repo_id, webhook_id, expected_secret],
+        )?;
+        Ok(Some(changed == 1))
+    }
+
     fn webhooks_for_event(
         &self,
         repo_id: &str,
@@ -2849,5 +2864,10 @@ mod tests {
     fn sqlite_atomic_webhook_registration_handles_boundary_and_concurrency() {
         let (_temp, store) = make_store();
         crate::hub::assert_atomic_webhook_registration(&store);
+    }
+    #[test]
+    fn sqlite_atomic_webhook_secret_upgrade_preserves_rotations() {
+        let (_temp, store) = make_store();
+        crate::hub::assert_atomic_webhook_secret_upgrade(&store);
     }
 }
