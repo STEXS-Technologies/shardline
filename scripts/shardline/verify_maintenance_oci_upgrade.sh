@@ -56,7 +56,8 @@ REVOKE INSERT, UPDATE ON shardline_oci_object_tombstones FROM existing_oci_write
 writer_url="postgres://existing_oci_writer:owned_fixture_password@127.0.0.1:$pg_port/shardline"
 sql "SELECT tablename, tableowner, coalesce(relacl::text,'') FROM pg_tables
 JOIN pg_class ON pg_class.oid=format('%I.%I',schemaname,tablename)::regclass
-WHERE schemaname='public' ORDER BY tablename" > "$fixture/grants-before"
+WHERE schemaname='public' AND tablename <> 'shardline_task_artifacts_v1'
+ORDER BY tablename" > "$fixture/grants-before"
 check_writer_privileges() {
     test "$(sql "SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreatedb AND NOT rolcreaterole
         AND NOT has_schema_privilege('existing_oci_writer','public','CREATE')
@@ -169,9 +170,12 @@ sql 'SELECT * FROM shardline_schema_migrations ORDER BY version' > "$fixture/led
 cmp "$fixture/ledger-before" "$fixture/ledger-after"
 sql "SELECT tablename, tableowner, coalesce(relacl::text,'') FROM pg_tables
 JOIN pg_class ON pg_class.oid=format('%I.%I',schemaname,tablename)::regclass
-WHERE schemaname='public' ORDER BY tablename" > "$fixture/grants-after"
+WHERE schemaname='public' AND tablename <> 'shardline_task_artifacts_v1'
+ORDER BY tablename" > "$fixture/grants-after"
 cmp "$fixture/grants-before" "$fixture/grants-after"
 check_writer_privileges
+test "$(sql "SELECT NOT has_table_privilege('existing_oci_writer',
+    'shardline_task_artifacts_v1','SELECT,INSERT,UPDATE,DELETE')")" = t
 start_server "$current" 1
 for node in 0 1; do read_manifest "$node" latest 200; done
 
@@ -484,4 +488,4 @@ for node in 0 1; do
 done
 assert_no_server_children 0 finished
 assert_no_server_children 1 finished
-echo "PASS: restricted released/current OCI and S3 writers preserve prior objects and upload state after database owner loss, publication failure and SIGKILL, and retry with unchanged migrations and table grants; ordinary servers have no child processes at readiness and completion; diagnostics: $fixture"
+echo "PASS: restricted released/current OCI and S3 writers preserve prior objects and upload state after database owner loss, publication failure and SIGKILL, and retry with the released ledger and existing table grants unchanged; the artifact table remains private; ordinary servers have no child processes at readiness and completion; diagnostics: $fixture"

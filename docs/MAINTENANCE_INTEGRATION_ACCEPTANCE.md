@@ -241,6 +241,23 @@ This document is for reviewers deciding whether the integration is safe to ship.
   publish object-backed evidence. Those cases, S3-only copy endpoints and
   deployment permissions remain required work before the full isolation gate
   passes. No database service or mount was added for the local backend.
+  The PostgreSQL owner upgrade now also installs a private artifact table and
+  guarded immutable publication, bounded reads, 64-key pages and retention
+  functions. Existing released table grants, migration rows and owner defaults
+  are preserved; direct grants on the optional artifact table are removed so
+  default privileges cannot bypass its functions. Reads require existing
+  reliability-metadata access. Publishing and retention check their respective
+  existing maintenance permissions. Real PostgreSQL tests cover writer, reader,
+  GC and denied accounts, concurrent conflicts, paging, reinstallation and RLS
+  rejection. These are storage primitives: the server and CLI still use
+  object-backed PostgreSQL/S3 evidence. Selecting the new backend, legacy reads,
+  connection/resource limits and supported row-scoped history remain unfinished.
+  Runtime routing must follow the work session's resolved metadata target;
+  another connection guessed from configuration does not establish that match.
+  The native mixed-version OCI/S3 drill passes with this owner extension: the
+  released ledger and original table grants are unchanged, the existing writer
+  has no direct artifact-table access, and prior publication/crash guarantees
+  and the ordinary one-process startup checks still pass.
   The earlier SQLite prototype also verifies unchanged released fsck output.
   Reproduce the local prototype with
   `bash scripts/shardline/verify_maintenance_metadata_inventory.sh RELEASED`,

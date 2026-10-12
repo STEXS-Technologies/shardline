@@ -3,9 +3,12 @@ use sqlx::{Postgres, Transaction, query, query_scalar};
 use super::PostgresIndexStore;
 
 impl PostgresIndexStore {
-    /// Installs a stable history-scope identity using migration-owner permissions.
-    /// Runtime readers need schema usage, not fence-table access. Reinstallation
-    /// preserves the identity; this never rewrites legacy task evidence.
+    /// Installs the stable history identity and private artifact functions with
+    /// migration-owner permissions. History grouping needs schema usage; artifact
+    /// functions validate existing reliability and maintenance permissions.
+    /// Reinstallation preserves identity and bytes, and keeps the artifact table
+    /// private without changing released table grants or owner defaults.
+    /// This never rewrites legacy object-backed task evidence.
     ///
     /// # Errors
     /// Returns missing released tables, insufficient DDL rights, entropy failure,
@@ -45,5 +48,6 @@ pub(super) async fn initialize_task_history_scope(
     .bind(hex::encode(identity))
     .execute(&mut **transaction)
     .await?;
+    super::task_artifacts::initialize_task_artifacts(transaction, schema).await?;
     Ok(())
 }
