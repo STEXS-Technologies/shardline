@@ -123,7 +123,8 @@ BEGIN
 END;
 $retention$;
 
--- A dedupe mapping publishes a physical shard key. Protect the table itself
+-- A dedupe mapping publishes a physical shard key and identifies a chunk.
+-- Protect both keys at the table itself
 -- so released writers also participate, without requiring new fence grants
 -- or retention-table privileges from an existing mapping writer.
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_dedupe_remote_delete_v1()
@@ -131,17 +132,26 @@ RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, pg_temp
 SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
 AS $dedupe$
-DECLARE pending BOOLEAN;
+DECLARE pending BOOLEAN; keys TEXT[]; lock_slot INTEGER;
 BEGIN
     IF TG_TABLE_SCHEMA IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
         RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
     END IF;
-    PERFORM pg_advisory_xact_lock(1397507140,
-        (hashtextextended('shardline:remote-delete:' || NEW.shard_object_key, 0) & 255)::INTEGER);
+    keys := ARRAY[NEW.shard_object_key];
+    -- Preserve inspection/repair of legacy malformed hashes; only canonical
+    -- hashes identify a physical chunk in the existing object-key grammar.
+    IF NEW.chunk_hash ~ '^[0-9a-f]{64}$' THEN
+        keys := array_append(keys, left(NEW.chunk_hash, 2) || '/' || NEW.chunk_hash);
+    END IF;
+    FOR lock_slot IN SELECT DISTINCT
+        (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
+        FROM unnest(keys) physical ORDER BY slot LOOP
+        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+    END LOOP;
     EXECUTE format(
-        'SELECT EXISTS(SELECT 1 FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=$2)',
+        'SELECT EXISTS(SELECT 1 FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=ANY($2))',
         TG_TABLE_SCHEMA
-    ) INTO pending USING 'maintenance-remote-delete', NEW.shard_object_key;
+    ) INTO pending USING 'maintenance-remote-delete', keys;
     IF pending THEN
         RAISE EXCEPTION USING ERRCODE = 'SLD01',
             MESSAGE = 'object has an unresolved remote delete; retry after reconciliation';
