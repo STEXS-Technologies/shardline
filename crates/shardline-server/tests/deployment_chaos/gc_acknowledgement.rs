@@ -31,6 +31,8 @@ struct FaultProxy {
     delete_path: String,
     delete_key: String,
     applied: Arc<AtomicUsize>,
+    arrived: Arc<AtomicUsize>,
+    before_apply: bool,
     acknowledge: Arc<Semaphore>,
     client: reqwest::Client,
 }
@@ -60,6 +62,11 @@ async fn forward(
             parts.uri.path(),
             proxy.delete_path
         );
+        if proxy.before_apply {
+            proxy.arrived.fetch_add(1, Ordering::Release);
+            let permit = proxy.acknowledge.acquire().await.unwrap();
+            permit.forget();
+        }
     }
     // Preserve the signed path and Host header while forwarding to real MinIO.
     let response = proxy
@@ -76,8 +83,10 @@ async fn forward(
     if is_target_delete && status.is_success() {
         proxy.applied.fetch_add(1, Ordering::Release);
         // MinIO has already applied DELETE. Only its response is withheld.
-        let permit = proxy.acknowledge.acquire().await.unwrap();
-        permit.forget();
+        if !proxy.before_apply {
+            let permit = proxy.acknowledge.acquire().await.unwrap();
+            permit.forget();
+        }
     }
     (status, headers, body).into_response()
 }
@@ -91,7 +100,21 @@ impl Drop for ProxyTask {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed() {
-    let drill = "drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed";
+    run_remote_gc_fault(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "merge-blocking: delayed S3 deletion is not yet fenced across database takeover"]
+async fn drill_gc_delayed_delete_rejects_hold_after_takeover() {
+    run_remote_gc_fault(true).await;
+}
+
+async fn run_remote_gc_fault(before_apply: bool) {
+    let drill = if before_apply {
+        "drill_gc_delayed_delete_preserves_hold_acknowledged_after_takeover"
+    } else {
+        "drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed"
+    };
     let Some(mut stack) = boot_chaos_stack(drill).await else {
         return;
     };
@@ -109,6 +132,8 @@ async fn drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replaye
         delete_path: format!("/{OBJECT_BUCKET}/{}", key.as_str()),
         delete_key: key.as_str().to_owned(),
         applied: Arc::new(AtomicUsize::new(0)),
+        arrived: Arc::new(AtomicUsize::new(0)),
+        before_apply,
         acknowledge: Arc::new(Semaphore::new(0)),
         client: reqwest::Client::new(),
     };
@@ -201,7 +226,11 @@ async fn drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replaye
         String::from_utf8_lossy(&started.stderr)
     );
     let deletion = tokio::time::timeout(Duration::from_secs(45), async {
-        while proxy.applied.load(Ordering::Acquire) == 0 {
+        while if before_apply {
+            proxy.arrived.load(Ordering::Acquire) == 0
+        } else {
+            proxy.applied.load(Ordering::Acquire) == 0
+        } {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -215,8 +244,8 @@ async fn drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replaye
         );
     }
     assert!(
-        !objects.contains(&key).unwrap(),
-        "MinIO really applied the delete"
+        objects.contains(&key).unwrap() == before_apply,
+        "the object must match the injected pre/post-mutation boundary"
     );
     assert!(index.quarantine_candidate(&key).await.unwrap().is_none());
     let tasks = store.summaries(deployment, None, 10).unwrap();
@@ -243,6 +272,82 @@ async fn drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replaye
         "true",
         "fault is injected while the original CLI still waits for its acknowledgement"
     );
+    if before_apply {
+        use shardline_index::RetentionHold;
+        let coordinator = sqlx::query_scalar::<_, i32>(
+            "SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND objsubid=1
+             AND classid::bigint=(($1::bigint >> 32) & 4294967295)
+             AND objid::bigint=($1::bigint & 4294967295)",
+        )
+        .bind(0x5348_4152_4447_4301_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(coordinator)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        let now = u64::try_from(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let hold = RetentionHold::new(
+            key.clone(),
+            "takeover protection regression".to_owned(),
+            now,
+            None,
+        )
+        .unwrap();
+        let hold_result = tokio::time::timeout(
+            Duration::from_secs(15),
+            shardline_server::set_retention_hold(&config, &hold),
+        )
+        .await
+        .unwrap();
+        let acknowledged = hold_result.is_ok();
+        let expected_hold = acknowledged.then_some(hold);
+        assert_eq!(index.retention_hold(&key).await.unwrap(), expected_hold);
+        assert!(
+            objects.contains(&key).unwrap(),
+            "original bytes must exist when the later hold request returns"
+        );
+        eprintln!(
+            "takeover hold acknowledged={acknowledged} while the former GC owner's remote request is paused"
+        );
+        proxy.acknowledge.add_permits(1);
+        let exited = tokio::time::timeout(
+            Duration::from_secs(25),
+            docker_run_owned(vec!["wait".to_owned(), container.0.clone()]),
+        )
+        .await
+        .unwrap();
+        assert!(exited.status.success());
+        assert_ne!(String::from_utf8_lossy(&exited.stdout).trim(), "0");
+        assert_eq!(proxy.applied.load(Ordering::Acquire), 1);
+        assert_eq!(index.retention_hold(&key).await.unwrap(), expected_hold);
+        let after = store.summaries(deployment, None, 10).unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .find(|task| task.id == interrupted.id)
+                .unwrap()
+                .state,
+            TaskRunState::Failed
+        );
+        assert!(
+            !acknowledged,
+            "a hold racing an unresolved remote delete must return a retryable error, not acknowledge protection"
+        );
+        return;
+    }
     let before = [0_u32, 1, 2].map(|sequence| {
         store
             .read(

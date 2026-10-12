@@ -25,7 +25,14 @@ This document is for reviewers deciding whether the integration is safe to ship.
   unresolved history after killing the original CLI; fresh fsck does not repeat
   the delete. Delayed remote effects after ownership changes and equivalent
   coverage for other operations remain open.
+  The delayed-delete takeover regression has now been run and fails: after
+  terminating GC's database owner, a new hold is acknowledged while the bytes
+  still exist, then the paused S3 request removes those bytes. The hold remains
+  and GC reports failure. Accurate history does not prevent that data loss.
   A missing completion record must never authorize repeating an unknown effect.
+  The chosen behavior is a clear retryable error for a later hold or write to the
+  affected object until the earlier delete is settled. The regression requires
+  rejection of the racing hold; the current implementation still acknowledges it.
 - **Large deployments and history growth.** Long operations, large reports and
   total growth of unresolved history still need deployment-scale validation.
   Unfinished evidence is retained, so completed-history cleanup alone does not
@@ -62,6 +69,7 @@ test does not close them.
 | Repeated and concurrent runs | Distinct scheduled runs complete. Concurrent ordinary rebuilds serialize through the existing Postgres barrier; one removes the fixture's stale record and the next removes zero. |
 | Local crash and reboot | GC interrupted after admission, a committed quarantine change, or a printed report stays unresolved. Fresh diagnostics do not replay it. Actual VM resets also preserve the original records. |
 | Remote delete acknowledgement | A proxy forwards the actual S3 deletion to MinIO and withholds only its successful response. The object and candidate are absent while the original ordinary CLI is still alive. Killing that process preserves its three admission records without a completion record. Fresh fsck completes without another delete. This proves unresolved reporting and no diagnostic replay at this boundary; it does not prove fencing of delayed requests during takeover. |
+| Delayed delete during takeover: failing | A proxy pauses the request before MinIO applies it. GC's lock-owning backend is terminated, a new hold succeeds while the bytes exist, and releasing the old request deletes the held object. GC's recorded failure and the surviving hold are verified before the protection assertion fails. This is an explicit merge blocker, not a passing safety guarantee. |
 | Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
 | Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
 | Connection loss during rebuild | The lock and metadata operations share one non-replaceable connection. The two-machine fault drill terminates that connection, observes a verified failed source run and a completed waiter with one stale-record removal. A separate database test rejects a stale pool's attempted write after takeover. |
@@ -181,3 +189,13 @@ CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT cargo test -p shardline-server
 
 Confirm the log reports a resolved stack and the final MinIO-deletion assertion;
 the drill explicitly reports a skip when its deployment prerequisites are absent.
+
+The delayed-delete regression is explicitly ignored in normal test runs because
+the required remote fence is not implemented. It was executed against real
+Postgres/MinIO and fails at the held-object protection assertion. Run it with:
+
+```bash
+CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT cargo test -p shardline-server --test deployment_chaos gc_acknowledgement::drill_gc_delayed_delete_rejects_hold_after_takeover -- --ignored --nocapture
+```
+
+This test must pass and its ignore marker must be removed before merging.
