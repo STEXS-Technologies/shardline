@@ -71,6 +71,19 @@ Use your existing admin token with:
 - `/api/v1/tasks/maintenance/deletes` for affected objects with pending deletes.
 - `/api/v1/tasks/maintenance` for recorded job results.
 
+For a server startup job, take its `id` from the history list and read the saved
+counts with the same admin token:
+
+```bash
+curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
+  "https://cas.example.com/api/v1/tasks/maintenance/$RUN_ID/report"
+```
+
+A failed Hub upgrade can show, for example, `inspected: 3`, `upgraded: 2` and
+`failures: 1`. This explains partial progress; the job still needs investigation.
+Older failed jobs and interrupted jobs may have no saved report. Ordinary CLI
+commands keep their existing output and diagnostics.
+
 A pending entry may mean GC is still running. Check the original command and
 logs. These endpoints inspect state; they do not retry or clear a delete.
 

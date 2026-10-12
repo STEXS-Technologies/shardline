@@ -4,7 +4,7 @@ mod v1;
 
 use axum::{
     Json,
-    extract::{RawQuery, State},
+    extract::{Path, RawQuery, State},
     http::{
         HeaderMap, HeaderValue,
         header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, X_CONTENT_TYPE_OPTIONS},
@@ -629,6 +629,39 @@ pub(super) async fn maintenance_tasks(
     })))
 }
 
+/// Retrieves a verified embedded diagnostic without scanning all task identities.
+pub(super) async fn maintenance_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
+    RawQuery(raw_query): RawQuery,
+) -> Result<AdminJson<serde_json::Value>, ServerError> {
+    authorize_admin(&state, &headers)?;
+    let Path(id) = path.map_err(|_error| ServerError::InvalidAdminQuery)?;
+    if raw_query.is_some_and(|query| !query.is_empty()) {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let permit = state
+        .admission
+        .try_acquire(weights::STATS)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let store = crate::task_tracking::TaskEvidenceStore::from_objects(state.backend.object_store());
+    let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
+    let history_scope =
+        crate::task_tracking::backend_history_scope(&state.config, &state.backend).await;
+    let report = spawn_maintenance_inspection(permit, move || {
+        store.embedded_report(deployment, history_scope, &id)
+    })
+    .await
+    .map_err(|error| ServerError::Io(std::io::Error::other(error)))??
+    .ok_or(ServerError::NotFound)?;
+    Ok(admin_json(serde_json::json!({
+        "api_version": ADMIN_API_VERSION,
+        "observed_at_unix_seconds": observed_at()?,
+        "task": report,
+    })))
+}
+
 /// Inspects pending delete markers without replaying or settling any request.
 pub(super) async fn pending_remote_deletes(
     State(state): State<Arc<AppState>>,
@@ -956,6 +989,135 @@ mod tests {
                 .await
                 .expect("response");
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_report_is_authenticated_verified_and_read_only() {
+        use crate::task_tracking::{
+            EmbeddedTaskTracker, TaskEvidenceStore, deployment_fingerprint,
+        };
+        let (app, root) = app(Some(ADMIN_TOKEN)).await;
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            NonZeroUsize::new(65_536).unwrap(),
+        );
+        let deployment = deployment_fingerprint(&config).unwrap();
+        let store = TaskEvidenceStore::from_config(&config).unwrap();
+        EmbeddedTaskTracker::new(
+            crate::object_store_from_config(&config).unwrap(),
+            deployment,
+        )
+        .begin(
+            "hub-webhook-secret-upgrade",
+            b"input",
+            shardline_reliability::MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap()
+        .finish(false, b"inspected: 3\nupgraded: 2\nfailures: 1")
+        .unwrap();
+        let id = store.summaries(deployment, None, 10).unwrap().remove(0).id;
+        let path = format!("/api/v1/tasks/maintenance/{id}/report");
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, &format!("{path}?invalid=true"), token))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, &path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+        let body = json_body(response).await;
+        assert_eq!(body["api_version"], ADMIN_API_VERSION);
+        assert_eq!(body["task"]["state"], "needs_reconciliation");
+        assert_eq!(
+            body["task"]["report"],
+            "inspected: 3\nupgraded: 2\nfailures: 1"
+        );
+        let response = app
+            .clone()
+            .oneshot(request(Method::HEAD, &path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+        assert!(to_bytes(response.into_body(), 1).await.unwrap().is_empty());
+        for (path, status) in [
+            (
+                "/api/v1/tasks/maintenance/missing/report",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/api/v1/tasks/maintenance/bad%2Fid/report",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            let response = app
+                .clone()
+                .oneshot(request(method, &path, Some(ADMIN_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("{path}?limit=1"),
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        std::fs::write(
+            root.path()
+                .join("chunks/_shardline_tasks/v1/runs")
+                .join(&id)
+                .join("artifacts")
+                .join(hex::encode(
+                    penelope_core::task::Digest::of(b"inspected: 3\nupgraded: 2\nfailures: 1").0,
+                )),
+            b"edited-report",
+        )
+        .unwrap();
+        let response = app
+            .oneshot(request(Method::GET, &path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("edited-report"));
+    }
+
+    #[tokio::test]
+    async fn embedded_report_route_preserves_disabled_api_concealment() {
+        let (app, _root) = app(None).await;
+        for path in [
+            "/api/v1/tasks/maintenance/test-run/report?invalid=true",
+            "/api/v1/tasks/maintenance/%FF/report",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
     }
 
