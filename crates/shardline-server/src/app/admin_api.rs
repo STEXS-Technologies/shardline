@@ -732,6 +732,7 @@ pub(super) async fn pending_remote_deletes(
             serde_json::json!({
                 "object_key": key, "attempt": epoch.to_string(), "state": "pending",
                 "reason": "delete has not been proved settled",
+                "next_step": "Check the original GC command and logs. Run shardline repair with the same storage configuration to recover saved replies. Missing replies remain blocked.",
             })
         })
         .collect();
@@ -1811,6 +1812,10 @@ mod tests {
             first.epoch().to_string()
         );
         assert_eq!(body["pending_deletes"][0]["state"], "pending");
+        assert_eq!(
+            body["pending_deletes"][0]["next_step"],
+            "Check the original GC command and logs. Run shardline repair with the same storage configuration to recover saved replies. Missing replies remain blocked."
+        );
         let cursor = body["page"]["next_cursor"].as_str().unwrap();
         assert!(cursor.len() < 1024);
         let response = app
