@@ -270,11 +270,22 @@ mod tests {
         postgres_provider_owner_loss_preserves_state_and_delivery_retry("repository", true).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_rename_owner_loss_preserves_existing_repository() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("rename", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_delete_owner_loss_preserves_existing_repository() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("delete", true).await;
+    }
+
     async fn postgres_provider_owner_loss_preserves_state_and_delivery_retry(
         event_kind: &str,
         seed_existing: bool,
     ) {
         use hmac::Mac;
+        use shardline_index::{FileChunkRecord, FileRecord, RecordMutation, RecordTraversal};
         use tower::ServiceExt;
         if std::env::var("DATABASE_URL").is_err() {
             return;
@@ -355,11 +366,63 @@ mod tests {
             .await
             .unwrap();
         }
-        sqlx::query("CREATE FUNCTION pause_provider_state() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); RETURN NEW; END $$")
+        let record = FileRecord {
+            file_id: "asset.bin".to_owned(),
+            content_hash: "a".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: Some(
+                shardline_protocol::RepositoryScope::new(
+                    ProviderKind::GitHub.repository_provider(),
+                    "team",
+                    "assets",
+                    Some("main"),
+                )
+                .unwrap(),
+            ),
+            chunks: vec![FileChunkRecord {
+                hash: "b".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+        if matches!(event_kind, "rename" | "delete") {
+            backend
+                .record_store()
+                .write_version_record(&record)
+                .await
+                .unwrap();
+            backend
+                .record_store()
+                .write_latest_record(&record)
+                .await
+                .unwrap();
+        }
+        let previous_records: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE FUNCTION pause_provider_state() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$")
             .execute(&pool).await.unwrap();
-        sqlx::query("CREATE TRIGGER pause_provider_state BEFORE INSERT OR UPDATE ON shardline_provider_repository_states FOR EACH ROW EXECUTE FUNCTION pause_provider_state()")
+        sqlx::query("CREATE TRIGGER pause_provider_state BEFORE INSERT OR UPDATE OR DELETE ON shardline_provider_repository_states FOR EACH ROW EXECUTE FUNCTION pause_provider_state()")
             .execute(&pool).await.unwrap();
-        let body = br#"{"action":"privatized","ref":"refs/heads/main","repository":{"full_name":"team/assets"}}"#;
+        let body: &[u8] = match event_kind {
+            "rename" => br#"{"action":"renamed","repository":{"full_name":"team/assets-renamed"},"changes":{"repository":{"name":{"from":"assets"}}}}"#,
+            "delete" => br#"{"action":"deleted","repository":{"full_name":"team/assets"}}"#,
+            _ => br#"{"action":"privatized","ref":"refs/heads/main","repository":{"full_name":"team/assets"}}"#,
+        };
+        let github_event = if matches!(event_kind, "rename" | "delete") {
+            "repository"
+        } else {
+            event_kind
+        };
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
         mac.update(body);
         let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
@@ -367,7 +430,7 @@ mod tests {
             axum::http::Request::builder()
                 .method("POST")
                 .uri("/v1/providers/github/webhooks")
-                .header("x-github-event", event_kind)
+                .header("x-github-event", github_event)
                 .header("x-github-delivery", "owner-loss-push")
                 .header("x-hub-signature-256", &signature)
                 .header("content-type", "application/json")
@@ -426,6 +489,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(preserved.as_ref(), seed_existing.then_some(&previous));
+        let preserved_records: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(preserved_records, previous_records);
+        let holds: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_retention_holds")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(holds, 0, "failed delivery committed retention holds");
         assert_eq!(
             app.clone().oneshot(request()).await.unwrap().status(),
             axum::http::StatusCode::ACCEPTED
@@ -452,8 +527,102 @@ mod tests {
             "assets",
         )
         .await
-        .unwrap()
         .unwrap();
+        if event_kind == "delete" {
+            assert!(stored.is_none());
+            let records: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let holds: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_retention_holds")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            // Fixed-chunk records protect both the chunk and its compatible xorb key.
+            assert_eq!((records, holds), (0, 2));
+            return;
+        }
+        if event_kind == "rename" {
+            assert!(stored.is_none());
+            assert!(
+                backend
+                    .record_store()
+                    .read_latest_record_bytes(&record)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let renamed_record = FileRecord {
+                repository_scope: Some(
+                    shardline_protocol::RepositoryScope::new(
+                        ProviderKind::GitHub.repository_provider(),
+                        "team",
+                        "assets-renamed",
+                        Some("main"),
+                    )
+                    .unwrap(),
+                ),
+                ..record
+            };
+            let latest = backend
+                .record_store()
+                .read_latest_record_bytes(&renamed_record)
+                .await
+                .unwrap()
+                .unwrap();
+            let version = backend
+                .record_store()
+                .read_record_bytes(
+                    &backend
+                        .record_store()
+                        .version_record_locator(&renamed_record),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<FileRecord>(&latest).unwrap(),
+                renamed_record
+            );
+            assert_eq!(
+                serde_json::from_slice::<FileRecord>(&version).unwrap(),
+                renamed_record
+            );
+            let renamed = shardline_index::AsyncIndexStore::provider_repository_state(
+                backend.index_store(),
+                ProviderKind::GitHub.repository_provider(),
+                "team",
+                "assets-renamed",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                renamed.last_pushed_revision(),
+                previous.last_pushed_revision()
+            );
+            assert_eq!(
+                renamed.last_access_changed_at_unix_seconds(),
+                previous.last_access_changed_at_unix_seconds()
+            );
+            assert_eq!(
+                renamed.last_revision_pushed_at_unix_seconds(),
+                previous.last_revision_pushed_at_unix_seconds()
+            );
+            assert_eq!(
+                renamed.last_cache_invalidated_at_unix_seconds(),
+                previous.last_cache_invalidated_at_unix_seconds()
+            );
+            assert_eq!(
+                renamed.last_authorization_rechecked_at_unix_seconds(),
+                previous.last_authorization_rechecked_at_unix_seconds()
+            );
+            assert_eq!(
+                renamed.last_drift_checked_at_unix_seconds(),
+                previous.last_drift_checked_at_unix_seconds()
+            );
+            return;
+        }
+        let stored = stored.unwrap();
         if event_kind == "push" {
             assert!(stored.last_revision_pushed_at_unix_seconds().is_some());
             assert_eq!(stored.last_pushed_revision(), Some("refs/heads/main"));

@@ -70,11 +70,16 @@ This document is for reviewers deciding whether the integration is safe to ship.
   state regressions also require the failed request to preserve its entire
   previous snapshot. A successful push keeps access and reconciliation fields;
   a successful access change keeps revision and reconciliation fields. All
-  four real-Postgres ownership-loss cases pass, alongside the other ten route
-  tests and strict server lint.
+  six real-Postgres ownership-loss cases pass, alongside the other ten route
+  tests and strict server lint. Rename/delete HTTP interruption tests include
+  both latest and version file records. Terminating ownership during the state
+  mutation rolls back the earlier record changes and leaves no retention holds
+  or delivery claim. Retry moves both records and all state fields for rename;
+  deletion removes both records and state and creates the expected chunk/xorb
+  holds. Replaying the same delivery does not add holds or repeat changes.
   Opportunistic delivery-history cleanup is retained. All 584 server tests
-  selected for provider behavior pass. Callback rename/delete
-  interruption drills and mutations outside guarded publication remain open;
+  selected for provider behavior passed before these additional tests.
+  Mutations outside guarded publication remain open;
   these tests do not prove deployment health or remote exactly-once effects.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
