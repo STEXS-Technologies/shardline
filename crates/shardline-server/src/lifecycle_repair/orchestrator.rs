@@ -43,6 +43,7 @@ pub async fn run_lifecycle_repair(
         let object_store = object_store_from_config(&config)?;
         let index_store = PostgresIndexStore::new(pool.clone());
         let record_store = PostgresRecordStore::new(pool.clone());
+        crate::remote_delete_recovery::recover_saved_replies(&index_store, &object_store).await;
         let now_unix_seconds = postgres_unix_now_seconds(&pool).await?;
         let result = run_lifecycle_repair_with_stores_at_time(
             &record_store,

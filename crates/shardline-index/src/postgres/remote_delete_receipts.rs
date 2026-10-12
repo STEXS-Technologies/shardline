@@ -17,6 +17,44 @@ pub struct RemoteDeleteReceipt {
     signature: Vec<u8>,
 }
 
+/// Outcome of reconciling a verified saved reply with current metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDeleteReceiptSettlement {
+    /// The exact registered attempt was settled.
+    Settled,
+    /// The signed reply matches the target, which has no pending delete for it.
+    NoPendingDelete,
+    /// A different target, verifier or pending attempt remains unchanged.
+    Unmatched,
+}
+
+impl RemoteDeleteReceipt {
+    /// Checks the signed observation and returns its metadata namespace.
+    /// This checks authenticity only; settlement must still check the pinned key.
+    /// # Errors
+    /// Returns malformed fields or an invalid signature.
+    pub fn verified_namespace(&self) -> Result<&str, PostgresMetadataStoreError> {
+        ObjectKey::parse(&self.object_key).map_err(|_error| invalid())?;
+        if self.epoch <= 0
+            || self.namespace.len() != 64
+            || !self
+                .namespace
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid());
+        }
+        let key = VerifyingKey::from_bytes(&self.public_key).map_err(|_error| invalid())?;
+        let signature = Signature::from_slice(&self.signature).map_err(|_error| invalid())?;
+        key.verify_strict(
+            &message(&self.schema, &self.namespace, &self.object_key, self.epoch)?,
+            &signature,
+        )
+        .map_err(|_error| invalid())?;
+        Ok(&self.namespace)
+    }
+}
+
 fn invalid() -> PostgresMetadataStoreError {
     PostgresMetadataStoreError::Unsupported("invalid remote delete receipt".to_owned())
 }
@@ -74,6 +112,28 @@ impl PostgresRemoteDeletePermit {
 }
 
 impl PostgresIndexStore {
+    /// Reads the saved-reply namespace without creating it. Returns `None` on
+    /// an older owner installation; callers may retain legacy admission there.
+    /// # Errors
+    /// Returns unavailable metadata, insufficient GC privileges or corrupt scope.
+    pub async fn remote_delete_receipt_namespace(
+        &self,
+    ) -> Result<Option<String>, PostgresMetadataStoreError> {
+        let installed: bool = sqlx::query_scalar(
+            "SELECT to_regprocedure(format('%I.shardline_remote_delete_receipt_namespace_v1(text)', current_schema())) IS NOT NULL
+             AND to_regprocedure(format('%I.shardline_remote_delete_receipt_begin_v1(text,text,text)', current_schema())) IS NOT NULL",
+        ).fetch_one(&self.pool).await?;
+        if !installed {
+            return Ok(None);
+        }
+        Ok(Some(
+            sqlx::query_scalar(
+                "SELECT shardline_remote_delete_receipt_namespace_v1(current_schema())",
+            )
+            .fetch_one(&self.pool)
+            .await?,
+        ))
+    }
     /// Atomically pins a fresh per-attempt receipt verifier with the pending
     /// marker before any remote request. The caller retains the private key.
     /// Use a new signing key for every admitted attempt, including after restores.
@@ -105,35 +165,33 @@ impl PostgresIndexStore {
         &self,
         receipt: &RemoteDeleteReceipt,
     ) -> Result<bool, PostgresMetadataStoreError> {
-        ObjectKey::parse(&receipt.object_key).map_err(|_error| invalid())?;
-        if receipt.epoch <= 0 {
-            return Err(invalid());
-        }
-        let key = VerifyingKey::from_bytes(&receipt.public_key).map_err(|_error| invalid())?;
-        let signature = Signature::from_slice(&receipt.signature).map_err(|_error| invalid())?;
-        key.verify_strict(
-            &message(
-                &receipt.schema,
-                &receipt.namespace,
-                &receipt.object_key,
-                receipt.epoch,
-            )?,
-            &signature,
-        )
-        .map_err(|_error| invalid())?;
+        Ok(self.reconcile_remote_delete_receipt(receipt).await?
+            == RemoteDeleteReceiptSettlement::Settled)
+    }
+
+    /// Reconciles a saved reply and distinguishes safe evidence retirement from
+    /// a pending or foreign attempt. It never sends a remote storage request.
+    /// # Errors
+    /// Returns invalid evidence, unavailable metadata or insufficient GC access.
+    pub async fn reconcile_remote_delete_receipt(
+        &self,
+        receipt: &RemoteDeleteReceipt,
+    ) -> Result<RemoteDeleteReceiptSettlement, PostgresMetadataStoreError> {
+        receipt.verified_namespace()?;
         let mut transaction = self.pool.begin().await?;
         let schema: String = sqlx::query_scalar("SELECT current_schema()")
             .fetch_one(&mut *transaction)
             .await?;
         if schema != receipt.schema {
-            return Ok(false);
+            return Ok(RemoteDeleteReceiptSettlement::Unmatched);
         }
-        let namespace: String =
-            sqlx::query_scalar("SELECT shardline_task_history_scope_v1(current_schema())")
-                .fetch_one(&mut *transaction)
-                .await?;
+        let namespace: String = sqlx::query_scalar(
+            "SELECT shardline_remote_delete_receipt_namespace_v1(current_schema())",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
         if namespace != receipt.namespace {
-            return Ok(false);
+            return Ok(RemoteDeleteReceiptSettlement::Unmatched);
         }
         // Compare the registered verifier under the same object locks used by
         // admission and settlement. Rechecking in SQL closes a read/settle race.
@@ -145,8 +203,25 @@ impl PostgresIndexStore {
         .bind(hex::encode(receipt.public_key))
         .fetch_one(&mut *transaction)
         .await?;
+        let result = if changed {
+            RemoteDeleteReceiptSettlement::Settled
+        } else {
+            // The failed finish still holds the object locks. A later admission
+            // cannot race the check that allows retiring already-settled evidence.
+            let pending: bool = sqlx::query_scalar(
+                "SELECT shardline_remote_delete_receipt_pending_v1(current_schema(), $1)",
+            )
+            .bind(&receipt.object_key)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if pending {
+                RemoteDeleteReceiptSettlement::Unmatched
+            } else {
+                RemoteDeleteReceiptSettlement::NoPendingDelete
+            }
+        };
         transaction.commit().await?;
-        Ok(changed)
+        Ok(result)
     }
 }
 

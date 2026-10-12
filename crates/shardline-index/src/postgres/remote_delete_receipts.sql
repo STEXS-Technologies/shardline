@@ -3,6 +3,45 @@ CREATE UNIQUE INDEX IF NOT EXISTS shardline_remote_delete_receipt_epoch_v1
 ON @SCHEMA@.shardline_resource_fences(domain, epoch)
 WHERE domain = 'maintenance-remote-delete-receipt-key';
 
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_remote_delete_receipt_namespace_v1(
+    index_schema TEXT
+) RETURNS TEXT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $receipt_namespace$
+DECLARE namespace TEXT;
+BEGIN
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema')
+       OR NOT has_schema_privilege(session_user, index_schema, 'USAGE')
+       OR NOT has_table_privilege(session_user, format('%I.shardline_retention_holds', index_schema), 'SELECT')
+       OR NOT has_table_privilege(session_user, format('%I.shardline_quarantine_candidates', index_schema), 'SELECT')
+       OR NOT has_table_privilege(session_user, format('%I.shardline_quarantine_candidates', index_schema), 'DELETE') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'garbage collection metadata access is required for receipt namespace';
+    END IF;
+    EXECUTE format('SELECT resource FROM %I.shardline_resource_fences WHERE domain=$1 AND epoch=1', index_schema)
+      INTO namespace USING 'maintenance-task-history-scope';
+    IF namespace IS NULL OR namespace !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = 'SLD04', MESSAGE = 'remote delete receipt namespace requires owner initialization';
+    END IF;
+    RETURN namespace;
+END;
+$receipt_namespace$;
+
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_remote_delete_receipt_pending_v1(
+    index_schema TEXT, object_key TEXT
+) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $receipt_pending$
+DECLARE pending BOOLEAN;
+BEGIN
+    PERFORM shardline_remote_delete_receipt_namespace_v1(index_schema);
+    EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=$2)', index_schema)
+      INTO pending USING 'maintenance-remote-delete', object_key;
+    RETURN pending;
+END;
+$receipt_pending$;
+
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_remote_delete_receipt_begin_v1(
     index_schema TEXT, object_key TEXT, verification_key TEXT
 ) RETURNS BIGINT
@@ -71,5 +110,7 @@ END;
 $receipt_finish$;
 
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_remote_delete_receipt_begin_v1(TEXT, TEXT, TEXT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_remote_delete_receipt_namespace_v1(TEXT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_remote_delete_receipt_pending_v1(TEXT, TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_remote_delete_receipt_key_v1(TEXT, TEXT, BIGINT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_remote_delete_receipt_finish_v1(TEXT, TEXT, BIGINT, TEXT) TO PUBLIC;

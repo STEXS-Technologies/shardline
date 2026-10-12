@@ -377,10 +377,31 @@ Settlement removes the registered key with the marker; existing GC privileges
 suffice without fence-table grants. Owner-run `db migrate up` installs the
 functions without changing the released migration catalog.
 
-These are tested metadata primitives. Normal GC does not yet save signed replies
-durably, and ordinary repair does not yet consume them. A signature records a
-trusted caller's observed reply; it does not prove provider health or settle a
-request whose reply was never received. Automatic recovery remains unfinished.
+Normal GC registers a fresh per-attempt signing key when the owner-installed
+receipt functions are present. Older owner installations keep legacy admission.
+After receiving success, GC attempts an immutable content-addressed write under
+`_shardline_tasks/v1/delete-replies/{namespace}/replies/` before metadata settlement.
+Evidence writes are optional: denied S3 writes warn and GC still attempts its
+existing acknowledged settlement. If settlement fails, GC returns the original
+error and leaves saved evidence for another invocation. Normal completion removes
+the saved reply. No private key is persisted.
+
+Ordinary Postgres/S3 sweep and `repair` process saved replies within their existing
+ownership session before scanning maintenance work. Each pass examines at most
+64 records, reads at most 16 KiB per reply and advances a durable object-store
+cursor past invalid or unmatched evidence. The cursor wraps and cannot authorize
+settlement. Strict signature, namespace, content-key and pinned-verifier checks
+precede exact-attempt settlement. Only the reply object is removed afterward;
+recovery never sends a user-object DELETE. A verified reply for the same target
+can also retire when metadata has no pending delete for that object, checked
+under the settlement locks. Foreign, corrupt and conflicting evidence remains.
+The namespace reader requires existing GC privileges without exposing history
+across row-security scopes or requiring direct fence-table access.
+
+A signature records a trusted caller's observed reply; it does not prove provider
+health. A reply never received, or lost before being saved while metadata is
+unavailable, still cannot be recovered automatically. Unresolved storage growth,
+older GC sources and other remote mutation boundaries remain open merge gates.
 
 The dedupe trigger checks both the mapped shard key and the physical chunk key
 derived from a canonical 64-character lowercase hash. It locks their distinct

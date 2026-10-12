@@ -180,6 +180,10 @@ pub async fn run_gc_diagnostics(
                 },
             );
             let record_store = PostgresRecordStore::new(pool.clone());
+            if options.sweep {
+                crate::remote_delete_recovery::recover_saved_replies(&index_store, &object_store)
+                    .await;
+            }
             let staging_report =
                 reclaim_postgres_resumable_staging(&index_store, &object_store, options.sweep)
                     .await?;

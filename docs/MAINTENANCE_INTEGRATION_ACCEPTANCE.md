@@ -44,8 +44,19 @@ This document is for reviewers deciding whether the integration is safe to ship.
   attempt key and durable metadata namespace. PostgreSQL tests reject tampering,
   stale attempts and other targets, and verify settlement after the source
   connection closes using the existing GC role without fence-table grants.
-  Normal GC persistence and repair consumption of these replies remain
-  unfinished. This does not recover a delete whose reply was never received.
+  Normal GC now attempts to save signed replies in existing object storage
+  before settlement. Denied evidence writes retain ordinary acknowledged
+  settlement behavior. Sweep and ordinary `repair` process a bounded saved-reply
+  page on their existing ownership session; a durable cursor advances past
+  malformed evidence. Real PostgreSQL recovery tests cover a 64-record malformed
+  backlog, source-session closure, missing-reply preservation and retirement of
+  already-settled replies. This does not recover a delete whose reply was never
+  received or lost before durable storage, and does not close the broader gate.
+  Two real database-outage drills save a successful MinIO reply while PostgreSQL
+  is stopped, keep later holds blocked after restart, then settle through either
+  ordinary `repair` or a fresh sweep without another user-object DELETE. The
+  original GC remains failed. A separate denied-receipt-write drill confirms
+  ordinary GC still completes and clears its marker using existing settlement.
   Normal Postgres/S3 GC now admits quarantine, OCI tombstone and resumable-staging
   deletes durably, sends each through a client with mutation retries disabled,
   and settles only a successful response. Its work remains on the original
@@ -79,6 +90,8 @@ This document is for reviewers deciding whether the integration is safe to ship.
   remain required work. A missing completion record never authorizes replay.
 - **Large deployments and history growth.** Long operations, large reports and
   total growth of unresolved history still need deployment-scale validation.
+  Saved-reply publication and cleanup add object-storage requests; their impact
+  on large GC batches still needs measurement.
   Unfinished evidence is retained, so completed-history cleanup alone does not
   establish a total storage bound.
 - **Remaining compatibility coverage.** Passing deployment fixtures establish
@@ -144,6 +157,9 @@ test does not close them.
 | Delayed delete during takeover | Real Postgres/MinIO regression passes: the paused old request has a durable marker; killing only GC's owner rejects the later hold with the typed retryable error. A replacement ordinary GC sends no duplicate delete. Releasing the old request records source failure; its successful reply settles the exact marker, and a subsequent hold succeeds. This covers current GC and retention writers, not every publication path or an older GC source. |
 | Acknowledged settlement after ownership loss | PostgreSQL tests keep the work pool closed and propagate its error even when an independent recorder settles the attempt. Settlement uses the schema captured at admission; an identical key/epoch in another schema stays pending despite the recorder's different search path. A duplicated completion cannot clear a newer attempt. An unavailable recorder preserves the marker. This does not recover missing replies or authorize replay. |
 | Acknowledged remote delete | Ordinary Postgres/S3 GC records verified completion after the single-attempt response and marker settlement. Exactly one delete is applied, no object marker remains, and a later hold succeeds. |
+| Saved reply during database outage | Real PostgreSQL/MinIO drills stop the database before releasing the successful delete reply. The source saves evidence and fails. After restart, holds remain blocked until ordinary repair or a fresh sweep verifies the reply and settles the marker; neither recovery sends another user-object DELETE. Missing replies remain unresolved. |
+| Bounded saved-reply recovery | Real PostgreSQL replay advances past 64 malformed records, settles the later valid reply after source-session closure, retains missing-reply markers and retires already-settled evidence. Scan counts and per-record reads are bounded; total unresolved storage growth and deployment-scale cost remain open. |
+| Optional receipt writes | A native GC drill actually denies saved-reply writes, yet preserves successful ordinary settlement and completion. It establishes no new S3 write requirement for existing GC; without a saved reply or database settlement, recovery remains unavailable. |
 | Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
 | Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
 | Connection loss during rebuild | The lock and metadata operations share one non-replaceable connection. The two-machine fault drill terminates that connection, observes a verified failed source run and a completed waiter with one stale-record removal. A separate database test rejects a stale pool's attempted write after takeover. |
@@ -278,10 +294,12 @@ included in normal test runs. Run it directly with:
 CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT cargo test -p shardline-server --test deployment_chaos gc_acknowledgement::drill_gc_delayed_delete_rejects_hold_after_takeover -- --nocapture
 ```
 
-Run all remote-delete drills, including the existing-role comparison, with:
+Run all remote-delete drills, including both saved-reply outage cases and the
+existing-role comparison, with nextest. Each drill needs its own OS process
+because the deployment fixture sets process-wide environment variables:
 
 ```bash
-CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT SHARDLINE_N_MINUS_ONE_BINARY=/absolute/path/to/RELEASED cargo test -p shardline-server --test deployment_chaos gc_acknowledgement:: -- --nocapture --test-threads=1
+CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT SHARDLINE_N_MINUS_ONE_BINARY=/absolute/path/to/RELEASED cargo nextest run -p shardline-server --all-features --test deployment_chaos -E 'test(gc_acknowledgement::)' --no-capture -j 1
 ```
 
 Check that no drill was skipped. These passing boundaries do not close the other

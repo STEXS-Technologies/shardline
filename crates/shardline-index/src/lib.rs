@@ -107,7 +107,7 @@ pub use postgres::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresProviderMutation,
     PostgresProviderMutationOutcome, PostgresRecordLocator, PostgresRecordStore,
     PostgresRemoteDeletePermit, PostgresResourceFence, ProviderRepositoryKey, RemoteDeletePending,
-    RemoteDeleteReceipt,
+    RemoteDeleteReceipt, RemoteDeleteReceiptSettlement,
 };
 pub use reconstruction::{FileReconstruction, ReconstructionTerm};
 pub use record::{
