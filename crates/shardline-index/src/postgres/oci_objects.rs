@@ -70,7 +70,18 @@ async fn record_oci_evidence(
     }
     let after = oci_snapshot(key, state, deleted_at)?;
     let evidence = load_oci_evidence(executor, key).await?;
-    let fallback = oci_snapshot(key, fallback_state, fallback_deleted_at)?;
+    let fallback = if state == OciObjectLifecycleState::Published
+        && fallback_state == OciObjectLifecycleState::Published
+        && fallback_deleted_at.is_none()
+        && let Some(head) = evidence.events().last()
+        && head.after.state != OciObjectLifecycleState::Published
+    {
+        // Staged and reclaimed bytes have verified hidden state without a
+        // tombstone row. Publication must transition from that actual state.
+        oci_snapshot(key, head.after.state, head.after.deleted_at_unix_seconds)?
+    } else {
+        oci_snapshot(key, fallback_state, fallback_deleted_at)?
+    };
     let (evidence, evidence_was_empty) =
         verify_and_append_snapshot_transition(evidence, fallback, after)?;
     let event = evidence.events().last().ok_or_else(|| {
@@ -92,7 +103,87 @@ use crate::{
     ResumableCompletionFence,
 };
 
+async fn check_oci_publication_references(
+    connection: &mut PgConnection,
+    key: &OciObjectKey,
+    references: &[OciObjectKey],
+) -> Result<(), PostgresMetadataStoreError> {
+    if query_scalar::<_, bool>(
+        "SELECT to_regprocedure(format('%I.shardline_oci_publication_references_remote_delete_v1(text,jsonb)', current_schema())) IS NOT NULL",
+    ).fetch_one(&mut *connection).await? {
+        let identities: Vec<_> = std::iter::once(key).chain(references).map(|identity| {
+            serde_json::json!({
+                "scope_namespace": identity.scope_namespace,
+                "repository": identity.repository,
+                "object_kind": identity.kind.as_str(),
+                "digest_hex": identity.digest_hex,
+            })
+        }).collect();
+        query("SELECT shardline_oci_publication_references_remote_delete_v1(current_schema(), $1)")
+            .bind(serde_json::Value::Array(identities)).execute(connection).await?;
+    }
+    Ok(())
+}
+
 impl PostgresIndexStore {
+    /// Keeps new immutable OCI bytes hidden until their publication commits.
+    /// Records the hidden state in the existing evidence log without requiring
+    /// extra tombstone-table privileges. Existing published identities and
+    /// deletion generations are preserved.
+    /// Call only when the physical manifest did not exist under its repository
+    /// write fence; legacy objects with existing bytes need no staging.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for pending references, invalid evidence or database failure.
+    pub async fn stage_oci_object_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        key: &OciObjectKey,
+        references: &[OciObjectKey],
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        check_oci_publication_references(transaction.as_mut(), key, references).await?;
+        let evidence = load_oci_evidence(transaction.as_mut(), key).await?;
+        if let Some(head) = evidence.events().last() {
+            let expected = oci_snapshot(key, head.after.state, head.after.deleted_at_unix_seconds)?;
+            verify_snapshot_evidence(&evidence, &expected)?;
+            if matches!(
+                head.after.state,
+                OciObjectLifecycleState::Published | OciObjectLifecycleState::Deleted
+            ) {
+                transaction.commit().await?;
+                return Ok(());
+            }
+        }
+        let deleted_at: i64 = query_scalar(
+            "SELECT COALESCE((SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+             WHERE scope_namespace=$1 AND repository=$2 AND object_kind=$3 AND digest_hex=$4),
+             EXTRACT(EPOCH FROM NOW())::BIGINT)",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .fetch_one(transaction.as_mut())
+        .await?;
+        let deleted_at = super::i64_to_u64(deleted_at)?;
+        let fallback = evidence.events().last().map_or(
+            (OciObjectLifecycleState::Deleted, Some(deleted_at)),
+            |head| (head.after.state, head.after.deleted_at_unix_seconds),
+        );
+        record_oci_evidence(
+            transaction.as_mut(),
+            key,
+            OciObjectLifecycleState::Deleted,
+            Some(deleted_at),
+            fallback.0,
+            fallback.1,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
     /// Publishes an OCI object through the session that owns its repository fence.
     ///
     /// # Errors
@@ -123,21 +214,8 @@ impl PostgresIndexStore {
         references: &[OciObjectKey],
     ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
-        if !references.is_empty()
-            && query_scalar::<_, bool>(
-                "SELECT to_regprocedure(format('%I.shardline_oci_publication_references_remote_delete_v1(text,jsonb)', current_schema())) IS NOT NULL",
-            ).fetch_one(&mut *transaction).await?
-        {
-            let identities: Vec<_> = std::iter::once(key).chain(references).map(|identity| {
-                serde_json::json!({
-                    "scope_namespace": identity.scope_namespace,
-                    "repository": identity.repository,
-                    "object_kind": identity.kind.as_str(),
-                    "digest_hex": identity.digest_hex,
-                })
-            }).collect();
-            query("SELECT shardline_oci_publication_references_remote_delete_v1(current_schema(), $1)")
-                .bind(serde_json::Value::Array(identities)).execute(&mut *transaction).await?;
+        if !references.is_empty() {
+            check_oci_publication_references(transaction.as_mut(), key, references).await?;
         }
         let previous_deleted_at = query(
             "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
@@ -465,9 +543,15 @@ impl OciObjectStore for PostgresIndexStore {
                 Some(super::i64_to_u64(deleted_at)?),
             )?;
             verify_snapshot_evidence(&evidence, &expected)?;
-        } else if !evidence.events().is_empty() {
-            let expected = oci_snapshot(key, OciObjectLifecycleState::Published, None)?;
+        } else if let Some(head) = evidence.events().last() {
+            // A new upload can persist its hidden state before immutable bytes
+            // arrive. Reclaimed identities still have no active tombstone.
+            let expected = oci_snapshot(key, head.after.state, head.after.deleted_at_unix_seconds)?;
             verify_snapshot_evidence(&evidence, &expected)?;
+            if head.after.state == OciObjectLifecycleState::Deleted {
+                transaction.commit().await?;
+                return Ok(true);
+            }
         }
         transaction.commit().await?;
         Ok(found.is_some())
@@ -618,6 +702,104 @@ mod tests {
             tag: name.to_owned(),
             digest_hex: digest.to_string().repeat(64),
         }
+    }
+
+    #[tokio::test]
+    async fn staging_preserves_publication_and_needs_no_tombstone_insert_or_fence_grant() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let schema: String = query_scalar("SELECT current_schema()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let role = format!(
+            "stage_oci_{}_{}",
+            std::process::id(),
+            schema.rsplit('_').next().unwrap()
+        );
+        query(sqlx::AssertSqlSafe(format!("CREATE ROLE {role}")))
+            .execute(&pool)
+            .await
+            .unwrap();
+        for sql in [
+            format!("GRANT USAGE ON SCHEMA {schema} TO {role}"),
+            format!("GRANT SELECT, DELETE ON {schema}.shardline_oci_object_tombstones TO {role}"),
+            format!("GRANT SELECT ON {schema}.shardline_oci_tags TO {role}"),
+            format!(
+                "GRANT SELECT, INSERT, UPDATE ON {schema}.shardline_reliability_events TO {role}"
+            ),
+        ] {
+            query(sqlx::AssertSqlSafe(sql))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let key = object("global");
+        let mut actor = pool.acquire().await.unwrap();
+        query(sqlx::AssertSqlSafe(format!(
+            "SET SESSION AUTHORIZATION {role}"
+        )))
+        .execute(&mut *actor)
+        .await
+        .unwrap();
+        let can_insert: bool = query_scalar(
+            "SELECT has_table_privilege(current_user, 'shardline_oci_object_tombstones', 'INSERT')",
+        )
+        .fetch_one(&mut *actor)
+        .await
+        .unwrap();
+        assert!(!can_insert);
+        let can_read_fences: bool = query_scalar(
+            "SELECT has_table_privilege(current_user, 'shardline_resource_fences', 'SELECT')",
+        )
+        .fetch_one(&mut *actor)
+        .await
+        .unwrap();
+        assert!(!can_read_fences);
+        store
+            .stage_oci_object_on_connection(&mut actor, &key, &[])
+            .await
+            .unwrap();
+        assert!(store.oci_object_is_deleted(&key).await.unwrap());
+        let tombstones: i64 = query_scalar("SELECT count(*) FROM shardline_oci_object_tombstones")
+            .fetch_one(&mut *actor)
+            .await
+            .unwrap();
+        assert_eq!(tombstones, 0);
+        store
+            .publish_oci_object_on_connection(&mut actor, &key, &[])
+            .await
+            .unwrap();
+        assert!(!store.oci_object_is_deleted(&key).await.unwrap());
+        let before: i64 = query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(&mut *actor)
+            .await
+            .unwrap();
+        store
+            .stage_oci_object_on_connection(&mut actor, &key, &[])
+            .await
+            .unwrap();
+        let after: i64 = query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(&mut *actor)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(!store.oci_object_is_deleted(&key).await.unwrap());
+        query("RESET SESSION AUTHORIZATION")
+            .execute(&mut *actor)
+            .await
+            .unwrap();
+        drop(actor);
+        query(sqlx::AssertSqlSafe(format!("DROP OWNED BY {role}")))
+            .execute(&pool)
+            .await
+            .unwrap();
+        query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

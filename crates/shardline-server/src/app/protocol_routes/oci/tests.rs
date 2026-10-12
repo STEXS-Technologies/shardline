@@ -12,6 +12,117 @@ const REPO: &str = "team/assets";
 const TAG: &str = "latest";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_interrupted_manifest_bytes_stay_hidden_until_publication() {
+    if std::env::var("DATABASE_URL").is_err() {
+        return;
+    }
+    let cluster = build_oci_postgres_test_cluster().await.unwrap();
+    let backend = match &cluster.node_a.backend {
+        crate::ServerBackend::Postgres(backend) => Some(backend),
+        crate::ServerBackend::Local(_) => None,
+    }
+    .unwrap();
+    let store = backend.index_store();
+    store.initialize_remote_delete_guard().await.unwrap();
+    let app_a = oci_test_router(&cluster.node_a);
+    let app_b = oci_test_router(&cluster.node_b);
+    let repository = format!("interrupted/manifest-{}", std::process::id());
+    let config = upload_blob(&app_a, &repository, b"{}").await;
+    let layer = upload_blob(&app_a, &repository, b"layr").await;
+    let document = test_manifest_json(&config, &layer);
+    let digest = sha256_hex(document.as_bytes());
+    let key = shardline_index::OciObjectKey {
+        scope_namespace: "global".to_owned(),
+        repository: repository.clone(),
+        kind: shardline_index::OciObjectKind::Manifest,
+        digest_hex: digest.clone(),
+    };
+    let dependency = shardline_index::OciObjectKey {
+        kind: shardline_index::OciObjectKind::Blob,
+        digest_hex: layer.clone(),
+        ..key.clone()
+    };
+    let mut connection = store.pool().acquire().await.unwrap();
+    store
+        .stage_oci_object_on_connection(&mut connection, &key, std::slice::from_ref(&dependency))
+        .await
+        .unwrap();
+    let repository_id = sha256_hex(repository.as_bytes());
+    let physical = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/manifests/{digest}"
+    ))
+    .unwrap();
+    let media = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/manifest-media-types/{digest}"
+    ))
+    .unwrap();
+    cluster
+        .node_a
+        .backend
+        .put_object_bytes_if_absent(&physical, document.as_bytes().to_vec())
+        .await
+        .unwrap();
+    cluster
+        .node_a
+        .backend
+        .put_object_bytes_if_absent(&media, MANIFEST_MEDIA_TYPE.as_bytes().to_vec())
+        .await
+        .unwrap();
+    let dependency_key = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/blobs/{layer}"
+    ))
+    .unwrap();
+    let permit = store.begin_remote_delete(&dependency_key).await.unwrap();
+    assert!(
+        store
+            .publish_oci_object_with_references_on_connection(
+                &mut connection,
+                &key,
+                &[],
+                &[dependency]
+            )
+            .await
+            .unwrap_err()
+            .is_remote_delete_pending()
+    );
+    drop(connection);
+    let digest_uri = format!("/v2/{repository}/manifests/sha256:{digest}");
+    for app in [&app_a, &app_b] {
+        assert_eq!(
+            send(app, Method::GET, &digest_uri, Body::empty())
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(app, Method::HEAD, &digest_uri, Body::empty())
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert!(store.finish_remote_delete(&permit).await.unwrap());
+    assert_eq!(
+        send_with_content_type(
+            &app_b,
+            Method::PUT,
+            &format!("/v2/{repository}/manifests/latest"),
+            Body::from(document),
+            MANIFEST_MEDIA_TYPE
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        send(&app_a, Method::GET, &digest_uri, Body::empty())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_manifest_dependency_pending_delete_returns_retryable_error() {
     if std::env::var("DATABASE_URL").is_err() {
         return;
@@ -51,6 +162,16 @@ async fn postgres_manifest_dependency_pending_delete_returns_retryable_error() {
         .unwrap();
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("object has an unresolved remote delete; retry after reconciliation"));
+    let digest_uri = format!(
+        "/v2/{repository}/manifests/sha256:{}",
+        sha256_hex(document.as_bytes())
+    );
+    assert_eq!(
+        send(&app_a, Method::GET, &digest_uri, Body::empty())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
     assert!(
         store
             .oci_tag("global", &repository, "latest")

@@ -51,6 +51,12 @@ New manifest uploads also check their validated config, layer, child-manifest
 and subject references in the publication transaction. Legacy tag-only writes
 cannot inspect those payload references and still need additional protection.
 
+New Postgres-backed manifests stay hidden until publication succeeds. If an
+upload is interrupted after storing bytes, those bytes remain hidden from
+manifest reads; a successful retry can publish them. Existing published
+manifests remain visible during retries. This uses the existing verified
+journal and adds a storage existence check, with no extra service or grants.
+
 If GC received a successful delete reply, it tries to save that reply in your
 existing object storage before recording completion in the database. The next
 sweep or ordinary repair command can settle that saved result:

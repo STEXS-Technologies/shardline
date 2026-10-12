@@ -917,6 +917,32 @@ impl ServerBackend {
     /// Publishes immutable OCI bytes through the metadata session that owns
     /// the repository fence. Clearing a prior tombstone and retargeting tags
     /// form one database transaction.
+    pub(crate) async fn stage_new_oci_manifest_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+        physical_key: &ObjectKey,
+        references: &[OciObjectKey],
+    ) -> Result<(), ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Ok(());
+        };
+        match self.object_length(physical_key).await {
+            Ok(_) => return Ok(()),
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        let connection = guard
+            .postgres_connection_mut()
+            .ok_or(ServerError::StaleResourceFence)?;
+        backend
+            .index_store()
+            .stage_oci_object_on_connection(connection, key, references)
+            .await?;
+        Ok(())
+    }
+
+    /// Publishes metadata through the repository fence's database session.
     pub(crate) async fn publish_oci_object_locked(
         &self,
         guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
