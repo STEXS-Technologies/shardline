@@ -78,8 +78,8 @@ deployments have no local backup of an unpublished result.
 
 Not yet. The version and deployment formats remain unchanged on this branch.
 
-In Postgres deployments, rebuild, lifecycle repair, GC and retention hold
-updates stop their database writes if they lose the connection holding their
+In Postgres deployments, rebuild, lifecycle repair, Hub tree repair, GC and
+retention hold updates stop their database writes if they lose the connection holding their
 maintenance lock. This prevents an old invocation from reconnecting to continue
 database work after another node takes over.
 

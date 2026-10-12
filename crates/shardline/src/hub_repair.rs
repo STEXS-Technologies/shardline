@@ -10,6 +10,7 @@ use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_protocol_adapters::{scope_namespace, validate_content_hash};
 use shardline_server::{ObjectStorageAdapter, ServerConfigError, ServerObjectStore};
 use shardline_storage::{ObjectKey, ObjectStore};
+#[cfg(test)]
 use sqlx::postgres::PgPoolOptions;
 use thiserror::Error;
 
@@ -88,8 +89,11 @@ async fn run_hub_tree_repair_with_config(
         .await
         .map_err(|error| HubTreeRepairRuntimeError::Store(error.to_string()))?;
     tokio::task::spawn_blocking(move || {
-        let _maintenance_guard = maintenance_guard;
-        recover_from_manifest(&config, &state_file)
+        recover_from_manifest(
+            &config,
+            &state_file,
+            maintenance_guard.postgres_metadata_pool(),
+        )
     })
     .await
     .map_err(|error| HubTreeRepairRuntimeError::Store(format!("recovery task failed: {error}")))?
@@ -98,6 +102,7 @@ async fn run_hub_tree_repair_with_config(
 fn recover_from_manifest(
     config: &shardline_server::ServerConfig,
     state_file: &Path,
+    metadata_pool: Option<&sqlx::PgPool>,
 ) -> Result<String, HubTreeRepairRuntimeError> {
     let mut bytes = Vec::new();
     File::open(state_file)?
@@ -109,12 +114,11 @@ fn recover_from_manifest(
         ));
     }
     let input: HubTreeRecoveryInput = serde_json::from_slice(&bytes)?;
-    let store = if let Some(url) = config.index_postgres_url() {
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_lazy(url)
-            .map_err(|error| HubTreeRepairRuntimeError::Store(error.to_string()))?;
-        BoxedHubStore::from_store(PostgresIndexStore::new(pool))
+    let store = if config.index_postgres_url().is_some() {
+        let pool = metadata_pool.ok_or_else(|| {
+            HubTreeRepairRuntimeError::Store("missing owned metadata session".to_owned())
+        })?;
+        BoxedHubStore::from_store(PostgresIndexStore::new(pool.clone()))
     } else {
         let store = LocalIndexStore::new(config.root_dir().join("hub"))
             .map_err(|error| HubTreeRepairRuntimeError::Store(error.to_string()))?;
@@ -348,6 +352,7 @@ mod tests {
     use tempfile::TempDir;
 
     const LEGACY: &str = "1234567890abcdef";
+    static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn fixture() -> (TempDir, LocalIndexStore, ServerObjectStore) {
         let temp = TempDir::new().unwrap();
@@ -596,10 +601,143 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_recovery_stops_after_gc_barrier_session_loss() {
+        postgres_recovery_with_interruption(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_recovery_keeps_barrier_until_blocking_work_finishes_after_cancellation() {
+        postgres_recovery_with_interruption(true).await;
+    }
+
+    async fn postgres_recovery_with_interruption(cancel_waiter: bool) {
+        let Ok(url) = std::env::var("SHARDLINE_HUB_RECOVERY_TEST_DATABASE_URL") else {
+            return;
+        };
+        let _test_guard = POSTGRES_TEST_LOCK.lock().await;
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .unwrap();
+        let store = PostgresIndexStore::new(pool.clone());
+        let temp = TempDir::new().unwrap();
+        let objects = ServerObjectStore::local(temp.path().join("chunks")).unwrap();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repo = format!("owner-loss/{suffix}");
+        let legacy = &blake3::hash(repo.as_bytes()).to_hex().to_string()[..16];
+        store.create_repo(HubRepoType::Model, &repo, true).unwrap();
+        store
+            .create_revision(&repo, Some(EMPTY_HUB_REVISION), legacy, "main", "fixture")
+            .unwrap();
+        let expected_file = file(&objects, None, "safe.txt", b"safe repair bytes", false);
+        let mut manifest = input(&repo, vec![expected_file]);
+        manifest.expected_head = legacy.to_owned();
+        let state_file = temp.path().join("tree.json");
+        std::fs::write(&state_file, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let config = shardline_server::ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_index_postgres_url(url)
+        .unwrap();
+        let mut scan_blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE shardline_hub_refs IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *scan_blocker)
+            .await
+            .unwrap();
+        let repair = tokio::spawn(run_hub_tree_repair_with_config(config, state_file));
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let blocked = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='shardline_hub_refs'::regclass AND NOT granted)",
+                ).fetch_one(&pool).await.unwrap();
+                if blocked { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.unwrap();
+        if cancel_waiter {
+            repair.abort();
+            assert!(repair.await.unwrap_err().is_cancelled());
+            let mut takeover = pool.begin().await.unwrap();
+            let mut acquiring = Box::pin(
+                sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                    .bind(0x5348_4152_4447_4301_i64)
+                    .execute(&mut *takeover),
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut acquiring)
+                    .await
+                    .is_err(),
+                "cancelling the waiter must not release ownership of live blocking repair",
+            );
+            scan_blocker.rollback().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(15), &mut acquiring)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(acquiring);
+            assert_ne!(
+                store.resolve_revision(&repo, "main").unwrap().as_deref(),
+                Some(legacy),
+                "blocking repair must finish publication before releasing its barrier"
+            );
+            takeover.rollback().await.unwrap();
+            return;
+        }
+        let coordinator = sqlx::query_scalar::<_, i32>(
+            "SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND objsubid=1
+             AND classid::bigint=(($1::bigint >> 32) & 4294967295)
+             AND objid::bigint=($1::bigint & 4294967295)",
+        )
+        .bind(0x5348_4152_4447_4301_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(coordinator)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        let mut takeover = pool.begin().await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(0x5348_4152_4447_4301_i64)
+                .execute(&mut *takeover),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        scan_blocker.rollback().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), repair)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "obsolete Hub repair published after database takeover: {result:?}"
+        );
+        assert_eq!(
+            store.resolve_revision(&repo, "main").unwrap().as_deref(),
+            Some(legacy)
+        );
+        takeover.rollback().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn postgres_recovery_isolates_legacy_collision_and_preserves_evidence() {
         let Ok(url) = std::env::var("SHARDLINE_HUB_RECOVERY_TEST_DATABASE_URL") else {
             return;
         };
+        let _test_guard = POSTGRES_TEST_LOCK.lock().await;
         let pool = PgPoolOptions::new()
             .max_connections(4)
             .connect(&url)
