@@ -178,7 +178,7 @@ pub(super) fn run_inner(
     let identity = if automatic && !operation.read_only() {
         let publication_config = super::publication_config(&operation, &config)?;
         Some((
-            shardline_server::task_tracking::TaskEvidenceStore::from_config(&publication_config)?,
+            super::evidence::store(&operation, &publication_config, Some(state))?,
             shardline_server::task_tracking::TaskRunIdentity {
                 schema: 1,
                 id: task_name.to_owned(),

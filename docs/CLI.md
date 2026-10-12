@@ -33,15 +33,19 @@ endpoints once. Changing a config or credential file does not redirect work
 already admitted; the next invocation reads the new configuration.
 
 Local maintenance scratch lives in `.shardline-maintenance` under the existing
-root. Postgres/S3-only administrative invocations use a private directory in the
-standard temporary filesystem. Normal jobs keep inherited host resource limits;
-they do not inherit the advanced runner's time/CPU/report limits below.
-When a Postgres/S3 invocation has a read-only local filesystem, it records native
-history directly in the existing shared object store. No writable mount is added.
-Read-only GC and migration scans do not need a task scratch directory.
+root. PostgreSQL jobs and storage copies use the standard temporary filesystem
+for private scratch, so copying does not require write access to its source.
+Normal jobs keep inherited host resource limits.
 
-Signed command outcomes are exported to `_shardline_tasks/v1/` through the configured
-object adapter. With a local journal, a shared-export failure retains local evidence and logs a warning;
+Signed outcomes use the deployment's task metadata when available. A local copy
+stores its history in the destination's SQLite metadata. A copy to an S3-only
+endpoint keeps history in private temporary storage on the command's host:
+there is no verified database association for that endpoint. That history is
+not shared between nodes and can be lost when temporary storage is cleaned.
+Tracking adds no objects to the copy's payload bucket and requires no new S3
+permissions, service or mount. Dry runs publish no task history.
+
+With a local journal, a history-export failure retains local evidence and logs a warning;
 it does not disable local supervision or change the application's result. Later
 invocations can export verified completed evidence without repeating its effects.
 Verified unfinished history can also be exported for inspection; its local
@@ -51,14 +55,14 @@ backlog, so unfinished or corrupt entries do not permanently hide later outcomes
 Completed local evidence can also be exported after a reboot on the same
 identified host. A different host or an unobservable container owner stays
 unconfirmed; its recorded PID does not authorize a retry.
-GC dry runs and storage-migration dry runs write no shared task history; real
-migration evidence belongs to the destination, preserving read-only source access.
+GC dry runs and storage-migration dry runs write no shared task history.
 Finished shared histories older than 30 days are eligible for bounded cleanup;
 interrupted cleanup resumes later, and unresolved and corrupt histories are
 retained. These policies do not grant any
 extra storage permissions.
 
-Without writable local storage, shared evidence is the only task history. If it
+Without writable local storage, commands use their available deployment history.
+An S3-only copy has no such fallback. If history
 cannot be recorded, Shardline warns and preserves the original command's result
 under its existing domain barriers. It does not claim verified completion or
 automatically repeat work to recover a missing receipt.

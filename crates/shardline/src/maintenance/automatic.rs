@@ -156,13 +156,7 @@ fn run_inner(
         return super::shared_inline::run(operation, arguments, &config);
     }
     let ephemeral = config.index_postgres_url().is_some()
-        || matches!(
-            operation,
-            MaintenanceOperation::StorageMigrate {
-                from: super::MaintenanceStorageAdapter::S3,
-                ..
-            }
-        );
+        || matches!(operation, MaintenanceOperation::StorageMigrate { .. });
     let state = {
         if ephemeral {
             shardline_server::task_tracking::deployment_fingerprint(&config).map(|deployment| {
@@ -199,7 +193,7 @@ fn run_inner(
     if !operation.read_only() {
         let export_config = super::publication_config(operation, &config)?;
         let retry = (|| -> Result<()> {
-            let store = super::evidence::store(operation, &export_config)?;
+            let store = super::evidence::store(operation, &export_config, Some(&state))?;
             let deployment =
                 shardline_server::task_tracking::deployment_fingerprint(&export_config)?;
             if let Err(error) =
@@ -229,7 +223,7 @@ fn run_inner(
         .as_ref()
         .is_ok_and(|result| result.evidence_published)
     {
-        // Evidence and streamed output are already confirmed in the deployment
+        // Evidence and streamed output are confirmed in the selected history
         // store. Open capture descriptors survive removal of the scratch files.
         let digest = penelope_core::task::Digest::of(id.as_bytes());
         std::fs::remove_dir_all(state.join(hex::encode(digest.0)))?;

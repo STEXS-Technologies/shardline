@@ -249,21 +249,9 @@ fn publication_config(
     config: &shardline_server::ServerConfig,
 ) -> Result<shardline_server::ServerConfig> {
     if let MaintenanceOperation::StorageMigrate { to, to_root, .. } = operation {
-        return Ok(
-            match crate::storage_migration::endpoint(
-                to.adapter(),
-                to_root.as_deref(),
-                "destination",
-            )? {
-                shardline_server::StorageMigrationEndpoint::LocalStateRoot(root) => config
-                    .clone()
-                    .with_root_dir(crate::local_output::resolved_output_path(&root)?)
-                    .with_object_storage(shardline_server::ObjectStorageAdapter::Local, None),
-                shardline_server::StorageMigrationEndpoint::S3(s3) => config
-                    .clone()
-                    .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3)),
-            },
-        );
+        let destination =
+            crate::storage_migration::endpoint(to.adapter(), to_root.as_deref(), "destination")?;
+        return source_config(config.root_dir(), destination);
     }
     Ok(config.clone())
 }

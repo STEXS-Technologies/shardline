@@ -98,8 +98,13 @@ account supports it. Normal maintenance moves verified, finished legacy history
 into metadata in bounded batches, preserving its signed bytes. Interrupted,
 corrupt or unrelated history stays in place. Storage copy keeps its source
 read-only; it does not require new source write permissions.
-Different work databases or schemas, some legacy history, S3-only storage-copy
-paths and narrowly privileged accounts still need compatibility work. Older GC,
+Copies to S3-only endpoints keep task history in private temporary storage on
+the command's host, without adding objects or permissions to the payload bucket.
+That history is not available through other nodes and can be removed by
+temporary-directory cleanup. A copy to local storage keeps history in its
+destination's SQLite metadata.
+Different work databases or schemas, some legacy history
+and narrowly privileged accounts still need compatibility work. Older GC,
 remaining write paths, missing delete replies and deployment-scale behavior also
 have open checks. Released 1.11.3 servers may return a generic error for a pending
 delete. See [the acceptance evidence and remaining gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md)

@@ -23,6 +23,7 @@ copy_objects() {
     cmp "$fixture/source/chunks/fixture/payload" "$destination/chunks/fixture/payload"
 }
 copy_objects "$current" "$fixture/source" "$fixture/current" "$fixture/current.log"
+test ! -e "$fixture/source/.shardline-maintenance"
 test ! -e "$fixture/current/chunks/_shardline_tasks"
 test "$(sqlite3 "$fixture/current/metadata.sqlite3" 'SELECT count(*) FROM shardline_task_artifacts_v1;')" -gt 0
 sqlite3 -separator $'\t' "$fixture/current/metadata.sqlite3" \

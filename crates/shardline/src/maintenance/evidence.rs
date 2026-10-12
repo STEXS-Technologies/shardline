@@ -5,10 +5,23 @@ use shardline_server::{ServerConfig, task_tracking::TaskEvidenceStore};
 pub(super) fn store(
     operation: &MaintenanceOperation,
     config: &ServerConfig,
+    private_state: Option<&std::path::Path>,
 ) -> Result<TaskEvidenceStore> {
     // Copy endpoints do not establish a PostgreSQL association. In particular,
     // copying local payloads must not start depending on an unavailable DB.
     if matches!(operation, MaintenanceOperation::StorageMigrate { .. }) {
+        if config.object_storage_adapter() == shardline_server::ObjectStorageAdapter::S3 {
+            // No verified metadata association exists for a raw S3 endpoint.
+            // Keep control data in the existing host task state, never payload.
+            let root =
+                private_state.ok_or("storage-copy history has no writable private archive")?;
+            super::artifact::private_directory(root)?;
+            let archive = super::source_config(
+                root,
+                shardline_server::StorageMigrationEndpoint::LocalStateRoot(root.to_path_buf()),
+            )?;
+            return Ok(TaskEvidenceStore::from_config(&archive)?);
+        }
         return Ok(TaskEvidenceStore::from_config(config)?);
     }
     let Some(url) = config.index_postgres_url() else {
@@ -39,3 +52,6 @@ pub(super) fn store(
         }
     })
 }
+
+#[cfg(test)]
+mod tests;
