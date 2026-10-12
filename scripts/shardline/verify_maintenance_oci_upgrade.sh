@@ -203,6 +203,50 @@ for node in 0 1; do
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
 
+# Partial uploads must also reject publication after losing the request owner.
+test "$(curl -sS --max-time 15 -o "$fixture/upload-create.body" \
+    -D "$fixture/upload-create.headers" -w '%{http_code}' \
+    -H "Authorization: Bearer $token" -X POST \
+    "http://127.0.0.1:${ports[1]}/v2/team/upgrade/blobs/uploads/")" = 202
+upload_location=$(sed -n 's/^[Ll]ocation: \(.*\)\r$/\1/p' "$fixture/upload-create.headers")
+[[ "$upload_location" == /v2/team/upgrade/blobs/uploads/* ]]
+upload_id=${upload_location##*/}
+[[ "$upload_id" =~ ^[A-Za-z0-9_-]+$ ]]
+generation_before=$(sql "SELECT generation FROM shardline_resumable_sessions WHERE session_id='$upload_id'")
+sql "CREATE FUNCTION fixture_pause_part() RETURNS trigger LANGUAGE plpgsql AS \$\$
+BEGIN PERFORM pg_sleep(5); RETURN NEW; END \$\$;
+CREATE TRIGGER fixture_pause_part BEFORE INSERT ON shardline_resumable_session_parts
+FOR EACH ROW EXECUTE FUNCTION fixture_pause_part();" > "$fixture/part-owner-loss-install.log"
+(curl -sS --max-time 15 -o "$fixture/upload-patch.body" -w '%{http_code}' \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/octet-stream' \
+    -X PATCH --data-binary abc "http://127.0.0.1:${ports[1]}$upload_location" \
+    > "$fixture/upload-patch.status" 2> "$fixture/upload-patch.log") &
+request_pid=$!
+part_pid=''
+for attempt in $(seq 1 50); do
+    part_pid=$(sql "SELECT pid FROM pg_stat_activity WHERE usename='existing_oci_writer'
+        AND wait_event='PgSleep' AND query LIKE '%INSERT INTO shardline_resumable_session_parts%'")
+    if test -n "$part_pid"; then break; fi
+    sleep 0.1
+done
+[[ "$part_pid" =~ ^[0-9]+$ ]]
+request_owner=$(sql "SELECT DISTINCT locks.pid FROM pg_locks AS locks
+    JOIN pg_stat_activity AS activity ON activity.pid=locks.pid
+    WHERE activity.usename='existing_oci_writer' AND locktype='advisory'
+    AND mode='ShareLock' AND granted AND objsubid=1
+    AND classid::bigint=1397244242 AND objid::bigint=1145520897")
+[[ "$request_owner" =~ ^[0-9]+$ ]]
+test "$(sql "SELECT pg_terminate_backend($request_owner)")" = t
+wait "$request_pid"
+request_pid=''
+[[ "$(cat "$fixture/upload-patch.status")" =~ ^5[0-9][0-9]$ ]]
+test "$(sql "SELECT generation FROM shardline_resumable_sessions WHERE session_id='$upload_id'")" = "$generation_before"
+test "$(sql "SELECT count(*) FROM shardline_resumable_session_parts WHERE session_id='$upload_id'")" = 0
+sql 'DROP TRIGGER fixture_pause_part ON shardline_resumable_session_parts; DROP FUNCTION fixture_pause_part();' > "$fixture/part-owner-loss-remove.log"
+test "$(curl -sS --max-time 15 -o "$fixture/upload-retry.body" -w '%{http_code}' \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/octet-stream' \
+    -X PATCH --data-binary abc "http://127.0.0.1:${ports[1]}$upload_location")" = 202
+
 # Lose the real request's database owner while its server remains alive. The
 # publication session itself must own the shared GC lock: losing a separate
 # middleware connection used to let this upload return 201.
@@ -301,4 +345,4 @@ for node in 0 1; do
     read_manifest "$node" latest 200
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
-echo "PASS: restricted released/current OCI writers preserve visibility after publication failure, database owner loss and SIGKILL, and retry with unchanged migrations and table grants; diagnostics: $fixture"
+echo "PASS: restricted released/current OCI writers preserve manifest visibility and partial-upload state after database owner loss, publication failure and SIGKILL, and retry with unchanged migrations and table grants; diagnostics: $fixture"

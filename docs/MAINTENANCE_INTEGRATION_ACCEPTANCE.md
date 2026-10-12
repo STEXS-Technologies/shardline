@@ -30,6 +30,11 @@ This document is for reviewers deciding whether the integration is safe to ship.
   session. The real server-process drill terminates that session during tag
   publication, preserves the prior manifest for released/current readers and
   verifies a normal retry succeeds without restarting the server.
+  Partial-upload publication now uses that same connection too. Its native
+  fault test first reproduced PATCH returning 202 after request ownership loss;
+  the fixed path rejects the request without advancing session generation or
+  adding a part, and a normal PATCH retry succeeds. Session creation and other
+  completion-state mutations still require the same review and fault coverage.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.
