@@ -3,8 +3,8 @@
 For commands, benefits and crash recovery, start with the
 [operator guide](MAINTENANCE_INTEGRATION_UX.md). This page describes implementation
 details. The [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) records
-remaining gaps. Rebuild, lifecycle repair and retention hold updates keep their
-locks and metadata work on non-replaceable Postgres connections. Other
+remaining gaps. Mutating GC, rebuild, lifecycle repair and retention hold updates
+keep their locks and metadata work on non-replaceable Postgres connections. Other
 operations' ownership and remote-effect boundaries still need validation.
 
 The 0.2.0 integration includes an embedded server tracker and automatic Linux
@@ -201,6 +201,15 @@ it can reconnect and prune holds or quarantine records during another owner's
 exclusive run. Object-store access in this operation reads reachability; this
 binding does not establish fencing for other operations' remote writes or deletes.
 Earlier committed repair changes may remain after a failure.
+
+Mutating GC uses the exclusive form of the same work pool for resumable-session
+metadata, reachability scans, quarantine changes and OCI metadata reclamation.
+Losing that session prevents the old invocation from reconnecting for later
+database work. A blocked-scan regression verifies failure after exclusive
+takeover, with no new quarantine row or clock anchor. Pure GC dry runs retain
+their existing pool and do not acquire this exclusive lock. This change does
+not atomically fence S3 effects: an already issued request can have an unknown
+outcome, and requests delayed across takeover still require protection.
 
 Both modes use PostgreSQL's advisory-lock wait queue. A queued exclusive owner
 blocks later shared acquisitions. During acquisition, cancellation closes the
