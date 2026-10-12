@@ -50,6 +50,12 @@ S3 can delete an object before GC receives its reply. If GC dies then, history
 stays unresolved. A replacement server does not repeat that uncertain work
 automatically. A missing reply is not proof that nothing changed.
 
+The intended behavior is a clear retryable error for a later hold or write to
+an object whose earlier delete is unresolved. Other objects remain available.
+Retrying must not acknowledge protection until the earlier delete is settled.
+This protection is still being implemented; the current branch has the S3 race
+described below.
+
 Inspect `/api/v1/tasks/maintenance` with your existing admin token:
 
 | State | What to do |
@@ -79,6 +85,8 @@ database work after another node takes over.
 
 Other operations' remote effects and crash boundaries, plus large-deployment
 limits, still need validation before this integration is ready to merge.
+A confirmed S3 race can still remove an object after a new retention hold is
+acknowledged. That must be fixed before upgrading with the stronger guarantees.
 
 Cluster-wide exactly-once execution is not guaranteed. See the
 [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) for remaining work and

@@ -211,6 +211,36 @@ their existing pool and do not acquire this exclusive lock. This change does
 not atomically fence S3 effects: an already issued request can have an unknown
 outcome, and requests delayed across takeover still require protection.
 
+The real delayed-delete regression confirms this boundary. It pauses a request
+before MinIO applies it, terminates GC's database owner, acknowledges a new hold
+while the bytes still exist, and then releases the former owner's request. The
+object is removed even though the hold remains and GC records failure. A signed
+failure describes the outcome; it does not protect the bytes retroactively.
+
+An ETag precondition alone cannot establish Shardline ownership. Amazon S3's
+[conditional-delete contract](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.html)
+checks whether the object matches its ETag. A metadata-only hold does not modify
+the stored object, so this precondition cannot distinguish the old and new
+Shardline owners. Idempotency alone likewise does not authorize a delete after
+the object's protection changes.
+
+The remaining design needs a durable effect gate: an uncertain issued delete
+must prevent a later successful hold or reference publication from racing with
+it. Later requests for the affected object must return a clear retryable error
+instead of waiting indefinitely or acknowledging protection. This is the chosen
+behavior, not a guarantee provided by the current implementation. Clearing that
+gate requires proof that issued requests have settled, rather
+than merely an expired timer, a dead PID or a lost database session. This must
+also work during mixed-version operation and rollback. An additive database
+migration is not automatically compatible: the existing
+`check_database_schema_compatibility` verifier rejects unknown applied migration
+versions. An isolated Postgres fixture confirms that the released 1.11.3
+`db migrate up` exits with code 2 for an unknown migration record and succeeds
+again after removing that fixture record. This checks the released migrator,
+not a full released-server startup. The remote gate is not implemented yet. The
+explicitly ignored takeover regression must pass before this integration is
+ready to merge.
+
 Both modes use PostgreSQL's advisory-lock wait queue. A queued exclusive owner
 blocks later shared acquisitions. During acquisition, cancellation closes the
 connection instead of leaving a detached pool-return operation queued on the
