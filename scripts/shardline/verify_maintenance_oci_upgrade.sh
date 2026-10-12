@@ -13,10 +13,11 @@ echo "diagnostics: $fixture"
 trap 'printf "FAIL: OCI upgrade drill at line %s; diagnostics: %s\n" "$LINENO" "$fixture" >&2' ERR
 container_id=''
 server_pids=()
+request_pid=''
 cleanup() {
+    if test -n "$request_pid"; then kill "$request_pid" 2>/dev/null || true; wait "$request_pid" 2>/dev/null || true; fi
     for pid in "${server_pids[@]}"; do
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+        if test -n "$pid"; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done
     if test -n "$container_id"; then docker rm -f "$container_id" > "$fixture/cleanup.log" 2>&1 || true; fi
 }
@@ -76,7 +77,7 @@ start_server() {
         SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=memory SHARDLINE_OBJECT_STORAGE_ADAPTER=local \
         SHARDLINE_INDEX_POSTGRES_URL="$writer_url" \
         "$binary" serve > "$fixture/server-$node.log" 2>&1 &
-    server_pids+=("$!")
+    server_pids[$node]=$!
     for attempt in $(seq 1 40); do
         kill -0 "${server_pids[$node]}"
         if curl -fsS --max-time 2 -H "Authorization: Bearer $token" \
@@ -168,4 +169,62 @@ for node in 0 1; do
     read_manifest "$node" latest 200
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
-echo "PASS: restricted released/current OCI writers preserve visibility and retry publication with unchanged migrations and table grants; diagnostics: $fixture"
+
+# Stop a real server while its publication transaction is sleeping after the
+# immutable writes. Let PostgreSQL observe the dead connection naturally;
+# do not terminate its backend or manufacture rollback from an owner session.
+printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[],"annotations":{"fixture":"process-crash"}}' > "$fixture/crashed.json"
+crashed_digest=$(sha256sum "$fixture/crashed.json" | cut -d ' ' -f 1)
+sql "CREATE FUNCTION fixture_pause_publication() RETURNS trigger LANGUAGE plpgsql AS \$\$
+BEGIN IF NEW.tag='crashed' THEN PERFORM pg_sleep(5); END IF; RETURN NEW; END \$\$;
+CREATE TRIGGER fixture_pause_publication BEFORE INSERT OR UPDATE ON shardline_oci_tags
+FOR EACH ROW EXECUTE FUNCTION fixture_pause_publication();" > "$fixture/crash-install.log"
+(request 1 PUT crashed --data-binary "@$fixture/crashed.json" > "$fixture/crashed-status" 2> "$fixture/crashed-request.log" || true) &
+request_pid=$!
+publication_pid=''
+for attempt in $(seq 1 50); do
+    publication_pid=$(sql "SELECT pid FROM pg_stat_activity WHERE usename='existing_oci_writer'
+        AND wait_event='PgSleep' AND query LIKE '%INSERT INTO shardline_oci_tags%'")
+    if test -n "$publication_pid"; then break; fi
+    sleep 0.1
+done
+[[ "$publication_pid" =~ ^[0-9]+$ ]]
+cmp "$fixture/crashed.json" "$objects/manifests/$crashed_digest"
+test "$(cat "$objects/manifest-media-types/$crashed_digest")" = "$media_type"
+printf '%s\n' "${server_pids[1]}" > "$fixture/crashed-server-pid"
+printf '%s\n' "$publication_pid" > "$fixture/crashed-database-pid"
+kill -KILL "${server_pids[1]}"
+if wait "${server_pids[1]}" 2>/dev/null; then
+    echo 'FAIL: crashed server exited successfully instead of dying from SIGKILL' >&2
+    exit 1
+else
+    exit_status=$?
+    printf '%s\n' "$exit_status" > "$fixture/crashed-server-status"
+    test "$exit_status" = 137
+fi
+server_pids[1]=''
+wait "$request_pid"
+request_pid=''
+test "$(cat "$fixture/crashed-status")" = 000
+for attempt in $(seq 1 60); do
+    if test "$(sql "SELECT count(*) FROM pg_stat_activity WHERE pid=$publication_pid")" = 0; then break; fi
+    sleep 0.2
+done
+test "$(sql "SELECT count(*) FROM pg_stat_activity WHERE pid=$publication_pid")" = 0
+test "$(sql "SELECT count(*) FROM shardline_oci_object_tombstones WHERE repository='team/upgrade' AND digest_hex='$crashed_digest'")" = 1
+read_manifest 0 "sha256:$crashed_digest" 404
+read_manifest 0 crashed 404
+read_manifest 0 latest 200
+cmp "$fixture/published.json" "$fixture/response-0.body"
+sql 'DROP TRIGGER fixture_pause_publication ON shardline_oci_tags; DROP FUNCTION fixture_pause_publication();' > "$fixture/crash-remove.log"
+mv "$fixture/server-1.log" "$fixture/crashed-server.log"
+start_server "$current" 1
+read_manifest 1 "sha256:$crashed_digest" 404
+test "$(request 1 PUT crashed --data-binary "@$fixture/crashed.json")" = 201
+for node in 0 1; do
+    read_manifest "$node" "sha256:$crashed_digest" 200
+    cmp "$fixture/crashed.json" "$fixture/response-$node.body"
+    read_manifest "$node" latest 200
+    cmp "$fixture/published.json" "$fixture/response-$node.body"
+done
+echo "PASS: restricted released/current OCI writers preserve visibility after publication failure and SIGKILL, and retry with unchanged migrations and table grants; diagnostics: $fixture"
