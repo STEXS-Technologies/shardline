@@ -557,6 +557,35 @@ impl PostgresIndexStore {
         session: &ResumableSession,
         max_active: usize,
     ) -> Result<CreateResumableSessionOutcome, PostgresMetadataStoreError> {
+        self.create_resumable_session_bounded_using_connection(None, session, max_active)
+            .await
+    }
+
+    /// Performs this session mutation on the caller's lock-owning connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection is lost or the transaction fails.
+    pub async fn create_resumable_session_bounded_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        session: &ResumableSession,
+        max_active: usize,
+    ) -> Result<CreateResumableSessionOutcome, PostgresMetadataStoreError> {
+        self.create_resumable_session_bounded_using_connection(
+            Some(connection),
+            session,
+            max_active,
+        )
+        .await
+    }
+
+    async fn create_resumable_session_bounded_using_connection(
+        &self,
+        connection: Option<&mut PgConnection>,
+        session: &ResumableSession,
+        max_active: usize,
+    ) -> Result<CreateResumableSessionOutcome, PostgresMetadataStoreError> {
         let max_active = i64::try_from(max_active)
             .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
         let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
@@ -567,7 +596,10 @@ impl PostgresIndexStore {
         )
         .ok_or_else(|| PostgresMetadataStoreError::IntegerOutOfRange("invalid expiry".into()))?;
         let state_digest = crate::resumable_state_digest(session, &[])?;
-        let mut transaction = self.pool().begin().await?;
+        let mut transaction = match connection {
+            Some(connection) => connection.begin().await?,
+            None => self.pool().begin().await?,
+        };
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(SESSION_ACCOUNTING_LOCK_ID)
             .execute(&mut *transaction)
@@ -1109,7 +1141,35 @@ impl PostgresIndexStore {
         session_id: &str,
     ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, PostgresMetadataStoreError>
     {
-        let mut transaction = self.pool().begin().await?;
+        self.begin_resumable_completion_using_connection(None, session_id)
+            .await
+    }
+
+    /// Performs this session mutation on the caller's lock-owning connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection is lost or the transaction fails.
+    pub async fn begin_resumable_completion_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, PostgresMetadataStoreError>
+    {
+        self.begin_resumable_completion_using_connection(Some(connection), session_id)
+            .await
+    }
+
+    async fn begin_resumable_completion_using_connection(
+        &self,
+        connection: Option<&mut PgConnection>,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, PostgresMetadataStoreError>
+    {
+        let mut transaction = match connection {
+            Some(connection) => connection.begin().await?,
+            None => self.pool().begin().await?,
+        };
         let previous_state: Option<String> = sqlx::query_scalar(
             "SELECT state FROM shardline_resumable_sessions
              WHERE session_id = $1 AND state IN ('active', 'completing')
@@ -1175,10 +1235,54 @@ impl PostgresIndexStore {
         expected_fence_epoch: NonZeroU64,
         next_state: ResumableSessionState,
     ) -> Result<bool, PostgresMetadataStoreError> {
+        self.transition_resumable_session_using_connection(
+            None,
+            session_id,
+            expected_state,
+            expected_fence_epoch,
+            next_state,
+        )
+        .await
+    }
+
+    /// Performs this session mutation on the caller's lock-owning connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection is lost or the transaction fails.
+    pub async fn transition_resumable_session_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        session_id: &str,
+        expected_state: ResumableSessionState,
+        expected_fence_epoch: NonZeroU64,
+        next_state: ResumableSessionState,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        self.transition_resumable_session_using_connection(
+            Some(connection),
+            session_id,
+            expected_state,
+            expected_fence_epoch,
+            next_state,
+        )
+        .await
+    }
+
+    async fn transition_resumable_session_using_connection(
+        &self,
+        connection: Option<&mut PgConnection>,
+        session_id: &str,
+        expected_state: ResumableSessionState,
+        expected_fence_epoch: NonZeroU64,
+        next_state: ResumableSessionState,
+    ) -> Result<bool, PostgresMetadataStoreError> {
         if !expected_state.can_transition_to(next_state) {
             return Ok(false);
         }
-        let mut transaction = self.pool().begin().await?;
+        let mut transaction = match connection {
+            Some(connection) => connection.begin().await?,
+            None => self.pool().begin().await?,
+        };
         let result = sqlx::query(
             "UPDATE shardline_resumable_sessions
              SET state = $1, updated_at = now()
@@ -1237,7 +1341,43 @@ impl PostgresIndexStore {
         session_id: &str,
         expected_fence_epoch: NonZeroU64,
     ) -> Result<bool, PostgresMetadataStoreError> {
-        let mut transaction = self.pool().begin().await?;
+        self.reopen_resumable_session_after_failed_completion_using_connection(
+            None,
+            session_id,
+            expected_fence_epoch,
+        )
+        .await
+    }
+
+    /// Performs this session mutation on the caller's lock-owning connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection is lost or the transaction fails.
+    pub async fn reopen_resumable_session_after_failed_completion_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        session_id: &str,
+        expected_fence_epoch: NonZeroU64,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        self.reopen_resumable_session_after_failed_completion_using_connection(
+            Some(connection),
+            session_id,
+            expected_fence_epoch,
+        )
+        .await
+    }
+
+    async fn reopen_resumable_session_after_failed_completion_using_connection(
+        &self,
+        connection: Option<&mut PgConnection>,
+        session_id: &str,
+        expected_fence_epoch: NonZeroU64,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut transaction = match connection {
+            Some(connection) => connection.begin().await?,
+            None => self.pool().begin().await?,
+        };
         let row = sqlx::query(
             "UPDATE shardline_resumable_sessions
              SET state = 'active', generation = generation + 1,
@@ -1592,6 +1732,110 @@ mod tests {
             "large/model.bin".to_owned(),
             expires_at,
         )
+    }
+
+    #[tokio::test]
+    async fn postgres_bound_session_mutations_do_not_replace_a_lost_connection() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry =
+            Duration::from_secs(u64::try_from(chrono::Utc::now().timestamp()).unwrap() + 3600);
+        let active = session("bound-active", expiry);
+        let completing = session("bound-completing", expiry);
+        let candidate = session("bound-create", expiry);
+        assert!(store.create_resumable_session(&active).await.unwrap());
+        assert!(store.create_resumable_session(&completing).await.unwrap());
+        let (claimed, _) = store
+            .begin_resumable_completion(completing.session_id())
+            .await
+            .unwrap()
+            .unwrap();
+        let events_before = store
+            .resumable_reliability_events(completing.session_id())
+            .await
+            .unwrap();
+        let mut connection = store.pool().acquire().await.unwrap();
+        connection.close_on_drop();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(terminated);
+        assert!(
+            store
+                .create_resumable_session_bounded_on_connection(
+                    &mut connection,
+                    &candidate,
+                    100_000
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .begin_resumable_completion_on_connection(&mut connection, active.session_id())
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .transition_resumable_session_on_connection(
+                    &mut connection,
+                    completing.session_id(),
+                    ResumableSessionState::Completing,
+                    claimed.fence_epoch(),
+                    ResumableSessionState::Aborted
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .reopen_resumable_session_after_failed_completion_on_connection(
+                    &mut connection,
+                    completing.session_id(),
+                    claimed.fence_epoch()
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .resumable_session_by_id(candidate.session_id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .resumable_session_by_id(active.session_id())
+                .await
+                .unwrap()
+                .unwrap(),
+            active
+        );
+        assert_eq!(
+            store
+                .resumable_session_by_id(completing.session_id())
+                .await
+                .unwrap()
+                .unwrap(),
+            claimed
+        );
+        assert_eq!(
+            store
+                .resumable_reliability_events(completing.session_id())
+                .await
+                .unwrap(),
+            events_before
+        );
     }
 
     #[tokio::test]

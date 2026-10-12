@@ -33,8 +33,14 @@ This document is for reviewers deciding whether the integration is safe to ship.
   Partial-upload publication now uses that same connection too. Its native
   fault test first reproduced PATCH returning 202 after request ownership loss;
   the fixed path rejects the request without advancing session generation or
-  adding a part, and a normal PATCH retry succeeds. Session creation and other
-  completion-state mutations still require the same review and fault coverage.
+  adding a part, and a normal PATCH retry succeeds. Session creation, completion
+  claims, cancellation transitions and reopening now use the same connection.
+  The native creation regression first reproduced 202 after losing its separate
+  request owner; the fixed path creates no session. A blocked completion claim
+  now fails with the session still active and its generation unchanged; retry
+  publishes the exact blob bytes for both released/current readers. All 13
+  index session tests pass, including direct rejection of all four mutations
+  after connection termination with unchanged session and journal state.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.

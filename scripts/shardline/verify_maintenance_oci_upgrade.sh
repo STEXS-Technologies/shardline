@@ -203,6 +203,38 @@ for node in 0 1; do
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
 
+# Session creation must not survive losing the request owner either.
+session_count=$(sql 'SELECT count(*) FROM shardline_resumable_sessions')
+sql "CREATE FUNCTION fixture_pause_session() RETURNS trigger LANGUAGE plpgsql AS \$\$
+BEGIN PERFORM pg_sleep(5); RETURN NEW; END \$\$;
+CREATE TRIGGER fixture_pause_session BEFORE INSERT ON shardline_resumable_sessions
+FOR EACH ROW EXECUTE FUNCTION fixture_pause_session();" > "$fixture/session-owner-loss-install.log"
+(curl -sS --max-time 15 -o "$fixture/session-create.body" -w '%{http_code}' \
+    -H "Authorization: Bearer $token" -X POST \
+    "http://127.0.0.1:${ports[1]}/v2/team/upgrade/blobs/uploads/" \
+    > "$fixture/session-create.status" 2> "$fixture/session-create.log") &
+request_pid=$!
+session_pid=''
+for attempt in $(seq 1 50); do
+    session_pid=$(sql "SELECT pid FROM pg_stat_activity WHERE usename='existing_oci_writer'
+        AND wait_event='PgSleep' AND query LIKE '%INSERT INTO shardline_resumable_sessions%'")
+    if test -n "$session_pid"; then break; fi
+    sleep 0.1
+done
+[[ "$session_pid" =~ ^[0-9]+$ ]]
+request_owner=$(sql "SELECT DISTINCT locks.pid FROM pg_locks AS locks
+    JOIN pg_stat_activity AS activity ON activity.pid=locks.pid
+    WHERE activity.usename='existing_oci_writer' AND locktype='advisory'
+    AND mode='ShareLock' AND granted AND objsubid=1
+    AND classid::bigint=1397244242 AND objid::bigint=1145520897")
+[[ "$request_owner" =~ ^[0-9]+$ ]]
+test "$(sql "SELECT pg_terminate_backend($request_owner)")" = t
+wait "$request_pid"
+request_pid=''
+[[ "$(cat "$fixture/session-create.status")" =~ ^5[0-9][0-9]$ ]]
+test "$(sql 'SELECT count(*) FROM shardline_resumable_sessions')" = "$session_count"
+sql 'DROP TRIGGER fixture_pause_session ON shardline_resumable_sessions; DROP FUNCTION fixture_pause_session();' > "$fixture/session-owner-loss-remove.log"
+
 # Partial uploads must also reject publication after losing the request owner.
 test "$(curl -sS --max-time 15 -o "$fixture/upload-create.body" \
     -D "$fixture/upload-create.headers" -w '%{http_code}' \
@@ -246,6 +278,46 @@ sql 'DROP TRIGGER fixture_pause_part ON shardline_resumable_session_parts; DROP 
 test "$(curl -sS --max-time 15 -o "$fixture/upload-retry.body" -w '%{http_code}' \
     -H "Authorization: Bearer $token" -H 'Content-Type: application/octet-stream' \
     -X PATCH --data-binary abc "http://127.0.0.1:${ports[1]}$upload_location")" = 202
+
+# Completion claims must preserve the active session after ownership loss.
+generation_before=$(sql "SELECT generation FROM shardline_resumable_sessions WHERE session_id='$upload_id'")
+blob_digest=$(printf '%s' abc | sha256sum | cut -d ' ' -f 1)
+sql "CREATE FUNCTION fixture_pause_completion() RETURNS trigger LANGUAGE plpgsql AS \$\$
+BEGIN PERFORM pg_sleep(5); RETURN NEW; END \$\$;
+CREATE TRIGGER fixture_pause_completion BEFORE UPDATE ON shardline_resumable_sessions
+FOR EACH ROW WHEN (NEW.state='completing') EXECUTE FUNCTION fixture_pause_completion();" > "$fixture/completion-owner-loss-install.log"
+(curl -sS --max-time 15 -o "$fixture/upload-complete.body" -w '%{http_code}' \
+    -H "Authorization: Bearer $token" -X PUT \
+    "http://127.0.0.1:${ports[1]}$upload_location?digest=sha256:$blob_digest" \
+    > "$fixture/upload-complete.status" 2> "$fixture/upload-complete.log") &
+request_pid=$!
+completion_pid=''
+for attempt in $(seq 1 50); do
+    completion_pid=$(sql "SELECT pid FROM pg_stat_activity WHERE usename='existing_oci_writer'
+        AND wait_event='PgSleep' AND query LIKE '%UPDATE shardline_resumable_sessions%'")
+    if test -n "$completion_pid"; then break; fi
+    sleep 0.1
+done
+[[ "$completion_pid" =~ ^[0-9]+$ ]]
+test "$(sql "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=$completion_pid
+    AND locktype='advisory' AND mode='ShareLock' AND granted AND objsubid=1
+    AND classid::bigint=1397244242 AND objid::bigint=1145520897)")" = t
+test "$(sql "SELECT pg_terminate_backend($completion_pid)")" = t
+wait "$request_pid"
+request_pid=''
+[[ "$(cat "$fixture/upload-complete.status")" =~ ^5[0-9][0-9]$ ]]
+test "$(sql "SELECT state FROM shardline_resumable_sessions WHERE session_id='$upload_id'")" = active
+test "$(sql "SELECT generation FROM shardline_resumable_sessions WHERE session_id='$upload_id'")" = "$generation_before"
+sql 'DROP TRIGGER fixture_pause_completion ON shardline_resumable_sessions; DROP FUNCTION fixture_pause_completion();' > "$fixture/completion-owner-loss-remove.log"
+test "$(curl -sS --max-time 15 -o "$fixture/upload-complete-retry.body" -w '%{http_code}' \
+    -H "Authorization: Bearer $token" -X PUT \
+    "http://127.0.0.1:${ports[1]}$upload_location?digest=sha256:$blob_digest")" = 201
+for node in 0 1; do
+    test "$(curl -sS --max-time 15 -o "$fixture/blob-$node.body" -w '%{http_code}' \
+        -H "Authorization: Bearer $token" \
+        "http://127.0.0.1:${ports[$node]}/v2/team/upgrade/blobs/sha256:$blob_digest")" = 200
+    test "$(cat "$fixture/blob-$node.body")" = abc
+done
 
 # Lose the real request's database owner while its server remains alive. The
 # publication session itself must own the shared GC lock: losing a separate

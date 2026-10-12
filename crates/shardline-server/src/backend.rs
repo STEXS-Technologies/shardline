@@ -542,6 +542,20 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            return Ok(backend
+                .index_store()
+                .create_resumable_session_bounded_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    session,
+                    max_active,
+                )
+                .await?);
+        }
         Ok(backend
             .index_store()
             .create_resumable_session_bounded(session, max_active)
@@ -677,6 +691,19 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            return Ok(backend
+                .index_store()
+                .begin_resumable_completion_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    session_id,
+                )
+                .await?);
+        }
         Ok(backend
             .index_store()
             .begin_resumable_completion(session_id)
@@ -693,6 +720,22 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            return Ok(backend
+                .index_store()
+                .transition_resumable_session_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    session_id,
+                    expected_state,
+                    expected_fence_epoch,
+                    next_state,
+                )
+                .await?);
+        }
         Ok(backend
             .index_store()
             .transition_resumable_session(
@@ -712,6 +755,20 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            return Ok(backend
+                .index_store()
+                .reopen_resumable_session_after_failed_completion_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    session_id,
+                    expected_fence_epoch,
+                )
+                .await?);
+        }
         Ok(backend
             .index_store()
             .reopen_resumable_session_after_failed_completion(session_id, expected_fence_epoch)
