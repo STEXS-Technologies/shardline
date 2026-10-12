@@ -6,7 +6,7 @@ test "$#" = 2 || { echo 'usage: verify_maintenance_oci_upgrade.sh CURRENT RELEAS
 current=$(realpath "$1")
 released=$(realpath "$2")
 test -x "$current" && test -x "$released"
-for tool in docker curl sha256sum shuf; do command -v "$tool" >/dev/null; done
+for tool in docker curl rg sha256sum shuf; do command -v "$tool" >/dev/null; done
 umask 077
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-oci-upgrade.XXXXXX")
 echo "diagnostics: $fixture"
@@ -34,6 +34,34 @@ database_url="postgres://postgres:owned_fixture_password@127.0.0.1:$pg_port/shar
 sql() { docker exec "$container_id" psql -U postgres -d shardline -At -v ON_ERROR_STOP=1 -c "$1"; }
 "$released" db migrate up --database-url "$database_url" > "$fixture/released-migrate.log" 2>&1
 sql 'SELECT * FROM shardline_schema_migrations ORDER BY version' > "$fixture/ledger-before"
+# Model an existing publication account. The installer alone owns the schema.
+# Publishing tags needs its released repository-fence permissions, but not
+# tombstone INSERT. Keep those existing grants identical through the upgrade.
+sql "CREATE ROLE existing_oci_writer LOGIN PASSWORD 'owned_fixture_password';
+GRANT CONNECT ON DATABASE shardline TO existing_oci_writer;
+GRANT USAGE ON SCHEMA public TO existing_oci_writer;
+DO \$\$ DECLARE target text; BEGIN
+  FOR target IN SELECT tablename FROM pg_tables WHERE schemaname='public'
+    AND tablename <> 'shardline_resource_fences'
+  LOOP EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO existing_oci_writer', target); END LOOP;
+END \$\$;
+GRANT SELECT, INSERT, UPDATE ON shardline_resource_fences TO existing_oci_writer;
+REVOKE INSERT, UPDATE ON shardline_oci_object_tombstones FROM existing_oci_writer;" > "$fixture/writer-grants.log"
+writer_url="postgres://existing_oci_writer:owned_fixture_password@127.0.0.1:$pg_port/shardline"
+sql "SELECT tablename, tableowner, coalesce(relacl::text,'') FROM pg_tables
+JOIN pg_class ON pg_class.oid=format('%I.%I',schemaname,tablename)::regclass
+WHERE schemaname='public' ORDER BY tablename" > "$fixture/grants-before"
+check_writer_privileges() {
+    test "$(sql "SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreatedb AND NOT rolcreaterole
+        AND NOT has_schema_privilege('existing_oci_writer','public','CREATE')
+        AND has_table_privilege('existing_oci_writer','shardline_resource_fences','SELECT')
+        AND has_table_privilege('existing_oci_writer','shardline_resource_fences','INSERT')
+        AND has_table_privilege('existing_oci_writer','shardline_resource_fences','UPDATE')
+        AND NOT has_table_privilege('existing_oci_writer','shardline_resource_fences','DELETE')
+        AND NOT has_table_privilege('existing_oci_writer','shardline_oci_object_tombstones','INSERT,UPDATE')
+        FROM pg_roles WHERE rolname='existing_oci_writer'")" = t
+}
+check_writer_privileges
 mkdir "$fixture/root"
 signing_key=0123456789abcdef0123456789abcdef
 token=$(SHARDLINE_TOKEN_SIGNING_KEY="$signing_key" "$released" admin token \
@@ -46,7 +74,7 @@ start_server() {
         SHARDLINE_PUBLIC_BASE_URL="http://127.0.0.1:${ports[$node]}" \
         SHARDLINE_AUTH_PROVIDER=local SHARDLINE_TOKEN_SIGNING_KEY="$signing_key" SHARDLINE_SERVER_FRONTENDS=oci \
         SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=memory SHARDLINE_OBJECT_STORAGE_ADAPTER=local \
-        SHARDLINE_INDEX_POSTGRES_URL="$database_url" \
+        SHARDLINE_INDEX_POSTGRES_URL="$writer_url" \
         "$binary" serve > "$fixture/server-$node.log" 2>&1 &
     server_pids+=("$!")
     for attempt in $(seq 1 40); do
@@ -84,8 +112,32 @@ read_manifest 0 "sha256:$published_digest" 200
 "$released" db migrate verify --database-url "$database_url" > "$fixture/released-verify.log" 2>&1
 sql 'SELECT * FROM shardline_schema_migrations ORDER BY version' > "$fixture/ledger-after"
 cmp "$fixture/ledger-before" "$fixture/ledger-after"
+sql "SELECT tablename, tableowner, coalesce(relacl::text,'') FROM pg_tables
+JOIN pg_class ON pg_class.oid=format('%I.%I',schemaname,tablename)::regclass
+WHERE schemaname='public' ORDER BY tablename" > "$fixture/grants-after"
+cmp "$fixture/grants-before" "$fixture/grants-after"
+check_writer_privileges
 start_server "$current" 1
 for node in 0 1; do read_manifest "$node" latest 200; done
+
+# A fixture-only uncertain delete must block both native publication paths.
+# The current server returns the actionable error; the released server cannot
+# acquire that newer error mapping, but must still reject rather than publish.
+published_scope=$(sql "SELECT scope_namespace FROM shardline_oci_tags WHERE repository='team/upgrade' AND tag='latest'")
+repository_digest=$(printf '%s' team/upgrade | sha256sum | cut -d ' ' -f 1)
+pending_key="protocols/oci/$published_scope/repos/$repository_digest/manifests/$published_digest"
+sql "INSERT INTO shardline_resource_fences(domain,resource,epoch)
+VALUES ('maintenance-remote-delete-sequence','global',1),('maintenance-remote-delete','$pending_key',1);" > "$fixture/pending-install.log"
+test "$(request 1 PUT latest --data-binary "@$fixture/published.json")" = 503
+rg -q 'unresolved remote delete; retry after reconciliation' "$fixture/response-1.body"
+test "$(request 0 PUT latest --data-binary "@$fixture/published.json")" = 500
+for node in 0 1; do
+    read_manifest "$node" latest 200
+    cmp "$fixture/published.json" "$fixture/response-$node.body"
+done
+# There is no external effect in this disposable fixture, so cleanup is safe.
+# Production unknown deletes cannot be settled by simply removing their row.
+sql "DELETE FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource='$pending_key';" > "$fixture/pending-remove.log"
 
 # Fixture-only fault at publication: storage has completed, but the metadata
 # transaction must roll back. No real remote delete is sent by this drill.
@@ -116,4 +168,4 @@ for node in 0 1; do
     read_manifest "$node" latest 200
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
-echo "PASS: released/current OCI readers preserve visibility and retry publication across an unchanged migration ledger; diagnostics: $fixture"
+echo "PASS: restricted released/current OCI writers preserve visibility and retry publication with unchanged migrations and table grants; diagnostics: $fixture"
