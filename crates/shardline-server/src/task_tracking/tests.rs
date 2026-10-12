@@ -13,6 +13,86 @@ fn config(root: &std::path::Path) -> ServerConfig {
 }
 
 #[test]
+fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let objects = object_store_from_config(&config).unwrap();
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let legacy = penelope_core::task::Digest::of(b"first login");
+    let foreign = penelope_core::task::Digest::of(b"second login");
+    let shared = penelope_core::task::Digest::of(b"shared schema");
+    let other = penelope_core::task::Digest::of(b"other schema");
+    for (deployment, scope, operation) in [
+        (legacy, Some(shared), "own-bound"),
+        (foreign, Some(shared), "foreign-bound"),
+        (legacy, Some(other), "own-other-schema"),
+        (legacy, None, "own-legacy"),
+        (foreign, None, "foreign-legacy"),
+    ] {
+        let mut tracker = EmbeddedTaskTracker::new(objects.clone(), deployment);
+        if let Some(scope) = scope {
+            tracker = tracker.with_history_scope(scope);
+        }
+        tracker
+            .begin(
+                operation,
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"report")
+            .unwrap();
+    }
+    let history = store
+        .inspect_summaries_with_scope(legacy, Some(shared), None, 10)
+        .unwrap();
+    assert_eq!(history.len(), 3);
+    let mut operations = Vec::new();
+    let mut foreign_id = String::new();
+    for entry in &history {
+        if let super::status::TaskEvidenceEntry::Verified(summary) = entry {
+            operations.push(summary.operation.as_str());
+            if summary.operation == "foreign-bound" {
+                foreign_id.clone_from(&summary.id);
+            }
+        }
+    }
+    operations.sort_unstable();
+    assert_eq!(operations, ["foreign-bound", "own-bound", "own-legacy"]);
+    let mut after = None;
+    for expected in &history {
+        let page = store
+            .inspect_summaries_with_scope(legacy, Some(shared), after.as_deref(), 1)
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id(), expected.id());
+        after = Some(page[0].id().to_owned());
+    }
+    assert!(
+        store
+            .inspect_summaries_with_scope(legacy, Some(shared), after.as_deref(), 1)
+            .unwrap()
+            .is_empty()
+    );
+    // Legacy readers keep their existing three own-login records.
+    assert_eq!(store.summaries(legacy, None, 10).unwrap().len(), 3);
+    std::fs::write(
+        root.path()
+            .join("chunks/_shardline_tasks/v1/scope-bindings")
+            .join(&foreign_id),
+        b"corrupt",
+    )
+    .unwrap();
+    let corrupt = store
+        .inspect_summaries_with_scope(legacy, Some(shared), None, 10)
+        .unwrap();
+    assert!(corrupt.iter().any(|entry| matches!(entry,
+        super::status::TaskEvidenceEntry::Unreadable { id, state: TaskRunState::Corrupt, identity_verified: false }
+        if id == &foreign_id)));
+    assert_eq!(store.summaries(foreign, None, 10).unwrap().len(), 2);
+}
+
+#[test]
 fn history_scope_bindings_preserve_legacy_results_and_reject_substitution() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -703,6 +783,71 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
         );
         assert_eq!(own_history[0].state, TaskRunState::Completed);
     }
+    // Normal routers resolve their own configured connections, publish bindings
+    // automatically and inspect the other login's signed history without flags.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER ROLE {first_role} SET search_path TO public;
+         ALTER ROLE {second_role} SET search_path TO public;
+         GRANT SELECT ON public.shardline_schema_migrations TO {first_role}, {second_role};"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for role_config in [&first, &second] {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let router_config = role_config
+            .clone()
+            .with_server_frontends([crate::ServerFrontend::Lfs])
+            .unwrap()
+            .with_admin_read_token(b"history-admin".to_vec())
+            .unwrap();
+        let app = crate::app::router(router_config).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks/maintenance")
+                    .header("Authorization", "Bearer history-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        let jobs = body["tasks"].as_array().unwrap();
+        assert_eq!(body["history_grouping"], "shared_metadata");
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| job["operation"] == "bound-role-job")
+                .count(),
+            2
+        );
+        let startup = jobs
+            .iter()
+            .find(|job| job["operation"] == "lfs-startup-session-sweep")
+            .unwrap();
+        let role_store = TaskEvidenceStore::from_config(role_config).unwrap();
+        let manifest: TaskRunIdentity = serde_json::from_slice(
+            &role_store
+                .read(
+                    &format!("manifests/{}", startup["id"].as_str().unwrap()),
+                    65536,
+                )
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            role_store
+                .history_scope_binding_matches(&manifest, shared_scope)
+                .unwrap()
+        );
+    }
     // Simulate another initialized backend behind the same endpoint with the
     // same database/schema names. Only its durable namespace identity differs.
     let original_identity: String =
@@ -755,12 +900,72 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
             .await
             .is_err()
     );
+    // A deployment awaiting the owner upgrade must still start and expose its
+    // original history. Ordinary startup never installs the missing function.
+    sqlx::raw_sql(
+        "ALTER FUNCTION public.shardline_task_history_scope_v1(text)
+         RENAME TO owned_disabled_history_scope;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let fallback_config = first
+            .clone()
+            .with_server_frontends([crate::ServerFrontend::Lfs])
+            .unwrap()
+            .with_admin_read_token(b"history-admin".to_vec())
+            .unwrap();
+        let app = crate::app::router(fallback_config).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks/maintenance")
+                    .header("Authorization", "Bearer history-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body["history_grouping"], "legacy");
+        assert_eq!(
+            body["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|job| job["operation"] == "bound-role-job")
+                .count(),
+            1
+        );
+        let exists: bool = sqlx::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
+            .bind("public.shardline_task_history_scope_v1(text)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!exists);
+    }
+    sqlx::raw_sql(
+        "ALTER FUNCTION public.owned_disabled_history_scope(text)
+         RENAME TO shardline_task_history_scope_v1;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     drop(first_connection);
     drop(second_connection);
     first_pool.close().await;
     second_pool.close().await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "DROP SCHEMA {first_role} CASCADE; DROP SCHEMA {second_role} CASCADE;
+         REVOKE SELECT ON public.shardline_schema_migrations FROM {first_role}, {second_role};
          DROP ROLE {first_role}; DROP ROLE {second_role};"
     )))
     .execute(&pool)

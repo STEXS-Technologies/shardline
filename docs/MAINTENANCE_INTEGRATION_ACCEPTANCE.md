@@ -78,8 +78,8 @@ This document is for reviewers deciding whether the integration is safe to ship.
 - **Remaining compatibility coverage.** Passing deployment fixtures establish
   those configurations. They do not establish compatibility for every filesystem,
   permission layout or deployment manifest. History across different database
-  logins remains unfinished: the current deployment fingerprint includes the
-  login name. A real PostgreSQL regression establishes why simply dropping it
+  logins remains unfinished for CLI publishers: the legacy deployment fingerprint
+  includes the login name. A real PostgreSQL regression establishes why simply dropping it
   is unsafe: two roles on the same database resolve to distinct default schemas
   despite identical URL options. Shared history must use the resolved database,
   schema and object target while preserving legacy evidence and isolation of
@@ -90,9 +90,13 @@ This document is for reviewers deciding whether the integration is safe to ship.
   absent schema. An additive tracker option now signs a companion binding to
   the original run manifest with that run's key. Tests cover two real database
   logins sharing one resolved target, tampering, retries and retention cleanup.
-  Normal startup and inspection still use the legacy scope: wiring the resolved
-  identity into ordinary publishers and shared inspection remains unfinished.
-  The existing-role drill
+  Normal server startup now publishes these bindings automatically. Admin
+  inspection admits verified matching records across logins and preserves
+  unbound own-login history. Resolution uses the existing pool, performs no DDL,
+  and falls back to legacy grouping with an explicit response field when
+  unavailable. Real PostgreSQL tests exercise both normal router publication
+  and shared admin inspection. CLI publishers and binding to each operation's
+  actual metadata connection remain unfinished. The existing-role drill
   inspects history using that role's scope.
 
 These are merge requirements. A passing dependency upgrade or optional worker

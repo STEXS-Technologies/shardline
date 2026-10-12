@@ -95,15 +95,25 @@ impl TaskEvidenceStore {
         identity: &TaskRunIdentity,
         scope: Digest,
     ) -> Result<bool, ServerError> {
+        Ok(self
+            .history_scope_binding_match(identity, scope)?
+            .unwrap_or(false))
+    }
+
+    pub(crate) fn history_scope_binding_match(
+        &self,
+        identity: &TaskRunIdentity,
+        scope: Digest,
+    ) -> Result<Option<bool>, ServerError> {
         let Some(manifest) = self.binding_manifest(identity)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(bytes) = self.read(
             &format!("scope-bindings/{}", identity.id),
             MAX_BINDING_BYTES,
         )?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let binding: Binding = serde_json::from_slice(&bytes).map_err(|_error| invalid())?;
         if binding.schema != 1 || binding.manifest != Digest::of(&manifest) {
@@ -113,6 +123,6 @@ impl TaskEvidenceStore {
         let signature = Signature::from_slice(&binding.signature).map_err(|_error| invalid())?;
         key.verify_strict(&message(binding.scope, binding.manifest)?, &signature)
             .map_err(|_error| invalid())?;
-        Ok(binding.scope == scope)
+        Ok(Some(binding.scope == scope))
     }
 }

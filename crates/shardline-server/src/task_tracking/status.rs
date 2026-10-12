@@ -232,6 +232,16 @@ impl TaskEvidenceStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<TaskEvidenceEntry>, ServerError> {
+        self.inspect_summaries_with_scope(deployment, None, after, limit)
+    }
+
+    pub(crate) fn inspect_summaries_with_scope(
+        &self,
+        deployment: Digest,
+        history_scope: Option<Digest>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskEvidenceEntry>, ServerError> {
         if limit == 0 || limit > 101 || after.is_some_and(|id| id.len() > 128) {
             return Err(ServerError::InvalidPath);
         }
@@ -250,21 +260,35 @@ impl TaskEvidenceStore {
             if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
                 return Err(invalid("invalid task identity key"));
             }
-            let identity = match self.read(&format!("manifests/{id}"), 65536) {
+            let mut identity = match self.read(&format!("manifests/{id}"), 65536) {
                 // Retention can remove an expired manifest during enumeration.
                 Ok(None) => return Ok(()),
                 Ok(Some(bytes)) => serde_json::from_slice::<TaskRunIdentity>(&bytes).ok(),
                 Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => None,
                 Err(error) => return Err(error),
             };
-            // A decodable foreign deployment stays outside this page. With an
-            // unreadable manifest its deployment is unknown, so expose only
-            // the incident reference, never a fabricated scoped task identity.
-            if identity
-                .as_ref()
-                .is_some_and(|identity| identity.deployment != deployment)
-            {
-                return Ok(());
+            if let Some(candidate) = identity.as_ref() {
+                let legacy_matches = candidate.deployment == deployment;
+                // Verify before admitting a foreign login's identity. Corrupt
+                // associations expose only an incident reference, never its
+                // untrusted operation, owner or completion claim.
+                let association = history_scope
+                    .map(|scope| self.history_scope_binding_match(candidate, scope))
+                    .transpose()
+                    .map(Option::flatten);
+                match association {
+                    Ok(Some(true)) => {}
+                    Ok(Some(false)) => return Ok(()),
+                    Ok(None) if !legacy_matches => return Ok(()),
+                    Ok(None) => {}
+                    Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {
+                        identity = None;
+                    }
+                    Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData => {
+                        identity = None;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             let identity = identity.filter(|identity| {
                 identity.schema == 1
