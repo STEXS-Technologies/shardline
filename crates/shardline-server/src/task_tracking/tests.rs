@@ -371,6 +371,15 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
     let Ok(database_url) = std::env::var("DATABASE_URL") else {
         return;
     };
+    let migration_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    crate::apply_database_migrations(&migration_pool)
+        .await
+        .unwrap();
+    migration_pool.close().await;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -387,11 +396,44 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
         "CREATE ROLE {first_role} LOGIN PASSWORD 'owned_history_fixture';
          CREATE ROLE {second_role} LOGIN PASSWORD 'owned_history_fixture';
          CREATE SCHEMA {first_role} AUTHORIZATION {first_role};
-         CREATE SCHEMA {second_role} AUTHORIZATION {second_role};"
+         CREATE SCHEMA {second_role} AUTHORIZATION {second_role};
+         CREATE TABLE {first_role}.shardline_resource_fences (LIKE public.shardline_resource_fences INCLUDING ALL);
+         CREATE TABLE {second_role}.shardline_resource_fences (LIKE public.shardline_resource_fences INCLUDING ALL);"
     )))
     .execute(&pool)
     .await
     .unwrap();
+    for schema in [&first_role, &second_role] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SET search_path TO {schema}, public"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        shardline_index::PostgresIndexStore::new(pool.clone())
+            .initialize_task_history_scope()
+            .await
+            .unwrap();
+        let identity: String =
+            sqlx::query_scalar("SELECT shardline_task_history_scope_v1(current_schema())")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        shardline_index::PostgresIndexStore::new(pool.clone())
+            .initialize_task_history_scope()
+            .await
+            .unwrap();
+        let reinstalled: String =
+            sqlx::query_scalar("SELECT shardline_task_history_scope_v1(current_schema())")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(identity, reinstalled);
+    }
+    sqlx::query("RESET search_path")
+        .execute(&pool)
+        .await
+        .unwrap();
     let options = sqlx::postgres::PgConnectOptions::from_str(&database_url).unwrap();
     let first_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
@@ -440,10 +482,118 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
         deployment_fingerprint(&first).unwrap(),
         deployment_fingerprint(&second).unwrap()
     );
+    let legacy_first = deployment_fingerprint(&first).unwrap();
+    let legacy_second = deployment_fingerprint(&second).unwrap();
+    let mut first_connection = first_pool.acquire().await.unwrap();
+    let mut second_connection = second_pool.acquire().await.unwrap();
+    let first_scope = resolved_postgres_deployment_fingerprint(&first, &mut first_connection)
+        .await
+        .unwrap();
+    let second_scope = resolved_postgres_deployment_fingerprint(&second, &mut second_connection)
+        .await
+        .unwrap();
+    assert_ne!(first_scope, second_scope);
+    assert!(
+        sqlx::query("SELECT * FROM shardline_resource_fences")
+            .execute(&mut *first_connection)
+            .await
+            .is_err()
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {first_role}.shardline_resource_fences ENABLE ROW LEVEL SECURITY"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        resolved_postgres_deployment_fingerprint(&first, &mut first_connection)
+            .await
+            .is_err()
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {first_role}.shardline_resource_fences DISABLE ROW LEVEL SECURITY"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("SET search_path TO public")
+        .execute(&mut *first_connection)
+        .await
+        .unwrap();
+    sqlx::query("SET search_path TO public")
+        .execute(&mut *second_connection)
+        .await
+        .unwrap();
+    let shared_scope = resolved_postgres_deployment_fingerprint(&first, &mut first_connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        shared_scope,
+        resolved_postgres_deployment_fingerprint(&second, &mut second_connection)
+            .await
+            .unwrap()
+    );
+    assert_ne!(shared_scope, first_scope);
+    assert_ne!(shared_scope, second_scope);
+    assert_ne!(shared_scope, legacy_first);
+    // Simulate another initialized backend behind the same endpoint with the
+    // same database/schema names. Only its durable namespace identity differs.
+    let original_identity: String =
+        sqlx::query_scalar("SELECT public.shardline_task_history_scope_v1('public')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let replacement_identity = if original_identity == "00".repeat(32) {
+        "01".repeat(32)
+    } else {
+        "00".repeat(32)
+    };
+    sqlx::query("UPDATE public.shardline_resource_fences SET resource=$1 WHERE domain='maintenance-task-history-scope'")
+        .bind(replacement_identity).execute(&pool).await.unwrap();
+    let other_backend = resolved_postgres_deployment_fingerprint(&first, &mut first_connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE public.shardline_resource_fences SET resource=$1 WHERE domain='maintenance-task-history-scope'")
+        .bind(original_identity).execute(&pool).await.unwrap();
+    assert_ne!(other_backend, shared_scope);
+    assert_eq!(
+        shared_scope,
+        resolved_postgres_deployment_fingerprint(&first, &mut first_connection)
+            .await
+            .unwrap()
+    );
+    assert_eq!(deployment_fingerprint(&first).unwrap(), legacy_first);
+    assert_eq!(deployment_fingerprint(&second).unwrap(), legacy_second);
+    let other_root = tempfile::tempdir().unwrap();
+    let other_target = config(other_root.path())
+        .with_index_postgres_url(second.index_postgres_url().unwrap().to_owned())
+        .unwrap();
+    assert_ne!(
+        shared_scope,
+        resolved_postgres_deployment_fingerprint(&other_target, &mut second_connection)
+            .await
+            .unwrap()
+    );
+    assert!(
+        resolved_postgres_deployment_fingerprint(&config(root.path()), &mut second_connection)
+            .await
+            .is_err()
+    );
+    sqlx::query("SET search_path TO nonexistent_history_scope")
+        .execute(&mut *second_connection)
+        .await
+        .unwrap();
+    assert!(
+        resolved_postgres_deployment_fingerprint(&second, &mut second_connection)
+            .await
+            .is_err()
+    );
+    drop(first_connection);
+    drop(second_connection);
     first_pool.close().await;
     second_pool.close().await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "DROP SCHEMA {first_role}; DROP SCHEMA {second_role};
+        "DROP SCHEMA {first_role} CASCADE; DROP SCHEMA {second_role} CASCADE;
          DROP ROLE {first_role}; DROP ROLE {second_role};"
     )))
     .execute(&pool)

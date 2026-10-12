@@ -84,6 +84,20 @@ Semantic replay is not signature, authorization, inclusion, or freshness
 verification. New native histories still need an explicit resource identity,
 retained historical verifiers, and a rollout gate before production activation.
 
+Postgres history grouping has an additive resolved identity, separate from the
+unchanged legacy deployment fingerprint. The usual owner-run upgrade installs
+one random 256-bit namespace identity in the existing fence table and a
+schema-bound read function. Reinstallation preserves it. Readers need schema
+usage, not fence-table grants; row-level security refuses shared grouping.
+`resolved_postgres_deployment_fingerprint` reads this identity on the caller's
+existing metadata connection and binds it to the configured endpoint (including
+Unix socket), database, schema and object target. Independently initialized
+stores behind one proxy cannot collide merely because their names match.
+Missing initialization, corrupt identity or an absent schema fails closed.
+This is not a health proof. Publishing verified scope bindings and merging
+legacy/new history remain unfinished; ordinary inspection still uses its legacy
+scope. Existing manifests and task formats are not rewritten.
+
 The optional `shardline-reliability/task-journal` feature provides
 `SqliteTaskJournal`, a synchronous Penelope `TaskJournal` port pinned to an exact
 scope and complete definition fingerprint. It uses a dedicated task database,

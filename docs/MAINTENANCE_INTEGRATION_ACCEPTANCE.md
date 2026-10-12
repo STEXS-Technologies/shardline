@@ -83,7 +83,13 @@ This document is for reviewers deciding whether the integration is safe to ship.
   is unsafe: two roles on the same database resolve to distinct default schemas
   despite identical URL options. Shared history must use the resolved database,
   schema and object target while preserving legacy evidence and isolation of
-  other deployments. The existing-role drill inspects history using that role's scope.
+  other deployments. The owner-run upgrade now installs a stable namespace
+  identity and a schema-bound read function without new fence-table grants.
+  An additive resolver agrees across roles using the same initialized target,
+  separates schemas and object targets, and refuses row-level security or an
+  absent schema. It does not yet bind published task evidence or merge history;
+  normal inspection still uses the legacy scope. The existing-role drill
+  inspects history using that role's scope.
 
 These are merge requirements. A passing dependency upgrade or optional worker
 test does not close them.
