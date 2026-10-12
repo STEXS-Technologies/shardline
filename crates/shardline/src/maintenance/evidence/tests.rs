@@ -117,3 +117,25 @@ fn local_copy_history_does_not_inherit_an_unrelated_server_database() {
         0
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unavailable_postgres_history_does_not_publish_into_payload_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let configured = config(root.path()).with_object_storage(ObjectStorageAdapter::Local, None);
+    let operation = MaintenanceOperation::IndexRebuild {
+        root: root.path().to_path_buf(),
+    };
+    tokio::task::spawn_blocking(move || {
+        let history = store(&operation, &configured, None).unwrap();
+        assert!(history.publish("new-history", b"optional result").is_err());
+        assert!(history.read("new-history", 1024).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_dir(root.path().join("chunks"))
+                .unwrap()
+                .count(),
+            0
+        );
+    })
+    .await
+    .unwrap();
+}

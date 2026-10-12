@@ -172,7 +172,7 @@ impl TaskEvidenceStore {
                         )
                     })
                 {
-                    tracing::warn!(%error, "task metadata unsupported; legacy history continues");
+                    tracing::warn!(%error, "task metadata unsupported; existing history remains available");
                     return Ok((self, None));
                 }
                 Err(error)

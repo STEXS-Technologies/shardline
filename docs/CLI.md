@@ -44,6 +44,9 @@ there is no verified database association for that endpoint. That history is
 not shared between nodes and can be lost when temporary storage is cleaned.
 Tracking adds no objects to the copy's payload bucket and requires no new S3
 permissions, service or mount. Dry runs publish no task history.
+Other automatic maintenance also avoids new history objects in payload storage:
+when metadata history is unavailable, it warns and keeps the original command
+behavior without a verified receipt. Existing legacy history remains readable.
 
 With a local journal, a history-export failure retains local evidence and logs a warning;
 it does not disable local supervision or change the application's result. Later
