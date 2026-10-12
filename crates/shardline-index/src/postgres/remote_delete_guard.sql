@@ -486,7 +486,7 @@ BEGIN
     repository := payload #>> '{after,identity,repository}';
     digest_hex := payload #>> '{after,identity,digest_hex}';
     epoch_text := payload #>> '{after,deleted_at_unix_seconds}';
-    IF scope_namespace IS NULL OR repository IS NULL OR digest_hex IS NULL OR epoch_text IS NULL
+    IF scope_namespace IS NULL OR repository IS NULL OR repository='' OR digest_hex IS NULL OR epoch_text IS NULL
        OR (scope_namespace <> 'global' AND scope_namespace !~ '^[0-9a-f]{64}$')
        OR digest_hex !~ '^[0-9a-f]{64}$' OR epoch_text !~ '^[0-9]{1,18}$'
        OR stored_operation_id IS DISTINCT FROM scope_namespace || ':' || repository || ':manifest:' || digest_hex THEN RETURN; END IF;
@@ -574,10 +574,14 @@ BEGIN
     SELECT identity.scope_namespace,identity.repository,'manifest',identity.digest_hex,identity.deleted_at_unix_seconds
     FROM (SELECT DISTINCT ON(operation_id) operation_id,event_json
           FROM shardline_reliability_events WHERE operation_kind='Visibility'
-            AND operation_id ~ '^(global|[0-9a-f]{64}):.+:manifest:[0-9a-f]{64}$'
+            AND operation_id LIKE '%:manifest:%'
           ORDER BY operation_id,sequence DESC) head
     CROSS JOIN LATERAL shardline_oci_staged_identity_v1(head.event_json::TEXT,head.operation_id) identity
-    WHERE NOT EXISTS(SELECT 1 FROM shardline_oci_object_tombstones existing
+    -- Apply this only after selecting the latest generation. Filtering history
+    -- first could mistake an older Deleted snapshot for the current Published
+    -- head. Avoid JSON/text round trips for ordinary published inventories.
+    WHERE head.event_json #>> '{after,state}'='Deleted'
+      AND NOT EXISTS(SELECT 1 FROM shardline_oci_object_tombstones existing
         WHERE existing.scope_namespace=identity.scope_namespace AND existing.repository=identity.repository
           AND existing.object_kind='manifest' AND existing.digest_hex=identity.digest_hex)
     ORDER BY head.operation_id LIMIT candidate_limit
@@ -600,9 +604,10 @@ INSERT INTO @SCHEMA@.shardline_oci_object_tombstones
 SELECT identity.scope_namespace, identity.repository, 'manifest', identity.digest_hex, identity.deleted_at_unix_seconds
 FROM (SELECT DISTINCT ON (operation_id) operation_id, event_json
       FROM @SCHEMA@.shardline_reliability_events WHERE operation_kind='Visibility'
-        AND operation_id ~ '^(global|[0-9a-f]{64}):.+:manifest:[0-9a-f]{64}$'
+        AND operation_id LIKE '%:manifest:%'
       ORDER BY operation_id, sequence DESC) head
 CROSS JOIN LATERAL @SCHEMA@.shardline_oci_staged_identity_v1(head.event_json::TEXT, head.operation_id) identity
+WHERE head.event_json #>> '{after,state}'='Deleted'
 ON CONFLICT (scope_namespace, repository, object_kind, digest_hex) DO NOTHING;
 END IF;
 END;

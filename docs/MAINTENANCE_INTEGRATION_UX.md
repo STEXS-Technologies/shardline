@@ -20,28 +20,25 @@ Postgres/S3 deployment, another node can inspect shared history after the
 original node disappears, without recovering its container files.
 
 After the usual owner upgrade, new server jobs, GC, rebuild and repair share
-history when their database sessions reach the same database, schema and object
-storage. Older records, storage-copy jobs and the optional runner retain their
-original login scope. If shared grouping is unavailable, the API reports
+history across logins that use the same database, schema and object storage.
+Older records, storage-copy jobs and the optional runner still follow their
+original login. If shared grouping is unavailable, the API reports
 `history_grouping: legacy`; otherwise it reports `shared_metadata`.
 
 If history cannot be saved, Shardline warns and the command keeps its existing
 behavior. You cannot then rely on a verified history result.
 
-Webhook secret encryption also preserves a secret rotated or removed by another
-node. Background and lazy upgrades change only the exact value they read; a
-concurrent change wins without extra configuration or a worker service.
-The startup sweep stays inside the server process. It uses one temporary
-database connection, records that connection's actual history scope, and stops
-if the connection is lost. Ordinary requests keep using their existing pool;
-lazy encryption remains available after a failed sweep.
+Webhook secret encryption preserves changes made by another node, including
+secret rotation and removal. Its startup sweep runs inside the server and stops
+if its database connection is lost. A failed sweep leaves ordinary request
+handling and lazy encryption enabled.
 
 ## When a delete is interrupted
 
 A later hold or covered write to an object with an unresolved delete returns a
 clear retryable error. Other objects remain available. Rejected updates preserve
-the previous metadata. Current native uploads check the chunks inside their
-xorbs as well as directly named objects.
+the previous metadata. Current native uploads also check the chunk references
+inside their uploaded data.
 
 On Postgres, this also covers publishing OCI blobs and manifests, changing a
 manifest tag, and removing a deletion tombstone. A pending manifest or its
@@ -56,8 +53,8 @@ cannot inspect those payload references and still need additional protection.
 New Postgres-backed manifests stay hidden until publication succeeds. If an
 upload is interrupted after storing bytes, those bytes remain hidden from
 manifest reads; a successful retry can publish them. Existing published
-manifests remain visible during retries. This uses the existing verified
-journal and adds a storage existence check, with no extra service or grants.
+manifests remain visible during retries. This adds a storage existence check,
+with no extra service or grants.
 The usual owner-run database upgrade adds hidden manifests to the existing OCI
 deletion inventory. Ordinary GC also discovers missing entries from interrupted
 uploads, including uploads made by accounts with row policies. It reclaims them
