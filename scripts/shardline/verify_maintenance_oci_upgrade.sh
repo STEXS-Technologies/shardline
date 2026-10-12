@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise released/current OCI processes against the same upgraded deployment.
+# Exercise released/current OCI and S3 processes against the same deployment.
 # Usage: bash scripts/shardline/verify_maintenance_oci_upgrade.sh CURRENT RELEASED
 set -euo pipefail
 test "$#" = 2 || { echo 'usage: verify_maintenance_oci_upgrade.sh CURRENT RELEASED' >&2; exit 2; }
@@ -10,6 +10,9 @@ for tool in docker curl rg sha256sum shuf; do command -v "$tool" >/dev/null; don
 umask 077
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-oci-upgrade.XXXXXX")
 echo "diagnostics: $fixture"
+sha256sum "$current" "$released" > "$fixture/binaries.sha256"
+"$current" --version > "$fixture/current-version"
+"$released" --version > "$fixture/released-version"
 trap 'printf "FAIL: OCI upgrade drill at line %s; diagnostics: %s\n" "$LINENO" "$fixture" >&2' ERR
 container_id=''
 server_pids=()
@@ -75,7 +78,7 @@ start_server() {
     local binary=$1 node=$2
     env SHARDLINE_ROOT_DIR="$fixture/root" SHARDLINE_BIND_ADDR="127.0.0.1:${ports[$node]}" \
         SHARDLINE_PUBLIC_BASE_URL="http://127.0.0.1:${ports[$node]}" \
-        SHARDLINE_AUTH_PROVIDER=local SHARDLINE_TOKEN_SIGNING_KEY="$signing_key" SHARDLINE_SERVER_FRONTENDS=oci \
+        SHARDLINE_AUTH_PROVIDER=local SHARDLINE_TOKEN_SIGNING_KEY="$signing_key" SHARDLINE_SERVER_FRONTENDS=oci,s3 \
         SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=memory SHARDLINE_OBJECT_STORAGE_ADAPTER=local \
         SHARDLINE_INDEX_POSTGRES_URL="$writer_url" \
         "$binary" serve > "$fixture/server-$node.log" 2>&1 &
@@ -108,7 +111,15 @@ read_manifest() {
         -H "Authorization: Bearer $token" \
         "http://127.0.0.1:${ports[$node]}/v2/team/upgrade/manifests/$reference")" = "$expected"
 }
+s3_request() {
+    local node=$1 method=$2 key=$3
+    shift 3
+    curl -sS --max-time 15 -o "$fixture/s3-response-$node.body" -w '%{http_code}' \
+        -H "Authorization: AWS4-HMAC-SHA256 Credential=$token/20260813/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef" \
+        -X "$method" "$@" "http://127.0.0.1:${ports[$node]}/team.upgrade/$key"
+}
 start_server "$released" 0
+test "$(s3_request 0 PUT s3-owner-loss --data-binary before)" = 200
 test "$(request 0 PUT latest --data-binary "@$fixture/published.json")" = 201
 read_manifest 0 "sha256:$published_digest" 200
 # A released native writer already holds the shared maintenance barrier.
@@ -201,6 +212,50 @@ for node in 0 1; do
     read_manifest "$node" interrupted 200
     read_manifest "$node" latest 200
     cmp "$fixture/published.json" "$fixture/response-$node.body"
+done
+
+# Exercise guarded S3 publication through the real fallback router using the
+# same restricted account and object storage as the released node.
+for node in 0 1; do
+    test "$(s3_request "$node" GET s3-owner-loss)" = 200
+    test "$(cat "$fixture/s3-response-$node.body")" = before
+done
+sql "CREATE FUNCTION fixture_pause_s3_owner() RETURNS trigger LANGUAGE plpgsql AS \$\$
+BEGIN PERFORM pg_sleep(5); RETURN NEW; END \$\$;
+CREATE TRIGGER fixture_pause_s3_owner BEFORE INSERT OR UPDATE ON shardline_s3_objects
+FOR EACH ROW WHEN (NEW.object_key='s3-owner-loss') EXECUTE FUNCTION fixture_pause_s3_owner();" > "$fixture/s3-owner-loss-install.log"
+(s3_request 1 PUT s3-owner-loss --data-binary after > "$fixture/s3-owner-loss.status" 2> "$fixture/s3-owner-loss.log") &
+request_pid=$!
+s3_pid=''
+for attempt in $(seq 1 50); do
+    s3_pid=$(sql "SELECT pid FROM pg_stat_activity WHERE usename='existing_oci_writer'
+        AND wait_event='PgSleep' AND query LIKE '%shardline_s3_objects%'")
+    if test -n "$s3_pid"; then break; fi
+    sleep 0.1
+done
+[[ "$s3_pid" =~ ^[0-9]+$ ]]
+test "$(sql "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=$s3_pid
+    AND locktype='advisory' AND mode='ShareLock' AND granted AND objsubid=1
+    AND classid::bigint=1397244242 AND objid::bigint=1145520897)")" = t
+test "$(sql "SELECT pg_terminate_backend($s3_pid)")" = t
+wait "$request_pid"
+request_pid=''
+[[ "$(cat "$fixture/s3-owner-loss.status")" =~ ^5[0-9][0-9]$ ]]
+kill -0 "${server_pids[1]}"
+for node in 0 1; do
+    test "$(s3_request "$node" GET s3-owner-loss)" = 200
+    test "$(cat "$fixture/s3-response-$node.body")" = before
+done
+sql 'DROP TRIGGER fixture_pause_s3_owner ON shardline_s3_objects; DROP FUNCTION fixture_pause_s3_owner();' > "$fixture/s3-owner-loss-remove.log"
+test "$(s3_request 1 PUT s3-owner-loss --data-binary after)" = 200
+for node in 0 1; do
+    test "$(s3_request "$node" GET s3-owner-loss)" = 200
+    test "$(cat "$fixture/s3-response-$node.body")" = after
+done
+test "$(s3_request 0 PUT s3-owner-loss --data-binary released-after)" = 200
+for node in 0 1; do
+    test "$(s3_request "$node" GET s3-owner-loss)" = 200
+    test "$(cat "$fixture/s3-response-$node.body")" = released-after
 done
 
 # Session creation must not survive losing the request owner either.
@@ -417,4 +472,4 @@ for node in 0 1; do
     read_manifest "$node" latest 200
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
-echo "PASS: restricted released/current OCI writers preserve manifest visibility and partial-upload state after database owner loss, publication failure and SIGKILL, and retry with unchanged migrations and table grants; diagnostics: $fixture"
+echo "PASS: restricted released/current OCI and S3 writers preserve prior objects and upload state after database owner loss, publication failure and SIGKILL, and retry with unchanged migrations and table grants; diagnostics: $fixture"
