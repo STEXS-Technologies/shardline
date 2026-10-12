@@ -804,3 +804,23 @@ cursor and verifies the exact surviving IDs. Four SQLite artifact tests, all 32
 tracking tests with owned PostgreSQL, all 32 admin API tests and strict index/server
 Clippy pass. This reduces repeated enumeration on later pages; first-page scans,
 legacy inventory walks and deployment-scale cost still need further work.
+
+### Stopping metadata enumeration when the page is settled
+
+SQLite and PostgreSQL history inspection now stop their ordered metadata walk
+once enough eligible records establish the requested page. Deployment and scope
+filters still run before a record counts toward that page. Unordered legacy
+inventory remains fully considered so its earlier IDs can replace later metadata
+IDs; the mixed-storage regression checks this with one-record pages.
+
+The SQLite visitor test checks stopping across a 64-row storage boundary, then
+resuming after a deleted cursor without changing unvisited artifacts. The server
+fixture introduces a malformed key beyond an earlier valid page: that page remains
+inspectable, while reaching the malformed key still reports failure and preserves
+its bytes. Four SQLite tests, all 32 tracking tests with owned PostgreSQL, all 32
+admin API tests and strict index/server Clippy pass.
+
+This limits unnecessary metadata enumeration, not all history-related work.
+Filtering large foreign backlogs, legacy walks, retention eligibility scans and
+deployment-scale latency remain open. No process, configuration, cursor format
+or database migration is added.

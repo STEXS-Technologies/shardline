@@ -161,14 +161,21 @@ fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
     let foreign = penelope_core::task::Digest::of(b"second login");
     let shared = penelope_core::task::Digest::of(b"shared schema");
     let other = penelope_core::task::Digest::of(b"other schema");
-    for (deployment, scope, operation) in [
+    for (index, (deployment, scope, operation)) in [
         (legacy, Some(shared), "own-bound"),
         (foreign, Some(shared), "foreign-bound"),
         (legacy, Some(other), "own-other-schema"),
         (legacy, None, "own-legacy"),
         (foreign, None, "foreign-legacy"),
-    ] {
-        let mut tracker = EmbeddedTaskTracker::new(objects.clone(), deployment);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut tracker = if index % 2 == 0 {
+            EmbeddedTaskTracker::from_store(store.clone(), deployment)
+        } else {
+            EmbeddedTaskTracker::new(objects.clone(), deployment)
+        };
         if let Some(scope) = scope {
             tracker = tracker.with_history_scope(scope);
         }
@@ -889,6 +896,35 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
     eprintln!(
         "132-run metadata fixture: full paginated inspection {inspection:?}; four retention calls {cleanup:?}"
     );
+    // An invalid key beyond the requested page must not break inspection of
+    // earlier verified history. Reaching that key still exposes the failure.
+    let database = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    let invalid_key = format!("{TASK_EVIDENCE_PREFIX}manifests/zz\n");
+    database
+        .execute(
+            "INSERT INTO shardline_task_artifacts_v1(artifact_key,payload) VALUES (?1,?2)",
+            rusqlite::params![invalid_key, b"invalid later history".as_slice()],
+        )
+        .unwrap();
+    let first = store.inspect_summaries(deployment, None, 1).unwrap();
+    assert_eq!(first.len(), 1);
+    assert!(
+        matches!(first.first().unwrap(), status::TaskEvidenceEntry::Verified(summary)
+        if summary.operation == "unfinished")
+    );
+    assert!(
+        store
+            .inspect_summaries(deployment, Some("unreadable"), 1)
+            .is_err()
+    );
+    let untouched: Vec<u8> = database
+        .query_row(
+            "SELECT payload FROM shardline_task_artifacts_v1 WHERE artifact_key=?1",
+            [invalid_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(untouched, b"invalid later history");
     drop(unfinished);
 }
 

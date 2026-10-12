@@ -5,6 +5,7 @@ use shardline_protocol::{ByteRange, ShardlineHash};
 use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore,
 };
+use std::ops::ControlFlow;
 pub(crate) mod embedded;
 pub use embedded::EmbeddedTaskTracker;
 mod owner;
@@ -357,6 +358,23 @@ impl TaskEvidenceStore {
     where
         F: FnMut(&ObjectMetadata) -> Result<(), ServerError>,
     {
+        self.visit_prefix_until(prefix, after, |object| {
+            visit(object)?;
+            Ok(ControlFlow::Continue(()))
+        })
+    }
+
+    // Only ordered metadata honors Break. Legacy inventory can be unordered,
+    // so all of it must still be considered for the globally earliest page.
+    fn visit_prefix_until<F>(
+        &self,
+        prefix: &ObjectPrefix,
+        after: Option<&str>,
+        mut visit: F,
+    ) -> Result<(), ServerError>
+    where
+        F: FnMut(&ObjectMetadata) -> Result<ControlFlow<()>, ServerError>,
+    {
         if let Some(metadata) = &self.postgres_metadata {
             let mut after = after.map(str::to_owned);
             'pages: loop {
@@ -371,12 +389,14 @@ impl TaskEvidenceStore {
                     let object_key =
                         ObjectKey::parse(&key).map_err(|_error| ServerError::InvalidPath)?;
                     after = Some(key);
-                    visit(&ObjectMetadata::new(object_key, length, None))?;
+                    if visit(&ObjectMetadata::new(object_key, length, None))?.is_break() {
+                        break 'pages;
+                    }
                 }
             }
         }
         if let Some(metadata) = &self.local_metadata {
-            metadata.visit_task_artifacts_after::<ServerError, _>(
+            metadata.visit_task_artifacts_until::<ServerError, _>(
                 prefix.as_str(),
                 after,
                 |key, length| {
@@ -400,7 +420,7 @@ impl TaskEvidenceStore {
                     return Ok(());
                 }
             }
-            visit(&object)
+            visit(&object).map(|_| ())
         })?;
         Ok(())
     }

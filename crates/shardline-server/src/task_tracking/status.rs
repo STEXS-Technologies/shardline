@@ -9,6 +9,7 @@ use shardline_storage::ObjectPrefix;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Error, ErrorKind},
+    ops::ControlFlow,
 };
 
 /// Operator-visible evidence state. Remote ownership is never inferred from a PID.
@@ -284,7 +285,7 @@ impl TaskEvidenceStore {
         let prefix = ObjectPrefix::parse(&format!("{}manifests/", super::TASK_EVIDENCE_PREFIX))?;
         let mut identities: BTreeMap<String, Option<TaskRunIdentity>> = BTreeMap::new();
         let after_key = after.map(|id| format!("{}{id}", prefix.as_str()));
-        self.visit_prefix_after(&prefix, after_key.as_deref(), |metadata| {
+        self.visit_prefix_until(&prefix, after_key.as_deref(), |metadata| {
             let id = metadata
                 .key()
                 .as_str()
@@ -292,7 +293,7 @@ impl TaskEvidenceStore {
                 .next()
                 .ok_or(ServerError::InvalidPath)?;
             if after.is_some_and(|after| id <= after) {
-                return Ok::<(), ServerError>(());
+                return Ok::<_, ServerError>(ControlFlow::Continue(()));
             }
             if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
                 return Err(invalid("invalid task identity key"));
@@ -305,11 +306,19 @@ impl TaskEvidenceStore {
                     .last_key_value()
                     .is_some_and(|(last, _)| id > last.as_str())
             {
-                return Ok(());
+                // Canonical manifest keys establish the ID ordering. A nested
+                // malformed key cannot safely establish an enumeration bound.
+                return Ok(
+                    if metadata.key().as_str() == format!("{}{id}", prefix.as_str()) {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    },
+                );
             }
             let mut identity = match self.read(&format!("manifests/{id}"), 65536) {
                 // Retention can remove an expired manifest during enumeration.
-                Ok(None) => return Ok(()),
+                Ok(None) => return Ok(ControlFlow::Continue(())),
                 Ok(Some(bytes)) => serde_json::from_slice::<TaskRunIdentity>(&bytes).ok(),
                 Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => None,
                 Err(error) => return Err(error),
@@ -325,8 +334,8 @@ impl TaskEvidenceStore {
                     .map(Option::flatten);
                 match association {
                     Ok(Some(true)) => {}
-                    Ok(Some(false)) => return Ok(()),
-                    Ok(None) if !legacy_matches => return Ok(()),
+                    Ok(Some(false)) => return Ok(ControlFlow::Continue(())),
+                    Ok(None) if !legacy_matches => return Ok(ControlFlow::Continue(())),
                     Ok(None) => {}
                     Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {
                         identity = None;
@@ -348,7 +357,18 @@ impl TaskEvidenceStore {
             if identities.len() > limit {
                 identities.pop_last();
             }
-            Ok(())
+            Ok(
+                if identities.len() == limit
+                    && identities
+                        .last_key_value()
+                        .is_some_and(|(last, _)| id >= last.as_str())
+                    && metadata.key().as_str() == format!("{}{id}", prefix.as_str())
+                {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                },
+            )
         })?;
         identities
             .into_iter()

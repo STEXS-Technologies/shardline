@@ -67,7 +67,9 @@ The following still need implementation or stronger evidence before merge:
   large reports, broad deployment performance and total unresolved-history
   growth are not fully established. A 132-run metadata fixture drains completed
   history in batches while retaining unfinished and corrupt history, but inspection
-  and retention still walk the inventory; bounded output does not bound latency.
+  retention and legacy inspection still walk the inventory. Metadata inspection
+  stops after its eligible page is settled, but filtering unrelated history can
+  still require a longer scan; bounded output does not bound latency.
 - **Remaining deployment layouts.** Work-specific database/schema routing,
   row policies, narrower accounts, library embedding and legacy history need
   coverage beyond the passing fixtures. Corrupt, unfinished or unrelated legacy
