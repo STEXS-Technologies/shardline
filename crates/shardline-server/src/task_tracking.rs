@@ -341,12 +341,24 @@ impl TaskEvidenceStore {
         Ok(Some(bytes))
     }
 
-    fn visit_prefix<F>(&self, prefix: &ObjectPrefix, mut visit: F) -> Result<(), ServerError>
+    fn visit_prefix<F>(&self, prefix: &ObjectPrefix, visit: F) -> Result<(), ServerError>
+    where
+        F: FnMut(&ObjectMetadata) -> Result<(), ServerError>,
+    {
+        self.visit_prefix_after(prefix, None, visit)
+    }
+
+    fn visit_prefix_after<F>(
+        &self,
+        prefix: &ObjectPrefix,
+        after: Option<&str>,
+        mut visit: F,
+    ) -> Result<(), ServerError>
     where
         F: FnMut(&ObjectMetadata) -> Result<(), ServerError>,
     {
         if let Some(metadata) = &self.postgres_metadata {
-            let mut after = None;
+            let mut after = after.map(str::to_owned);
             'pages: loop {
                 let page = metadata.page(prefix.as_str(), after.as_deref())?;
                 if page.is_empty() {
@@ -364,12 +376,19 @@ impl TaskEvidenceStore {
             }
         }
         if let Some(metadata) = &self.local_metadata {
-            metadata.visit_task_artifacts::<ServerError, _>(prefix.as_str(), |key, length| {
-                let key = ObjectKey::parse(key).map_err(|_error| ServerError::InvalidPath)?;
-                visit(&ObjectMetadata::new(key, length, None))
-            })?;
+            metadata.visit_task_artifacts_after::<ServerError, _>(
+                prefix.as_str(),
+                after,
+                |key, length| {
+                    let key = ObjectKey::parse(key).map_err(|_error| ServerError::InvalidPath)?;
+                    visit(&ObjectMetadata::new(key, length, None))
+                },
+            )?;
         }
         self.objects.visit_prefix(prefix, |object| {
+            if after.is_some_and(|after| object.key().as_str() <= after) {
+                return Ok(());
+            }
             if let Some(metadata) = &self.postgres_metadata
                 && metadata.read(object.key().as_str(), 0)?.is_some()
             {

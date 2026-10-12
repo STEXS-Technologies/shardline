@@ -115,7 +115,26 @@ impl LocalIndexStore {
     ///
     /// # Errors
     /// Returns database or callback failures.
-    pub fn visit_task_artifacts<E, F>(&self, prefix: &str, mut visit: F) -> Result<(), E>
+    pub fn visit_task_artifacts<E, F>(&self, prefix: &str, visit: F) -> Result<(), E>
+    where
+        E: From<LocalIndexStoreError>,
+        F: FnMut(&str, u64) -> Result<(), E>,
+    {
+        self.visit_task_artifacts_after(prefix, None, visit)
+    }
+
+    /// Visits literal-prefix artifacts strictly after an optional full key.
+    /// The cursor need not exist; deletion between pages does not reset progress.
+    /// Uses the same bounded pages and callback semantics as [`Self::visit_task_artifacts`].
+    ///
+    /// # Errors
+    /// Returns database or callback failures.
+    pub fn visit_task_artifacts_after<E, F>(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        mut visit: F,
+    ) -> Result<(), E>
     where
         E: From<LocalIndexStoreError>,
         F: FnMut(&str, u64) -> Result<(), E>,
@@ -124,7 +143,7 @@ impl LocalIndexStore {
         if !exists(&connection)? {
             return Ok(());
         }
-        let mut after: Option<String> = None;
+        let mut after = after.map(str::to_owned);
         loop {
             let page = {
                 let query = if after.is_some() {
@@ -258,6 +277,52 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some(winning)
+        );
+    }
+
+    #[test]
+    fn literal_prefix_seek_resumes_after_a_deleted_cursor_across_pages() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::open(root.path().to_owned());
+        for index in 0..130 {
+            store
+                .publish_task_artifact(&format!("_task%/{index:03}"), b"opaque")
+                .unwrap();
+        }
+        store
+            .publish_task_artifact("_taskX/other", b"keep")
+            .unwrap();
+        store.delete_task_artifact("_task%/063").unwrap();
+        let mut keys = Vec::new();
+        store
+            .visit_task_artifacts_after::<LocalIndexStoreError, _>(
+                "_task%/",
+                Some("_task%/063"),
+                |key, length| {
+                    assert_eq!(length, 6);
+                    keys.push(key.to_owned());
+                    assert!(store.delete_task_artifact(key)?);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            keys,
+            (64..130)
+                .map(|index| format!("_task%/{index:03}"))
+                .collect::<Vec<_>>()
+        );
+        let mut remaining = 0;
+        store
+            .visit_task_artifacts::<LocalIndexStoreError, _>("_task%/", |_, _| {
+                remaining += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(remaining, 63);
+        assert_eq!(
+            store.read_task_artifact("_taskX/other", 4).unwrap(),
+            Some(b"keep".to_vec())
         );
     }
 }

@@ -787,3 +787,20 @@ It measured about 2.0 seconds for inspection and 4.9 seconds for retention after
 the change. The shared-host debug timings are indicative rather than a controlled
 benchmark. Inventory enumeration remains O(N), so deployment-scale cost is still
 open. All 32 tracking tests, 32 admin API tests and strict server Clippy pass.
+
+### Seeking past the history cursor
+
+Later history pages now pass their existing cursor to SQLite and PostgreSQL
+metadata enumeration, avoiding rows at or before that key. A cursor need not
+still exist: cleanup between requests does not reset inspection to the start.
+Legacy object-backed enumeration remains available and keeps its inventory walk.
+The existing visitor API retains its behavior; SQLite adds an optional-cursor
+variant using the same literal-prefix queries and 64-row storage pages.
+
+A SQLite fixture deletes the cursor, then seeks and deletes 66 later artifacts
+across storage pages without touching earlier keys or a wildcard-lookalike prefix.
+The 132-run server fixture also inspects after each newly deleted retirement
+cursor and verifies the exact surviving IDs. Four SQLite artifact tests, all 32
+tracking tests with owned PostgreSQL, all 32 admin API tests and strict index/server
+Clippy pass. This reduces repeated enumeration on later pages; first-page scans,
+legacy inventory walks and deployment-scale cost still need further work.
