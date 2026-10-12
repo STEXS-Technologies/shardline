@@ -19,6 +19,53 @@ const GC_WRITE_BARRIER_KEY: i64 = 0x5348_4152_4447_4301;
 const LOCAL_BARRIER_FILE_NAME: &str = ".gc-write-barrier.lock";
 const LOCAL_RESOURCE_LOCK_DIR: &str = ".resource-locks";
 
+tokio::task_local! {
+    static REQUEST_SESSION: RequestSession;
+}
+
+#[derive(Clone)]
+/// One OCI request's non-replaceable lock-owning session. Resource publications
+/// borrow this connection rather than acquiring an independent session. The
+/// backend identity prevents a nested call to another backend borrowing it.
+pub(crate) struct RequestSession {
+    backend: Arc<()>,
+    connection: Arc<tokio::sync::Mutex<Option<PoolConnection<Postgres>>>>,
+}
+
+impl RequestSession {
+    pub(crate) async fn acquire(pool: &PgPool, backend: Arc<()>) -> Result<Self, ServerError> {
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+        connection.close_on_drop();
+        sqlx::query("SELECT pg_advisory_lock_shared($1)")
+            .bind(GC_WRITE_BARRIER_KEY)
+            .execute(&mut *connection)
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+        Ok(Self {
+            backend,
+            connection: Arc::new(tokio::sync::Mutex::new(Some(connection))),
+        })
+    }
+
+    pub(crate) async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
+        REQUEST_SESSION.scope(self.clone(), future).await
+    }
+
+    pub(crate) async fn finish(self) {
+        if let Some(mut connection) = self.connection.lock().await.take()
+            && sqlx::query("SELECT pg_advisory_unlock_all()")
+                .execute(&mut *connection)
+                .await
+                .is_ok()
+        {
+            connection.return_to_pool().await;
+        }
+    }
+}
+
 /// Held shared or exclusive maintenance barrier.
 ///
 /// Dropping the local file releases its advisory lock. Dropping the Postgres
@@ -52,8 +99,8 @@ impl Drop for MaintenanceBarrierGuard {
 /// Exclusive ownership of one mutable application resource.
 ///
 /// Postgres guards retain a dedicated session-level advisory lock and a durable,
-/// monotonically increasing fencing epoch. The connection is always closed rather
-/// than returned to the pool so a session lock cannot leak into an unrelated request.
+/// monotonically increasing fencing epoch. Dedicated sessions close on drop;
+/// request sessions are returned only after explicitly releasing every lock.
 pub(crate) enum ResourceWriteGuard {
     Local {
         files: Vec<File>,
@@ -62,13 +109,17 @@ pub(crate) enum ResourceWriteGuard {
         connection: PoolConnection<Postgres>,
         fences: Vec<(ResourceLockKey, i64)>,
     },
+    PostgresRequest {
+        connection: tokio::sync::OwnedMutexGuard<Option<PoolConnection<Postgres>>>,
+        fences: Vec<(ResourceLockKey, i64)>,
+    },
 }
 
 impl std::fmt::Debug for ResourceWriteGuard {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Local { .. } => formatter.write_str("ResourceWriteGuard::Local"),
-            Self::Postgres { fences, .. } => formatter
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => formatter
                 .debug_struct("ResourceWriteGuard::Postgres")
                 .field("fences", fences)
                 .finish_non_exhaustive(),
@@ -90,7 +141,7 @@ impl ResourceWriteGuard {
     pub(crate) fn postgres_fences(&self) -> Option<Vec<shardline_index::PostgresResourceFence>> {
         match self {
             Self::Local { .. } => None,
-            Self::Postgres { fences, .. } => Some(
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => Some(
                 fences
                     .iter()
                     .map(|(key, epoch)| {
@@ -105,24 +156,31 @@ impl ResourceWriteGuard {
         match self {
             Self::Local { .. } => None,
             Self::Postgres { connection, .. } => Some(&mut **connection),
+            Self::PostgresRequest { connection, .. } => {
+                connection.as_mut().map(|value| &mut **value)
+            }
         }
     }
 
     /// Checks every fence using the session that owns all of the locks.
     pub(crate) async fn assert_current(&mut self) -> Result<(), ServerError> {
-        let Self::Postgres { connection, fences } = self else {
-            return Ok(());
+        let fences = match self {
+            Self::Local { .. } => return Ok(()),
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => fences.clone(),
         };
+        let connection = self
+            .postgres_connection_mut()
+            .ok_or(ServerError::StaleResourceFence)?;
         for (key, epoch) in fences {
             let current = query_scalar::<_, i64>(
                 "SELECT epoch FROM shardline_resource_fences WHERE domain = $1 AND resource = $2",
             )
             .bind(key.domain().as_str())
             .bind(key.resource())
-            .fetch_optional(&mut **connection)
+            .fetch_optional(&mut *connection)
             .await
             .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-            if current != Some(*epoch) {
+            if current != Some(epoch) {
                 return Err(ServerError::StaleResourceFence);
             }
         }
@@ -133,7 +191,9 @@ impl ResourceWriteGuard {
     fn epoch(&self) -> Option<i64> {
         match self {
             Self::Local { .. } => None,
-            Self::Postgres { fences, .. } => fences.first().map(|(_, epoch)| *epoch),
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => {
+                fences.first().map(|(_, epoch)| *epoch)
+            }
         }
     }
 }
@@ -353,6 +413,7 @@ async fn acquire_postgres(
 }
 
 /// Acquires an exclusive session-scoped advisory lock for an application resource.
+#[cfg(test)]
 pub(crate) async fn acquire_postgres_resource_exclusive(
     pool: &PgPool,
     key: &ResourceLockKey,
@@ -372,6 +433,32 @@ pub(crate) async fn acquire_postgres_resources_exclusive(
         .await
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
     connection.close_on_drop();
+    let fences = acquire_resource_fences(&mut connection, keys).await?;
+    Ok(ResourceWriteGuard::Postgres { connection, fences })
+}
+
+pub(crate) async fn acquire_postgres_request_resources(
+    pool: &PgPool,
+    backend: &Arc<()>,
+    keys: &[ResourceLockKey],
+) -> Result<ResourceWriteGuard, ServerError> {
+    let session = REQUEST_SESSION
+        .try_with(|session| Arc::ptr_eq(backend, &session.backend).then(|| session.clone()))
+        .ok()
+        .flatten();
+    let Some(session) = session else {
+        return acquire_postgres_resources_exclusive(pool, keys).await;
+    };
+    let mut connection = session.connection.lock_owned().await;
+    let work = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
+    let fences = acquire_resource_fences(work, keys).await?;
+    Ok(ResourceWriteGuard::PostgresRequest { connection, fences })
+}
+
+async fn acquire_resource_fences(
+    connection: &mut PgConnection,
+    keys: &[ResourceLockKey],
+) -> Result<Vec<(ResourceLockKey, i64)>, ServerError> {
     let mut fences = Vec::new();
     for key in ordered_resources(keys) {
         // A backend blocked on a later lock may not read the termination
@@ -404,7 +491,7 @@ pub(crate) async fn acquire_postgres_resources_exclusive(
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
         fences.push((key, epoch));
     }
-    Ok(ResourceWriteGuard::Postgres { connection, fences })
+    Ok(fences)
 }
 
 fn resource_lock_digest(key: &ResourceLockKey) -> String {

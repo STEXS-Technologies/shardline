@@ -164,9 +164,10 @@ impl ServerBackend {
                 crate::maintenance_barrier::acquire_local_resource_exclusive(root, key).await
             }
             Self::Postgres(backend) => {
-                crate::maintenance_barrier::acquire_postgres_resource_exclusive(
+                crate::maintenance_barrier::acquire_postgres_request_resources(
                     &backend.resource_lock_pool,
-                    key,
+                    &backend.request_session_identity,
+                    std::slice::from_ref(key),
                 )
                 .await
             }
@@ -187,8 +188,9 @@ impl ServerBackend {
                 crate::maintenance_barrier::acquire_local_resources_exclusive(root, keys).await?
             }
             Self::Postgres(backend) => {
-                crate::maintenance_barrier::acquire_postgres_resources_exclusive(
+                crate::maintenance_barrier::acquire_postgres_request_resources(
                     &backend.resource_lock_pool,
+                    &backend.request_session_identity,
                     keys,
                 )
                 .await?

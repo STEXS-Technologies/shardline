@@ -1131,6 +1131,26 @@ async fn gc_write_barrier_middleware(
         return next.run(request).await;
     }
 
+    if request.uri().path().starts_with("/v2/")
+        && let ServerBackend::Postgres(backend) = &state.backend
+    {
+        let session = tokio::time::timeout(
+            timeouts::REQUEST_TOTAL,
+            crate::maintenance_barrier::RequestSession::acquire(
+                &backend.gc_barrier_pool,
+                Arc::clone(&backend.request_session_identity),
+            ),
+        )
+        .await;
+        let session = match session {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => return error.into_response(),
+            Err(_) => return ServerError::RequestTimedOut.into_response(),
+        };
+        let response = session.scope(next.run(request)).await;
+        session.finish().await;
+        return response;
+    }
     let barrier = tokio::time::timeout(
         timeouts::REQUEST_TOTAL,
         state

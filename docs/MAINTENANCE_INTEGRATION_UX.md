@@ -55,6 +55,8 @@ upload is interrupted after storing bytes, those bytes remain hidden from
 manifest reads; a successful retry can publish them. Existing published
 manifests remain visible during retries. This adds a storage existence check,
 with no extra service or grants.
+OCI publication also stops if the database connection holding its GC lock is
+lost. A rejected publication preserves the previous tag and manifest.
 The usual owner-run database upgrade adds hidden manifests to the existing OCI
 deletion inventory. Ordinary GC also discovers missing entries from interrupted
 uploads, including uploads made by accounts with row policies. It reclaims them
