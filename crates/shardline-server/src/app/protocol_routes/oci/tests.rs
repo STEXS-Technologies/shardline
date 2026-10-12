@@ -468,6 +468,13 @@ async fn postgres_manifest_dependency_pending_delete_returns_retryable_error() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .unwrap(),
+        "1"
+    );
     let body = axum::body::to_bytes(response.into_body(), 16_384)
         .await
         .unwrap();
