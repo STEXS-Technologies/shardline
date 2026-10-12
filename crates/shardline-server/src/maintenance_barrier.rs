@@ -33,6 +33,15 @@ pub(crate) struct RequestSession {
 }
 
 impl RequestSession {
+    pub(crate) async fn connection_for(
+        backend: &Arc<()>,
+    ) -> Option<tokio::sync::OwnedMutexGuard<Option<PoolConnection<Postgres>>>> {
+        let session = REQUEST_SESSION
+            .try_with(|session| Arc::ptr_eq(backend, &session.backend).then(|| session.clone()))
+            .ok()
+            .flatten()?;
+        Some(session.connection.lock_owned().await)
+    }
     pub(crate) async fn acquire(pool: &PgPool, backend: Arc<()>) -> Result<Self, ServerError> {
         let mut connection = pool
             .acquire()
@@ -442,14 +451,9 @@ pub(crate) async fn acquire_postgres_request_resources(
     backend: &Arc<()>,
     keys: &[ResourceLockKey],
 ) -> Result<ResourceWriteGuard, ServerError> {
-    let session = REQUEST_SESSION
-        .try_with(|session| Arc::ptr_eq(backend, &session.backend).then(|| session.clone()))
-        .ok()
-        .flatten();
-    let Some(session) = session else {
+    let Some(mut connection) = RequestSession::connection_for(backend).await else {
         return acquire_postgres_resources_exclusive(pool, keys).await;
     };
-    let mut connection = session.connection.lock_owned().await;
     let work = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
     let fences = acquire_resource_fences(work, keys).await?;
     Ok(ResourceWriteGuard::PostgresRequest { connection, fences })

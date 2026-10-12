@@ -3,7 +3,7 @@ use std::{collections::HashMap, num::NonZeroU64, time::Duration};
 use shardline_reliability::{
     StateTransitionEvent, resumable_session_event, verify_resumable_session_head,
 };
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{Connection, PgConnection, Postgres, Row, Transaction};
 
 use super::{
     PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, insert_reliability_event,
@@ -925,7 +925,41 @@ impl PostgresIndexStore {
         aggregate_max_bytes: u64,
         max_active_parts: usize,
     ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
-        let mut transaction = self.pool().begin().await?;
+        let mut connection = self.pool().acquire().await?;
+        Self::publish_resumable_part_bounded_on_connection(
+            &mut connection,
+            session_id,
+            part_number,
+            staging_key,
+            size_bytes,
+            etag,
+            range,
+            session_max_bytes,
+            aggregate_max_bytes,
+            max_active_parts,
+        )
+        .await
+    }
+
+    /// Publishes a part using the caller's lock-owning database connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection is lost or the transaction fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_resumable_part_bounded_on_connection(
+        connection: &mut PgConnection,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        range: Option<ResumablePartRange>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(SESSION_ACCOUNTING_LOCK_ID)
             .execute(&mut *transaction)

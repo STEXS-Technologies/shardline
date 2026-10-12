@@ -632,6 +632,28 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            let connection = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
+            return Ok(
+                shardline_index::PostgresIndexStore::publish_resumable_part_bounded_on_connection(
+                    connection,
+                    session_id,
+                    part_number,
+                    staging_key,
+                    size_bytes,
+                    etag,
+                    range,
+                    session_max_bytes,
+                    aggregate_max_bytes,
+                    max_active_parts,
+                )
+                .await?,
+            );
+        }
         Ok(backend
             .index_store()
             .publish_resumable_part_bounded(
