@@ -204,7 +204,11 @@ impl PostgresIndexStore {
                   WHERE tgrelid IN ('shardline_file_records'::regclass,
                                     'shardline_file_reconstructions'::regclass,
                                     'shardline_stored_objects'::regclass)
-                  AND tgname='shardline_reference_remote_delete_v1' AND tgenabled='O') = 3",
+                  AND tgname='shardline_reference_remote_delete_v1' AND tgenabled='O') = 3
+             AND to_regprocedure(format('%I.shardline_oci_publication_remote_delete_v1(text,text,text,text,text)', current_schema())) IS NOT NULL
+             AND (SELECT count(*) FROM pg_trigger
+                  WHERE tgrelid IN ('shardline_oci_tags'::regclass, 'shardline_oci_object_tombstones'::regclass)
+                  AND tgname='shardline_oci_reference_remote_delete_v1' AND tgenabled='O') = 2",
         )
         .fetch_one(&mut *transaction)
         .await?;
@@ -1146,6 +1150,8 @@ mod tests {
             "shardline_file_records",
             "shardline_file_reconstructions",
             "shardline_stored_objects",
+            "shardline_oci_tags",
+            "shardline_oci_object_tombstones",
         ] {
             query(sqlx::AssertSqlSafe(format!(
                 "CREATE TABLE {identifier}.{table} (LIKE {table} INCLUDING ALL)"
