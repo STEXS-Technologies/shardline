@@ -12,7 +12,7 @@ const REPO: &str = "team/assets";
 const TAG: &str = "latest";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn postgres_ordinary_gc_reclaims_abandoned_manifest_after_hold_release() {
+async fn postgres_ordinary_gc_reclaims_row_scoped_abandoned_manifest_after_hold_release() {
     use shardline_index::{AsyncIndexStore as _, OciObjectStore as _};
     let Ok(url) = std::env::var("DATABASE_URL") else {
         return;
@@ -80,12 +80,42 @@ async fn postgres_ordinary_gc_reclaims_abandoned_manifest_after_hold_release() {
         "protocols/oci/global/repos/{repository_id}/manifest-media-types/{digest}"
     ))
     .unwrap();
+    let actor_role = format!("staged_actor_{schema}");
+    for statement in [
+        format!("CREATE ROLE {actor_role}"),
+        format!("GRANT USAGE ON SCHEMA {schema} TO {actor_role}"),
+        format!("GRANT SELECT,DELETE ON {schema}.shardline_oci_object_tombstones TO {actor_role}"),
+        format!("GRANT SELECT ON {schema}.shardline_oci_tags TO {actor_role}"),
+        format!(
+            "GRANT SELECT,INSERT,UPDATE ON {schema}.shardline_reliability_events TO {actor_role}"
+        ),
+        format!("ALTER TABLE {schema}.shardline_oci_object_tombstones ENABLE ROW LEVEL SECURITY"),
+        format!(
+            "CREATE POLICY actor_scope ON {schema}.shardline_oci_object_tombstones TO {actor_role} USING(scope_namespace='global') WITH CHECK(scope_namespace='global')"
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
     let mut connection = store.pool().acquire().await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET SESSION AUTHORIZATION {actor_role}"
+    )))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
     store
         .stage_oci_object_on_connection(&mut connection, &key, &[])
         .await
         .unwrap();
+    sqlx::query("RESET SESSION AUTHORIZATION")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
     drop(connection);
+    assert!(store.list_oci_object_tombstones().await.unwrap().is_empty());
     cluster
         .node_a
         .backend
@@ -204,6 +234,10 @@ async fn postgres_ordinary_gc_reclaims_abandoned_manifest_after_hold_release() {
             .any(|entry| entry.key == key)
     );
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {actor_role}")))
         .execute(&admin)
         .await
         .unwrap();

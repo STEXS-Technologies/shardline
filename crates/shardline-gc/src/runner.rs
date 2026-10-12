@@ -517,6 +517,16 @@ pub async fn run_postgres_gc_with_remote_delete_protection(
     frontends: &[ServerFrontend],
     options: LocalGcOptions,
 ) -> Result<LocalGcDiagnostics, GcError> {
+    if options.sweep
+        && index_store
+            .restore_staged_oci_tombstones_for_gc()
+            .await?
+            .is_none()
+    {
+        tracing::warn!(
+            "GC cannot discover journal-only OCI stages: run the usual owner database upgrade and check the maintenance account's row policies"
+        );
+    }
     run_gc_with_oci_tombstones_internal(
         record_store,
         index_store,

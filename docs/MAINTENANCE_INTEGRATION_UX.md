@@ -59,9 +59,11 @@ manifest reads; a successful retry can publish them. Existing published
 manifests remain visible during retries. This uses the existing verified
 journal and adds a storage existence check, with no extra service or grants.
 The usual owner-run database upgrade adds hidden manifests to the existing OCI
-deletion inventory. Ordinary GC can then reclaim abandoned uploads after the
-configured retention period, while preserving active holds. Cleanup under
-row-scoped database permissions still needs additional coverage.
+deletion inventory. Ordinary GC also discovers missing entries from interrupted
+uploads, including uploads made by accounts with row policies. It reclaims them
+after the configured retention period and preserves active holds. This uses the
+existing maintenance account. If that account also has active row restrictions,
+automatic discovery remains unsupported and reports a warning.
 
 If GC received a successful delete reply, it tries to save that reply in your
 existing object storage before recording completion in the database. The next
@@ -139,5 +141,6 @@ and deployment-scale limits still need work.
 
 The usual owner-run `shardline db migrate up` installs the protection functions,
 even with no pending migration entries. Runtime accounts need no new fence-table
-grant. See the [migration guide](DATABASE_MIGRATIONS.md) and
+grant. Installation waits for current writes and maintenance to finish before
+changing protection triggers. See the [migration guide](DATABASE_MIGRATIONS.md) and
 [remaining acceptance gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).

@@ -14,7 +14,9 @@ trap 'printf "FAIL: OCI upgrade drill at line %s; diagnostics: %s\n" "$LINENO" "
 container_id=''
 server_pids=()
 request_pid=''
+upgrade_pid=''
 cleanup() {
+    if test -n "$upgrade_pid"; then kill "$upgrade_pid" 2>/dev/null || true; wait "$upgrade_pid" 2>/dev/null || true; fi
     if test -n "$request_pid"; then kill "$request_pid" 2>/dev/null || true; wait "$request_pid" 2>/dev/null || true; fi
     for pid in "${server_pids[@]}"; do
         if test -n "$pid"; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
@@ -109,7 +111,38 @@ read_manifest() {
 start_server "$released" 0
 test "$(request 0 PUT latest --data-binary "@$fixture/published.json")" = 201
 read_manifest 0 "sha256:$published_digest" 200
-"$current" db migrate up --database-url "$database_url" > "$fixture/upgrade.log" 2>&1
+# A released native writer already holds the shared maintenance barrier.
+# The owner upgrade must wait there before changing protection triggers.
+sql "CREATE FUNCTION fixture_pause_upgrade_writer() RETURNS trigger LANGUAGE plpgsql AS \$\$
+BEGIN IF NEW.tag='upgrade-writer' THEN PERFORM pg_sleep(5); END IF; RETURN NEW; END \$\$;
+CREATE TRIGGER fixture_pause_upgrade_writer BEFORE INSERT OR UPDATE ON shardline_oci_tags
+FOR EACH ROW EXECUTE FUNCTION fixture_pause_upgrade_writer();" > "$fixture/upgrade-writer-install.log"
+request 0 PUT upgrade-writer --data-binary "@$fixture/published.json" > "$fixture/upgrade-writer-status" &
+request_pid=$!
+for attempt in $(seq 1 50); do
+    if test "$(sql "SELECT count(*) FROM pg_stat_activity WHERE usename='existing_oci_writer' AND wait_event='PgSleep'")" = 1; then break; fi
+    sleep 0.1
+done
+test "$(sql "SELECT count(*) FROM pg_stat_activity WHERE usename='existing_oci_writer' AND wait_event='PgSleep'")" = 1
+"$current" db migrate up --database-url "$database_url" > "$fixture/upgrade.log" 2>&1 &
+upgrade_pid=$!
+upgrade_waiting=false
+for attempt in $(seq 1 50); do
+    kill -0 "$upgrade_pid"
+    upgrade_waiting=$(sql "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+        AND NOT granted AND mode='ExclusiveLock' AND objsubid=1
+        AND classid::bigint=(x'5348415244474301'::bit(64)::bigint >> 32)
+        AND objid::bigint=(x'5348415244474301'::bit(64)::bigint & 4294967295))")
+    if test "$upgrade_waiting" = t; then break; fi
+    sleep 0.1
+done
+test "$upgrade_waiting" = t
+wait "$request_pid"
+request_pid=''
+test "$(cat "$fixture/upgrade-writer-status")" = 201
+wait "$upgrade_pid"
+upgrade_pid=''
+sql 'DROP TRIGGER fixture_pause_upgrade_writer ON shardline_oci_tags; DROP FUNCTION fixture_pause_upgrade_writer();' > "$fixture/upgrade-writer-remove.log"
 "$released" db migrate verify --database-url "$database_url" > "$fixture/released-verify.log" 2>&1
 sql 'SELECT * FROM shardline_schema_migrations ORDER BY version' > "$fixture/ledger-after"
 cmp "$fixture/ledger-before" "$fixture/ledger-after"
