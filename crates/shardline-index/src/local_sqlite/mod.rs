@@ -10,6 +10,7 @@ mod record_store;
 mod records;
 mod s3_objects;
 mod store;
+mod task_artifacts;
 #[cfg(test)]
 mod tests;
 mod tree_store;

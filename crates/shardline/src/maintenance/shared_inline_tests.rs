@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 use super::*;
 use shardline_server::{ServerConfig, task_tracking::TaskRunState};
-use std::{fs, num::NonZeroUsize, path::Path};
+use std::{num::NonZeroUsize, path::Path};
 
 fn config(root: &Path) -> ServerConfig {
     ServerConfig::new(
@@ -159,15 +159,20 @@ fn shared_receipts_verify_native_success_failure_and_materialized_tampering() {
             }
         );
     }
-    // No signing key, SQLite journal or scratch directory exists beside the
-    // shared object adapter. Its native body verification detects later damage.
+    // No signing key, private task journal or scratch directory is needed.
+    // Native body verification also detects damage in metadata-backed evidence.
     assert!(!root.path().join(".shardline-maintenance").exists());
-    let artifacts = root
-        .path()
-        .join("chunks/_shardline_tasks/v1/runs/shared-inline-0/artifacts");
-    for entry in fs::read_dir(artifacts).unwrap() {
-        fs::write(entry.unwrap().path(), b"damaged materialized result").unwrap();
-    }
+    let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    assert!(
+        connection
+            .execute(
+                "UPDATE shardline_task_artifacts_v1 SET payload = ?1
+         WHERE artifact_key GLOB '_shardline_tasks/v1/runs/shared-inline-0/artifacts/*'",
+                [b"damaged materialized result".as_slice()],
+            )
+            .unwrap()
+            > 0
+    );
     let tasks = store.summaries(deployment, None, 10).unwrap();
     assert_eq!(
         tasks
@@ -190,12 +195,14 @@ fn shared_completion_write_failure_never_claims_a_finished_task() {
     let (input, definition, scope) =
         super::super::inline::prepare(&config, id, &operation, vec![b"fsck".to_vec()]).unwrap();
     let mut receipt = Receipt::begin(&operation, id, &config, &input, definition, scope).unwrap();
-    let report = b"maintenance.success: true\n{\"exit_code\":0,\"schema\":1}";
-    fs::create_dir(root.path().join(format!(
-        "chunks/_shardline_tasks/v1/runs/{id}/artifacts/{}",
-        hex::encode(Digest::of(report).0),
-    )))
-    .unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fixture_reject_artifacts BEFORE INSERT ON shardline_task_artifacts_v1
+         WHEN NEW.artifact_key GLOB '_shardline_tasks/v1/runs/shared-inline-incomplete/artifacts/*'
+         BEGIN SELECT RAISE(ABORT, 'fixture rejects task artifact writes'); END;",
+        )
+        .unwrap();
     assert!(receipt.finish(operation.kind(), 0).is_err());
     assert!(
         receipt

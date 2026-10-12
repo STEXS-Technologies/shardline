@@ -590,7 +590,10 @@ pub(super) async fn maintenance_tasks(
     if limit > 100 {
         return Err(ServerError::InvalidAdminQuery);
     }
-    let store = crate::task_tracking::TaskEvidenceStore::from_objects(state.backend.object_store());
+    let store = crate::task_tracking::TaskEvidenceStore::from_backend_objects(
+        &state.config,
+        state.backend.object_store(),
+    );
     let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
     let history_scope =
         crate::task_tracking::backend_history_scope(&state.config, &state.backend).await;
@@ -645,7 +648,10 @@ pub(super) async fn maintenance_report(
         .admission
         .try_acquire(weights::STATS)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let store = crate::task_tracking::TaskEvidenceStore::from_objects(state.backend.object_store());
+    let store = crate::task_tracking::TaskEvidenceStore::from_backend_objects(
+        &state.config,
+        state.backend.object_store(),
+    );
     let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
     let history_scope =
         crate::task_tracking::backend_history_scope(&state.config, &state.backend).await;

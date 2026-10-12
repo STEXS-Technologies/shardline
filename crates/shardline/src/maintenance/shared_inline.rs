@@ -1,5 +1,5 @@
 //! Observation without requiring writable private task storage.
-//! Object-store receipts are durable evidence; domain fences authorize effects.
+//! Deployment-backed receipts are evidence; domain fences authorize effects.
 use super::{MaintenanceOperation, Result};
 use ed25519_dalek::SigningKey;
 use penelope_core::task::{

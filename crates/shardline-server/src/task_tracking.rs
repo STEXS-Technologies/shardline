@@ -1,8 +1,10 @@
-//! Deployment-backed task evidence. Uses the existing object adapter, not a new service.
+//! Deployment-backed task evidence using existing storage resources.
 use crate::{ServerConfig, ServerError, ServerObjectStore, object_store_from_config};
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ByteRange, ShardlineHash};
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+use shardline_storage::{
+    ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore,
+};
 pub(crate) mod embedded;
 pub use embedded::EmbeddedTaskTracker;
 mod owner;
@@ -198,24 +200,41 @@ pub(crate) async fn backend_history_scope(
     }
 }
 
-/// Immutable publication in the configured local or S3-compatible object store.
+/// Immutable publication in existing deployment storage. Local deployments use
+/// the metadata database with legacy object-store reads; PostgreSQL/S3 evidence
+/// configurations retain object-backed publication.
 /// Instantiate on a blocking thread when using the synchronous methods.
 #[derive(Debug, Clone)]
 pub struct TaskEvidenceStore {
     objects: ServerObjectStore,
+    local_metadata: Option<shardline_index::LocalIndexStore>,
 }
 
 impl TaskEvidenceStore {
     pub(crate) const fn from_objects(objects: ServerObjectStore) -> Self {
-        Self { objects }
+        Self {
+            objects,
+            local_metadata: None,
+        }
     }
-    /// Reuses the configured object adapter without requiring a writable metadata root.
+    /// Reuses existing metadata for local payload storage without PostgreSQL.
+    /// Other configurations retain object-backed evidence and its existing permissions.
     /// # Errors
     /// Returns adapter initialization failures.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
-        Ok(Self {
-            objects: object_store_from_config(config)?,
-        })
+        Ok(Self::from_backend_objects(
+            config,
+            object_store_from_config(config)?,
+        ))
+    }
+
+    pub(crate) fn from_backend_objects(config: &ServerConfig, objects: ServerObjectStore) -> Self {
+        Self {
+            objects,
+            local_metadata: (config.index_postgres_url().is_none()
+                && config.object_storage_adapter() == crate::ObjectStorageAdapter::Local)
+                .then(|| shardline_index::LocalIndexStore::open(config.root_dir().to_owned())),
+        }
     }
 
     /// Publishes an immutable record, checking exact bytes even on repeated writes.
@@ -223,6 +242,21 @@ impl TaskEvidenceStore {
     /// Returns invalid keys, unavailable storage or a conflicting publication.
     pub fn publish(&self, suffix: &str, bytes: &[u8]) -> Result<(), ServerError> {
         let key = Self::key(suffix)?;
+        if let Some(metadata) = &self.local_metadata {
+            // Preserve existing immutable legacy publications. New runs use the
+            // metadata table; old history is neither rewritten nor discarded.
+            if self.objects.metadata(&key)?.is_some() {
+                let existing = self.read(suffix, u64::try_from(bytes.len())?)?;
+                if existing.as_deref() != Some(bytes) {
+                    return Err(ServerError::Io(std::io::Error::other(
+                        "task evidence publication conflict",
+                    )));
+                }
+                return Ok(());
+            }
+            metadata.publish_task_artifact(key.as_str(), bytes)?;
+            return Ok(());
+        }
         let hash = ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes());
         let length = u64::try_from(bytes.len())?;
         self.objects.put_if_absent(
@@ -243,6 +277,27 @@ impl TaskEvidenceStore {
     /// # Errors
     /// Returns unavailable storage or evidence larger than the requested bound.
     pub fn read(&self, suffix: &str, maximum: u64) -> Result<Option<Vec<u8>>, ServerError> {
+        if let Some(metadata) = &self.local_metadata {
+            let bytes = match metadata.read_task_artifact(Self::key(suffix)?.as_str(), maximum) {
+                Err(shardline_index::LocalIndexStoreError::MetadataTooLarge { .. }) => {
+                    return Err(ServerError::RequestBodyTooLarge);
+                }
+                result => result?,
+            };
+            if let Some(bytes) = bytes {
+                if self
+                    .read_objects(suffix, maximum)?
+                    .is_some_and(|legacy| legacy != bytes)
+                {
+                    return Err(ServerError::InvalidContentHash);
+                }
+                return Ok(Some(bytes));
+            }
+        }
+        self.read_objects(suffix, maximum)
+    }
+
+    fn read_objects(&self, suffix: &str, maximum: u64) -> Result<Option<Vec<u8>>, ServerError> {
         let key = Self::key(suffix)?;
         let Some(metadata) = self.objects.metadata(&key)? else {
             return Ok(None);
@@ -263,6 +318,38 @@ impl TaskEvidenceStore {
             return Err(ServerError::InvalidContentHash);
         }
         Ok(Some(bytes))
+    }
+
+    fn visit_prefix<F>(&self, prefix: &ObjectPrefix, mut visit: F) -> Result<(), ServerError>
+    where
+        F: FnMut(&ObjectMetadata) -> Result<(), ServerError>,
+    {
+        if let Some(metadata) = &self.local_metadata {
+            metadata.visit_task_artifacts::<ServerError, _>(prefix.as_str(), |key, length| {
+                let key = ObjectKey::parse(key).map_err(|_error| ServerError::InvalidPath)?;
+                visit(&ObjectMetadata::new(key, length, None))
+            })?;
+        }
+        self.objects.visit_prefix(prefix, |object| {
+            if let Some(metadata) = &self.local_metadata {
+                // Do not allocate evidence while suppressing duplicate inventory.
+                if metadata.contains_task_artifact(object.key().as_str())? {
+                    return Ok(());
+                }
+            }
+            visit(&object)
+        })?;
+        Ok(())
+    }
+
+    fn delete_artifact(&self, key: &ObjectKey) -> Result<(), ServerError> {
+        // Remove the legacy copy first so a partially completed cleanup cannot
+        // reveal it again after the metadata copy disappears.
+        self.objects.delete_if_present(key)?;
+        if let Some(metadata) = &self.local_metadata {
+            metadata.delete_task_artifact(key.as_str())?;
+        }
+        Ok(())
     }
 
     fn key(suffix: &str) -> Result<ObjectKey, ServerError> {

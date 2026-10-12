@@ -190,7 +190,7 @@ fn run_inner(
             .is_some_and(|error| matches!(error.raw_os_error(), Some(libc::EROFS | libc::EACCES)))
         {
             tracing::debug!(
-                "local task storage is read-only; maintenance evidence uses the existing object store"
+                "private task storage is read-only; maintenance evidence uses existing deployment storage"
             );
             return super::shared_inline::run(operation, arguments, &config);
         }

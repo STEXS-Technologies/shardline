@@ -224,27 +224,28 @@ This document is for reviewers deciding whether the integration is safe to ship.
   completed outcomes. Database tests distinguish that
   session's schema from an inspection connection, preserve its PID and reject
   a changed scope or closed pool without replacing the session. Storage-copy
-  jobs use only their copy endpoints, not a metadata connection. Their history
+  execution uses its copy endpoints without acquiring a server PostgreSQL
+  metadata connection. Its history
   cannot safely inherit a server's database scope without a verified association;
   opening a guessed database connection would also add a deployment dependency.
-  A local current/released copy comparison works with PostgreSQL unavailable
-  and matches payload bytes and output on a clean source. Current recopy also
-  excludes its task artifacts. Released 1.11.3 rollback from the current
-  destination instead scans and copies 11 objects for a one-object fixture,
-  including ten task-history artifacts. This fails the requirement to keep
-  private task state out of storage migration. The storage-copy verifier
-  reproduces this failure; rollback isolation remains required work.
-  A separate prototype stores opaque bytes in an extra table in the existing
-  SQLite metadata database. Released fsck output stays identical; released
-  copy scans only the one payload object and leaves the metadata bytes intact.
-  This establishes a possible local separation mechanism, not an implemented
-  task backend. The real change must preserve artifact verification and legacy
-  reads, support Postgres/S3 and object-only copies, and retain the existing
-  restricted-root behavior without adding a database service or mount.
+  Local deployments without PostgreSQL now publish new task artifacts in an
+  optional table in their existing SQLite metadata database. Artifact encodings,
+  signature verification and the domain migration ledger stay unchanged.
+  Inspection merges this history with legacy object-backed evidence; retention
+  removes both copies without exposing a partly retired run. The local
+  current/released copy comparison now passes with PostgreSQL unavailable:
+  clean copy, current recopy and released rollback match payload bytes and
+  output while ten current task artifacts stay outside payload inventory.
+  Existing object-backed history is not moved or discarded. Such history can
+  still contaminate a released copy, and PostgreSQL/S3 configurations still
+  publish object-backed evidence. Those cases, S3-only copy endpoints and
+  deployment permissions remain required work before the full isolation gate
+  passes. No database service or mount was added for the local backend.
+  The earlier SQLite prototype also verifies unchanged released fsck output.
   Reproduce the local prototype with
   `bash scripts/shardline/verify_maintenance_metadata_inventory.sh RELEASED`,
   where `RELEASED` is the official 1.11.3 executable. This checks the proposed
-  storage surface only; it does not pass the production rollback gate.
+  storage surface only; it does not exercise the production task backend.
   Shared grouping for these jobs, the optional isolated runner, other entry points and binding every
   server background operation to its work connection remain unfinished.
   The Hub secret sweep now binds from its own non-replaceable work connection,
@@ -391,7 +392,7 @@ All eight remain the completion criteria:
 
 ## Reproducing the machine tests
 
-The storage-copy compatibility check currently **fails** at released rollback:
+The storage-copy compatibility check covers new local history through released rollback:
 
 ```bash
 bash scripts/shardline/verify_maintenance_storage_copy.sh CURRENT RELEASED
@@ -400,8 +401,21 @@ bash scripts/shardline/verify_maintenance_storage_copy.sh CURRENT RELEASED
 It verifies exact payload bytes and matching current/released output on a clean
 source with PostgreSQL unavailable, then checks current recopy and released
 rollback from a destination containing current task history. It retains its
-diagnostics and exits nonzero when released migration copies that history as
-payload. This is a known merge failure, not a passing compatibility drill.
+diagnostics, requires actual task artifacts in SQLite and verifies that rollback
+leaves their exact bytes intact. This does not cover historical object-backed
+evidence or PostgreSQL/S3 task storage.
+
+The local permissions comparison requires an unprivileged host user and SQLite:
+
+```bash
+bash scripts/shardline/verify_maintenance_local_permissions.sh CURRENT RELEASED
+```
+
+It compares released/current stdout and stderr for fsck, rebuild, lifecycle repair
+and GC mark. All eight invocations must succeed. The database and its existing
+WAL/SHM files remain writable beneath a mode-0555 root; four current manifests
+must be saved in SQLite, with no task artifacts in payload inventory. This does
+not cover a fully read-only metadata database.
 
 For the saved-reply request-count drill, point `DATABASE_URL` at an isolated,
 owner-accessible PostgreSQL fixture initialized by `shardline db migrate up`:

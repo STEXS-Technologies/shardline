@@ -1,4 +1,5 @@
 use super::{TaskEvidenceStore, TaskExecutionMode, TaskRunIdentity};
+#[cfg(test)]
 use crate::ServerObjectStore;
 use ed25519_dalek::SigningKey;
 use penelope_core::task::{
@@ -33,9 +34,14 @@ pub(crate) struct TaskReceipt {
 type TrackingResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 impl EmbeddedTaskTracker {
+    #[cfg(test)]
     pub(crate) const fn new(objects: ServerObjectStore, deployment: Digest) -> Self {
+        Self::from_store(TaskEvidenceStore::from_objects(objects), deployment)
+    }
+
+    pub(crate) const fn from_store(store: TaskEvidenceStore, deployment: Digest) -> Self {
         Self {
-            store: TaskEvidenceStore::from_objects(objects),
+            store,
             deployment,
             history_scope: None,
         }

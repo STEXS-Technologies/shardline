@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
-# Compare existing-file maintenance under a non-writable deployment root.
+# Released/current comparison with an existing writable database under a 0555 root.
 # Usage: bash scripts/shardline/verify_maintenance_local_permissions.sh CURRENT RELEASED
 set -euo pipefail
 test "$#" = 2 || { echo 'usage: verify_maintenance_local_permissions.sh CURRENT RELEASED' >&2; exit 2; }
-test "$(id -u)" != 0 || { echo 'run as a normal user; root bypasses permissions' >&2; exit 2; }
+test "$(id -u)" != 0 || { echo 'run as an unprivileged user to test directory permissions' >&2; exit 2; }
 current=$(realpath "$1")
 released=$(realpath "$2")
 test -x "$current" && test -x "$released"
 command -v sqlite3 >/dev/null
+umask 077
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-local-permissions.XXXXXX")
-echo "Validation artifacts: $fixture"
+echo "diagnostics: $fixture"
 root="$fixture/root"
 keeper=''
 cleanup() {
+    exec 9>&- || true
     chmod 755 "$root" 2>/dev/null || true
-    if test -n "$keeper"; then kill "$keeper" 2>/dev/null || true; wait "$keeper" 2>/dev/null || true; fi
+    if test -n "$keeper"; then
+        kill "$keeper" 2>/dev/null || true
+        wait "$keeper" 2>/dev/null || true
+    fi
     rm -f "$fixture/keeper-input"
 }
 trap cleanup EXIT
@@ -23,8 +28,12 @@ mkfifo "$fixture/keeper-input"
 sqlite3 "$root/metadata.sqlite3" < "$fixture/keeper-input" > "$fixture/keeper.log" 2>&1 &
 keeper=$!
 exec 9> "$fixture/keeper-input"
+# Keep existing WAL/SHM files open, matching a root whose directory is not writable.
 printf 'PRAGMA journal_mode=WAL;\nSELECT COUNT(*) FROM sqlite_master;\n.shell touch %s/ready\n' "$fixture" >&9
-for attempt in $(seq 1 30); do test ! -e "$fixture/ready" || break; sleep 0.1; done
+for attempt in $(seq 1 60); do
+    test ! -e "$fixture/ready" || break
+    sleep 0.1
+done
 test -e "$fixture/ready"
 test -f "$root/metadata.sqlite3-wal" && test -f "$root/metadata.sqlite3-shm"
 chmod 555 "$root"
@@ -53,3 +62,7 @@ for operation in fsck rebuild repair gc; do
     done
     echo "PASS: $operation preserves released output and status without new root entries or permission changes"
 done
+test "$(stat -c '%a' "$root")" = 555
+test ! -e "$root/chunks/_shardline_tasks"
+test "$(sqlite3 "$root/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key GLOB '_shardline_tasks/v1/manifests/*';")" = 4
+echo "PASS: four released/current commands preserve output and save metadata-backed history under a 0555 root; diagnostics: $fixture"
