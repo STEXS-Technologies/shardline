@@ -115,7 +115,9 @@ destination's SQLite metadata.
 Different work databases or schemas, some legacy history
 and narrowly privileged accounts still need compatibility work. Older GC,
 remaining write paths, missing delete replies and deployment-scale behavior also
-have open checks. Released 1.11.3 servers may return a generic error for a pending
+have open checks. Large histories can make inspection and cleanup slow;
+performance at deployment scale is still under review.
+Released 1.11.3 servers may return a generic error for a pending
 delete. See [the acceptance evidence and remaining gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md)
 before planning a rolling upgrade or rollback.
 
