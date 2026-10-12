@@ -121,7 +121,7 @@ impl TaskEvidenceStore {
         limit: usize,
     ) -> Result<BTreeMap<(u64, String), TaskRunIdentity>, ServerError> {
         let prefix = ObjectPrefix::parse(&format!("{}{category}/", super::TASK_EVIDENCE_PREFIX))?;
-        let mut candidates = BTreeMap::new();
+        let mut candidates: BTreeMap<(u64, String), TaskRunIdentity> = BTreeMap::new();
         self.visit_prefix(&prefix, |metadata| {
             let id = metadata
                 .key()
@@ -158,6 +158,20 @@ impl TaskEvidenceStore {
                 && identity.deployment == deployment
                 && identity.created_at.saturating_add(30 * 24 * 60 * 60) < now
             {
+                // Only identities older than the newest selected candidate can
+                // enter this bounded page. Avoid verifying an entire finished
+                // backlog after the page is full. Earlier unfinished runs still
+                // get checked and cannot prevent later finished runs entering.
+                if candidates.len() == limit
+                    && candidates
+                        .last_key_value()
+                        .is_some_and(|((created_at, selected_id), _)| {
+                            (identity.created_at, identity.id.as_str())
+                                > (*created_at, selected_id.as_str())
+                        })
+                {
+                    return Ok(());
+                }
                 // Retained corrupt/unfinished runs must not monopolize the
                 // bounded candidate page and prevent all later cleanup.
                 if category == "manifests"
@@ -268,7 +282,7 @@ impl TaskEvidenceStore {
             return Err(ServerError::InvalidPath);
         }
         let prefix = ObjectPrefix::parse(&format!("{}manifests/", super::TASK_EVIDENCE_PREFIX))?;
-        let mut identities = BTreeMap::new();
+        let mut identities: BTreeMap<String, Option<TaskRunIdentity>> = BTreeMap::new();
         self.visit_prefix(&prefix, |metadata| {
             let id = metadata
                 .key()
@@ -281,6 +295,16 @@ impl TaskEvidenceStore {
             }
             if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
                 return Err(invalid("invalid task identity key"));
+            }
+            // Enumeration need not be ordered. A higher ID cannot replace any
+            // entry once the page contains `limit` eligible identities; lower
+            // IDs must still be read and checked against the deployment scope.
+            if identities.len() == limit
+                && identities
+                    .last_key_value()
+                    .is_some_and(|(last, _)| id > last.as_str())
+            {
+                return Ok(());
             }
             let mut identity = match self.read(&format!("manifests/{id}"), 65536) {
                 // Retention can remove an expired manifest during enumeration.
