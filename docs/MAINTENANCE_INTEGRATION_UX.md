@@ -94,16 +94,18 @@ Use `/api/v1/status` for server readiness. Maintenance history does not prove
 current deployment health. The [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 covers pagination and all states.
 
-After the usual owner upgrade, new server jobs can share history across database
-logins that reach the same database, schema and object storage. This happens
+After the usual owner upgrade, new server jobs and ordinary GC, rebuild and
+lifecycle repair can share history across database logins that reach the same
+database, schema and object storage. This happens
 automatically. The response reports `history_grouping: shared_metadata`.
 If shared grouping is unavailable, it reports `legacy` and keeps the original
 login's history visible. Changing a password keeps that history visible too.
 
-CLI maintenance and old records still use their original login scope. If GC and
-the server use different logins, GC's history may remain absent until that
-integration is finished. An empty history is not evidence that a job succeeded
-or never ran.
+GC, rebuild and lifecycle repair identify their target using the database session
+doing the work. Old records, storage-copy jobs and the optional isolated runner
+still use their original login scope. Those records may be absent when inspected
+through another login. An empty history is not evidence that a job succeeded or
+never ran.
 
 If Shardline cannot save the history, it warns. The command keeps its existing
 behavior, but you cannot rely on a verified result in history. Shared-only

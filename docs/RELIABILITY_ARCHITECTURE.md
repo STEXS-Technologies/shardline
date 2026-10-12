@@ -110,9 +110,16 @@ Resolution is read-only and limited to five seconds. Missing owner initializatio
 unsupported isolation or database failure falls back to legacy history, with a
 warning and `history_grouping: "legacy"` in the admin response. Local deployments
 also retain legacy grouping. This adds no pool, process or configuration.
-CLI maintenance publishers and operation-connection scope binding still need
-integration; server history association observes startup's metadata target and
-does not fence or prove the target of every later database operation.
+Ordinary CLI tracking installs a task-local observation context around its
+original handlers, for both shared-only receipts and local journals. GC, rebuild
+and lifecycle repair resolve and publish their binding on the already acquired
+barrier-owning work pool, before their metadata scan. Observation creates no
+pool, never replaces a failed session, and warns on binding failures without
+changing the native result or replaying work. Its context is not inherited by
+spawned tasks. Storage-copy jobs, the optional isolated runner and other entry
+points still need integration. Server history association observes startup's
+metadata target and does not fence or prove the target of every later database
+operation.
 
 The optional `shardline-reliability/task-journal` feature provides
 `SqliteTaskJournal`, a synchronous Penelope `TaskJournal` port pinned to an exact

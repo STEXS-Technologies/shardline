@@ -78,8 +78,8 @@ This document is for reviewers deciding whether the integration is safe to ship.
 - **Remaining compatibility coverage.** Passing deployment fixtures establish
   those configurations. They do not establish compatibility for every filesystem,
   permission layout or deployment manifest. History across different database
-  logins remains unfinished for CLI publishers: the legacy deployment fingerprint
-  includes the login name. A real PostgreSQL regression establishes why simply dropping it
+  logins remains unfinished for some maintenance entry points: the legacy deployment
+  fingerprint includes the login name. A real PostgreSQL regression establishes why simply dropping it
   is unsafe: two roles on the same database resolve to distinct default schemas
   despite identical URL options. Shared history must use the resolved database,
   schema and object target while preserving legacy evidence and isolation of
@@ -95,8 +95,16 @@ This document is for reviewers deciding whether the integration is safe to ship.
   unbound own-login history. Resolution uses the existing pool, performs no DDL,
   and falls back to legacy grouping with an explicit response field when
   unavailable. Real PostgreSQL tests exercise both normal router publication
-  and shared admin inspection. CLI publishers and binding to each operation's
-  actual metadata connection remain unfinished. The existing-role drill
+  and shared admin inspection. Ordinary GC, rebuild and lifecycle repair now
+  bind on their existing barrier-owning work session. Both CLI tracking paths
+  preserve the original process and handlers; a real PostgreSQL CLI test runs
+  all three handlers through both paths and verifies their signed bindings and
+  completed outcomes. Database tests distinguish that
+  session's schema from an inspection connection, preserve its PID and reject
+  a changed scope or closed pool without replacing the session. Storage-copy
+  jobs, the optional isolated runner, other entry points and binding every
+  server background operation to its work connection remain unfinished.
+  The existing-role drill
   inspects history using that role's scope.
 
 These are merge requirements. A passing dependency upgrade or optional worker

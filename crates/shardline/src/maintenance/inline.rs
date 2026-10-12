@@ -86,7 +86,8 @@ fn run_prepared(
     artifact::private_directory(state)?;
     let directory = state.join(hex::encode(scope.task.digest().0));
     artifact::private_directory(&directory)?;
-    let key = artifact::signer(&directory, true)?.verifying_key();
+    let signing_key = artifact::signer(&directory, true)?;
+    let key = signing_key.verifying_key();
     let identity = if operation.read_only() {
         None
     } else {
@@ -109,6 +110,7 @@ fn run_prepared(
             },
         ))
     };
+    let observer = identity.clone();
     let mut journal = super::journal::PublishedJournal::open(
         &directory.join("tasks.sqlite"),
         scope,
@@ -162,8 +164,16 @@ fn run_prepared(
 
     // These are the original handlers, in the original CLI process. They retain
     // their live streams, diagnostic destinations and operation-specific barriers.
-    let status = tokio::runtime::Handle::current()
-        .block_on(Box::pin(crate::entry::run_direct(arguments.into_iter())));
+    let status = tokio::runtime::Handle::current().block_on(async move {
+        let work = crate::entry::run_direct(arguments.into_iter());
+        if let Some((store, run_identity)) = observer {
+            store
+                .observe_history_scopes(run_identity, signing_key, work)
+                .await
+        } else {
+            work.await
+        }
+    });
     let exit_code = if status == ExitCode::SUCCESS {
         0
     } else if status == ExitCode::FAILURE {
