@@ -87,11 +87,11 @@ This document is for reviewers deciding whether the integration is safe to ship.
   writers and other publication
   paths, a supported reconciliation path for uncertain markers, protection when
   an older GC binary issues the delete, and remote coverage for other operations
-  remain required work. Native manifest bytes are written before their metadata
-  transaction; rejected publication must still be checked for visibility through
-  digest reads and manifest inventory. The new dependency check proves metadata
-  rejection, not atomic visibility of object-storage bytes. A missing completion
-  record never authorizes replay.
+  remain required work. New native Postgres manifest uploads now record verified
+  hidden state before storing previously absent bytes, then transition to
+  published state only when metadata publication commits. This does not yet
+  establish mixed-binary visibility or cleanup of every interrupted upload.
+  A missing completion record never authorizes replay.
 - **Large deployments and history growth.** Long operations, large reports and
   total growth of unresolved history still need deployment-scale validation.
   Saved-reply publication and cleanup add object-storage requests. An initial
@@ -101,6 +101,8 @@ This document is for reviewers deciding whether the integration is safe to ship.
   baseline without saved replies and 3.11 seconds with them. These are local
   boundary measurements, not released-binary, cloud or whole-GC benchmarks.
   Provider latency, large inventories and end-to-end GC cost still need measurement.
+  Native Postgres manifest staging adds one storage existence check; its
+  deployment-scale latency and abandoned-upload cleanup still need measurement.
   Unfinished evidence is retained, so completed-history cleanup alone does not
   establish a total storage bound.
 - **Remaining compatibility coverage.** Passing deployment fixtures establish
@@ -185,6 +187,7 @@ test does not close them.
 | Direct-reference publication during a pending delete | Real PostgreSQL tests reject dedupe, file-record, reconstruction and stored-object publication to pending direct keys. Dedupe inserts and hash updates also check their named physical chunk; rejection preserves the previous mapping. Rejection preserves the previous file version and rolls back a multi-row insert. Restricted writers need no retention or fence-table grants. Publication serializes delete admission before a marker exists. A 20,000-chunk file and 20,000 mappings with canonical hashes use at most 256 publication locks. References hidden inside older writers' xorb payloads and other mutation paths remain open. |
 | Current native shard member references | Normal Postgres native shard uploads derive member keys from validated xorb descriptors and check them in the metadata transaction. A real PostgreSQL test empties the optional chunk cache, marks a member pending and verifies rejection with no file records; settlement permits the same upload. References now come from the existing validation read. A real S3 HTTP fixture verifies unchanged read counts and one payload GET for repeated references; byte/file callbacks preserve legacy metadata. Older SQL-only writers, other publication paths and broader deployment-scale cost remain open. |
 | Direct OCI publication | Real PostgreSQL tests reject native blob publication, manifest tag changes and deletion-tombstone removal while their physical object is pending deletion. Manifest publication also checks its media-type sidecar. Rejection rolls back tags, tombstones and native evidence; proven settlement permits publication. Other repositories and namespaces remain writable. A legacy column-only tag writer needs no fence-table grants. Current delete admission requires these guards, and the normal owner-run upgrade restores a disabled guard. New native manifest uploads carry validated config, layer, child-manifest and subject identities into the same publication transaction, with all target/reference locks acquired in sorted order before mutation. PostgreSQL regression tests cover pending blob, manifest and sidecar dependencies. Payload references behind legacy tag-only writes, underlying chunk references and older GC binaries remain open. |
+| New manifest byte visibility | A PostgreSQL-backed HTTP regression reproduced a digest GET returning 200 after rejected publication. Native uploads now record verified hidden state before writing previously absent manifest bytes. Two routers sharing Postgres and object storage return 404 for digest GET/HEAD after manually staged bytes encounter a later pending dependency; settlement and a normal PUT publish those same bytes. Existing published identities remain visible, and a restricted role without tombstone INSERT or fence-table access can stage and publish. This checks current routers and direct staging boundaries, not mixed released binaries, real process-kill timing or abandoned-byte cleanup. |
 | Existing retention role and mixed writers | Released 1.11.3 and current native binaries use the same restricted role with no fence-table grant. Both work before and after the normal owner-run upgrade, reject a fixture-only pending delete, and work again after its settlement. The current error explains that retry must wait for reconciliation. Released migration verification accepts the upgraded schema. This checks hold commands, not every publication path or released-server startup. |
 | Existing GC role | Released 1.11.3 and current native binaries both mark and physically sweep an expired MinIO object using a role with no fence-table access. Current GC records verified completion, settles its marker, and admits a later hold. This regression failed before admission/settlement moved behind the scoped, authorized database functions. |
 | Repair ownership | A database regression first demonstrated repair removing an expired hold after losing its separate lock connection during GC takeover. Repair now binds its scan and metadata changes to the lock-owning session. The database regression and two-machine `repair-connection-loss` drill pass: the source records failure, the waiting rebuild completes, and the expired hold remains unchanged. This covers metadata changes, not remote mutations by other operations. |

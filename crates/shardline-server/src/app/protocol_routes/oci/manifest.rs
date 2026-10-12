@@ -149,6 +149,15 @@ pub(crate) async fn oci_put_manifest(
         validate_oci_manifest_document(state, repository, auth, &media_type, &bytes).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
+    state
+        .backend
+        .stage_new_oci_manifest_locked(
+            &mut repository_guard,
+            &oci_manifest_index_key(repository, &digest_hex, auth),
+            &manifest_key,
+            &references,
+        )
+        .await?;
     let _stored_manifest = state
         .backend
         // Manifests are authoritative, repository-enumerable metadata. Keep
