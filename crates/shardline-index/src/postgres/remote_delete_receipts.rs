@@ -119,11 +119,7 @@ impl PostgresIndexStore {
     pub async fn remote_delete_receipt_namespace(
         &self,
     ) -> Result<Option<String>, PostgresMetadataStoreError> {
-        let installed: bool = sqlx::query_scalar(
-            "SELECT to_regprocedure(format('%I.shardline_remote_delete_receipt_namespace_v1(text)', current_schema())) IS NOT NULL
-             AND to_regprocedure(format('%I.shardline_remote_delete_receipt_begin_v1(text,text,text)', current_schema())) IS NOT NULL",
-        ).fetch_one(&self.pool).await?;
-        if !installed {
+        if !self.supports_remote_delete_receipts().await? {
             return Ok(None);
         }
         Ok(Some(
@@ -133,6 +129,21 @@ impl PostgresIndexStore {
             .fetch_one(&self.pool)
             .await?,
         ))
+    }
+
+    /// Checks receipt support on this session's schema without reading its namespace.
+    /// Delete admission obtains and pins that namespace in its own transaction.
+    /// This check grants no mutation ownership and never caches a schema across sessions.
+    ///
+    /// # Errors
+    /// Returns a database failure without authorizing replacement work ownership.
+    pub async fn supports_remote_delete_receipts(
+        &self,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT to_regprocedure(format('%I.shardline_remote_delete_receipt_namespace_v1(text)', current_schema())) IS NOT NULL
+             AND to_regprocedure(format('%I.shardline_remote_delete_receipt_begin_v1(text,text,text)', current_schema())) IS NOT NULL",
+        ).fetch_one(&self.pool).await?)
     }
     /// Atomically pins a fresh per-attempt receipt verifier with the pending
     /// marker before any remote request. The caller retains the private key.
