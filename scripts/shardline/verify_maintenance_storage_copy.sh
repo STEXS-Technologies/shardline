@@ -68,3 +68,21 @@ awk -F '\t' 'NF != 3 || $2 != $3 {exit 1}' "$fixture/history-byte-comparison.log
 copy_objects "$released" "$fixture/current" "$fixture/legacy-rollback" "$fixture/legacy-rollback.log"
 cmp "$fixture/current.log" "$fixture/legacy-rollback.log"
 echo "PASS: current/released copies preserve payload inventory and output without PostgreSQL; completed legacy history relocates byte-for-byte before released rollback; diagnostics: $fixture"
+if test "$(id -u)" != 0; then
+    # Executable read permission was never required by the original copy. A
+    # failed tracker fingerprint must not prevent its handler from running.
+    cp "$current" "$fixture/execute-only-shardline"
+    chmod 0111 "$fixture/execute-only-shardline"
+    mkdir -p "$fixture/execute-only-copy/chunks"
+    env -i "$fixture/execute-only-shardline" --config "$fixture/local.toml" storage migrate \
+        --from local --from-root "$fixture/source" --to local --to-root "$fixture/execute-only-copy" \
+        > "$fixture/execute-only.log" 2> "$fixture/execute-only.stderr"
+    cmp "$fixture/source/chunks/fixture/payload" "$fixture/execute-only-copy/chunks/fixture/payload"
+    cmp "$fixture/current.log" "$fixture/execute-only.log"
+    test ! -e "$fixture/execute-only-copy/chunks/_shardline_tasks"
+    if test -f "$fixture/execute-only-copy/metadata.sqlite3" \
+        && test "$(sqlite3 "$fixture/execute-only-copy/metadata.sqlite3" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='shardline_task_artifacts_v1';")" = 1; then
+        test "$(sqlite3 "$fixture/execute-only-copy/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '%/manifests/%';")" = 0
+    fi
+    echo "PASS: execute-only binary preserves original copy behavior without a verified tracker identity"
+fi

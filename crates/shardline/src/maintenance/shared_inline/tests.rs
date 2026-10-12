@@ -115,7 +115,7 @@ async fn ordinary_cli_tracking_paths_bind_the_actual_postgres_work_session() {
             super::super::configuration::scope(configuration, || {
                 let arguments = vec![OsString::from("shardline"), OsString::from("index-rebuild")];
                 if shared_only {
-                    run(&operation, arguments, &invocation_config)
+                    Ok(run(&operation, arguments, &invocation_config))
                 } else {
                     super::super::inline::run(
                         &invocation_config.root_dir().join("existing-private-state"),

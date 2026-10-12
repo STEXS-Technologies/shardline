@@ -33,6 +33,7 @@ These are scoped results, not a claim that every deployment is compatible:
   with its original systemd restrictions after replacing the binary.
 - Ordinary maintenance keeps its original PID, output and handlers. Fixtures
   cover read-only roots, fresh runs, contention and loss of database ownership.
+  Private-state and receipt faults preserve results; tracking warnings use stderr.
 - Local and S3 copies preserve payload bytes, counts and released rollback.
   Their tracker does not write control objects into payload inventory or require
   source write access. S3-only destination history is temporary and host-local.

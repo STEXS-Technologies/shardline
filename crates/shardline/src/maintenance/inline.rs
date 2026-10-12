@@ -17,10 +17,16 @@ pub(super) fn run(
     arguments: Vec<OsString>,
 ) -> Result<super::CommandOutput> {
     let config = super::operation_config(operation, true)?;
-    let (input, definition, scope) = prepare(&config, id, operation, command)?;
-    run_prepared(
+    let (input, definition, scope) = match prepare(&config, id, operation, command) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::debug!(run = %id, "maintenance identity unavailable; no application work started; existing command continues without private tracking: {error}");
+            return Ok(super::shared_inline::run(operation, arguments, &config));
+        }
+    };
+    Ok(run_prepared(
         state, id, operation, arguments, &config, &input, definition, scope,
-    )
+    ))
 }
 
 pub(super) fn prepare(
@@ -82,85 +88,106 @@ fn run_prepared(
     input: &[u8],
     definition: TaskDefinition,
     scope: TaskScope,
-) -> Result<super::CommandOutput> {
-    artifact::private_directory(state)?;
-    let directory = state.join(hex::encode(scope.task.digest().0));
-    artifact::private_directory(&directory)?;
-    let signing_key = artifact::signer(&directory, true)?;
-    let key = signing_key.verifying_key();
-    let identity = if operation.read_only() {
-        None
-    } else {
-        let export_config = super::publication_config(operation, config)?;
-        Some((
-            super::evidence::store(operation, &export_config, Some(state))?,
-            shardline_server::task_tracking::TaskRunIdentity {
-                schema: 1,
-                id: id.to_owned(),
-                operation: format!("{:?}", operation.kind()),
-                created_at: shardline_protocol::unix_now_seconds_lossy(),
-                scope,
-                definition,
-                public_key: *key.as_bytes(),
-                deployment: shardline_server::task_tracking::deployment_fingerprint(
-                    &export_config,
-                )?,
-                execution: shardline_server::task_tracking::TaskExecutionMode::Inline,
-                owner: shardline_server::task_tracking::TaskOwner::current(),
-            },
-        ))
-    };
-    let observer = identity.clone();
-    let mut journal = super::journal::PublishedJournal::open(
-        &directory.join("tasks.sqlite"),
-        scope,
-        definition,
-        identity,
-    )?;
-    let mut projection = TaskProjection::new(scope, definition)?;
-    commit(
-        &mut journal,
-        &mut projection,
-        TaskExecutionEvent::IntentCommitted {
+) -> super::CommandOutput {
+    // This entire phase precedes the original handler. Only failure here can
+    // choose another observation path; nothing after work may execute it again.
+    let admission = (|| -> Result<_> {
+        artifact::private_directory(state)?;
+        let directory = state.join(hex::encode(scope.task.digest().0));
+        artifact::private_directory(&directory)?;
+        let signing_key = artifact::signer(&directory, true)?;
+        let key = signing_key.verifying_key();
+        let identity = if operation.read_only() {
+            None
+        } else {
+            let export_config = super::publication_config(operation, config)?;
+            Some((
+                super::evidence::store(operation, &export_config, Some(state))?,
+                shardline_server::task_tracking::TaskRunIdentity {
+                    schema: 1,
+                    id: id.to_owned(),
+                    operation: format!("{:?}", operation.kind()),
+                    created_at: shardline_protocol::unix_now_seconds_lossy(),
+                    scope,
+                    definition,
+                    public_key: *key.as_bytes(),
+                    deployment: shardline_server::task_tracking::deployment_fingerprint(
+                        &export_config,
+                    )?,
+                    execution: shardline_server::task_tracking::TaskExecutionMode::Inline,
+                    owner: shardline_server::task_tracking::TaskOwner::current(),
+                },
+            ))
+        };
+        let observer = identity.clone();
+        let mut journal = super::journal::PublishedJournal::open(
+            &directory.join("tasks.sqlite"),
+            scope,
             definition,
-            input: reference(input)?,
-        },
-        TaskGeneration::ZERO,
-        Some(input),
-    )?;
-    let generation = TaskGeneration::new(1);
-    commit(
-        &mut journal,
-        &mut projection,
-        TaskExecutionEvent::Started,
-        generation,
-        None,
-    )?;
-    let checkpoint = artifact::publish(
-        &directory,
-        scope,
-        generation,
-        MaintenanceArtifactKind::Checkpoint,
-        1,
-        b"ordinary CLI admitted; no application work completed",
-    )?;
-    artifact::verify(
-        &directory,
-        &checkpoint,
-        scope,
-        generation,
-        MaintenanceArtifactKind::Checkpoint,
-        &key,
-    )?;
-    commit(
-        &mut journal,
-        &mut projection,
-        TaskExecutionEvent::CheckpointCommitted {
-            checkpoint: reference(&checkpoint)?,
-        },
-        generation,
-        Some(&checkpoint),
-    )?;
+            identity,
+        )?;
+        let mut projection = TaskProjection::new(scope, definition)?;
+        commit(
+            &mut journal,
+            &mut projection,
+            TaskExecutionEvent::IntentCommitted {
+                definition,
+                input: reference(input)?,
+            },
+            TaskGeneration::ZERO,
+            Some(input),
+        )?;
+        let generation = TaskGeneration::new(1);
+        commit(
+            &mut journal,
+            &mut projection,
+            TaskExecutionEvent::Started,
+            generation,
+            None,
+        )?;
+        let checkpoint = artifact::publish(
+            &directory,
+            scope,
+            generation,
+            MaintenanceArtifactKind::Checkpoint,
+            1,
+            b"ordinary CLI admitted; no application work completed",
+        )?;
+        artifact::verify(
+            &directory,
+            &checkpoint,
+            scope,
+            generation,
+            MaintenanceArtifactKind::Checkpoint,
+            &key,
+        )?;
+        commit(
+            &mut journal,
+            &mut projection,
+            TaskExecutionEvent::CheckpointCommitted {
+                checkpoint: reference(&checkpoint)?,
+            },
+            generation,
+            Some(&checkpoint),
+        )?;
+        Ok((
+            directory,
+            signing_key,
+            observer,
+            journal,
+            projection,
+            generation,
+        ))
+    })();
+    let (directory, signing_key, observer, mut journal, mut projection, generation) =
+        match admission {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                tracing::debug!(run = %id, "private maintenance admission unavailable; no application work started; existing command continues with available metadata history: {error}");
+                return super::shared_inline::run(operation, arguments, config);
+            }
+        };
+    let key = signing_key.verifying_key();
 
     // These are the original handlers, in the original CLI process. They retain
     // their live streams, diagnostic destinations and operation-specific barriers.
@@ -181,44 +208,59 @@ fn run_prepared(
     } else {
         2
     };
-    let report = format!(
-        "maintenance.success: {}\n{}",
-        exit_code == 0,
-        serde_json::to_string(&serde_json::json!({"schema": 1, "exit_code": exit_code}))?
-    );
-    let output = artifact::publish(
-        &directory,
-        scope,
-        generation,
-        operation.kind(),
-        2,
-        report.as_bytes(),
-    )?;
-    artifact::verify(
-        &directory,
-        &output,
-        scope,
-        generation,
-        operation.kind(),
-        &key,
-    )?;
-    commit(
-        &mut journal,
-        &mut projection,
-        TaskExecutionEvent::Completed {
-            output: reference(&output)?,
-        },
-        generation,
-        Some(&output),
-    )?;
-    Ok(super::CommandOutput {
+    let completion = (|| -> Result<()> {
+        let report = format!(
+            "maintenance.success: {}\n{}",
+            exit_code == 0,
+            serde_json::to_string(&serde_json::json!({"schema": 1, "exit_code": exit_code}))?
+        );
+        let output = artifact::publish(
+            &directory,
+            scope,
+            generation,
+            operation.kind(),
+            2,
+            report.as_bytes(),
+        )?;
+        artifact::verify(
+            &directory,
+            &output,
+            scope,
+            generation,
+            operation.kind(),
+            &key,
+        )?;
+        commit(
+            &mut journal,
+            &mut projection,
+            TaskExecutionEvent::Completed {
+                output: reference(&output)?,
+            },
+            generation,
+            Some(&output),
+        )?;
+        Ok(())
+    })();
+    let evidence_published = match completion {
+        Ok(()) => journal.publication_confirmed(),
+        Err(error) => {
+            // Work already ran. Retain its unconfirmed history and preserve
+            // the original exit status; never retry work to repair a receipt.
+            tracing::warn!(run = %id, "maintenance completed with exit {exit_code}, but its receipt is unconfirmed; original result is preserved; inspect effects before retrying: {error}");
+            false
+        }
+    };
+    super::CommandOutput {
         text: String::new(),
         success: exit_code == 0,
         capture: None,
-        evidence_published: journal.publication_confirmed(),
+        evidence_published,
         exit_code: Some(exit_code),
-    })
+    }
 }
+
+#[cfg(test)]
+mod tests;
 
 fn reference(bytes: &[u8]) -> Result<BlobRef> {
     if bytes.len() > 65536 {

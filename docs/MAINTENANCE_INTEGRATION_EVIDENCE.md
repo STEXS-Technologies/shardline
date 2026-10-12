@@ -650,3 +650,29 @@ remaining owner-upgrade, publication-failure, ownership-loss, process-crash and
 retry stages also pass. Strict CLI/server Clippy passes. These results cover the
 fixture's existing writer and storage layout, not every deployment permission
 profile.
+
+### Optional tracking failures preserve command results
+
+Private directory, identity and journal failures can fall back only before
+application work starts. The fallback uses available metadata history; if its
+own preparation fails, it runs the original handler without a verified receipt.
+After work, report or journal publication failures preserve the original exit
+status, retain unconfirmed evidence and never rerun the handler. Confirmed
+scratch cleanup is also best-effort and cannot replace the command's result.
+
+Three new regressions exercise the actual rebuild handler with an operator
+file at the private-state path, a corrupt private journal and a conflicting
+completion artifact. Successful fallback preserves the original files; rejected
+completion preserves success without publishing a completed outcome. All 16
+maintenance tests pass with owned PostgreSQL bootstrapped by released 1.11.3,
+and strict CLI/server Clippy passes.
+
+The CLI's logging writer sends task diagnostics to stderr while retaining the
+existing stream for other application logs. Existing embedding subscribers
+remain untouched. Native local-copy and S3-copy rollback checks pass. The local
+check additionally runs an execute-only binary: the failed executable
+fingerprint leaves copy stdout, payload bytes and exit status unchanged, with
+no verified receipt. Four released/current commands also preserve stdout,
+stderr and exit status beneath a mode-0555 root with writable SQLite sidecars.
+Scratch-cleanup failure handling was reviewed but was not independently fault
+injected in these drills; broader filesystem failure coverage remains open.

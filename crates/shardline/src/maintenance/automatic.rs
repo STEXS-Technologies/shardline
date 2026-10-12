@@ -153,7 +153,7 @@ fn run_inner(
     let config = super::operation_config(operation, true)?;
     // Read-only diagnostics must not acquire a new filesystem write requirement.
     if operation.read_only() {
-        return super::shared_inline::run(operation, arguments, &config);
+        return Ok(super::shared_inline::run(operation, arguments, &config));
     }
     let ephemeral = config.index_postgres_url().is_some()
         || matches!(operation, MaintenanceOperation::StorageMigrate { .. });
@@ -171,7 +171,12 @@ fn run_inner(
         }
     }?;
     let mut nonce = [0_u8; 16];
-    getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
+    if let Err(error) = getrandom::fill(&mut nonce) {
+        tracing::debug!(
+            "private maintenance identity unavailable; no application work started; existing command continues with available metadata history: {error}"
+        );
+        return Ok(super::shared_inline::run(operation, arguments, &config));
+    }
     let id = hex::encode(nonce);
     let directory = state.join(hex::encode(
         penelope_core::task::Digest::of(id.as_bytes()).0,
@@ -179,16 +184,10 @@ fn run_inner(
     let writable = super::artifact::private_directory(&state)
         .and_then(|()| super::artifact::private_directory(&directory));
     if let Err(error) = writable {
-        if error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| matches!(error.raw_os_error(), Some(libc::EROFS | libc::EACCES)))
-        {
-            tracing::debug!(
-                "private task storage is read-only; maintenance evidence uses existing deployment storage"
-            );
-            return super::shared_inline::run(operation, arguments, &config);
-        }
-        return Err(error);
+        // No application work has started. Ignore unusable private observation
+        // state without reading or repairing it, and keep the original handler.
+        tracing::debug!(workspace = %state.display(), "private maintenance tracking unavailable; existing command continues with available metadata history: {error}");
+        return Ok(super::shared_inline::run(operation, arguments, &config));
     }
     if !operation.read_only() {
         let export_config = super::publication_config(operation, &config)?;
@@ -226,7 +225,14 @@ fn run_inner(
         // Evidence and streamed output are confirmed in the selected history
         // store. Open capture descriptors survive removal of the scratch files.
         let digest = penelope_core::task::Digest::of(id.as_bytes());
-        std::fs::remove_dir_all(state.join(hex::encode(digest.0)))?;
+        if let Err(error) = std::fs::remove_dir_all(state.join(hex::encode(digest.0))) {
+            // Work and its receipt are already complete. A scratch-cleanup
+            // error must not change the handler's result or authorize a retry.
+            tracing::warn!(workspace = %state.display(), "completed maintenance scratch could not be removed; original command result is preserved: {error}");
+        }
     }
     output
 }
+
+#[cfg(test)]
+mod tests;

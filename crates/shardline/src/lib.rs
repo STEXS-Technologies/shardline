@@ -51,6 +51,7 @@ mod gc_schedule;
 mod hold;
 mod hub_repair;
 mod lfs_repair;
+mod logging;
 #[cfg(target_os = "linux")]
 mod maintenance;
 #[cfg(target_os = "linux")]
