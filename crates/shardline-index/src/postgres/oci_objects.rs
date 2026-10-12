@@ -705,6 +705,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_upgrade_restores_only_current_hidden_manifest_generations() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        query("ALTER TABLE shardline_reliability_events DISABLE TRIGGER shardline_oci_staged_tombstone_v1").execute(&pool).await.unwrap();
+        let hidden = object("global");
+        let published = OciObjectKey {
+            digest_hex: "b".repeat(64),
+            ..hidden.clone()
+        };
+        let mut connection = pool.acquire().await.unwrap();
+        store
+            .stage_oci_object_on_connection(&mut connection, &hidden, &[])
+            .await
+            .unwrap();
+        store
+            .stage_oci_object_on_connection(&mut connection, &published, &[])
+            .await
+            .unwrap();
+        store
+            .publish_oci_object_on_connection(&mut connection, &published, &[])
+            .await
+            .unwrap();
+        drop(connection);
+        assert!(store.list_oci_object_tombstones().await.unwrap().is_empty());
+        let physical = shardline_storage::ObjectKey::parse("owner-upgrade/staged-guard").unwrap();
+        assert!(
+            store
+                .begin_remote_delete(&physical)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("db migrate up")
+        );
+        store.initialize_remote_delete_guard().await.unwrap();
+        let rows = store.list_oci_object_tombstones().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.first().unwrap().key, hidden);
+        assert!(store.oci_object_is_deleted(&hidden).await.unwrap());
+        assert!(!store.oci_object_is_deleted(&published).await.unwrap());
+        let permit = store.begin_remote_delete(&physical).await.unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        store.initialize_remote_delete_guard().await.unwrap();
+        assert_eq!(store.list_oci_object_tombstones().await.unwrap(), rows);
+        let operation = format!("global:team/assets:manifest:{}", hidden.digest_hex);
+        let mut event: serde_json::Value = query_scalar("SELECT event_json FROM shardline_reliability_events WHERE operation_kind='Visibility' AND operation_id=$1 ORDER BY sequence DESC LIMIT 1")
+            .bind(&operation).fetch_one(&pool).await.unwrap();
+        *event
+            .get_mut("after")
+            .unwrap()
+            .get_mut("identity")
+            .unwrap()
+            .get_mut("digest_hex")
+            .unwrap() = serde_json::Value::String("f".repeat(64));
+        query("UPDATE shardline_reliability_events SET event_json=$1 WHERE operation_kind='Visibility' AND operation_id=$2 AND sequence=(SELECT max(sequence) FROM shardline_reliability_events WHERE operation_kind='Visibility' AND operation_id=$2)")
+            .bind(event).bind(&operation).execute(&pool).await.unwrap();
+        assert!(store.list_oci_object_tombstones().await.is_err());
+    }
+
+    #[tokio::test]
     async fn staging_preserves_publication_and_needs_no_tombstone_insert_or_fence_grant() {
         let Some(pool) = connect_postgres().await else {
             return;
@@ -767,7 +828,7 @@ mod tests {
             .fetch_one(&mut *actor)
             .await
             .unwrap();
-        assert_eq!(tombstones, 0);
+        assert_eq!(tombstones, 1);
         store
             .publish_oci_object_on_connection(&mut actor, &key, &[])
             .await
@@ -787,11 +848,66 @@ mod tests {
             .unwrap();
         assert_eq!(before, after);
         assert!(!store.oci_object_is_deleted(&key).await.unwrap());
+        query("ALTER TABLE shardline_oci_object_tombstones ENABLE ROW LEVEL SECURITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        query(sqlx::AssertSqlSafe(format!("CREATE POLICY staging_scope ON shardline_oci_object_tombstones TO {role} USING (scope_namespace='global') WITH CHECK (scope_namespace='global')")))
+            .execute(&pool).await.unwrap();
+        let scoped = OciObjectKey {
+            digest_hex: "c".repeat(64),
+            ..key.clone()
+        };
+        store
+            .stage_oci_object_on_connection(&mut actor, &scoped, &[])
+            .await
+            .unwrap();
+        let rows: i64 = query_scalar("SELECT count(*) FROM shardline_oci_object_tombstones")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows, 0,
+            "definer materialization must not bypass row policies"
+        );
+        assert!(store.oci_object_is_deleted(&scoped).await.unwrap());
+        let backfill = include_str!("remote_delete_guard.sql")
+            .split_once("DO $materialize_stages$")
+            .unwrap()
+            .1;
+        let backfill = format!("DO $materialize_stages${backfill}")
+            .replace("@SCHEMA@", &format!("\"{schema}\""))
+            .replace("@SCHEMA_LITERAL@", &format!("'{schema}'"));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(backfill))
+            .execute(&mut *actor)
+            .await
+            .unwrap();
+        let backfilled_rows: i64 =
+            query_scalar("SELECT count(*) FROM shardline_oci_object_tombstones")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            backfilled_rows, 0,
+            "owner backfill also respects active row policies"
+        );
+        // The authorized owner can restore the candidate inventory without
+        // changing the actor's grants or its existing publication operation.
+        store.initialize_remote_delete_guard().await.unwrap();
+        assert_eq!(store.list_oci_object_tombstones().await.unwrap().len(), 1);
+        store
+            .publish_oci_object_on_connection(&mut actor, &scoped, &[])
+            .await
+            .unwrap();
         query("RESET SESSION AUTHORIZATION")
             .execute(&mut *actor)
             .await
             .unwrap();
         drop(actor);
+        query("DROP POLICY staging_scope ON shardline_oci_object_tombstones")
+            .execute(&pool)
+            .await
+            .unwrap();
         query(sqlx::AssertSqlSafe(format!("DROP OWNED BY {role}")))
             .execute(&pool)
             .await

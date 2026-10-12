@@ -465,3 +465,89 @@ DROP TRIGGER IF EXISTS shardline_reference_remote_delete_v1 ON @SCHEMA@.shardlin
 CREATE TRIGGER shardline_reference_remote_delete_v1
 BEFORE INSERT OR UPDATE ON @SCHEMA@.shardline_stored_objects
 FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_reference_remote_delete_v1();
+
+-- Materialize verified hidden manifest state into the existing OCI inventory.
+-- This is a candidate boundary: Rust still verifies the complete evidence head
+-- before GC issues any physical deletion. Malformed legacy events are ignored.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_oci_staged_identity_v1(
+    encoded_event TEXT, stored_operation_id TEXT
+) RETURNS TABLE(scope_namespace TEXT, repository TEXT, digest_hex TEXT, deleted_at_unix_seconds BIGINT)
+LANGUAGE plpgsql IMMUTABLE SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+AS $staged_identity$
+DECLARE payload JSONB; epoch_text TEXT;
+BEGIN
+    BEGIN
+        payload := encoded_event::JSONB;
+    EXCEPTION WHEN invalid_text_representation THEN RETURN;
+    END;
+    IF payload #>> '{after,state}' IS DISTINCT FROM 'Deleted'
+       OR payload #>> '{after,identity,object_kind}' IS DISTINCT FROM 'manifest' THEN RETURN; END IF;
+    scope_namespace := payload #>> '{after,identity,scope_namespace}';
+    repository := payload #>> '{after,identity,repository}';
+    digest_hex := payload #>> '{after,identity,digest_hex}';
+    epoch_text := payload #>> '{after,deleted_at_unix_seconds}';
+    IF scope_namespace IS NULL OR repository IS NULL OR digest_hex IS NULL OR epoch_text IS NULL
+       OR (scope_namespace <> 'global' AND scope_namespace !~ '^[0-9a-f]{64}$')
+       OR digest_hex !~ '^[0-9a-f]{64}$' OR epoch_text !~ '^[0-9]{1,18}$'
+       OR stored_operation_id IS DISTINCT FROM scope_namespace || ':' || repository || ':manifest:' || digest_hex THEN RETURN; END IF;
+    deleted_at_unix_seconds := epoch_text::BIGINT;
+    RETURN NEXT;
+END;
+$staged_identity$;
+
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_oci_staged_tombstone_v1()
+RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $staged_tombstone$
+BEGIN
+    IF TG_TABLE_SCHEMA IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'OCI staging schema mismatch';
+    END IF;
+    IF NEW.operation_kind <> 'Visibility'
+       OR NEW.operation_id !~ '^(global|[0-9a-f]{64}):.+:manifest:[0-9a-f]{64}$' THEN RETURN NEW; END IF;
+    IF NOT has_schema_privilege(session_user, TG_TABLE_SCHEMA, 'USAGE')
+       OR NOT has_table_privilege(session_user,
+           format('%I.shardline_oci_object_tombstones', TG_TABLE_SCHEMA), 'DELETE') THEN RETURN NEW; END IF;
+    -- Do not broaden row-scoped writers' permissions through definer access.
+    IF EXISTS(SELECT 1 FROM pg_class target JOIN pg_roles actor ON actor.rolname=session_user
+        WHERE target.oid IN ('shardline_oci_object_tombstones'::regclass, 'shardline_reliability_events'::regclass)
+          AND target.relrowsecurity AND NOT (actor.rolsuper OR actor.rolbypassrls
+              OR (target.relowner=actor.oid AND NOT target.relforcerowsecurity))) THEN RETURN NEW; END IF;
+    -- Replaying an older checkpoint cannot hide a later published generation.
+    IF EXISTS(SELECT 1 FROM shardline_reliability_events
+        WHERE operation_kind=NEW.operation_kind AND operation_id=NEW.operation_id
+          AND sequence>NEW.sequence) THEN RETURN NEW; END IF;
+    INSERT INTO shardline_oci_object_tombstones
+        (scope_namespace, repository, object_kind, digest_hex, deleted_at_unix_seconds)
+    SELECT identity.scope_namespace, identity.repository, 'manifest', identity.digest_hex, identity.deleted_at_unix_seconds
+    FROM shardline_oci_staged_identity_v1(NEW.event_json::TEXT, NEW.operation_id) identity
+    ON CONFLICT (scope_namespace, repository, object_kind, digest_hex) DO NOTHING;
+    RETURN NEW;
+END;
+$staged_tombstone$;
+
+DROP TRIGGER IF EXISTS shardline_oci_staged_tombstone_v1 ON @SCHEMA@.shardline_reliability_events;
+CREATE TRIGGER shardline_oci_staged_tombstone_v1
+AFTER INSERT ON @SCHEMA@.shardline_reliability_events
+FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_oci_staged_tombstone_v1();
+
+-- Trigger installation excludes concurrent event inserts until commit. OCI
+-- publication tables are already locked by the guards installed above. Restore
+-- prior journal-only stages without replacing any existing deletion generation.
+DO $materialize_stages$
+BEGIN
+IF NOT pg_catalog.row_security_active(pg_catalog.to_regclass(pg_catalog.format('%I.shardline_oci_object_tombstones', @SCHEMA_LITERAL@)))
+   AND NOT pg_catalog.row_security_active(pg_catalog.to_regclass(pg_catalog.format('%I.shardline_reliability_events', @SCHEMA_LITERAL@))) THEN
+INSERT INTO @SCHEMA@.shardline_oci_object_tombstones
+    (scope_namespace, repository, object_kind, digest_hex, deleted_at_unix_seconds)
+SELECT identity.scope_namespace, identity.repository, 'manifest', identity.digest_hex, identity.deleted_at_unix_seconds
+FROM (SELECT DISTINCT ON (operation_id) operation_id, event_json
+      FROM @SCHEMA@.shardline_reliability_events WHERE operation_kind='Visibility'
+        AND operation_id ~ '^(global|[0-9a-f]{64}):.+:manifest:[0-9a-f]{64}$'
+      ORDER BY operation_id, sequence DESC) head
+CROSS JOIN LATERAL @SCHEMA@.shardline_oci_staged_identity_v1(head.event_json::TEXT, head.operation_id) identity
+ON CONFLICT (scope_namespace, repository, object_kind, digest_hex) DO NOTHING;
+END IF;
+END;
+$materialize_stages$;
