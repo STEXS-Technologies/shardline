@@ -28,9 +28,17 @@ Postgres database and can be read by another node using that same database,
 schema and object storage. It reuses the existing connection pool. Local
 deployments without Postgres save new history in their existing metadata database.
 
-Postgres provider callbacks save the delivery ID and repository changes
-together, so retrying a successful delivery does not repeat its changes.
-Covered writes stop after losing database ownership.
+The production benefits are:
+
+- Postgres provider callbacks save the delivery ID and repository changes
+  together, so retrying a successful delivery does not repeat those changes.
+- Native OCI and S3 uploads reject publication after losing database ownership.
+  An old process cannot use a replacement connection to finish that publication.
+- Retention holds and native OCI/S3 publications reject writes to an object while
+  an earlier remote delete is unresolved. Other objects remain available.
+
+These are protections for the tested operations. Other library write paths,
+older GC binaries and references hidden in legacy payloads still have open checks.
 
 If optional tracking cannot save history, Shardline warns and preserves the
 command's existing behavior. There is then no verified history result to rely on.

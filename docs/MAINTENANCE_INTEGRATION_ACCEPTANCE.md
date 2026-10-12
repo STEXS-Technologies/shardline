@@ -68,7 +68,7 @@ The following still need implementation or stronger evidence before merge:
 - **Scale and retained history.** Bounded pages are tested; whole-operation cost,
   large reports, broad deployment performance and total unresolved-history
   growth are not fully established. A 132-run metadata fixture drains completed
-  history in batches while retaining unfinished and corrupt history, but inspection
+  history in batches while retaining unfinished and corrupt history, but
   retention and legacy inspection still walk the inventory. Metadata inspection
   stops after its eligible page is settled, but filtering unrelated history can
   still require a longer scan; bounded output does not bound latency.
