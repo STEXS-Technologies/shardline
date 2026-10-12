@@ -3,6 +3,7 @@
 //! This optional table deliberately does not change the domain migration ledger:
 //! older binaries ignore it. Artifact codecs and verification belong to callers.
 use rusqlite::{Connection, OptionalExtension, params};
+use std::ops::ControlFlow;
 
 use super::{LocalIndexStore, LocalIndexStoreError};
 
@@ -139,6 +140,28 @@ impl LocalIndexStore {
         E: From<LocalIndexStoreError>,
         F: FnMut(&str, u64) -> Result<(), E>,
     {
+        self.visit_task_artifacts_until(prefix, after, |key, length| {
+            visit(key, length)?;
+            Ok(ControlFlow::Continue(()))
+        })
+    }
+
+    /// Visits ordered artifacts until the callback returns [`ControlFlow::Break`].
+    /// Retains literal-prefix filtering, cursor seeking and 64-row storage pages.
+    /// Stopping does not mutate history or persist a cursor.
+    ///
+    /// # Errors
+    /// Returns database or callback failures.
+    pub fn visit_task_artifacts_until<E, F>(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        mut visit: F,
+    ) -> Result<(), E>
+    where
+        E: From<LocalIndexStoreError>,
+        F: FnMut(&str, u64) -> Result<ControlFlow<()>, E>,
+    {
         let connection = self.open_connection()?;
         if !exists(&connection)? {
             return Ok(());
@@ -173,7 +196,9 @@ impl LocalIndexStore {
                 if !key.starts_with(prefix) {
                     return Ok(());
                 }
-                visit(&key, super::i64_to_u64(length)?)?;
+                if visit(&key, super::i64_to_u64(length)?)?.is_break() {
+                    return Ok(());
+                }
                 after = Some(key);
             }
         }
@@ -281,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn literal_prefix_seek_resumes_after_a_deleted_cursor_across_pages() {
+    fn literal_prefix_scan_stops_and_resumes_after_a_deleted_cursor_across_pages() {
         let root = tempfile::tempdir().unwrap();
         let store = LocalIndexStore::open(root.path().to_owned());
         for index in 0..130 {
@@ -292,6 +317,23 @@ mod tests {
         store
             .publish_task_artifact("_taskX/other", b"keep")
             .unwrap();
+        let mut inspected = Vec::new();
+        store
+            .visit_task_artifacts_until::<LocalIndexStoreError, _>("_task%/", None, |key, _| {
+                inspected.push(key.to_owned());
+                Ok(if inspected.len() == 65 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            inspected,
+            (0..65)
+                .map(|index| format!("_task%/{index:03}"))
+                .collect::<Vec<_>>()
+        );
         store.delete_task_artifact("_task%/063").unwrap();
         let mut keys = Vec::new();
         store
