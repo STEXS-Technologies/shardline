@@ -88,6 +88,8 @@ and logs. These endpoints inspect state; they do not retry or clear a delete.
 A completed result describes that run. Investigate failed or interrupted work
 before repeating mutations; treat corrupt history as untrusted. Older and
 interrupted jobs may have no saved report. CLI diagnostics remain available.
+The history endpoint includes `history_notice` when new metadata history is
+unavailable. An empty task list then does not mean maintenance never ran.
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.

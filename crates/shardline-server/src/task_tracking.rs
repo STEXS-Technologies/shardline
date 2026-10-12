@@ -226,6 +226,11 @@ impl TaskEvidenceStore {
         self
     }
 
+    /// Whether metadata was selected for history; this is not a write-health probe.
+    pub(crate) const fn uses_metadata_history(&self) -> bool {
+        self.local_metadata.is_some() || self.postgres_metadata.is_some()
+    }
+
     /// Publishes an immutable record, checking exact bytes even on repeated writes.
     /// # Errors
     /// Returns invalid keys, unavailable storage or a conflicting publication.
