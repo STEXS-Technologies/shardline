@@ -45,6 +45,12 @@ clear retryable error. Other objects remain available. Rejected updates preserve
 the previous metadata. Current native uploads also check the chunk references
 inside their uploaded data.
 
+The error says `object has an unresolved remote delete; retry after
+reconciliation`. This means Shardline has not confirmed the earlier delete's
+outcome. HTTP 503 and `Retry-After: 1` tell clients to wait before retrying;
+they do not promise recovery in one second. Repeating the write cannot clear
+the block. Recovery must confirm the delete first, as described below.
+
 On Postgres, an S3 overwrite rejected before it commits leaves the current
 object in place. Retry with your usual S3 client; no additional service or
 configuration is needed.

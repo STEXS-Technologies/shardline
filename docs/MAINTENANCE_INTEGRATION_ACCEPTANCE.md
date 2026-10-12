@@ -104,7 +104,12 @@ This document is for reviewers deciding whether the integration is safe to ship.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.
-- **Remote effects and acknowledgements.** Local GC crash boundaries and a real
+- **Remote effects and acknowledgements.**
+  OCI pending-delete responses preserve HTTP 503, their existing error envelope
+  and `Retry-After: 1`. A real Postgres manifest request verifies the header and
+  explanation; all 279 OCI tests and strict server lint pass. The delay tells
+  clients when to retry, not when recovery will finish.
+  Local GC crash boundaries and a real
   MinIO deletion with its response withheld have passed. The latter preserves
   unresolved history after killing the original CLI; fresh fsck does not repeat
   the delete. The previously failing hold/delete takeover regression now passes:
