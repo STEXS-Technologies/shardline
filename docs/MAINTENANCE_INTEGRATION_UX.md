@@ -47,6 +47,8 @@ On Postgres, this also covers publishing OCI blobs and manifests, changing a
 manifest tag, and removing a deletion tombstone. A pending manifest or its
 media-type sidecar blocks publication. Rejection preserves the previous tag
 and tombstone; publication can succeed after the delete is reconciled.
+During a rolling upgrade, released 1.11.3 servers reject covered OCI writes too,
+but return a generic server error. Updated servers explain when retry is safe.
 New manifest uploads also check their validated config, layer, child-manifest
 and subject references in the publication transaction. Legacy tag-only writes
 cannot inspect those payload references and still need additional protection.
