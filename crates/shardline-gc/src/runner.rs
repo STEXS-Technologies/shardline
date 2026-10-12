@@ -52,11 +52,12 @@ use shardline_storage::ObjectStore;
 
 use crate::{
     error::GcError,
-    oci_tombstones::{OciRecordReclaimer, reclaim_oci_tombstones},
+    oci_tombstones::{OciRecordReclaimer, reclaim_oci_tombstones_with_guard},
     quarantine::{
         gc_boot_observation, read_active_retention_hold_object_keys, read_gc_clock_anchor,
         read_newest_stored_creation_timestamp, read_quarantine_entries,
-        reconcile_quarantine_entries, sweep_quarantine_entries, write_last_gc_clock_anchor,
+        reconcile_quarantine_entries, sweep_quarantine_entries_with_guard,
+        write_last_gc_clock_anchor,
     },
     reachability::{
         OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys,
@@ -131,6 +132,31 @@ pub async fn run_gc_with_stores<RecordAdapter, IndexAdapter>(
     object_store: &ServerObjectStore,
     frontends: &[ServerFrontend],
     options: LocalGcOptions,
+) -> Result<LocalGcDiagnostics, GcError>
+where
+    RecordAdapter: shardline_index::RecordStore + Sync,
+    RecordAdapter::Error: Into<GcError>,
+    IndexAdapter: AsyncIndexStore + Sync,
+    <IndexAdapter as AsyncIndexStore>::Error: Into<GcError>,
+{
+    run_gc_with_stores_internal(
+        record_store,
+        index_store,
+        object_store,
+        frontends,
+        options,
+        None,
+    )
+    .await
+}
+
+async fn run_gc_with_stores_internal<RecordAdapter, IndexAdapter>(
+    record_store: &RecordAdapter,
+    index_store: &IndexAdapter,
+    object_store: &ServerObjectStore,
+    frontends: &[ServerFrontend],
+    options: LocalGcOptions,
+    remote_guard: Option<&shardline_index::PostgresIndexStore>,
 ) -> Result<LocalGcDiagnostics, GcError>
 where
     RecordAdapter: shardline_index::RecordStore + Sync,
@@ -309,7 +335,7 @@ where
             );
         } else {
             let sweep_start = std::time::Instant::now();
-            sweep_quarantine_entries(
+            sweep_quarantine_entries_with_guard(
                 record_store,
                 object_store,
                 index_store,
@@ -318,6 +344,7 @@ where
                 now_unix_seconds,
                 &mut quarantine_entries,
                 &mut report,
+                remote_guard,
             )
             .await?;
             shardline_metrics::record_gc_sweep_duration(sweep_start.elapsed());
@@ -340,9 +367,8 @@ where
                 );
             } else {
                 for (temp_key, temp_bytes) in temp_scan.stale {
-                    object_store
-                        .delete_if_present(&temp_key)
-                        .map_err(GcError::ObjectStore)?;
+                    crate::remote_delete::delete_gc_object(object_store, &temp_key, remote_guard)
+                        .await?;
                     report.reaped_stale_temporary_chunks = shardline_server_core::checked_add(
                         report.reaped_stale_temporary_chunks,
                         1,
@@ -461,10 +487,78 @@ where
         + Sync,
     <IndexAdapter as AsyncIndexStore>::Error: Into<GcError>,
 {
-    let oci_report =
-        reclaim_oci_tombstones(record_store, index_store, object_store, options).await?;
-    let mut diagnostics =
-        run_gc_with_stores(record_store, index_store, object_store, frontends, options).await?;
+    run_gc_with_oci_tombstones_internal(
+        record_store,
+        index_store,
+        object_store,
+        frontends,
+        options,
+        None,
+    )
+    .await
+}
+
+/// Runs Postgres GC with durable admission around S3 object deletes.
+///
+/// The index and record adapters must share the non-replaceable connection
+/// holding the exclusive maintenance barrier. The caller retains that barrier
+/// until this future finishes. Unknown outcomes keep their markers pending;
+/// this function never reconnects or retries an uncertain remote delete.
+///
+/// # Errors
+///
+/// Returns GC, remote admission, deletion, or settlement failure.
+pub async fn run_postgres_gc_with_remote_delete_protection(
+    record_store: &shardline_index::PostgresRecordStore,
+    index_store: &shardline_index::PostgresIndexStore,
+    object_store: &ServerObjectStore,
+    frontends: &[ServerFrontend],
+    options: LocalGcOptions,
+) -> Result<LocalGcDiagnostics, GcError> {
+    run_gc_with_oci_tombstones_internal(
+        record_store,
+        index_store,
+        object_store,
+        frontends,
+        options,
+        Some(index_store),
+    )
+    .await
+}
+
+async fn run_gc_with_oci_tombstones_internal<RecordAdapter, IndexAdapter>(
+    record_store: &RecordAdapter,
+    index_store: &IndexAdapter,
+    object_store: &ServerObjectStore,
+    frontends: &[ServerFrontend],
+    options: LocalGcOptions,
+    remote_guard: Option<&shardline_index::PostgresIndexStore>,
+) -> Result<LocalGcDiagnostics, GcError>
+where
+    RecordAdapter: shardline_index::RecordStore + OciRecordReclaimer + Sync,
+    RecordAdapter::Error: Into<GcError>,
+    IndexAdapter: AsyncIndexStore
+        + shardline_index::OciObjectStore<Error = <IndexAdapter as AsyncIndexStore>::Error>
+        + Sync,
+    <IndexAdapter as AsyncIndexStore>::Error: Into<GcError>,
+{
+    let oci_report = reclaim_oci_tombstones_with_guard(
+        record_store,
+        index_store,
+        object_store,
+        options,
+        remote_guard,
+    )
+    .await?;
+    let mut diagnostics = run_gc_with_stores_internal(
+        record_store,
+        index_store,
+        object_store,
+        frontends,
+        options,
+        remote_guard,
+    )
+    .await?;
     diagnostics.report.scanned_oci_tombstones = oci_report.scanned;
     diagnostics.report.eligible_oci_tombstones = oci_report.eligible;
     diagnostics.report.reclaimed_oci_tombstones = oci_report.reclaimed;

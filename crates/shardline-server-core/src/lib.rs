@@ -60,6 +60,8 @@ pub mod at_rest;
 pub mod object_store;
 pub mod ops;
 pub mod protocol_support;
+#[doc(hidden)]
+pub mod remote_delete;
 pub mod server_frontend;
 pub mod validation;
 

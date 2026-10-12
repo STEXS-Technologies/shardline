@@ -27,8 +27,13 @@ async fn reclaim_postgres_resumable_staging(
         .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let mut report =
-        reclaim_unprotected_resumable_staging_objects(object_store, &protected, sweep).await?;
+    let mut report = reclaim_unprotected_resumable_staging_objects_with_guard(
+        object_store,
+        &protected,
+        sweep,
+        Some(index_store),
+    )
+    .await?;
     if sweep {
         report.reclaimed_sessions = index_store
             .delete_reclaimable_resumable_sessions(inventory.reclaimable_sessions())
@@ -37,10 +42,21 @@ async fn reclaim_postgres_resumable_staging(
     Ok(report)
 }
 
+#[cfg(test)]
 async fn reclaim_unprotected_resumable_staging_objects(
     object_store: &ServerObjectStore,
     protected: &std::collections::HashSet<String>,
     sweep: bool,
+) -> Result<ResumableStagingGcReport, error::ServerError> {
+    reclaim_unprotected_resumable_staging_objects_with_guard(object_store, protected, sweep, None)
+        .await
+}
+
+async fn reclaim_unprotected_resumable_staging_objects_with_guard(
+    object_store: &ServerObjectStore,
+    protected: &std::collections::HashSet<String>,
+    sweep: bool,
+    remote_guard: Option<&PostgresIndexStore>,
 ) -> Result<ResumableStagingGcReport, error::ServerError> {
     let prefix = ObjectPrefix::parse("staging/resumable/")
         .map_err(|_error| error::ServerError::InvalidPath)?;
@@ -62,7 +78,24 @@ async fn reclaim_unprotected_resumable_staging_objects(
         if protected.contains(metadata.key().as_str()) {
             continue;
         }
-        object_store.delete_if_present(metadata.key()).await?;
+        if let Some(index) = remote_guard {
+            shardline_server_core::remote_delete::delete_with_postgres_guard(
+                index,
+                object_store,
+                metadata.key(),
+            )
+            .await
+            .map_err(|error| match error {
+                shardline_server_core::remote_delete::GuardedRemoteDeleteError::Metadata(error) => {
+                    error::ServerError::from(error)
+                }
+                shardline_server_core::remote_delete::GuardedRemoteDeleteError::ObjectStore(
+                    error,
+                ) => error::ServerError::from(error),
+            })?;
+        } else {
+            object_store.delete_if_present(metadata.key()).await?;
+        }
         report.reclaimed_objects = report
             .reclaimed_objects
             .checked_add(1)
@@ -138,7 +171,7 @@ pub async fn run_gc_diagnostics(
             let staging_report =
                 reclaim_postgres_resumable_staging(&index_store, &object_store, options.sweep)
                     .await?;
-            let mut diagnostics = gc::run_gc_with_oci_tombstones(
+            let mut diagnostics = shardline_gc::run_postgres_gc_with_remote_delete_protection(
                 &record_store,
                 &index_store,
                 &object_store,

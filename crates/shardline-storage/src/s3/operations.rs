@@ -39,6 +39,7 @@ use super::{
 #[derive(Clone)]
 pub struct S3ObjectStore {
     pub(crate) inner: AmazonS3,
+    single_attempt_inner: AmazonS3,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) key_prefix: Option<String>,
 }
@@ -107,6 +108,7 @@ impl S3ObjectStore {
         }
         super::credentials::validate_s3_config(&config)?;
         let inner = super::client::build_amazon_s3_client(&config)?;
+        let single_attempt_inner = super::client::build_single_attempt_client(&config)?;
 
         // Process-wide ownership keeps the bridge independent of the runtime in
         // which an adapter was constructed and avoids dropping a Tokio runtime
@@ -134,9 +136,31 @@ impl S3ObjectStore {
         drop(shared);
         Ok(Self {
             inner,
+            single_attempt_inner,
             runtime,
             key_prefix: config.key_prefix,
         })
+    }
+
+    /// Sends one delete without transparently retrying an uncertain mutation.
+    ///
+    /// A successful response settles this request. An error may mean the object
+    /// was deleted; the caller must preserve its durable pending-delete marker.
+    /// Other operations retain their existing retry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a key validation or remote failure, without retrying the delete.
+    pub async fn delete_if_present_single_attempt(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<DeleteOutcome, S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        match self.single_attempt_inner.delete(&location).await {
+            Ok(()) => Ok(DeleteOutcome::Deleted),
+            Err(ExternalObjectStoreError::NotFound { .. }) => Ok(DeleteOutcome::NotFound),
+            Err(error) => Err(S3ObjectStoreError::External(error)),
+        }
     }
 
     fn block_on<T: Send>(

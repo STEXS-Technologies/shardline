@@ -30,6 +30,62 @@ fn synchronous_runtime_fixture(endpoint: String) -> S3ObjectStore {
     .unwrap()
 }
 
+#[tokio::test]
+async fn single_attempt_delete_does_not_retry_dropped_reply_or_retryable_server_error() {
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    for dropped_reply in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut attempts = 0;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let mut request = Vec::new();
+                        let mut buffer = [0_u8; 1024];
+                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            let read = stream.read(&mut buffer).unwrap();
+                            assert!(read > 0);
+                            request.extend_from_slice(&buffer[..read]);
+                        }
+                        assert!(request.starts_with(b"DELETE /assets/chunks/single-attempt "));
+                        attempts += 1;
+                        if !dropped_reply {
+                            stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(attempts)
+        });
+        let store = synchronous_runtime_fixture(format!("http://{address}"));
+        let key = ObjectKey::parse("chunks/single-attempt").unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            store.delete_if_present_single_attempt(&key),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        assert_eq!(
+            server.join().unwrap().unwrap(),
+            1,
+            "an uncertain delete was retried"
+        );
+    }
+}
+
 #[test]
 fn synchronous_s3_zero_page_survives_runtime_changes() {
     let prefix = ObjectPrefix::parse("chunks").unwrap();

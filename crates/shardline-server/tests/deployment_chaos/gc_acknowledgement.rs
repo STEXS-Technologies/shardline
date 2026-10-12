@@ -100,18 +100,36 @@ impl Drop for ProxyTask {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed() {
-    run_remote_gc_fault(false).await;
+    run_remote_gc_fault(false, false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "merge-blocking: delayed S3 deletion is not yet fenced across database takeover"]
 async fn drill_gc_delayed_delete_rejects_hold_after_takeover() {
-    run_remote_gc_fault(true).await;
+    run_remote_gc_fault(true, false, None).await;
 }
 
-async fn run_remote_gc_fault(before_apply: bool) {
-    let drill = if before_apply {
-        "drill_gc_delayed_delete_preserves_hold_acknowledged_after_takeover"
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill_gc_acknowledged_remote_delete_settles_its_marker() {
+    run_remote_gc_fault(false, true, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill_gc_existing_role_needs_no_new_fence_grant() {
+    let Some(released) =
+        resolve_n_minus_one_binary("drill_gc_existing_role_needs_no_new_fence_grant")
+    else {
+        return;
+    };
+    run_remote_gc_fault(false, true, Some(&released)).await;
+}
+
+async fn run_remote_gc_fault(before_apply: bool, complete: bool, released: Option<&Path>) {
+    let drill = if released.is_some() {
+        "drill_gc_existing_role_needs_no_new_fence_grant"
+    } else if complete {
+        "drill_gc_acknowledged_remote_delete_settles_its_marker"
+    } else if before_apply {
+        "drill_gc_delayed_delete_rejects_hold_after_takeover"
     } else {
         "drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed"
     };
@@ -159,7 +177,7 @@ async fn run_remote_gc_fault(before_apply: bool) {
             &ObjectIntegrity::new(hash, bytes.len() as u64),
         )
         .unwrap();
-    let config = ServerConfig::new(
+    let mut config = ServerConfig::new(
         "127.0.0.1:8080".parse().unwrap(),
         "http://localhost:8080".to_owned(),
         PathBuf::from("/var/lib/shardline"),
@@ -169,9 +187,89 @@ async fn run_remote_gc_fault(before_apply: bool) {
     .unwrap()
     .with_object_storage(ObjectStorageAdapter::S3, Some(s3));
     let store = TaskEvidenceStore::from_config(&config).unwrap();
-    let deployment = deployment_fingerprint(&config).unwrap();
     let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
     let index = PostgresIndexStore::new(pool.clone());
+    if let Some(released) = released {
+        sqlx::raw_sql(
+            "CREATE ROLE legacy_gc_writer LOGIN PASSWORD 'owned_gc_fixture_password';
+             GRANT USAGE ON SCHEMA public TO legacy_gc_writer;
+             DO $$ DECLARE relation_name text; BEGIN
+             FOR relation_name IN SELECT tablename FROM pg_tables
+               WHERE schemaname='public' AND tablename LIKE 'shardline_%'
+               AND tablename <> 'shardline_resource_fences'
+             LOOP EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE public.%I TO legacy_gc_writer',relation_name);
+             END LOOP; END $$;",
+        ).execute(&pool).await.unwrap();
+        let mut writer_url = url::Url::parse(&stack.pg_url).unwrap();
+        writer_url.set_username("legacy_gc_writer").unwrap();
+        writer_url
+            .set_password(Some("owned_gc_fixture_password"))
+            .unwrap();
+        stack.pg_url = writer_url.to_string();
+        let baseline = docker_run_owned(
+            super::readonly_maintenance_deployment::readonly_cli_arguments(
+                released,
+                &stack,
+                &["gc", "--mark", "--retention-seconds", "0"],
+                false,
+            ),
+        )
+        .await;
+        assert!(
+            baseline.status.success(),
+            "released GC role must work: {}",
+            String::from_utf8_lossy(&baseline.stderr)
+        );
+        assert!(!sqlx::query_scalar::<_, bool>(
+            "SELECT has_table_privilege('legacy_gc_writer', 'shardline_resource_fences', 'SELECT')",
+        ).fetch_one(&pool).await.unwrap());
+        let baseline_now = sqlx::query_scalar::<_, i64>(
+            "SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let baseline_expired = QuarantineCandidate::new(
+            key.clone(),
+            bytes.len() as u64,
+            u64::try_from(baseline_now - 7200).unwrap(),
+            u64::try_from(baseline_now - 3600).unwrap(),
+        )
+        .unwrap();
+        index
+            .upsert_quarantine_candidate(&baseline_expired)
+            .await
+            .unwrap();
+        proxy.acknowledge.add_permits(1);
+        let baseline_sweep = docker_run_owned(
+            super::readonly_maintenance_deployment::readonly_cli_arguments(
+                released,
+                &stack,
+                &["gc", "--sweep", "--retention-seconds", "0"],
+                false,
+            ),
+        )
+        .await;
+        assert!(
+            baseline_sweep.status.success(),
+            "released sweep role must work: {}",
+            String::from_utf8_lossy(&baseline_sweep.stderr)
+        );
+        assert!(!objects.contains(&key).unwrap());
+        assert!(index.quarantine_candidate(&key).await.unwrap().is_none());
+        objects
+            .put_if_absent(
+                &key,
+                ObjectBody::Borrowed(bytes),
+                &ObjectIntegrity::new(hash, bytes.len() as u64),
+            )
+            .unwrap();
+        proxy.applied.store(0, Ordering::Release);
+        config = config
+            .with_index_postgres_url(stack.pg_url.clone())
+            .unwrap();
+    }
+    let deployment = deployment_fingerprint(&config).unwrap();
     let mark = docker_run_owned(
         super::readonly_maintenance_deployment::readonly_cli_arguments(
             &binary,
@@ -248,6 +346,17 @@ async fn run_remote_gc_fault(before_apply: bool) {
         "the object must match the injected pre/post-mutation boundary"
     );
     assert!(index.quarantine_candidate(&key).await.unwrap().is_none());
+    let pending_epoch = sqlx::query_scalar::<_, i64>(
+        "SELECT epoch FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1",
+    )
+    .bind(key.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        pending_epoch > 0,
+        "the remote request must have durable admission"
+    );
     let tasks = store.summaries(deployment, None, 10).unwrap();
     assert_eq!(tasks.len(), 2);
     let interrupted = tasks
@@ -272,6 +381,43 @@ async fn run_remote_gc_fault(before_apply: bool) {
         "true",
         "fault is injected while the original CLI still waits for its acknowledgement"
     );
+    if complete {
+        proxy.acknowledge.add_permits(1);
+        let exited = tokio::time::timeout(
+            Duration::from_secs(25),
+            docker_run_owned(vec!["wait".to_owned(), container.0.clone()]),
+        )
+        .await
+        .unwrap();
+        assert!(exited.status.success());
+        assert_eq!(String::from_utf8_lossy(&exited.stdout).trim(), "0");
+        assert_eq!(proxy.applied.load(Ordering::Acquire), 1);
+        assert!(!objects.contains(&key).unwrap());
+        assert!(sqlx::query_scalar::<_, i64>(
+            "SELECT epoch FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1",
+        ).bind(key.as_str()).fetch_optional(&pool).await.unwrap().is_none());
+        let after = store.summaries(deployment, None, 10).unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .find(|task| task.id == interrupted.id)
+                .unwrap()
+                .state,
+            TaskRunState::Completed
+        );
+        let hold = shardline_index::RetentionHold::new(
+            key.clone(),
+            "settled delete permits later protection".to_owned(),
+            u64::try_from(now).unwrap(),
+            None,
+        )
+        .unwrap();
+        shardline_server::set_retention_hold(&config, &hold)
+            .await
+            .unwrap();
+        assert_eq!(index.retention_hold(&key).await.unwrap(), Some(hold));
+        return;
+    }
     if before_apply {
         use shardline_index::RetentionHold;
         let coordinator = sqlx::query_scalar::<_, i32>(
@@ -313,6 +459,9 @@ async fn run_remote_gc_fault(before_apply: bool) {
         .await
         .unwrap();
         let acknowledged = hold_result.is_ok();
+        let rejected_as_pending = hold_result
+            .as_ref()
+            .is_err_and(|error| error.is_remote_delete_pending());
         let expected_hold = acknowledged.then_some(hold);
         assert_eq!(index.retention_hold(&key).await.unwrap(), expected_hold);
         assert!(
@@ -322,6 +471,31 @@ async fn run_remote_gc_fault(before_apply: bool) {
         eprintln!(
             "takeover hold acknowledged={acknowledged} while the former GC owner's remote request is paused"
         );
+        // Give a replacement ordinary GC a genuinely expired candidate while
+        // the original remote attempt is still paused. It must not replay that
+        // unknown delete, even though it can now acquire database ownership.
+        index.upsert_quarantine_candidate(&expired).await.unwrap();
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(25),
+            docker_run_owned(
+                super::readonly_maintenance_deployment::readonly_cli_arguments(
+                    &binary,
+                    &stack,
+                    &["gc", "--sweep", "--retention-seconds", "0"],
+                    false,
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!replacement.status.success());
+        assert!(
+            String::from_utf8_lossy(&replacement.stderr)
+                .contains("unresolved remote delete; retry after reconciliation")
+        );
+        assert_eq!(proxy.arrived.load(Ordering::Acquire), 1);
+        assert_eq!(proxy.applied.load(Ordering::Acquire), 0);
+        assert!(objects.contains(&key).unwrap());
         proxy.acknowledge.add_permits(1);
         let exited = tokio::time::timeout(
             Duration::from_secs(25),
@@ -346,6 +520,19 @@ async fn run_remote_gc_fault(before_apply: bool) {
             !acknowledged,
             "a hold racing an unresolved remote delete must return a retryable error, not acknowledge protection"
         );
+        assert!(
+            rejected_as_pending,
+            "the hold must receive the typed retryable error"
+        );
+        assert_eq!(
+            proxy.arrived.load(Ordering::Acquire),
+            1,
+            "GC must not retry its delete"
+        );
+        assert_eq!(sqlx::query_scalar::<_, i64>(
+            "SELECT epoch FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1",
+        ).bind(key.as_str()).fetch_one(&pool).await.unwrap(), pending_epoch,
+            "ownership loss must retain the original unresolved marker");
         return;
     }
     let before = [0_u32, 1, 2].map(|sequence| {
@@ -428,6 +615,10 @@ async fn run_remote_gc_fault(before_apply: bool) {
     );
     assert!(!objects.contains(&key).unwrap());
     assert!(index.quarantine_candidate(&key).await.unwrap().is_none());
+    assert_eq!(sqlx::query_scalar::<_, i64>(
+        "SELECT epoch FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1",
+    ).bind(key.as_str()).fetch_one(&pool).await.unwrap(), pending_epoch,
+        "diagnostics must preserve the unresolved remote attempt");
     eprintln!(
         "PASS: real MinIO delete applied; lost acknowledgement remains unresolved; fresh fsck does not replay it"
     );
