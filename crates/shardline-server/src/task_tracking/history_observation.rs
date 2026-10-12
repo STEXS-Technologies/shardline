@@ -51,11 +51,22 @@ pub(crate) async fn observe_work_pool(config: &ServerConfig, pool: &PgPool) {
             .acquire()
             .await
             .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-        resolved_postgres_deployment_fingerprint(config, &mut connection).await
+        let scope = resolved_postgres_deployment_fingerprint(config, &mut connection).await?;
+        let published = observer
+            .store
+            .publish_scope_on_work_connection(
+                &observer.identity,
+                &observer.key,
+                scope,
+                &mut connection,
+            )
+            .await?;
+        Ok::<_, crate::ServerError>((scope, published))
     })
     .await;
     let scope = match scope {
-        Ok(Ok(scope)) => scope,
+        Ok(Ok((_, true))) => return,
+        Ok(Ok((scope, false))) => scope,
         Ok(Err(error)) => {
             tracing::warn!(%error, "maintenance scope unavailable; legacy history continues");
             return;

@@ -14,6 +14,7 @@ pub(super) struct PostgresTaskMetadata {
     handle: tokio::runtime::Handle,
     config: ServerConfig,
     pub(super) scope: Digest,
+    close_after_io: bool,
 }
 
 impl fmt::Debug for PostgresTaskMetadata {
@@ -57,16 +58,49 @@ impl TaskEvidenceStore {
         config: &ServerConfig,
         backend: &ServerBackend,
     ) -> Result<(Self, Option<Digest>), ServerError> {
-        let mut store = Self::from_backend_objects(config, backend.object_store());
+        let store = Self::from_backend_objects(config, backend.object_store());
         let ServerBackend::Postgres(postgres) = backend else {
             return Ok((store, None));
         };
         let pool = postgres.index_store().pool();
+        store.with_postgres_pool(config, pool, false).await
+    }
+
+    /// Reuses a caller-owned evidence pool, independent of a maintenance work
+    /// session. The caller must keep the pool and Tokio runtime alive until all
+    /// synchronous history I/O has finished. This pool never authorizes work.
+    /// Uses the same target checks and legacy compatibility as [`Self::from_backend`].
+    /// Connections are closed after each history operation so this evidence
+    /// pool does not retain an idle session needed by the actual work.
+    ///
+    /// # Errors
+    /// Returns adapter, runtime, metadata or timeout failures.
+    pub async fn from_postgres_pool(
+        config: &ServerConfig,
+        pool: &PgPool,
+    ) -> Result<(Self, Option<Digest>), ServerError> {
+        Self::from_config(config)?
+            .with_postgres_pool(config, pool, true)
+            .await
+    }
+
+    async fn with_postgres_pool(
+        mut self,
+        config: &ServerConfig,
+        pool: &PgPool,
+        close_after_io: bool,
+    ) -> Result<(Self, Option<Digest>), ServerError> {
+        if config.index_postgres_url().is_none() {
+            return Ok((self, None));
+        }
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
         let resolved = tokio::time::timeout(Duration::from_secs(5), async {
             let mut connection = pool.acquire().await
                 .map_err(PostgresMetadataStoreError::from)?;
+            if close_after_io {
+                connection.close_on_drop();
+            }
             let scope = resolved_postgres_deployment_fingerprint(config, &mut connection).await?;
             let installed: bool = sqlx::query_scalar(
                 "SELECT to_regprocedure(format('%I.shardline_task_artifact_read_v1(text,text,bigint)',current_schema())) IS NOT NULL",
@@ -91,19 +125,23 @@ impl TaskEvidenceStore {
                     }
                 }
             } else { false };
+            if close_after_io {
+                connection.close().await.map_err(PostgresMetadataStoreError::from)?;
+            }
             Ok::<_, ServerError>((scope, usable))
         }).await;
         match resolved {
             Ok(Ok((scope, installed))) => {
                 if installed {
-                    store.postgres_metadata = Some(PostgresTaskMetadata {
+                    self.postgres_metadata = Some(PostgresTaskMetadata {
                         pool: pool.clone(),
                         handle,
                         config: config.clone(),
                         scope,
+                        close_after_io,
                     });
                 }
-                Ok((store, Some(scope)))
+                Ok((self, Some(scope)))
             }
             Ok(Err(error)) => {
                 if let ServerError::Index(crate::error::IndexError::PostgresMetadata(
@@ -117,7 +155,7 @@ impl TaskEvidenceStore {
                     })
                 {
                     tracing::warn!(%error, "task metadata unsupported; legacy history continues");
-                    return Ok((store, None));
+                    return Ok((self, None));
                 }
                 Err(error)
             }
@@ -136,6 +174,9 @@ impl PostgresTaskMetadata {
             .acquire()
             .await
             .map_err(PostgresMetadataStoreError::from)?;
+        if self.close_after_io {
+            connection.close_on_drop();
+        }
         // A proxy or changed session default must not move a run's history to
         // another database or schema. Resolve and use the very same checkout.
         let actual =
@@ -146,6 +187,23 @@ impl PostgresTaskMetadata {
             )));
         }
         Ok(connection)
+    }
+
+    async fn finish<T>(
+        &self,
+        connection: PoolConnection<Postgres>,
+        result: Result<T, ServerError>,
+    ) -> Result<T, ServerError> {
+        if self.close_after_io {
+            let closed = connection
+                .close()
+                .await
+                .map_err(PostgresMetadataStoreError::from);
+            if result.is_ok() {
+                closed?;
+            }
+        }
+        result
     }
 
     fn run<T>(&self, work: impl Future<Output = Result<T, ServerError>>) -> Result<T, ServerError> {
@@ -163,9 +221,14 @@ impl PostgresTaskMetadata {
     pub(super) fn publish(&self, key: &str, bytes: &[u8]) -> Result<(), ServerError> {
         self.run(async {
             let mut connection = self.connection().await?;
-            PostgresIndexStore::publish_task_artifact_on_connection(&mut connection, key, bytes)
-                .await
-                .map_err(ServerError::from)
+            let result = PostgresIndexStore::publish_task_artifact_on_connection(
+                &mut connection,
+                key,
+                bytes,
+            )
+            .await
+            .map_err(ServerError::from);
+            self.finish(connection, result).await
         })
     }
 
@@ -176,9 +239,11 @@ impl PostgresTaskMetadata {
     ) -> Result<Option<PostgresTaskArtifact>, ServerError> {
         self.run(async {
             let mut connection = self.connection().await?;
-            PostgresIndexStore::read_task_artifact_on_connection(&mut connection, key, maximum)
-                .await
-                .map_err(ServerError::from)
+            let result =
+                PostgresIndexStore::read_task_artifact_on_connection(&mut connection, key, maximum)
+                    .await
+                    .map_err(ServerError::from);
+            self.finish(connection, result).await
         })
     }
 
@@ -189,19 +254,26 @@ impl PostgresTaskMetadata {
     ) -> Result<Vec<(String, u64)>, ServerError> {
         self.run(async {
             let mut connection = self.connection().await?;
-            PostgresIndexStore::task_artifact_page_on_connection(&mut connection, prefix, after)
-                .await
-                .map_err(ServerError::from)
+            let result = PostgresIndexStore::task_artifact_page_on_connection(
+                &mut connection,
+                prefix,
+                after,
+            )
+            .await
+            .map_err(ServerError::from);
+            self.finish(connection, result).await
         })
     }
 
     pub(super) fn delete(&self, key: &str) -> Result<(), ServerError> {
         self.run(async {
             let mut connection = self.connection().await?;
-            PostgresIndexStore::delete_task_artifact_on_connection(&mut connection, key)
-                .await
-                .map_err(ServerError::from)?;
-            Ok(())
+            let result =
+                PostgresIndexStore::delete_task_artifact_on_connection(&mut connection, key)
+                    .await
+                    .map(|_| ())
+                    .map_err(ServerError::from);
+            self.finish(connection, result).await
         })
     }
 }

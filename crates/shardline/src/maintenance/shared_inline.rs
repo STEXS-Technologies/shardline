@@ -102,7 +102,7 @@ impl Receipt {
         scope: TaskScope,
     ) -> Result<Self> {
         let export_config = super::publication_config(operation, config)?;
-        let store = TaskEvidenceStore::from_config(&export_config)?;
+        let store = super::evidence::store(operation, &export_config)?;
         let deployment = shardline_server::task_tracking::deployment_fingerprint(&export_config)?;
         if let Err(error) =
             store.prune_completed(deployment, shardline_protocol::unix_now_seconds_lossy())

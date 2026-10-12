@@ -199,8 +199,7 @@ fn run_inner(
     if !operation.read_only() {
         let export_config = super::publication_config(operation, &config)?;
         let retry = (|| -> Result<()> {
-            let store =
-                shardline_server::task_tracking::TaskEvidenceStore::from_config(&export_config)?;
+            let store = super::evidence::store(operation, &export_config)?;
             let deployment =
                 shardline_server::task_tracking::deployment_fingerprint(&export_config)?;
             if let Err(error) =

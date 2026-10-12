@@ -4,6 +4,7 @@ mod automatic;
 mod capture;
 pub(crate) mod configuration;
 mod controller;
+mod evidence;
 mod history;
 mod inline;
 mod journal;

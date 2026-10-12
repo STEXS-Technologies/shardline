@@ -25,9 +25,28 @@ async fn ordinary_cli_tracking_paths_bind_the_actual_postgres_work_session() {
     shardline_server::apply_database_migrations(&pool)
         .await
         .unwrap();
+    let mut nonce = [0_u8; 8];
+    getrandom::fill(&mut nonce).unwrap();
+    let role = format!("cli_history_{}", hex::encode(nonce));
+    let owner: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let owner = owner.replace('"', "\"\"");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD 'owned_history_login_password' CONNECTION LIMIT 1 IN ROLE \"{owner}\""
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut runtime_url = url::Url::parse(&database_url).unwrap();
+    runtime_url.set_username(&role).unwrap();
+    runtime_url
+        .set_password(Some("owned_history_login_password"))
+        .unwrap();
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path())
-        .with_index_postgres_url(database_url)
+        .with_index_postgres_url(runtime_url.to_string())
         .unwrap();
     let expected_scope = {
         let mut connection = pool.acquire().await.unwrap();
@@ -38,13 +57,17 @@ async fn ordinary_cli_tracking_paths_bind_the_actual_postgres_work_session() {
         .await
         .unwrap()
     };
-    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let (store, scope) = TaskEvidenceStore::from_postgres_pool(&config, &pool)
+        .await
+        .unwrap();
+    assert_eq!(scope, Some(expected_scope));
     let legacy = shardline_server::task_tracking::deployment_fingerprint(&config).unwrap();
     for (shared_only, operation_kind) in [true, false]
         .into_iter()
         .flat_map(|shared_only| (0..3).map(move |kind| (shared_only, kind)))
     {
         let invocation_config = config.clone();
+        let run_id = format!("ordinary-bound-session-{role}-{operation_kind}");
         let result = tokio::task::spawn_blocking(move || {
             let work_root = invocation_config.root_dir().to_path_buf();
             let (operation, command) = match operation_kind {
@@ -96,7 +119,7 @@ async fn ordinary_cli_tracking_paths_bind_the_actual_postgres_work_session() {
                 } else {
                     super::super::inline::run(
                         &invocation_config.root_dir().join("existing-private-state"),
-                        &format!("ordinary-bound-session-{operation_kind}"),
+                        &run_id,
                         &operation,
                         vec![b"index-rebuild".to_vec()],
                         arguments,
@@ -110,24 +133,58 @@ async fn ordinary_cli_tracking_paths_bind_the_actual_postgres_work_session() {
         assert!(result.success);
         assert!(result.evidence_published);
     }
-    let tasks = store.summaries(legacy, None, 10).unwrap();
-    assert_eq!(tasks.len(), 6);
-    for task in tasks {
-        assert_eq!(task.state, TaskRunState::Completed);
-        let identity: TaskRunIdentity = serde_json::from_slice(
-            &store
-                .read(&format!("manifests/{}", task.id), 65536)
-                .unwrap()
-                .unwrap(),
-        )
+    let artifacts: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_task_artifacts_v1")
+        .fetch_one(&pool)
+        .await
         .unwrap();
-        assert_eq!(identity.owner.pid, std::process::id());
+    assert!(artifacts > 0);
+    tokio::task::spawn_blocking(move || {
+        let objects = shardline_server::object_store_from_config(&config).unwrap();
         assert!(
-            store
-                .history_scope_binding_matches(&identity, expected_scope)
-                .unwrap()
+            shardline_storage::ObjectStore::list_prefix(
+                &objects,
+                &shardline_storage::ObjectPrefix::parse(
+                    shardline_server::task_tracking::TASK_EVIDENCE_PREFIX
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .is_empty()
         );
-    }
+        let tasks = store
+            .summaries_with_scope(legacy, Some(expected_scope), None, 10)
+            .unwrap();
+        assert_eq!(tasks.len(), 6);
+        for task in tasks {
+            assert_eq!(task.state, TaskRunState::Completed);
+            let identity: TaskRunIdentity = serde_json::from_slice(
+                &store
+                    .read(&format!("manifests/{}", task.id), 65536)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(identity.owner.pid, std::process::id());
+            assert!(
+                store
+                    .history_scope_binding_matches(&identity, expected_scope)
+                    .unwrap()
+            );
+        }
+    })
+    .await
+    .unwrap();
+    let remaining_sessions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE usename=$1")
+            .bind(&role)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining_sessions, 0);
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
+        .execute(&pool)
+        .await
+        .unwrap();
     pool.close().await;
 }
 
