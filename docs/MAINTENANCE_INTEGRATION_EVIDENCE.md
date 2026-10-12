@@ -674,5 +674,17 @@ check additionally runs an execute-only binary: the failed executable
 fingerprint leaves copy stdout, payload bytes and exit status unchanged, with
 no verified receipt. Four released/current commands also preserve stdout,
 stderr and exit status beneath a mode-0555 root with writable SQLite sidecars.
-Scratch-cleanup failure handling was reviewed but was not independently fault
-injected in these drills; broader filesystem failure coverage remains open.
+The native cleanup drill independently injects an I/O error into removal of the
+completed task's top-level private directory. Its marker confirms that the
+fault occurred. The command succeeds with unchanged stdout, warns on stderr,
+retains its stored completion record and permits a released rebuild with the
+same output. Payload inventory receives no control objects. This closes that
+specific cleanup boundary; broader filesystem failure coverage remains open.
+
+```bash
+bash scripts/shardline/verify_maintenance_cleanup_failure.sh CURRENT RELEASED
+```
+
+This Linux-only drill compiles an owned test library that intercepts directory
+removal only beneath its fixture's private task root. It adds no production
+library, runtime setting or deployment dependency.
