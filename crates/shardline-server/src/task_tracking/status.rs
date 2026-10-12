@@ -358,7 +358,7 @@ impl TaskEvidenceStore {
             .collect()
     }
 
-    fn state(
+    pub(super) fn state(
         &self,
         identity: &TaskRunIdentity,
     ) -> Result<(TaskRunState, Option<bool>), ServerError> {

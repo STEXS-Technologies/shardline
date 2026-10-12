@@ -242,6 +242,11 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         ) {
             tracing::warn!("task evidence retention unavailable; serving continues: {error}");
         }
+        if let Err(error) = retention_store.relocate_finished_history(retention_deployment) {
+            tracing::warn!(
+                "legacy task history relocation unavailable; serving continues: {error}"
+            );
+        }
     });
     tracing::info!("embedded task tracker initialized; no separate tracker service required");
     let auth = build_auth_provider(&config).await?;

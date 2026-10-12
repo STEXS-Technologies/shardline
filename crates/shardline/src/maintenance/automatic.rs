@@ -209,6 +209,11 @@ fn run_inner(
                     "maintenance evidence retention unavailable; existing command continues: {error}"
                 );
             }
+            if let Err(error) = store.relocate_finished_history(deployment) {
+                tracing::warn!(
+                    "legacy task history relocation unavailable; existing command continues: {error}"
+                );
+            }
             super::journal::retry_exports(&state, &store, deployment)
         })();
         if let Err(error) = retry {

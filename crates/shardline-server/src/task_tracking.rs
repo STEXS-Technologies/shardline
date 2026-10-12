@@ -12,6 +12,7 @@ pub use owner::TaskOwner;
 mod history_observation;
 mod history_scope_binding;
 mod postgres_metadata;
+mod relocation;
 pub(crate) use history_observation::observe_work_pool;
 mod status;
 pub use status::{TaskRunState, TaskRunSummary};

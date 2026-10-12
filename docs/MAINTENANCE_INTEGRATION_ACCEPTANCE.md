@@ -556,3 +556,21 @@ CARGO_BIN_EXE_shardline=/absolute/path/to/CURRENT SHARDLINE_N_MINUS_ONE_BINARY=/
 
 Check that no drill was skipped. These passing boundaries do not close the other
 publication, reconciliation and deployment-scale requirements above.
+
+### Finished legacy history relocation
+
+Normal startup and maintenance now relocate verified completed or failed history
+to available metadata storage, with limits of 64 artifacts and 16 MiB per pass.
+Each artifact is copied and read back byte-for-byte before its original is
+removed; the manifest moves last. A later pass resumes partial relocation
+without replaying work. Invalid, unfinished, oversized and unrelated history
+remains in place. PostgreSQL relocation checks the signed work scope when present.
+Raw storage copy does not modify its source or require source write permission.
+
+Validation passed: 29 tracker tests against SQLite and PostgreSQL 16, including
+partial relocation, conflicting metadata, byte limits and different work scopes;
+strict CLI/server Clippy; and the native storage-copy script against released
+1.11.3. The native check recreated finished object-backed history, verified every
+relocated byte, then confirmed released 1.11.3 copied the original payload and
+retained its expected output. This covers the supported finished-history case,
+not every legacy deployment or S3-only storage-copy endpoint.
