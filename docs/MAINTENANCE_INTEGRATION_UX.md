@@ -53,8 +53,11 @@ automatically. A missing reply is not proof that nothing changed.
 The intended behavior is a clear retryable error for a later hold or write to
 an object whose earlier delete is unresolved. Other objects remain available.
 Retrying must not acknowledge protection until the earlier delete is settled.
-This protection is still being implemented; the current branch has the S3 race
-described below.
+The database guard is implemented for retention holds, including older hold
+writers after the usual owner-run `db migrate up`. It needs no new permissions
+for the existing retention writer role. GC still needs to record the pending
+delete before sending its S3 request, so the current branch has the race
+described below. This is not ready to rely on in production yet.
 
 Inspect `/api/v1/tasks/maintenance` with your existing admin token:
 

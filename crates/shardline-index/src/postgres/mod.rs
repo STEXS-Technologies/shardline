@@ -3,6 +3,7 @@ mod oci_objects;
 mod oci_tags;
 mod provider_mutation;
 mod record_store;
+mod remote_deletes;
 mod resumable_sessions;
 mod s3_objects;
 mod tree_store;
@@ -16,6 +17,7 @@ pub use provider_mutation::{
     PostgresProviderMutation, PostgresProviderMutationOutcome, PostgresResourceFence,
     ProviderRepositoryKey,
 };
+pub use remote_deletes::{PostgresRemoteDeletePermit, RemoteDeletePending};
 pub(crate) use resumable_sessions::refresh_resumable_state_digest;
 pub(crate) use types::RecordKind;
 pub use types::{

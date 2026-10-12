@@ -242,7 +242,7 @@ the stored object, so this precondition cannot distinguish the old and new
 Shardline owners. Idempotency alone likewise does not authorize a delete after
 the object's protection changes.
 
-The remaining design needs a durable effect gate: an uncertain issued delete
+The protocol needs a durable effect gate: an uncertain issued delete
 must prevent a later successful hold or reference publication from racing with
 it. Later requests for the affected object must return a clear retryable error
 instead of waiting indefinitely or acknowledging protection. This is the chosen
@@ -255,9 +255,28 @@ migration is not automatically compatible: the existing
 versions. An isolated Postgres fixture confirms that the released 1.11.3
 `db migrate up` exits with code 2 for an unknown migration record and succeeds
 again after removing that fixture record. This checks the released migrator,
-not a full released-server startup. The remote gate is not implemented yet. The
-explicitly ignored takeover regression must pass before this integration is
-ready to merge.
+not a full released-server startup.
+
+The first part is implemented in `PostgresIndexStore`: delete admission commits
+an object marker with a globally unique epoch before any remote request. A
+writer checks that marker while holding the same transaction through its
+publication. Exact-epoch settlement removes the marker; one persistent sequence
+prevents an old completion from matching a later attempt. Neither process death
+nor connection loss clears an unresolved marker.
+
+The existing owner-run `db migrate up` installs the read-only check and a
+retention trigger in one transaction, without adding migration-history records
+or changing released checksums. Runtime retention roles keep their existing
+grants. The trigger protects older hold writers too. Delete admission refuses
+to create a marker if the guard and trigger are missing. The definer functions
+use fixed search paths with temporary schemas last, following the
+[Postgres function guidance](https://www.postgresql.org/docs/16/sql-createfunction.html).
+
+Normal GC does not yet use this admission/settlement protocol. Other object
+publication paths also need transactional enforcement, and remote settlement
+requires proof that all issued attempts have settled. A successful retry cannot
+prove that an earlier request will never apply later. The explicitly ignored
+takeover regression must pass before this integration is ready to merge.
 
 Both modes use PostgreSQL's advisory-lock wait queue. A queued exclusive owner
 blocks later shared acquisitions. During acquisition, cancellation closes the

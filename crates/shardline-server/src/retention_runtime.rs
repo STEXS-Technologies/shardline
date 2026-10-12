@@ -270,6 +270,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_pending_remote_delete_returns_clear_retryable_hold_error() {
+        use axum::{
+            http::{StatusCode, header::RETRY_AFTER},
+            response::IntoResponse,
+        };
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let _test_guard = POSTGRES_TEST_LOCK.lock().await;
+        let storage = tempfile::tempdir().unwrap();
+        let config = config(storage.path())
+            .with_index_postgres_url(url.clone())
+            .unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let index = PostgresIndexStore::new(pool.clone());
+        let key =
+            ObjectKey::parse(&format!("retention/pending-delete-{}", std::process::id())).unwrap();
+        index.initialize_remote_delete_guard().await.unwrap();
+        let hold = RetentionHold::new(
+            key.clone(),
+            "pending delete protection".to_owned(),
+            shardline_protocol::unix_now_seconds_lossy(),
+            None,
+        )
+        .unwrap();
+        let owner = maintenance_barrier::postgres_exclusive_work_pool(&url)
+            .await
+            .unwrap();
+        let permit = PostgresIndexStore::new(owner.clone())
+            .begin_remote_delete(&key)
+            .await
+            .unwrap();
+        drop(permit);
+        owner.close().await;
+        let error = set_retention_hold(&config, &hold).await.unwrap_err();
+        assert!(error.is_remote_delete_pending());
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body.get("error").unwrap(),
+            "object has an unresolved remote delete; retry after reconciliation"
+        );
+        assert!(index.retention_hold(&key).await.unwrap().is_none());
+        let unrelated = RetentionHold::new(
+            ObjectKey::parse(&format!("{}/other", key.as_str())).unwrap(),
+            "unrelated protection".to_owned(),
+            hold.held_at_unix_seconds(),
+            None,
+        )
+        .unwrap();
+        set_retention_hold(&config, &unrelated).await.unwrap();
+        assert!(
+            release_retention_hold(&config, unrelated.object_key())
+                .await
+                .unwrap()
+        );
+        // This fixture never issued a remote request. Remove only its marker.
+        sqlx::query("DELETE FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1")
+            .bind(key.as_str()).execute(&pool).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn postgres_metadata_barrier_closes_retained_pool_handles_on_drop() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("skipping: no DATABASE_URL");
