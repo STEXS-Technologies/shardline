@@ -22,6 +22,7 @@ pub struct PostgresBackend {
     pub(super) index_store: PostgresIndexStore,
     pub(crate) gc_barrier_pool: sqlx::PgPool,
     pub(crate) resource_lock_pool: sqlx::PgPool,
+    pub(crate) request_session_identity: std::sync::Arc<()>,
     pub(super) record_store: PostgresRecordStore,
     pub(super) object_store: ServerObjectStore,
     pub(crate) stream_work_pool: crate::admission::BoundedPool,
@@ -115,6 +116,7 @@ impl PostgresBackend {
             resource_lock_pool: crate::maintenance_barrier::postgres_coordination_pool(
                 index_postgres_url,
             )?,
+            request_session_identity: std::sync::Arc::new(()),
             object_store,
             stream_work_pool: crate::admission::ExecutionPools::default_sizes().blocking_io,
         })

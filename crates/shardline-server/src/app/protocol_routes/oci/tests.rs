@@ -12,6 +12,84 @@ const REPO: &str = "team/assets";
 const TAG: &str = "latest";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() {
+    if std::env::var("DATABASE_URL").is_err() {
+        return;
+    }
+    let mut cluster = build_oci_postgres_test_cluster().await.unwrap();
+    let state = std::sync::Arc::get_mut(&mut cluster.node_a).unwrap();
+    let backend = match &mut state.backend {
+        crate::ServerBackend::Postgres(backend) => Some(backend),
+        crate::ServerBackend::Local(_) => None,
+    }
+    .unwrap();
+    let label = format!("oci_barrier_loss_{}", std::process::id());
+    let options = backend.index_store().pool().connect_options();
+    backend.gc_barrier_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*options).clone().application_name(&label));
+    let resource_label = format!("{label}_resource");
+    backend.resource_lock_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*options).clone().application_name(&resource_label));
+    let pool = backend.index_store().pool().clone();
+    backend
+        .index_store()
+        .initialize_remote_delete_guard()
+        .await
+        .unwrap();
+    let app = oci_test_router(&cluster.node_a);
+    let media = "application/vnd.oci.image.index.v1+json";
+    let before = format!(
+        r#"{{"schemaVersion":2,"mediaType":"{media}","manifests":[],"annotations":{{"value":"before"}}}}"#
+    );
+    let after = before.replace("before", "after");
+    let uri = "/v2/ownership/manifest/manifests/latest";
+    assert_eq!(
+        send_with_content_type(&app, Method::PUT, uri, Body::from(before.clone()), media)
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    sqlx::query("CREATE FUNCTION pause_publication() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); RETURN NEW; END $$")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER pause_publication BEFORE INSERT OR UPDATE ON shardline_oci_tags FOR EACH ROW EXECUTE FUNCTION pause_publication()")
+        .execute(&pool).await.unwrap();
+    let upload_app = app.clone();
+    let upload = tokio::spawn(async move {
+        send_with_content_type(&upload_app, Method::PUT, uri, Body::from(after), media).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let paused: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND application_name IN ($1, $2))")
+                .bind(&label).bind(&resource_label).fetch_one(&pool).await.unwrap();
+            if paused { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let terminated: bool = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
+    )
+    .bind(&label)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(terminated);
+    let response = upload.await.unwrap();
+    assert!(
+        response.status().is_server_error(),
+        "upload acknowledged after losing its GC barrier: {}",
+        response.status()
+    );
+    let latest = send(&app, Method::GET, uri, Body::empty()).await;
+    assert_eq!(latest.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(latest.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), before.as_bytes());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_ordinary_gc_reclaims_row_scoped_abandoned_manifest_after_hold_release() {
     use shardline_index::{AsyncIndexStore as _, OciObjectStore as _};
     let Ok(url) = std::env::var("DATABASE_URL") else {
