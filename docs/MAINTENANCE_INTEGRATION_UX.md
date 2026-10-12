@@ -47,7 +47,9 @@ On Postgres, this also covers publishing OCI blobs and manifests, changing a
 manifest tag, and removing a deletion tombstone. A pending manifest or its
 media-type sidecar blocks publication. Rejection preserves the previous tag
 and tombstone; publication can succeed after the delete is reconciled.
-References inside manifest payloads still need additional protection.
+New manifest uploads also check their validated config, layer, child-manifest
+and subject references in the publication transaction. Legacy tag-only writes
+cannot inspect those payload references and still need additional protection.
 
 If GC received a successful delete reply, it tries to save that reply in your
 existing object storage before recording completion in the database. The next

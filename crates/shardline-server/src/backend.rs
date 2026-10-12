@@ -923,6 +923,17 @@ impl ServerBackend {
         key: &OciObjectKey,
         tags: &[OciTagEntry],
     ) -> Result<(), ServerError> {
+        self.publish_oci_object_with_references_locked(guard, key, tags, &[])
+            .await
+    }
+
+    pub(crate) async fn publish_oci_object_with_references_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+        references: &[OciObjectKey],
+    ) -> Result<(), ServerError> {
         match self {
             Self::Local(backend) => {
                 if guard.postgres_connection_mut().is_some() {
@@ -936,7 +947,9 @@ impl ServerBackend {
                     .ok_or(ServerError::StaleResourceFence)?;
                 backend
                     .index_store()
-                    .publish_oci_object_on_connection(connection, key, tags)
+                    .publish_oci_object_with_references_on_connection(
+                        connection, key, tags, references,
+                    )
                     .await?;
                 Ok(())
             }

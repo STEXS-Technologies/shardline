@@ -2,6 +2,7 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode, header},
 };
+use shardline_index::OciTagStore as _;
 use tower::ServiceExt;
 
 use super::test_helpers::{build_oci_postgres_test_cluster, build_oci_test_state, oci_test_router};
@@ -9,6 +10,72 @@ use super::test_helpers::{build_oci_postgres_test_cluster, build_oci_test_state,
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const REPO: &str = "team/assets";
 const TAG: &str = "latest";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_manifest_dependency_pending_delete_returns_retryable_error() {
+    if std::env::var("DATABASE_URL").is_err() {
+        return;
+    }
+    let cluster = build_oci_postgres_test_cluster().await.unwrap();
+    let backend = match &cluster.node_a.backend {
+        crate::ServerBackend::Postgres(backend) => Some(backend),
+        crate::ServerBackend::Local(_) => None,
+    }
+    .unwrap();
+    let store = backend.index_store();
+    store.initialize_remote_delete_guard().await.unwrap();
+    let app_a = oci_test_router(&cluster.node_a);
+    let app_b = oci_test_router(&cluster.node_b);
+    let repository = format!("pending/dependency-{}", std::process::id());
+    let config = upload_blob(&app_a, &repository, b"{}").await;
+    let layer = upload_blob(&app_a, &repository, b"layr").await;
+    let document = test_manifest_json(&config, &layer);
+    let repository_id = sha256_hex(repository.as_bytes());
+    let physical = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/blobs/{layer}"
+    ))
+    .unwrap();
+    let permit = store.begin_remote_delete(&physical).await.unwrap();
+    let uri = format!("/v2/{repository}/manifests/latest");
+    let response = send_with_content_type(
+        &app_b,
+        Method::PUT,
+        &uri,
+        Body::from(document.clone()),
+        MANIFEST_MEDIA_TYPE,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 16_384)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("object has an unresolved remote delete; retry after reconciliation"));
+    assert!(
+        store
+            .oci_tag("global", &repository, "latest")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.finish_remote_delete(&permit).await.unwrap());
+    let response = send_with_content_type(
+        &app_b,
+        Method::PUT,
+        &uri,
+        Body::from(document),
+        MANIFEST_MEDIA_TYPE,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(
+        store
+            .oci_tag("global", &repository, "latest")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
 
 /// A minimal OCI image manifest for testing.
 fn test_manifest_json(config_digest: &str, layer_digest: &str) -> String {

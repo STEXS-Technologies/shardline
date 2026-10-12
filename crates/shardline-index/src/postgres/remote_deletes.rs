@@ -206,6 +206,7 @@ impl PostgresIndexStore {
                                     'shardline_stored_objects'::regclass)
                   AND tgname='shardline_reference_remote_delete_v1' AND tgenabled='O') = 3
              AND to_regprocedure(format('%I.shardline_oci_publication_remote_delete_v1(text,text,text,text,text)', current_schema())) IS NOT NULL
+             AND to_regprocedure(format('%I.shardline_oci_publication_references_remote_delete_v1(text,jsonb)', current_schema())) IS NOT NULL
              AND (SELECT count(*) FROM pg_trigger
                   WHERE tgrelid IN ('shardline_oci_tags'::regclass, 'shardline_oci_object_tombstones'::regclass)
                   AND tgname='shardline_oci_reference_remote_delete_v1' AND tgenabled='O') = 2",

@@ -145,7 +145,8 @@ pub(crate) async fn oci_put_manifest(
         .backend
         .acquire_resource_write_lock(state.config.root_dir(), &lock_key)
         .await?;
-    validate_oci_manifest_document(state, repository, auth, &media_type, &bytes).await?;
+    let references =
+        validate_oci_manifest_document(state, repository, auth, &media_type, &bytes).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
     let _stored_manifest = state
@@ -166,6 +167,7 @@ pub(crate) async fn oci_put_manifest(
         auth,
         &accepted_tags,
         &digest_hex,
+        &references,
     )
     .await?;
     repository_guard.assert_current().await?;
@@ -245,7 +247,7 @@ async fn validate_oci_manifest_document(
     auth: &AuthorizedRepository,
     media_type: &str,
     bytes: &[u8],
-) -> Result<(), ServerError> {
+) -> Result<Vec<shardline_index::OciObjectKey>, ServerError> {
     let document: Value = serde_json::from_slice(bytes).map_err(|e| {
         tracing::warn!(error = %e, "invalid manifest json");
         ServerError::InvalidManifestReference
@@ -257,22 +259,25 @@ async fn validate_oci_manifest_document(
     {
         return Err(ServerError::InvalidManifestReference);
     }
+    let mut references = Vec::new();
     if let Some(subject) = document.get("subject") {
         // Per the OCI Distribution spec, a registry MUST accept a manifest
         // with a subject field that references a manifest that does not exist.
         // We validate the descriptor format but do not check existence.
-        validate_oci_descriptor(subject)?;
+        let (digest_hex, _) = validate_oci_descriptor(subject)?;
+        references.push(oci_manifest_index_key(repository, &digest_hex, auth));
     }
 
-    match normalized_media_type {
+    references.extend(match normalized_media_type {
         OCI_IMAGE_MANIFEST_MEDIA_TYPE | DOCKER_SCHEMA2_MANIFEST_MEDIA_TYPE => {
-            validate_oci_image_manifest_document(state, repository, auth, &document).await
+            validate_oci_image_manifest_document(state, repository, auth, &document).await?
         }
         OCI_IMAGE_INDEX_MEDIA_TYPE | DOCKER_SCHEMA2_MANIFEST_LIST_MEDIA_TYPE => {
-            validate_oci_image_index_document(state, repository, auth, &document).await
+            validate_oci_image_index_document(state, repository, auth, &document).await?
         }
-        _ => Err(ServerError::InvalidManifestReference),
-    }
+        _ => return Err(ServerError::InvalidManifestReference),
+    });
+    Ok(references)
 }
 
 fn validate_oci_schema_version(document: &Value) -> Result<(), ServerError> {
@@ -287,7 +292,7 @@ async fn validate_oci_image_manifest_document(
     repository: &str,
     auth: &AuthorizedRepository,
     document: &Value,
-) -> Result<(), ServerError> {
+) -> Result<Vec<shardline_index::OciObjectKey>, ServerError> {
     let config = document
         .get("config")
         .ok_or(ServerError::InvalidManifestReference)?;
@@ -311,7 +316,10 @@ async fn validate_oci_image_manifest_document(
         }
     }
 
-    Ok(())
+    Ok(verified_sizes
+        .into_keys()
+        .map(|digest_hex| oci_blob_index_key(repository, &digest_hex, auth))
+        .collect())
 }
 
 async fn validate_oci_image_index_document(
@@ -319,7 +327,7 @@ async fn validate_oci_image_index_document(
     repository: &str,
     auth: &AuthorizedRepository,
     document: &Value,
-) -> Result<(), ServerError> {
+) -> Result<Vec<shardline_index::OciObjectKey>, ServerError> {
     let manifests = document
         .get("manifests")
         .and_then(Value::as_array)
@@ -337,7 +345,10 @@ async fn validate_oci_image_index_document(
         }
     }
 
-    Ok(())
+    Ok(verified_sizes
+        .into_keys()
+        .map(|digest_hex| oci_manifest_index_key(repository, &digest_hex, auth))
+        .collect())
 }
 
 fn validate_oci_descriptor(descriptor: &Value) -> Result<(String, u64), ServerError> {
