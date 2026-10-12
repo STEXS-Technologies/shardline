@@ -60,6 +60,8 @@ lost. A rejected publication preserves the previous tag and manifest.
 Partial-upload writes use the same protection. If ownership is lost before a
 part commits, that part does not advance recorded progress. The client can
 check the upload and retry.
+Upload-session creation and completion changes also stop when that connection
+is lost. No extra service or configuration is needed.
 The usual owner-run database upgrade adds hidden manifests to the existing OCI
 deletion inventory. Ordinary GC also discovers missing entries from interrupted
 uploads, including uploads made by accounts with row policies. It reclaims them
