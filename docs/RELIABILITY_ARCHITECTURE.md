@@ -365,6 +365,23 @@ The generic legacy GC library entry points preserve their signatures; embedders
 wanting this boundary use `run_postgres_gc_with_remote_delete_protection` with
 the same ownership-bound record and index adapters.
 
+The additive receipt API provides a foundation for preserving a known successful
+reply when database settlement is unavailable. `begin_remote_delete_with_receipt`
+registers a fresh attempt's public signing key atomically with its pending marker.
+The private key stays with the caller. A signed reply binds the admitted schema,
+durable metadata namespace, object and epoch. Settlement verifies the signature,
+namespace and registered key before clearing that exact marker under the existing
+object locks. Direct settlement of these permits performs the same identity
+checks. Tampered, foreign and stale receipts cannot clear a pending attempt.
+Settlement removes the registered key with the marker; existing GC privileges
+suffice without fence-table grants. Owner-run `db migrate up` installs the
+functions without changing the released migration catalog.
+
+These are tested metadata primitives. Normal GC does not yet save signed replies
+durably, and ordinary repair does not yet consume them. A signature records a
+trusted caller's observed reply; it does not prove provider health or settle a
+request whose reply was never received. Automatic recovery remains unfinished.
+
 The dedupe trigger checks both the mapped shard key and the physical chunk key
 derived from a canonical 64-character lowercase hash. It locks their distinct
 bounded slots in sorted order before checking exact markers. Inserts and hash

@@ -40,6 +40,12 @@ This document is for reviewers deciding whether the integration is safe to ship.
   records failure. An observed successful single-attempt reply now permits
   exact-epoch settlement through an independent recorder using the same database
   credentials; no GC work resumes. Missing replies remain unresolved.
+  Additive signed-reply primitives now bind an observed reply to its registered
+  attempt key and durable metadata namespace. PostgreSQL tests reject tampering,
+  stale attempts and other targets, and verify settlement after the source
+  connection closes using the existing GC role without fence-table grants.
+  Normal GC persistence and repair consumption of these replies remain
+  unfinished. This does not recover a delete whose reply was never received.
   Normal Postgres/S3 GC now admits quarantine, OCI tombstone and resumable-staging
   deletes durably, sends each through a client with mutation retries disabled,
   and settles only a successful response. Its work remains on the original

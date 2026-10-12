@@ -19,6 +19,8 @@ pub use provider_mutation::{
     ProviderRepositoryKey,
 };
 pub use remote_deletes::{PostgresRemoteDeletePermit, RemoteDeletePending};
+mod remote_delete_receipts;
+pub use remote_delete_receipts::RemoteDeleteReceipt;
 pub(crate) use resumable_sessions::refresh_resumable_state_digest;
 pub(crate) use types::RecordKind;
 pub use types::{
