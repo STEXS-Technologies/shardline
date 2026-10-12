@@ -125,6 +125,7 @@ impl PostgresIndexStore {
             "SELECT to_regprocedure('shardline_remote_delete_guard_v1(text,text)') IS NOT NULL
              AND to_regprocedure('shardline_remote_delete_begin_v1(text,text)') IS NOT NULL
              AND to_regprocedure('shardline_remote_delete_finish_v1(text,text,bigint)') IS NOT NULL
+             AND to_regprocedure('shardline_reference_keys_remote_delete_v1(text,text[])') IS NOT NULL
              AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_retention_holds'::regclass
                         AND tgname='shardline_retention_remote_delete_v1' AND tgenabled='O')
              AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_dedupe_shards'::regclass
@@ -628,6 +629,9 @@ mod tests {
                 serde_json::json!({"chunk_size": 0, "chunks": [{"hash": hash_to_publish}]});
             let terms = serde_json::json!({"terms": [{"object_hash": hash_to_publish}]});
             let results = [
+                query("SELECT shardline_reference_keys_remote_delete_v1(current_schema(), $1)")
+                    .bind(vec![format!("xorbs/default/{}/{}.xorb", hash_to_publish.get(..2).unwrap(), hash_to_publish)])
+                    .execute(&mut *connection).await,
                 query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ($1,'version','global','file','content',$2)")
                     .bind(&hash_to_publish).bind(sqlx::types::Json(record)).execute(&mut *connection).await,
                 query("INSERT INTO shardline_file_reconstructions(file_id,terms) VALUES ($1,$2)")
@@ -670,6 +674,7 @@ mod tests {
             "SELECT shardline_remote_delete_guard_v1('public', 'remote-delete/scope')",
             "SELECT shardline_remote_delete_begin_v1('public', 'remote-delete/scope')",
             "SELECT shardline_remote_delete_finish_v1('public', 'remote-delete/scope', 1)",
+            "SELECT shardline_reference_keys_remote_delete_v1('public', ARRAY['remote-delete/scope'])",
         ] {
             let error = query(sql).execute(&pool).await.unwrap_err();
             assert_eq!(

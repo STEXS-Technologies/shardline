@@ -288,6 +288,19 @@ The definer functions
 use fixed search paths with temporary schemas last, following the
 [Postgres function guidance](https://www.postgresql.org/docs/16/sql-createfunction.html).
 
+Current native Postgres shard uploads also derive physical member-chunk keys
+from validated xorb descriptors, ignoring the optional chunk-cache sidecar.
+The additive `commit_native_shard_metadata_with_remote_delete_references`
+method checks those keys and their existing dedupe mappings in the same
+transaction as version, mapping and latest publication. Its schema-bound
+definer check uses the caller's existing record-column write privilege, so it
+requires no new retention/fence grant. Existing method signatures and record
+formats remain unchanged. Legacy schemas preserve their previous behavior;
+guarded GC admission requires the installed member-check function. Older
+SQL-only writers do not derive member keys, and other publication paths still
+need equivalent coverage. The implementation currently rereads referenced
+xorbs; large native-upload cost remains part of the scale gate.
+
 Normal Postgres/S3 GC uses this protocol for quarantine, OCI tombstone and
 resumable-staging deletion. The guarded client sends a single-object DELETE with
 retries disabled, following the dependency's
