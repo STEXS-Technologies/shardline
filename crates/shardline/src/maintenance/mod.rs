@@ -2,6 +2,7 @@
 mod artifact;
 mod automatic;
 mod capture;
+mod cleanup;
 pub(crate) mod configuration;
 mod controller;
 mod evidence;
