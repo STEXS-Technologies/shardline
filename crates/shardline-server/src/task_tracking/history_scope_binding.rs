@@ -32,6 +32,80 @@ fn message(scope: Digest, manifest: Digest) -> Result<Vec<u8>, ServerError> {
 }
 
 impl TaskEvidenceStore {
+    pub(super) async fn publish_scope_on_work_connection(
+        &self,
+        identity: &TaskRunIdentity,
+        key: &SigningKey,
+        scope: Digest,
+        connection: &mut sqlx::PgConnection,
+    ) -> Result<bool, ServerError> {
+        let Some(metadata) = &self.postgres_metadata else {
+            return Ok(false);
+        };
+        if metadata.scope != scope || key.verifying_key().as_bytes() != &identity.public_key {
+            return Err(invalid());
+        }
+        // Legacy duplicates must agree too. This read uses only the existing
+        // object adapter, never a second PostgreSQL connection.
+        let legacy = Self::from_objects(self.objects.clone());
+        let observed = identity.clone();
+        let (legacy, legacy_binding) = tokio::task::spawn_blocking(move || {
+            let manifest = legacy.binding_manifest(&observed)?;
+            let binding = legacy.read(
+                &format!("scope-bindings/{}", observed.id),
+                MAX_BINDING_BYTES,
+            )?;
+            Ok::<_, ServerError>((manifest, binding))
+        })
+        .await
+        .map_err(|error| ServerError::Io(std::io::Error::other(error)))??;
+        let manifest_key = Self::key(&format!("manifests/{}", identity.id))?;
+        let stored = shardline_index::PostgresIndexStore::read_task_artifact_on_connection(
+            connection,
+            manifest_key.as_str(),
+            65536,
+        )
+        .await?;
+        let stored = stored
+            .map(|artifact| artifact.bytes.ok_or(ServerError::RequestBodyTooLarge))
+            .transpose()?;
+        if let (Some(stored), Some(legacy)) = (&stored, &legacy)
+            && stored != legacy
+        {
+            return Err(invalid());
+        }
+        let manifest = stored.or(legacy).ok_or_else(invalid)?;
+        let parsed: TaskRunIdentity =
+            serde_json::from_slice(&manifest).map_err(|_error| invalid())?;
+        if serde_json::to_vec(&parsed)? != serde_json::to_vec(identity)? {
+            return Err(invalid());
+        }
+        let binding = Binding {
+            schema: 1,
+            scope,
+            manifest: Digest::of(&manifest),
+            signature: key
+                .sign(&message(scope, Digest::of(&manifest))?)
+                .to_bytes()
+                .to_vec(),
+        };
+        let binding_key = Self::key(&format!("scope-bindings/{}", identity.id))?;
+        let bytes = serde_json::to_vec(&binding)?;
+        if legacy_binding
+            .as_ref()
+            .is_some_and(|previous_binding| previous_binding != &bytes)
+        {
+            return Err(invalid());
+        }
+        shardline_index::PostgresIndexStore::publish_task_artifact_on_connection(
+            connection,
+            binding_key.as_str(),
+            &bytes,
+        )
+        .await?;
+        Ok(true)
+    }
+
     fn binding_manifest(&self, identity: &TaskRunIdentity) -> Result<Option<Vec<u8>>, ServerError> {
         if identity.schema != 1
             || identity.id.is_empty()

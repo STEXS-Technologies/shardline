@@ -97,7 +97,8 @@ Installation waits for current writes and maintenance. Runtime accounts need no
 new fence-table grant. See the [database migration guide](DATABASE_MIGRATIONS.md).
 
 New local and upgraded server history stays separate from user payload data.
-CLI Postgres/S3 history, earlier object-backed history and storage-copy endpoints
+Ordinary Postgres GC, rebuild and repair also use metadata history when the
+account supports it. Earlier object-backed history and storage-copy endpoints
 still need that separation verified for mixed-version upgrades and rollback.
 Jobs using a different database/schema from server startup also need storage
 routing to their actual work target. Narrowly privileged accounts may retain

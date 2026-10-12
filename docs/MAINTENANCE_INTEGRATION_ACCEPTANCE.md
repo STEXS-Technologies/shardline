@@ -266,9 +266,25 @@ This document is for reviewers deciding whether the integration is safe to ship.
   All 23 tracker tests pass against owned PostgreSQL, including the runtime
   guard and public cross-login summaries; the external API example compiles
   as a Rust doctest and strict server Clippy passes.
-  CLI and configuration-only library stores still use object-backed PostgreSQL/S3
-  evidence. CLI routing, full connection/resource limits and supported
-  row-scoped history remain unfinished.
+  Ordinary PostgreSQL CLI tracking now selects metadata storage through the
+  additive `from_postgres_pool` API. Its one-connection evidence pool lasts
+  through command completion, independently of the closed lock-owning work
+  pool. Evidence connections close after each operation, avoiding an idle
+  session that could exhaust a restricted login's connection limit. The scope
+  binding is saved on the actual work session. Neither path replaces a work
+  session or authorizes effects. Both ordinary
+  tracking paths and retained local-journal exports use this selection.
+  Metadata initialization failures warn and retain legacy tracking; storage
+  copies retain their existing database-independent behavior. Configuration-only
+  library stores and the optional runner still use legacy PostgreSQL/S3 storage.
+  Full connection/resource limits, source-specific routing, legacy-artifact
+  relocation, copy isolation and supported row-scoped history remain unfinished.
+  All nine CLI maintenance tests pass against owned PostgreSQL bootstrapped by
+  released 1.11.3. A real non-superuser login with a one-connection limit runs
+  GC mark, rebuild and repair through both ordinary tracking paths. All six
+  results verify as completed with their actual work scope and original PID;
+  payload task inventory and remaining sessions for that login are empty.
+  All 23 server tracker regressions and strict CLI/server Clippy also pass.
   All 22 server task-tracking tests pass against an owned PostgreSQL fixture
   bootstrapped by released 1.11.3. New tests close the original backend pool,
   verify completed history and reports from a fresh backend, retain and retire
@@ -292,7 +308,7 @@ This document is for reviewers deciding whether the integration is safe to ship.
   Server stores reject a signed work-scope binding that differs from their
   selected metadata target. Jobs whose work target differs from the server's
   inspection target still need source-specific storage routing; this change
-  does not establish that association or switch CLI/runner storage.
+  does not establish that association or switch optional runner storage.
   The native mixed-version OCI/S3 drill passes with this owner extension: the
   released ledger and original table grants are unchanged, the existing writer
   has no direct artifact-table access, and prior publication/crash guarantees
