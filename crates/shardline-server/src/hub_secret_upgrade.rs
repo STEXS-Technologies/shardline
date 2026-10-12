@@ -134,5 +134,4 @@ pub(crate) fn run(
 }
 
 #[cfg(test)]
-#[path = "hub_secret_upgrade_tests.rs"]
 mod tests;

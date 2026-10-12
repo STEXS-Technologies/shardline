@@ -245,7 +245,6 @@ pub(super) fn retry_exports(
 }
 
 #[cfg(test)]
-#[path = "journal_tests.rs"]
 mod tests;
 
 impl TaskJournal for PublishedJournal {

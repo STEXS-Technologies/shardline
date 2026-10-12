@@ -61,5 +61,4 @@ pub(crate) fn endpoint(side: &str) -> Option<StorageMigrationEndpoint> {
 }
 
 #[cfg(test)]
-#[path = "configuration_tests.rs"]
 mod tests;
