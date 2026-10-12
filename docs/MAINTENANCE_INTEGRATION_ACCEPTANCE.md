@@ -81,6 +81,18 @@ This document is for reviewers deciding whether the integration is safe to ship.
   selected for provider behavior passed before these additional tests.
   Mutations outside guarded publication remain open;
   these tests do not prove deployment health or remote exactly-once effects.
+  Ordinary file and native shard publication now also borrow the matching
+  request's ownership connection for their final metadata transaction. The
+  additive record-store methods preserve existing library signatures and
+  reference checks. A backend regression terminates the real request session,
+  rejects a file overwrite and native shard publication with the previous
+  record snapshot unchanged, then successfully retries both. All 28 upload
+  tests and all ten record-store tests pass against a migrated Postgres fixture,
+  and strict index/server lint
+  passes. The first broad run exposed fixture ordering: one xorb test ran before
+  another test installed the public schema; rerunning against that schema passes.
+  Native HTTP interruption coverage, upload-intent phase ownership and library
+  callers outside request sessions remain open.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.

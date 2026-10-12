@@ -2,6 +2,8 @@ mod admin_api;
 mod metadata_routes;
 mod operational;
 mod protocol_routes;
+#[cfg(test)]
+pub(crate) use protocol_routes::oci::test_helpers::build_oci_postgres_test_cluster;
 mod provider;
 mod provider_routes;
 mod reconstruction_helpers;

@@ -124,7 +124,22 @@ impl super::PostgresRecordStore {
         &self,
         record: &FileRecord,
     ) -> Result<(), PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        self.commit_file_version_metadata_on_connection(&mut connection, record)
+            .await
+    }
+
+    /// Commits a file version and latest alias on the caller's ownership session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or metadata error without replacing a lost connection.
+    pub async fn commit_file_version_metadata_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        record: &FileRecord,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
         let version_locator = self.version_record_locator(record);
         upsert_record_in_transaction(&mut transaction, &version_locator, record).await?;
         let latest_locator = self.latest_record_locator(record);
@@ -443,7 +458,30 @@ impl super::PostgresRecordStore {
         dedupe_mappings: &[DedupeShardMapping],
         references: &[shardline_storage::ObjectKey],
     ) -> Result<(), PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        self.commit_native_shard_metadata_on_connection(
+            &mut connection,
+            records,
+            dedupe_mappings,
+            references,
+        )
+        .await
+    }
+
+    /// Publishes native records, mappings and reference checks on one ownership session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a pending-delete, metadata or database error. A lost connection is
+    /// never replaced by a connection from the store's pool.
+    pub async fn commit_native_shard_metadata_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
         if !references.is_empty()
             && query_scalar::<_, bool>(
                 "SELECT to_regprocedure('shardline_reference_keys_remote_delete_v1(text,text[])') IS NOT NULL",
