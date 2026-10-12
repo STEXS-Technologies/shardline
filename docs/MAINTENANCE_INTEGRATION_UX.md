@@ -161,7 +161,7 @@ storage-copy rollback isolation and deployment-scale limits still need work.
 New local history now stays out of released payload copies. Earlier object-backed
 history, Postgres/S3 CLI history and storage-copy endpoints still need that
 isolation before the upgrade is ready. Server history now uses Postgres metadata;
-CLI and library readers still need integration with that storage.
+CLI storage routing still needs integration with that database.
 
 The usual owner-run `shardline db migrate up` installs the protection functions,
 even with no pending migration entries. Runtime accounts need no new fence-table

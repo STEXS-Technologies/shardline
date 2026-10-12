@@ -257,8 +257,17 @@ This document is for reviewers deciding whether the integration is safe to ship.
   readable, and retention removes both formats. Unsupported owner installations
   and row-scoped schemas retain legacy behavior. Unexpected metadata failures
   return an inspection error, while startup preserves serving availability.
+  Library embedders can reuse an existing backend through the public async
+  `TaskEvidenceStore::from_backend` constructor. The returned scope works with
+  `summaries_with_scope` and the existing report API; it is a history filter,
+  not execution authority. No extra pool or runtime is created. Calls outside
+  a Tokio runtime return a prompt error instead of panicking. The existing
+  synchronous constructor and summary method preserve their behavior.
+  All 23 tracker tests pass against owned PostgreSQL, including the runtime
+  guard and public cross-login summaries; the external API example compiles
+  as a Rust doctest and strict server Clippy passes.
   CLI and configuration-only library stores still use object-backed PostgreSQL/S3
-  evidence. Their routing, full connection/resource limits and supported
+  evidence. CLI routing, full connection/resource limits and supported
   row-scoped history remain unfinished.
   All 22 server task-tracking tests pass against an owned PostgreSQL fixture
   bootstrapped by released 1.11.3. New tests close the original backend pool,

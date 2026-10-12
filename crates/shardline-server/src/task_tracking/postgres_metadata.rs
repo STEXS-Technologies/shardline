@@ -26,14 +26,34 @@ impl fmt::Debug for PostgresTaskMetadata {
 }
 
 impl TaskEvidenceStore {
-    /// Selects metadata only after resolving an actual backend session. Older
+    /// Reuses a backend and the configuration used to create it. Selects
+    /// metadata only after resolving an actual backend session. Older
     /// owner installations retain legacy reads and publication. No pool,
     /// runtime, process, runtime DDL or new connection configuration is created.
     ///
+    /// PostgreSQL needs an active Tokio runtime. Use the synchronous evidence
+    /// methods on a blocking thread while that runtime remains alive. Pass the
+    /// returned scope to [`Self::summaries_with_scope`] and [`Self::embedded_report`].
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # async fn example(config: shardline_server::ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    /// use shardline_server::{ServerBackend, task_tracking::{TaskEvidenceStore, deployment_fingerprint}};
+    /// let backend = ServerBackend::from_config(&config).await?;
+    /// let (store, scope) = TaskEvidenceStore::from_backend(&config, &backend).await?;
+    /// let deployment = deployment_fingerprint(&config)?;
+    /// let history = tokio::task::spawn_blocking(move || {
+    ///     store.summaries_with_scope(deployment, scope, None, 20)
+    /// }).await??;
+    /// # let _ = history;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
-    /// Returns unexpected metadata failures or a timeout. Inspection must expose
-    /// these failures; startup may preserve optional legacy tracking instead.
-    pub(crate) async fn from_backend(
+    /// Returns a missing runtime, unexpected metadata failures or a timeout.
+    /// Inspection must expose these failures; startup may preserve optional
+    /// legacy tracking instead.
+    pub async fn from_backend(
         config: &ServerConfig,
         backend: &ServerBackend,
     ) -> Result<(Self, Option<Digest>), ServerError> {
@@ -42,6 +62,8 @@ impl TaskEvidenceStore {
             return Ok((store, None));
         };
         let pool = postgres.index_store().pool();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
         let resolved = tokio::time::timeout(Duration::from_secs(5), async {
             let mut connection = pool.acquire().await
                 .map_err(PostgresMetadataStoreError::from)?;
@@ -76,7 +98,7 @@ impl TaskEvidenceStore {
                 if installed {
                     store.postgres_metadata = Some(PostgresTaskMetadata {
                         pool: pool.clone(),
-                        handle: tokio::runtime::Handle::current(),
+                        handle,
                         config: config.clone(),
                         scope,
                     });
