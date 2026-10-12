@@ -54,8 +54,11 @@ The intended behavior is a clear retryable error for a later hold or write to
 an object whose earlier delete is unresolved. Other objects remain available.
 Retrying must not acknowledge protection until the earlier delete is settled.
 Postgres/S3 GC now records the pending delete before sending its request. A
-successful reply clears that marker while GC still owns its database session.
-If the reply or ownership is lost, the marker stays pending. A replacement GC
+successful reply clears that marker. If GC has lost its database lock but still
+receives that reply, Shardline can record the exact delete's completion using
+the same database credentials. GC still stops with an error; it cannot resume
+work on a replacement connection. No extra process or configuration is needed.
+If the reply is missing, or completion cannot be saved, the marker stays pending. A replacement GC
 does not repeat it, and later holds receive the retryable error. Publishing a
 dedupe mapping or direct file/reconstruction reference to that object also
 returns the retryable error. Rejected updates preserve the previous metadata.

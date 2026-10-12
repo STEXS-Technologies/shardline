@@ -165,8 +165,19 @@ pub async fn run_gc_diagnostics(
         } else {
             connect_postgres_metadata_pool(index_postgres_url, 4)?
         };
+        let settlement_pool = if options.sweep && matches!(object_store, ServerObjectStore::S3(_)) {
+            Some(connect_postgres_metadata_pool(index_postgres_url, 1)?)
+        } else {
+            None
+        };
         let result = async {
-            let index_store = PostgresIndexStore::new(pool.clone());
+            let index_store = settlement_pool.as_ref().map_or_else(
+                || PostgresIndexStore::new(pool.clone()),
+                |recorder| {
+                    PostgresIndexStore::new(pool.clone())
+                        .with_remote_delete_settlement_pool(recorder.clone())
+                },
+            );
             let record_store = PostgresRecordStore::new(pool.clone());
             let staging_report =
                 reclaim_postgres_resumable_staging(&index_store, &object_store, options.sweep)
@@ -191,6 +202,9 @@ pub async fn run_gc_diagnostics(
         }
         .await;
         pool.close().await;
+        if let Some(recorder) = settlement_pool {
+            recorder.close().await;
+        }
         return result;
     }
 

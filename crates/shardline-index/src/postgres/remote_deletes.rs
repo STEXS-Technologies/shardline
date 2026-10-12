@@ -20,6 +20,7 @@ const REMOTE_DELETE_SEQUENCE_DOMAIN: &str = "maintenance-remote-delete-sequence"
 pub struct PostgresRemoteDeletePermit {
     object_key: ObjectKey,
     epoch: i64,
+    schema: String,
 }
 
 impl PostgresRemoteDeletePermit {
@@ -196,29 +197,29 @@ impl PostgresIndexStore {
                 "remote delete protection requires the existing db migrate up command".to_owned(),
             ));
         }
-        let epoch =
-            query_scalar::<_, i64>("SELECT shardline_remote_delete_begin_v1(current_schema(), $1)")
-                .bind(object_key.as_str())
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(|error| {
-                    if error
-                        .as_database_error()
-                        .and_then(|error| error.code())
-                        .as_deref()
-                        == Some("SLD02")
-                    {
-                        PostgresMetadataStoreError::IntegerOutOfRange(
-                            "remote delete epoch".to_owned(),
-                        )
-                    } else {
-                        PostgresMetadataStoreError::from(error)
-                    }
-                })?;
+        let (schema, epoch) = sqlx::query_as::<_, (String, i64)>(
+            "SELECT current_schema(), shardline_remote_delete_begin_v1(current_schema(), $1)",
+        )
+        .bind(object_key.as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref()
+                == Some("SLD02")
+            {
+                PostgresMetadataStoreError::IntegerOutOfRange("remote delete epoch".to_owned())
+            } else {
+                PostgresMetadataStoreError::from(error)
+            }
+        })?;
         transaction.commit().await?;
         Ok(PostgresRemoteDeletePermit {
             object_key: object_key.clone(),
             epoch,
+            schema,
         })
     }
 
@@ -239,15 +240,49 @@ impl PostgresIndexStore {
         permit: &PostgresRemoteDeletePermit,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let changed = query_scalar::<_, bool>(
-            "SELECT shardline_remote_delete_finish_v1(current_schema(), $1, $2)",
-        )
+        let quoted_schema = format!("\"{}\"", permit.schema.replace('"', "\"\""));
+        let changed = query_scalar::<_, bool>(sqlx::AssertSqlSafe(format!(
+            "SELECT {quoted_schema}.shardline_remote_delete_finish_v1($1, $2, $3)"
+        )))
+        .bind(&permit.schema)
         .bind(permit.object_key().as_str())
         .bind(permit.epoch())
         .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;
         Ok(changed)
+    }
+
+    /// Settles an attempt after a successful response proves every issued
+    /// remote request has finished. Call only after a single-attempt delete, or
+    /// with equivalent proof that no earlier request can still apply later.
+    ///
+    /// If the original session fails, an explicitly supplied settlement pool
+    /// may record this exact attempt's completion. The original error is still
+    /// returned: this does not authorize continued GC work or new mutations.
+    /// A missing response, elapsed time, lost owner, or absent object is not
+    /// sufficient evidence to call this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original work-session failure even if completion is recorded
+    /// independently. Without independent settlement, the marker stays pending.
+    pub async fn finish_acknowledged_remote_delete(
+        &self,
+        permit: &PostgresRemoteDeletePermit,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        match self.finish_remote_delete(permit).await {
+            Ok(changed) => Ok(changed),
+            Err(work_error) => {
+                if let Some(pool) = &self.remote_delete_settlement_pool {
+                    // A failed or ambiguous commit is also safe: exact-epoch
+                    // settlement cannot remove a newer admitted attempt.
+                    let recorder = Self::new(pool.clone());
+                    let _settlement = recorder.finish_remote_delete(permit).await;
+                }
+                Err(work_error)
+            }
+        }
     }
 
     /// Rejects a pending delete in the same transaction as a later publication.
@@ -288,6 +323,114 @@ impl PostgresIndexStore {
 mod tests {
     use super::*;
     use crate::{AsyncIndexStore, RecordTraversal, RetentionHold};
+
+    #[tokio::test]
+    async fn acknowledged_settlement_never_restores_work_ownership_or_clears_a_new_attempt() {
+        let Some(observer_pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let schema: String = query_scalar("SELECT current_schema()")
+            .fetch_one(&observer_pool)
+            .await
+            .unwrap();
+        let search_path = format!(
+            "SET search_path TO \"{}\", public",
+            schema.replace('"', "\"\"")
+        );
+        let work_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |connection, _metadata| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    query(sqlx::AssertSqlSafe(search_path))
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*observer_pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let work = PostgresIndexStore::new(work_pool.clone());
+        let observer = PostgresIndexStore::new(observer_pool.clone());
+        let key = ObjectKey::parse("settlement/acknowledged").unwrap();
+        let permit = work.begin_remote_delete(&key).await.unwrap();
+        let alternate_pool = super::super::connect_isolated_postgres().await.unwrap();
+        let alternate = PostgresIndexStore::new(alternate_pool.clone());
+        let alternate_permit = alternate.begin_remote_delete(&key).await.unwrap();
+        assert_eq!(alternate_permit.epoch(), permit.epoch());
+        work_pool.close().await;
+        // No recorder preserves the original API's conservative behavior.
+        assert!(
+            work.finish_acknowledged_remote_delete(&permit)
+                .await
+                .is_err()
+        );
+        assert!(
+            observer
+                .begin_remote_delete(&key)
+                .await
+                .unwrap_err()
+                .is_remote_delete_pending()
+        );
+        // Even a different default search path must settle only the schema
+        // captured at admission, never a coincident epoch in another schema.
+        let acknowledged = work.with_remote_delete_settlement_pool(alternate_pool);
+        assert!(
+            acknowledged
+                .finish_acknowledged_remote_delete(&permit)
+                .await
+                .is_err()
+        );
+        assert!(acknowledged.pool().is_closed());
+        assert!(
+            alternate
+                .begin_remote_delete(&key)
+                .await
+                .unwrap_err()
+                .is_remote_delete_pending()
+        );
+        assert!(acknowledged.begin_remote_delete(&key).await.is_err());
+        let next = observer.begin_remote_delete(&key).await.unwrap();
+        assert!(next.epoch() > permit.epoch());
+        // A duplicated completion, including an ambiguous original commit,
+        // must not clear the newer attempt or return successful work ownership.
+        assert!(
+            acknowledged
+                .finish_acknowledged_remote_delete(&permit)
+                .await
+                .is_err()
+        );
+        assert!(
+            observer
+                .begin_remote_delete(&key)
+                .await
+                .unwrap_err()
+                .is_remote_delete_pending()
+        );
+        let unavailable = PostgresIndexStore::new(work_pool.clone())
+            .with_remote_delete_settlement_pool(work_pool);
+        assert!(
+            unavailable
+                .finish_acknowledged_remote_delete(&next)
+                .await
+                .is_err()
+        );
+        assert!(
+            observer
+                .begin_remote_delete(&key)
+                .await
+                .unwrap_err()
+                .is_remote_delete_pending()
+        );
+        assert!(observer.finish_remote_delete(&next).await.unwrap());
+        assert!(
+            alternate
+                .finish_remote_delete(&alternate_permit)
+                .await
+                .unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn pending_delete_inspection_needs_no_fence_grant_and_respects_row_scoped_metadata() {

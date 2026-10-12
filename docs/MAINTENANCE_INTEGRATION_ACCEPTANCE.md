@@ -37,10 +37,14 @@ This document is for reviewers deciding whether the integration is safe to ship.
   hold return a typed retryable error. A replacement ordinary GC also rejects
   the pending object without sending a second delete. The old request can still
   finish, but it cannot erase newly acknowledged hold protection. Its source
-  records failure and its original marker remains unresolved.
+  records failure. An observed successful single-attempt reply now permits
+  exact-epoch settlement through an independent recorder using the same database
+  credentials; no GC work resumes. Missing replies remain unresolved.
   Normal Postgres/S3 GC now admits quarantine, OCI tombstone and resumable-staging
   deletes durably, sends each through a client with mutation retries disabled,
-  and settles only a successful response on the original ownership session.
+  and settles only a successful response. Its work remains on the original
+  ownership session; an independent recorder can only settle that acknowledged
+  attempt after the work session fails, and the original failure still propagates.
   Completed markers are removed; one sequence prevents stale identity reuse.
   A normal-completion drill verifies marker removal and subsequent hold admission.
   The existing owner-run `db migrate up` installs functions and a retention
@@ -105,7 +109,8 @@ test does not close them.
 | Repeated and concurrent runs | Distinct scheduled runs complete. Concurrent ordinary rebuilds serialize through the existing Postgres barrier; one removes the fixture's stale record and the next removes zero. |
 | Local crash and reboot | GC interrupted after admission, a committed quarantine change, or a printed report stays unresolved. Fresh diagnostics do not replay it. Actual VM resets also preserve the original records. |
 | Remote delete acknowledgement | A proxy forwards the actual S3 deletion to MinIO and withholds only its successful response. The object and candidate are absent while the original ordinary CLI is still alive. Killing that process preserves its three admission records without a completion record. Fresh fsck completes without another delete. This proves unresolved reporting and no diagnostic replay at this boundary; it does not prove fencing of delayed requests during takeover. |
-| Delayed delete during takeover | Real Postgres/MinIO regression passes: the paused old request has a durable marker; killing only GC's owner rejects the later hold with the typed retryable error. A replacement ordinary GC sends no duplicate delete. Releasing the old request records source failure and preserves its marker. This covers current GC and retention writers, not every publication path or an older GC source. |
+| Delayed delete during takeover | Real Postgres/MinIO regression passes: the paused old request has a durable marker; killing only GC's owner rejects the later hold with the typed retryable error. A replacement ordinary GC sends no duplicate delete. Releasing the old request records source failure; its successful reply settles the exact marker, and a subsequent hold succeeds. This covers current GC and retention writers, not every publication path or an older GC source. |
+| Acknowledged settlement after ownership loss | PostgreSQL tests keep the work pool closed and propagate its error even when an independent recorder settles the attempt. Settlement uses the schema captured at admission; an identical key/epoch in another schema stays pending despite the recorder's different search path. A duplicated completion cannot clear a newer attempt. An unavailable recorder preserves the marker. This does not recover missing replies or authorize replay. |
 | Acknowledged remote delete | Ordinary Postgres/S3 GC records verified completion after the single-attempt response and marker settlement. Exactly one delete is applied, no object marker remains, and a later hold succeeds. |
 | Container and machine replacement | New server instances publish their own startup results while lost foreign runs remain unresolved. Two distinct VMs share history without copied private state. |
 | Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
