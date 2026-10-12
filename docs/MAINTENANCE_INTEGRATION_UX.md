@@ -1,6 +1,6 @@
 # Maintenance without another service
 
-Keep using your existing commands and timers:
+Start Shardline and run maintenance as you do today:
 
 ```bash
 shardline serve
@@ -9,162 +9,115 @@ shardline gc --mark --sweep
 shardline repair
 ```
 
-There is no tracker service, extra port, new mount or separate configuration.
-Normal startup tracks work inside the server. Maintenance keeps its original
-process and live output. Starting the server does not start GC.
-Local deployments without Postgres save new history in the existing metadata
-database, so payload copies do not include it. Earlier history stays readable.
-After the usual owner upgrade, new server history also uses the existing
-Postgres database. It needs no extra connection pool or service.
-This uses existing metadata permissions; accounts with narrower access keep
-legacy tracking.
+Tracking runs inside Shardline. There is no extra process, service, port, mount
+or configuration for normal startup. Maintenance keeps its original process
+and live output. Your existing timer still starts GC; starting the server does
+not start GC.
 
-## What you gain
+**This branch is still under development and is not ready to merge.**
+The version remains 1.11.3. The remaining upgrade limits are listed below.
 
-Maintenance history records completed, failed and interrupted runs. In a
-Postgres/S3 deployment, another node can inspect shared history after the
-original node disappears, without recovering its container files.
+## What this helps with in production
 
-After the usual owner upgrade, new server jobs, GC, rebuild and repair share
-history across logins that use the same database, schema and object storage.
-Older records and the optional runner can still follow their original database
-login. Storage-copy jobs track their copy endpoints; their history is not yet
-grouped with a server's shared database history. If shared grouping is unavailable, the API reports
-`history_grouping: legacy`; otherwise it reports `shared_metadata`.
+You can inspect recorded maintenance results after a node disappears. History
+distinguishes completed work from failed or interrupted work. It does not
+automatically rerun a job.
 
-If history cannot be saved, Shardline warns and the command keeps its existing
-behavior. You cannot then rely on a verified history result.
+In upgraded Postgres/S3 deployments, server history lives in the existing
+Postgres database and can be read by another node using that same database,
+schema and object storage. It reuses the existing connection pool. Local
+deployments without Postgres save new history in their existing metadata database.
 
-Webhook secret encryption preserves changes made by another node, including
-secret rotation and removal. Its startup sweep runs inside the server and stops
-if its database connection is lost. A failed sweep leaves ordinary request
-handling and lazy encryption enabled.
+Postgres provider callbacks save the delivery ID and repository changes
+together. A failed transaction can be retried with the same delivery ID;
+successful deliveries are deduplicated. The startup webhook encryption sweep
+also preserves concurrent secret changes and stops if its work connection is
+lost. Ordinary request handling continues if that sweep fails.
 
-On Postgres, provider callbacks save their delivery ID and repository changes
-together. If the database lock owner disappears before the change commits,
-neither is saved: the provider can retry the same delivery. Successful retries
-are deduplicated. This needs no extra process or configuration.
+If optional tracking cannot save history, Shardline warns and preserves the
+command's existing behavior. There is then no verified history result to rely on.
+Recorded history does not prove that the cluster is healthy now or guarantee
+cluster-wide exactly-once execution.
 
-## When a delete is interrupted
+## Why a write might return a retryable error
 
-A later hold or covered write to an object with an unresolved delete returns a
-clear retryable error. Other objects remain available. Rejected updates preserve
-the previous metadata. Current native uploads also check the chunk references
-inside their uploaded data.
+If an earlier remote delete has an uncertain outcome, a later hold or covered
+write to that object returns HTTP 503 with `Retry-After: 1`:
 
-The error says `object has an unresolved remote delete; retry after
-reconciliation`. This means Shardline has not confirmed the earlier delete's
-outcome. HTTP 503 and `Retry-After: 1` tell clients to wait before retrying;
-they do not promise recovery in one second. Repeating the write cannot clear
-the block. Recovery must confirm the delete first, as described below.
+```text
+object has an unresolved remote delete; retry after reconciliation
+```
 
-On Postgres, an S3 overwrite rejected before it commits leaves the current
-object in place. Retry with your usual S3 client; no additional service or
-configuration is needed.
+Other objects remain available. The retry interval does not promise recovery
+in one second, and repeating the write does not clear the block.
 
-File and native shard uploads on Postgres also reject final publication if the
-request loses its database lock. Existing file records remain available; retry
-with your usual client. An interrupted attempt may leave unreferenced bytes
-for later maintenance to reclaim.
-
-For OCI uploads on Postgres, a rejected publication preserves the previous tag
-and manifest. Incomplete new manifests stay hidden until a retry publishes them.
-If Shardline loses its database lock before an upload part or session change
-commits, it rejects that change without advancing recorded progress. Check the
-upload with your usual client and retry.
-
-A pending delete also blocks covered OCI publication. New manifest uploads
-check their config, layer, child-manifest and subject references before saving
-them. Older tag-only writes still need additional protection. During a rolling
-upgrade, released 1.11.3 servers reject covered writes with a generic server
-error; updated servers explain when retry is safe.
-
-After the owner-run database upgrade, ordinary GC can find hidden manifests
-left by interrupted uploads. It keeps active holds and waits for your configured
-retention period before reclaiming them. This uses the existing maintenance
-account. Automatic discovery warns and remains unsupported if that account
-has active row restrictions.
-
-If GC received a successful delete reply, it tries to save that reply in your
-existing object storage before recording completion in the database. The next
-sweep or ordinary repair command can settle that saved result:
+If GC saved the successful delete reply, your next sweep or ordinary repair
+can verify it and clear the matching pending delete:
 
 ```bash
 shardline repair
 ```
 
-Recovery verifies the saved reply and clears only its matching pending delete.
-It does not delete the object again or resume the failed GC process. The original
-run stays failed even if recovery later settles its delete.
+Recovery does not send another user-object delete or resume the failed process.
+Each invocation checks up to 64 saved replies and advances through the backlog.
+If the reply is missing or invalid, the object stays blocked for investigation.
+An object being absent is insufficient evidence to clear the block.
 
-On upgraded Postgres/S3 deployments, saving and cleaning up a successful reply
-adds one receipt write and one receipt cleanup request per deleted object.
-This can increase GC runtime, especially when object storage is far away.
-Your existing GC command and timer remain in charge.
+Saving a successful reply adds a receipt write and cleanup request in your
+existing object storage. This can increase GC time. No recovery worker is needed.
 
-Each command checks up to 64 saved replies and logs the counts. Repeated runs
-advance through the backlog. Invalid or conflicting evidence is retained for
-investigation. There is no recovery worker to start.
+## Where to look when something fails
 
-If Shardline cannot save a reply, it warns and still tries normal database
-settlement. Existing GC credentials need no additional storage write permission.
-If both fail, or the reply was never received or saved, the object stays blocked.
-A missing object does not prove that an earlier request can never apply later.
+Use your existing admin token:
 
-## Inspecting a problem
-
-Use your existing admin token with:
-
-- `/api/v1/tasks/maintenance/deletes` for affected objects with pending deletes.
-- `/api/v1/tasks/maintenance` for recorded job results.
-
-For a server startup job, take its `id` from the history list and read the saved
-counts with the same admin token:
-
-```bash
-curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
-  "https://cas.example.com/api/v1/tasks/maintenance/$RUN_ID/report"
-```
-
-A failed Hub upgrade can show, for example, `inspected: 3`, `upgraded: 2` and
-`failures: 1`. This explains partial progress; the job still needs investigation.
-Older failed jobs and interrupted jobs may have no saved report. Ordinary CLI
-commands keep their existing output and diagnostics.
-
-A pending entry may mean GC is still running. Check the original command and
-logs. These endpoints inspect state; they do not retry or clear a delete.
-
-| History state | What to do |
+| Endpoint | What it tells you |
 | --- | --- |
-| `completed` | Read the verified recorded result. |
-| `failed` | Read diagnostics; some data may have changed. |
-| `needs_reconciliation` | Investigate before repeating a mutation. |
-| `running_or_interrupted` | Check whether the original command is still working. |
-| `corrupt` | Investigate before relying on the history. |
+| `/api/v1/status` | Server readiness. |
+| `/api/v1/tasks/maintenance` | Recorded maintenance results. |
+| `/api/v1/tasks/maintenance/$RUN_ID/report` | Saved counts for a server job, when available. |
+| `/api/v1/tasks/maintenance/deletes` | Objects with pending deletes. |
 
-Use `/api/v1/status` for server readiness. History does not prove current
-deployment health. The [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
-covers pagination and all states.
+A pending delete may still belong to a running GC. Check the original process
+and logs. These endpoints inspect state; they do not retry or clear a delete.
 
-## The optional runner
+A `completed` result describes that recorded run. A `failed` or
+`needs_reconciliation` result needs investigation before repeating mutations.
+For `running_or_interrupted`, check whether the original process is alive.
+Treat `corrupt` history as untrusted. Older and interrupted jobs may have no
+saved report. CLI commands retain their existing diagnostics.
 
-`shardline maintenance ...` uses a child process for deadlines and CPU limits.
-You only need it for those controls. Normal commands do not use it. Database
-ownership and checks at each write provide the safety independently of that
-process separation.
+See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
+for authentication, pagination and response fields.
 
-## Upgrade status
+## Upgrade and compatibility limits
 
-**This branch is not ready to merge.** The version remains 1.11.3. Recovery of
-missing replies, older GC sources, remaining write paths,
-storage-copy rollback isolation and deployment-scale limits still need work.
-New local history now stays out of released payload copies. Earlier object-backed
-history, Postgres/S3 CLI history and storage-copy endpoints still need that
-isolation before the upgrade is ready. Server history now uses Postgres metadata;
-CLI storage routing still needs integration with that database.
+The usual owner-run `shardline db migrate up` installs the optional metadata
+and protection functions, including when no migration entries are pending.
+Installation waits for current writes and maintenance. Runtime accounts need no
+new fence-table grant. See the [database migration guide](DATABASE_MIGRATIONS.md).
 
-The usual owner-run `shardline db migrate up` installs the protection functions,
-even with no pending migration entries. Runtime accounts need no new fence-table
-grant. Installation waits for current writes and maintenance to finish before
-changing protection triggers. See the [migration guide](DATABASE_MIGRATIONS.md) and
-[remaining acceptance gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
+New local and upgraded server history stays separate from user payload data.
+CLI Postgres/S3 history, earlier object-backed history and storage-copy endpoints
+still need that separation verified for mixed-version upgrades and rollback.
+Jobs using a different database/schema from server startup also need storage
+routing to their actual work target. Narrowly privileged accounts may retain
+legacy tracking; shared history does not bypass row restrictions.
+
+Shared history grouping reports `shared_metadata` when available and `legacy`
+otherwise. Storage-copy jobs and the optional runner are not yet covered by
+all of the shared-storage guarantees.
+
+Covered Postgres writes reject publication after losing database ownership.
+OCI failures preserve the previous published tag; incomplete manifests stay
+hidden. Unreferenced bytes may remain for later maintenance. Released 1.11.3
+servers can return a generic server error where updated servers explain the
+pending-delete retry. Older GC sources, remaining write paths, row-restricted
+cleanup, missing-delete replies and deployment-scale limits still have open
+acceptance work. See [the acceptance evidence and remaining gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
+
+## When to use a separate worker
+
+The optional `shardline maintenance ...` runner uses a child process for
+deadlines and CPU limits. Use it only when you need those controls.
+Normal commands do not use it. Database ownership checks provide write safety;
+the extra process provides isolation for those optional controls.
