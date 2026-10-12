@@ -141,6 +141,13 @@ impl PostgresIndexStore {
     /// Returns a database failure, including insufficient migration-owner rights.
     pub async fn initialize_remote_delete_guard(&self) -> Result<(), sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
+        // Released servers already hold the shared side for mutations. Wait
+        // before taking DDL locks, so an incremental owner upgrade cannot
+        // deadlock trigger installation against an in-flight publication.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(0x5348_4152_4447_4301_i64)
+            .execute(&mut *transaction)
+            .await?;
         let schema = query_scalar::<_, String>("SELECT current_schema()")
             .fetch_one(&mut *transaction)
             .await?;

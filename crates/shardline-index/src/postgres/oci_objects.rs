@@ -126,6 +126,40 @@ async fn check_oci_publication_references(
 }
 
 impl PostgresIndexStore {
+    /// Restores at most 64 hidden manifests to the ordinary GC inventory.
+    ///
+    /// The pool must retain the session owning the exclusive GC barrier. The
+    /// installed function checks that session and existing read/delete grants;
+    /// it never bypasses active row policies for the GC account. Candidates
+    /// still require normal native evidence verification before reclamation.
+    /// `None` means the owner upgrade is absent, existing OCI mutation grants
+    /// are insufficient, or row-scoped GC is unsupported.
+    ///
+    /// # Errors
+    /// Returns missing ownership, a schema mismatch or database failure.
+    pub async fn restore_staged_oci_tombstones_for_gc(
+        &self,
+    ) -> Result<Option<u64>, PostgresMetadataStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let (schema, installed): (String, bool) = sqlx::query_as(
+            "SELECT current_schema(), to_regprocedure(format('%I.shardline_oci_staged_gc_inventory_v1(text,integer)',current_schema())) IS NOT NULL",
+        ).fetch_one(&mut *transaction).await?;
+        if !installed {
+            return Ok(None);
+        }
+        let schema = schema.replace('"', "\"\"");
+        let restored: i64 = query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT \"{schema}\".shardline_oci_staged_gc_inventory_v1(current_schema(),64)"
+        )))
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        if restored < 0 {
+            return Ok(None);
+        }
+        Ok(Some(super::i64_to_u64(restored)?))
+    }
+
     /// Keeps new immutable OCI bytes hidden until their publication commits.
     /// Records the hidden state in the existing evidence log without requiring
     /// extra tombstone-table privileges. Existing published identities and
@@ -705,6 +739,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_guard_upgrade_waits_for_released_mutation_barrier() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let upgrade_pool = pool
+            .options()
+            .clone()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let upgrade_pid: i32 = query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&upgrade_pool)
+            .await
+            .unwrap();
+        let mut writer = pool.acquire().await.unwrap();
+        writer.close_on_drop();
+        query("SELECT pg_advisory_lock_shared($1)")
+            .bind(0x5348_4152_4447_4301_i64)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let upgrade = tokio::spawn(async move {
+            PostgresIndexStore::new(upgrade_pool)
+                .initialize_remote_delete_guard()
+                .await
+        });
+        let mut waiting = false;
+        for _ in 0..100 {
+            waiting = query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks
+                WHERE locktype='advisory' AND pid=$1 AND NOT granted AND mode='ExclusiveLock'
+                AND objsubid=1 AND classid::bigint=(x'5348415244474301'::bit(64)::bigint >> 32)
+                AND objid::bigint=(x'5348415244474301'::bit(64)::bigint & 4294967295))",
+            )
+            .bind(upgrade_pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            waiting,
+            "upgrade must queue behind the existing writer barrier"
+        );
+        assert!(!upgrade.is_finished());
+        query("SELECT pg_advisory_unlock_shared($1)")
+            .bind(0x5348_4152_4447_4301_i64)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), upgrade)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_gc_inventory_is_owned_bounded_and_excludes_published_stages() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        query("ALTER TABLE shardline_reliability_events DISABLE TRIGGER shardline_oci_staged_tombstone_v1")
+            .execute(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        connection.close_on_drop();
+        for number in 0..66 {
+            let key = OciObjectKey {
+                digest_hex: format!("{number:064x}"),
+                ..object("global")
+            };
+            store
+                .stage_oci_object_on_connection(&mut connection, &key, &[])
+                .await
+                .unwrap();
+            if number == 65 {
+                store
+                    .publish_oci_object_on_connection(&mut connection, &key, &[])
+                    .await
+                    .unwrap();
+            }
+        }
+        assert!(
+            store.restore_staged_oci_tombstones_for_gc().await.is_err(),
+            "a separate unowned session cannot restore stages"
+        );
+        query("SELECT pg_advisory_lock($1)")
+            .bind(0x5348_4152_4447_4301_i64)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        assert!(
+            query_scalar::<_, i64>(
+                "SELECT shardline_oci_staged_gc_inventory_v1(current_schema(),65)"
+            )
+            .fetch_one(&mut *connection)
+            .await
+            .is_err()
+        );
+        for expected in [64, 1, 0] {
+            assert_eq!(
+                query_scalar::<_, i64>(
+                    "SELECT shardline_oci_staged_gc_inventory_v1(current_schema(),64)"
+                )
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+                expected
+            );
+        }
+        let rows = store.list_oci_object_tombstones().await.unwrap();
+        assert_eq!(rows.len(), 65);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.key.digest_hex == format!("{:064x}", 65))
+        );
+        assert_eq!(store.list_oci_object_tombstones().await.unwrap(), rows);
+    }
+
+    #[tokio::test]
     async fn owner_upgrade_restores_only_current_hidden_manifest_generations() {
         let Some(pool) = connect_postgres().await else {
             return;
@@ -891,6 +1051,26 @@ mod tests {
             backfilled_rows, 0,
             "owner backfill also respects active row policies"
         );
+        query("SELECT pg_advisory_lock($1)")
+            .bind(0x5348_4152_4447_4301_i64)
+            .execute(&mut *actor)
+            .await
+            .unwrap();
+        assert_eq!(
+            query_scalar::<_, i64>(
+                "SELECT shardline_oci_staged_gc_inventory_v1(current_schema(),64)"
+            )
+            .fetch_one(&mut *actor)
+            .await
+            .unwrap(),
+            -1,
+            "GC discovery must not bypass this account's row policies"
+        );
+        query("SELECT pg_advisory_unlock($1)")
+            .bind(0x5348_4152_4447_4301_i64)
+            .execute(&mut *actor)
+            .await
+            .unwrap();
         // The authorized owner can restore the candidate inventory without
         // changing the actor's grants or its existing publication operation.
         store.initialize_remote_delete_guard().await.unwrap();

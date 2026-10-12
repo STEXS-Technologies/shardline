@@ -532,6 +532,62 @@ CREATE TRIGGER shardline_oci_staged_tombstone_v1
 AFTER INSERT ON @SCHEMA@.shardline_reliability_events
 FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_oci_staged_tombstone_v1();
 
+-- Ordinary GC can discover journal-only stages without asking a publication
+-- account to bypass its row policies or acquire tombstone INSERT. Inventory is
+-- only a candidate: native GC still verifies the journal before deleting bytes.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_oci_staged_gc_inventory_v1(
+    index_schema TEXT, candidate_limit INTEGER
+) RETURNS BIGINT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $staged_gc_inventory$
+DECLARE changed BIGINT;
+BEGIN
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE='42501', MESSAGE='remote delete guard schema mismatch';
+    END IF;
+    IF candidate_limit IS NULL OR candidate_limit NOT BETWEEN 1 AND 64 THEN
+        RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='invalid staged manifest inventory limit';
+    END IF;
+    IF NOT has_schema_privilege(session_user,index_schema,'USAGE')
+       OR NOT has_table_privilege(session_user,format('%I.shardline_oci_object_tombstones',index_schema),'SELECT')
+       OR NOT has_table_privilege(session_user,format('%I.shardline_oci_object_tombstones',index_schema),'DELETE')
+       OR NOT has_table_privilege(session_user,format('%I.shardline_reliability_events',index_schema),'SELECT') THEN
+        RETURN -1; -- Preserve existing GC accounts without OCI mutation grants.
+    END IF;
+    -- Require the caller's own exclusive maintenance session. A separate pool
+    -- must not invent a candidate concurrently with a manifest publication.
+    IF NOT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+       AND pid=pg_backend_pid() AND granted AND mode='ExclusiveLock' AND objsubid=1
+       AND classid::bigint=(x'5348415244474301'::bit(64)::bigint >> 32)
+       AND objid::bigint=(x'5348415244474301'::bit(64)::bigint & 4294967295)) THEN
+        RAISE EXCEPTION USING ERRCODE='42501', MESSAGE='staged inventory requires the GC lock-owning session';
+    END IF;
+    IF EXISTS(SELECT 1 FROM pg_class target JOIN pg_roles actor ON actor.rolname=session_user
+        WHERE target.oid IN ('shardline_oci_object_tombstones'::regclass,'shardline_reliability_events'::regclass)
+          AND target.relrowsecurity AND NOT (actor.rolsuper OR actor.rolbypassrls
+              OR (target.relowner=actor.oid AND NOT target.relforcerowsecurity))) THEN
+        RETURN -1; -- Do not broaden this GC account's row visibility either.
+    END IF;
+    INSERT INTO shardline_oci_object_tombstones
+        (scope_namespace,repository,object_kind,digest_hex,deleted_at_unix_seconds)
+    SELECT identity.scope_namespace,identity.repository,'manifest',identity.digest_hex,identity.deleted_at_unix_seconds
+    FROM (SELECT DISTINCT ON(operation_id) operation_id,event_json
+          FROM shardline_reliability_events WHERE operation_kind='Visibility'
+            AND operation_id ~ '^(global|[0-9a-f]{64}):.+:manifest:[0-9a-f]{64}$'
+          ORDER BY operation_id,sequence DESC) head
+    CROSS JOIN LATERAL shardline_oci_staged_identity_v1(head.event_json::TEXT,head.operation_id) identity
+    WHERE NOT EXISTS(SELECT 1 FROM shardline_oci_object_tombstones existing
+        WHERE existing.scope_namespace=identity.scope_namespace AND existing.repository=identity.repository
+          AND existing.object_kind='manifest' AND existing.digest_hex=identity.digest_hex)
+    ORDER BY head.operation_id LIMIT candidate_limit
+    ON CONFLICT(scope_namespace,repository,object_kind,digest_hex) DO NOTHING;
+    GET DIAGNOSTICS changed=ROW_COUNT;
+    RETURN changed;
+END;
+$staged_gc_inventory$;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_oci_staged_gc_inventory_v1(TEXT,INTEGER) TO PUBLIC;
+
 -- Trigger installation excludes concurrent event inserts until commit. OCI
 -- publication tables are already locked by the guards installed above. Restore
 -- prior journal-only stages without replacing any existing deletion generation.
