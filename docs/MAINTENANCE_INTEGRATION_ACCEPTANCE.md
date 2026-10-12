@@ -236,10 +236,13 @@ This document is for reviewers deciding whether the integration is safe to ship.
   current/released copy comparison now passes with PostgreSQL unavailable:
   clean copy, current recopy and released rollback match payload bytes and
   output while ten current task artifacts stay outside payload inventory.
-  Existing object-backed history is not moved or discarded. Such history can
-  still contaminate a released copy, and PostgreSQL/S3 CLI configurations still
-  publish object-backed evidence. Those cases, S3-only copy endpoints and
-  deployment permissions remain required work before the full isolation gate
+  Verified finished legacy history can now move into metadata in bounded
+  batches. Unfinished, corrupt and unrelated object-backed history remains in
+  place and can still enter a released raw copy. Ordinary PostgreSQL maintenance
+  uses metadata when its account supports the installed functions. Copies to
+  S3-only endpoints use private host metadata. The native restricted-account
+  copy and released rollback checks pass for that route. Deployment permissions and
+  unresolved legacy history remain required work before the full isolation gate
   passes. No database service or mount was added for the local backend.
   The PostgreSQL owner upgrade now also installs a private artifact table and
   guarded immutable publication, bounded reads, 64-key pages and retention
@@ -587,3 +590,32 @@ strict CLI/server Clippy; and the native storage-copy script against released
 relocated byte, then confirmed released 1.11.3 copied the original payload and
 retained its expected output. This covers the supported finished-history case,
 not every legacy deployment or S3-only storage-copy endpoint.
+
+### Storage-copy history without payload changes
+
+Normal copies run in their original CLI process and keep scratch outside the
+source. Copies to local storage publish history in destination SQLite metadata.
+Copies to S3-only endpoints publish history in private host temporary metadata;
+they do not guess a PostgreSQL association or write control objects to S3.
+That temporary history is not shared across nodes and can be removed by host
+cleanup. If temporary storage is read-only, the original copy still runs without
+claiming a recorded outcome.
+
+The three new routing tests pass, alongside eight other exercised maintenance
+tests; the PostgreSQL-dependent test was skipped in this run. Native local-copy
+and S3-copy checks also pass against released 1.11.3. The S3 fixture uses an
+account allowed to list its bucket and read/write only the exact payload key.
+Its source is read-only, an unrelated PostgreSQL URL is unreachable, and the
+recorded owner PID equals the ordinary CLI PID. Current and released recopy
+preserve payload bytes, counts and stdout; the bucket contains only its original
+payload object. A second copy succeeds with read-only temporary storage and
+adds no source files or control objects. These checks cover this fixture, not
+every storage provider, deployment permission profile or unresolved legacy run.
+
+```bash
+bash scripts/shardline/verify_maintenance_s3_copy.sh CURRENT RELEASED
+```
+
+The script creates and removes its own MinIO fixture. `CONTAINER_ENGINE`,
+`MINIO_IMAGE` and `MC_IMAGE` can select the test environment; these are test-only
+settings, not deployment requirements.

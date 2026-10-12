@@ -93,7 +93,7 @@ fn run_prepared(
     } else {
         let export_config = super::publication_config(operation, config)?;
         Some((
-            super::evidence::store(operation, &export_config)?,
+            super::evidence::store(operation, &export_config, Some(state))?,
             shardline_server::task_tracking::TaskRunIdentity {
                 schema: 1,
                 id: id.to_owned(),
