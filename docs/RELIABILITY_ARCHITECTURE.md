@@ -94,9 +94,14 @@ existing metadata connection and binds it to the configured endpoint (including
 Unix socket), database, schema and object target. Independently initialized
 stores behind one proxy cannot collide merely because their names match.
 Missing initialization, corrupt identity or an absent schema fails closed.
-This is not a health proof. Publishing verified scope bindings and merging
-legacy/new history remain unfinished; ordinary inspection still uses its legacy
-scope. Existing manifests and task formats are not rewritten.
+This is not a health proof. `EmbeddedTaskTracker::with_history_scope` can publish
+an immutable companion binding signed by the run's existing key. It binds the
+shared scope to the exact stored manifest bytes; readers verify the signature
+before comparing scopes. Identical retries succeed, conflicting bindings fail,
+and verified completed-run retirement removes the companion. A binding failure
+warns while original tracking continues. Existing manifests and task formats
+are not rewritten. Ordinary startup and inspection still use the legacy scope;
+connecting this option to normal publishers and merging history remain unfinished.
 
 The optional `shardline-reliability/task-journal` feature provides
 `SqliteTaskJournal`, a synchronous Penelope `TaskJournal` port pinned to an exact

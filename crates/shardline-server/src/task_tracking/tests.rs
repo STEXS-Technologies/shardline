@@ -13,6 +13,129 @@ fn config(root: &std::path::Path) -> ServerConfig {
 }
 
 #[test]
+fn history_scope_bindings_preserve_legacy_results_and_reject_substitution() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let scope = penelope_core::task::Digest::of(b"resolved scope");
+    let other_scope = penelope_core::task::Digest::of(b"other scope");
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let tracker = EmbeddedTaskTracker::new(object_store_from_config(&config).unwrap(), deployment)
+        .with_history_scope(scope);
+    let receipt = tracker
+        .begin(
+            "bound-sweep",
+            b"input",
+            MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap();
+    let summary = store.summaries(deployment, None, 10).unwrap();
+    let id = &summary[0].id;
+    let manifest = store
+        .read(&format!("manifests/{id}"), 65536)
+        .unwrap()
+        .unwrap();
+    let identity: TaskRunIdentity = serde_json::from_slice(&manifest).unwrap();
+    let binding = store
+        .read(&format!("scope-bindings/{id}"), 2048)
+        .unwrap()
+        .unwrap();
+    assert_eq!(identity.deployment, deployment);
+    assert!(
+        store
+            .history_scope_binding_matches(&identity, scope)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .history_scope_binding_matches(&identity, other_scope)
+            .unwrap()
+    );
+    receipt.bind_history_scope(scope).unwrap();
+    assert_eq!(
+        store
+            .read(&format!("scope-bindings/{id}"), 2048)
+            .unwrap()
+            .unwrap(),
+        binding
+    );
+    assert!(receipt.bind_history_scope(other_scope).is_err());
+    assert!(
+        store
+            .publish_history_scope_binding(
+                &identity,
+                &ed25519_dalek::SigningKey::from_bytes(&[1; 32]),
+                scope
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .history_scope_binding_matches(&identity, scope)
+            .unwrap()
+    );
+    receipt.finish(true, b"done").unwrap();
+    assert_eq!(
+        store.summaries(deployment, None, 10).unwrap()[0].state,
+        TaskRunState::Completed
+    );
+    assert_eq!(
+        store
+            .read(&format!("manifests/{id}"), 65536)
+            .unwrap()
+            .unwrap(),
+        manifest
+    );
+    let binding_path = root
+        .path()
+        .join("chunks/_shardline_tasks/v1/scope-bindings")
+        .join(id);
+    let mut tampered: serde_json::Value = serde_json::from_slice(&binding).unwrap();
+    tampered["scope"] = serde_json::to_value(other_scope).unwrap();
+    std::fs::write(&binding_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(
+        store
+            .history_scope_binding_matches(&identity, scope)
+            .is_err()
+    );
+    assert!(
+        store
+            .history_scope_binding_matches(&identity, other_scope)
+            .is_err()
+    );
+    std::fs::write(&binding_path, &binding).unwrap();
+    let mut forged = identity.clone();
+    forged.operation.push_str("-forged");
+    std::fs::write(
+        root.path()
+            .join("chunks/_shardline_tasks/v1/manifests")
+            .join(id),
+        serde_json::to_vec(&forged).unwrap(),
+    )
+    .unwrap();
+    assert!(store.history_scope_binding_matches(&forged, scope).is_err());
+    std::fs::write(
+        root.path()
+            .join("chunks/_shardline_tasks/v1/manifests")
+            .join(id),
+        &manifest,
+    )
+    .unwrap();
+    assert!(
+        store
+            .history_scope_binding_matches(&identity, scope)
+            .unwrap()
+    );
+    std::fs::remove_file(&binding_path).unwrap();
+    assert!(
+        !store
+            .history_scope_binding_matches(&identity, scope)
+            .unwrap()
+    );
+    std::fs::write(&binding_path, &binding).unwrap();
+}
+
+#[test]
 fn embedded_tasks_publish_verified_success_and_truthful_failure() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -135,7 +258,8 @@ fn evidence_retention_removes_only_verified_finished_runs() {
     let config = config(root.path());
     let deployment = deployment_fingerprint(&config).unwrap();
     let store = TaskEvidenceStore::from_config(&config).unwrap();
-    let tracker = EmbeddedTaskTracker::new(object_store_from_config(&config).unwrap(), deployment);
+    let tracker = EmbeddedTaskTracker::new(object_store_from_config(&config).unwrap(), deployment)
+        .with_history_scope(penelope_core::task::Digest::of(b"retention scope"));
     tracker
         .begin(
             "finished",
@@ -193,6 +317,18 @@ fn evidence_retention_removes_only_verified_finished_runs() {
     let remaining = store.summaries(deployment, None, 10).unwrap();
     assert_eq!(remaining.len(), 2);
     assert!(remaining.iter().all(|task| task.operation != "finished"));
+    for task in &remaining {
+        assert!(
+            store
+                .read(&format!("scope-bindings/{}", task.id), 2048)
+                .unwrap()
+                .is_some()
+        );
+    }
+    let prefix =
+        shardline_storage::ObjectPrefix::parse("_shardline_tasks/v1/scope-bindings/").unwrap();
+    use shardline_storage::ObjectStore as _;
+    assert_eq!(store.objects.list_prefix(&prefix).unwrap().len(), 2);
     drop(unfinished);
 }
 
@@ -536,6 +672,37 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
     assert_ne!(shared_scope, first_scope);
     assert_ne!(shared_scope, second_scope);
     assert_ne!(shared_scope, legacy_first);
+    // Separate legacy logins retain their original views while new signed
+    // bindings can associate their runs with the same resolved metadata scope.
+    for role_config in [&first, &second] {
+        let legacy = deployment_fingerprint(role_config).unwrap();
+        let role_store = TaskEvidenceStore::from_config(role_config).unwrap();
+        EmbeddedTaskTracker::new(object_store_from_config(role_config).unwrap(), legacy)
+            .with_history_scope(shared_scope)
+            .begin(
+                "bound-role-job",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"role report")
+            .unwrap();
+        let own_history = role_store.summaries(legacy, None, 10).unwrap();
+        assert_eq!(own_history.len(), 1);
+        let role_manifest: TaskRunIdentity = serde_json::from_slice(
+            &role_store
+                .read(&format!("manifests/{}", own_history[0].id), 65536)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            role_store
+                .history_scope_binding_matches(&role_manifest, shared_scope)
+                .unwrap()
+        );
+        assert_eq!(own_history[0].state, TaskRunState::Completed);
+    }
     // Simulate another initialized backend behind the same endpoint with the
     // same database/schema names. Only its durable namespace identity differs.
     let original_identity: String =

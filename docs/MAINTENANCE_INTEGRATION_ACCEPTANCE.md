@@ -87,8 +87,12 @@ This document is for reviewers deciding whether the integration is safe to ship.
   identity and a schema-bound read function without new fence-table grants.
   An additive resolver agrees across roles using the same initialized target,
   separates schemas and object targets, and refuses row-level security or an
-  absent schema. It does not yet bind published task evidence or merge history;
-  normal inspection still uses the legacy scope. The existing-role drill
+  absent schema. An additive tracker option now signs a companion binding to
+  the original run manifest with that run's key. Tests cover two real database
+  logins sharing one resolved target, tampering, retries and retention cleanup.
+  Normal startup and inspection still use the legacy scope: wiring the resolved
+  identity into ordinary publishers and shared inspection remains unfinished.
+  The existing-role drill
   inspects history using that role's scope.
 
 These are merge requirements. A passing dependency upgrade or optional worker

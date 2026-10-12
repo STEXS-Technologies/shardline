@@ -18,6 +18,7 @@ use std::{io::Error, time::Instant};
 pub struct EmbeddedTaskTracker {
     store: TaskEvidenceStore,
     deployment: Digest,
+    history_scope: Option<Digest>,
 }
 
 pub(crate) struct TaskReceipt {
@@ -36,7 +37,17 @@ impl EmbeddedTaskTracker {
         Self {
             store: TaskEvidenceStore::from_objects(objects),
             deployment,
+            history_scope: None,
         }
+    }
+
+    /// Associates new runs with a resolved history scope without changing their
+    /// legacy identity. Resolve it on the intended metadata connection first.
+    /// This association never grants execution ownership or authorizes retries.
+    #[must_use]
+    pub const fn with_history_scope(mut self, scope: Digest) -> Self {
+        self.history_scope = Some(scope);
+        self
     }
 
     pub(crate) async fn begin_async(
@@ -116,6 +127,11 @@ impl EmbeddedTaskTracker {
             born: Instant::now(),
             kind,
         };
+        if let Some(history_scope) = self.history_scope
+            && let Err(error) = receipt.bind_history_scope(history_scope)
+        {
+            tracing::warn!(%error, "shared history binding unavailable; legacy tracking continues");
+        }
         let input_ref = blob(&input)?;
         receipt.commit(
             TaskExecutionEvent::IntentCommitted {
@@ -143,6 +159,11 @@ fn blob(bytes: &[u8]) -> TrackingResult<BlobRef> {
 }
 
 impl TaskReceipt {
+    pub(crate) fn bind_history_scope(&self, scope: Digest) -> TrackingResult<()> {
+        self.store
+            .publish_history_scope_binding(&self.identity, &self.key, scope)?;
+        Ok(())
+    }
     pub(crate) async fn finish_async(self, success: bool, report: Vec<u8>) {
         match tokio::task::spawn_blocking(move || self.finish(success, &report)).await {
             Ok(Ok(())) => {}

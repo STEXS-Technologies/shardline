@@ -191,6 +191,8 @@ impl TaskEvidenceStore {
         // removed native proof; the cleanup marker remains outside status.
         self.objects
             .delete_if_present(&Self::key(&format!("manifests/{}", identity.id))?)?;
+        self.objects
+            .delete_if_present(&Self::key(&format!("scope-bindings/{}", identity.id))?)?;
         let run_prefix = ObjectPrefix::parse(&format!(
             "{}runs/{}/",
             super::TASK_EVIDENCE_PREFIX,
