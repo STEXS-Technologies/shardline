@@ -63,8 +63,9 @@ pub use frontend::{
     validate_optional_content_hash, validate_xorb_transfer_namespace,
 };
 pub use ingest::{
-    register_uploaded_shard_bytes, register_uploaded_shard_file, store_uploaded_xorb_bytes,
-    store_uploaded_xorb_file_path,
+    register_uploaded_shard_bytes, register_uploaded_shard_bytes_with_member_references,
+    register_uploaded_shard_file, register_uploaded_shard_file_with_member_references,
+    store_uploaded_xorb_bytes, store_uploaded_xorb_file_path,
 };
 pub use model::{
     BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,

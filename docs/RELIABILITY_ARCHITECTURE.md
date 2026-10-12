@@ -298,8 +298,14 @@ requires no new retention/fence grant. Existing method signatures and record
 formats remain unchanged. Legacy schemas preserve their previous behavior;
 guarded GC admission requires the installed member-check function. Older
 SQL-only writers do not derive member keys, and other publication paths still
-need equivalent coverage. The implementation currently rereads referenced
-xorbs; large native-upload cost remains part of the scale gate.
+need equivalent coverage. The member-aware byte and file registration APIs
+collect these references during the existing xorb range-validation pass.
+They preserve the legacy APIs and `ParsedShardUpload` fields, and the server
+no longer rereads xorbs or launches extra blocking work to collect references.
+A real S3 HTTP fixture verifies identical records and HEAD/GET counts, with
+one payload GET for two references to the same xorb. A byte/file regression
+verifies identical metadata to the legacy API. Broader deployment-scale cost
+remains part of the scale gate.
 
 Normal Postgres/S3 GC uses this protocol for quarantine, OCI tombstone and
 resumable-staging deletion. The guarded client sends a single-object DELETE with

@@ -15,9 +15,10 @@ use crate::{
     },
     validation::validate_identifier,
     xet_adapter::{
-        ShardUploadResponse, XorbUploadResponse, register_uploaded_shard_bytes,
-        register_uploaded_shard_file, store_uploaded_xorb_bytes, store_uploaded_xorb_file_path,
-        xorb_object_key,
+        ShardUploadResponse, XorbUploadResponse,
+        register_uploaded_shard_bytes_with_member_references,
+        register_uploaded_shard_file_with_member_references, store_uploaded_xorb_bytes,
+        store_uploaded_xorb_file_path, xorb_object_key,
     },
 };
 
@@ -259,37 +260,39 @@ impl super::PostgresBackend {
                     match staged {
                         StagedRequestBody::Memory { bytes, .. } => {
                             let record_store = record_store.clone();
-                            let reference_objects = object_store.clone();
-                            register_uploaded_shard_bytes(
+                            register_uploaded_shard_bytes_with_member_references(
                                 &object_store,
                                 &bytes,
                                 repository_scope,
                                 shard_metadata_limits,
-                                move |records, mappings| {
-                                    commit_native_shard_with_member_guards(
-                                        record_store,
-                                        reference_objects,
-                                        records,
-                                        mappings,
-                                    )
+                                move |records, mappings, references| async move {
+                                    record_store
+                                        .commit_native_shard_metadata_with_remote_delete_references(
+                                            &records,
+                                            &mappings,
+                                            &references,
+                                        )
+                                        .await?;
+                                    Ok(())
                                 },
                             )
                             .await
                         }
                         StagedRequestBody::File { file, .. } => {
-                            let reference_objects = object_store.clone();
-                            register_uploaded_shard_file(
+                            register_uploaded_shard_file_with_member_references(
                                 &object_store,
                                 file.path(),
                                 repository_scope,
                                 shard_metadata_limits,
-                                move |records, mappings| {
-                                    commit_native_shard_with_member_guards(
-                                        record_store,
-                                        reference_objects,
-                                        records,
-                                        mappings,
-                                    )
+                                move |records, mappings, references| async move {
+                                    record_store
+                                        .commit_native_shard_metadata_with_remote_delete_references(
+                                            &records,
+                                            &mappings,
+                                            &references,
+                                        )
+                                        .await?;
+                                    Ok(())
                                 },
                             )
                             .await
@@ -307,55 +310,6 @@ impl super::PostgresBackend {
         }
         result
     }
-}
-
-async fn commit_native_shard_with_member_guards(
-    record_store: shardline_index::PostgresRecordStore,
-    objects: crate::object_store::ServerObjectStore,
-    records: Vec<FileRecord>,
-    mappings: Vec<shardline_index::DedupeShardMapping>,
-) -> Result<(), crate::xet_adapter::XetAdapterError> {
-    use crate::xet_adapter::{XetAdapterError, validate_serialized_xorb};
-    // Read validated descriptors rather than trusting the optional chunk-cache
-    // sidecar. Move the owned records through the blocking work without copying
-    // the full native metadata set or retaining it in a cancelled waiter.
-    let (records, mappings, references) = tokio::task::spawn_blocking(move || {
-        let mut xorbs = std::collections::BTreeSet::new();
-        let mut references = std::collections::BTreeMap::new();
-        for record in &records {
-            for term in &record.chunks {
-                if !xorbs.insert(term.hash.clone()) {
-                    continue;
-                }
-                let key = xorb_object_key(&term.hash)?;
-                let metadata = shardline_storage::ObjectStore::metadata(&objects, &key)?
-                    .ok_or(XetAdapterError::MissingReferencedXorb)?;
-                let mut file = objects.materialize_object_to_tempfile(&key, metadata.length())?;
-                let expected_hash = shardline_index::parse_xet_hash_hex(&term.hash)?;
-                let validated = validate_serialized_xorb(file.as_file_mut(), expected_hash)?;
-                for chunk in validated.chunks() {
-                    let hash = shardline_index::xet_hash_hex_string(chunk.hash());
-                    let chunk_key = shardline_server_core::chunk_object_key(&hash)?;
-                    references.insert(chunk_key.as_str().to_owned(), chunk_key);
-                }
-            }
-        }
-        Ok::<_, XetAdapterError>((
-            records,
-            mappings,
-            references.into_values().collect::<Vec<_>>(),
-        ))
-    })
-    .await
-    .map_err(|error| XetAdapterError::Io(std::io::Error::other(error)))??;
-    record_store
-        .commit_native_shard_metadata_with_remote_delete_references(
-            &records,
-            &mappings,
-            &references,
-        )
-        .await?;
-    Ok(())
 }
 
 #[cfg(test)]
