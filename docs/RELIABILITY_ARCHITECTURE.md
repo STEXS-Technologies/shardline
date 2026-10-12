@@ -211,6 +211,24 @@ their existing pool and do not acquire this exclusive lock. This change does
 not atomically fence S3 effects: an already issued request can have an unknown
 outcome, and requests delayed across takeover still require protection.
 
+Hub tree repair also uses one shared, non-replaceable session for its barrier,
+reference reads and recovered-tree publication. Its blocking task owns the
+barrier until the task finishes, even if the awaiting future is cancelled.
+A real Postgres regression blocks the reference scan, terminates only that
+session, acquires exclusive ownership elsewhere, and then releases the scan.
+The old implementation published a recovered revision; the bound implementation
+returns an error and preserves the original ref.
+A separate Postgres cancellation test aborts the waiting caller while the scan
+is blocked. Competing exclusive ownership remains queued until the blocking
+repair publishes its recovered tree and releases its session.
+
+Library callers can obtain this bound pool through
+`MetadataWriteBarrier::postgres_metadata_pool()`. Existing barrier acquisition
+remains available. Callers that open a separate metadata pool do not receive
+the connection-loss protection automatically. Dropping the barrier closes its
+pool to new acquisitions, including retained clones; graceful connection cleanup
+then releases ownership. This does not establish fencing of remote requests.
+
 The real delayed-delete regression confirms this boundary. It pauses a request
 before MinIO applies it, terminates GC's database owner, acknowledges a new hold
 while the bytes still exist, and then releases the former owner's request. The

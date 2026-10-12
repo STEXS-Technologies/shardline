@@ -9,14 +9,23 @@ This document is for reviewers deciding whether the integration is safe to ship.
 
 ## Known gaps
 
-- **Ownership protection for other operations.** Mutating GC, rebuild, lifecycle repair and retention hold
-  updates bind their locks and metadata work to non-replaceable Postgres
+- **Ownership protection for other operations.** Mutating GC, rebuild, lifecycle
+  repair, Hub tree repair and retention hold updates bind their locks and metadata work to non-replaceable Postgres
   connections. The two-machine
   `connection-loss` drill passes, and a database test rejects an old pool's
   attempted write after takeover. Retention fault tests cover setting a hold
   after losing its barrier and releasing a hold during a blocked database query.
   Repair fault tests preserve an expired hold after connection loss during its
   scan, including a two-machine CLI run with a competing rebuild.
+  Hub tree repair now uses its lock-owning session for reference reads and
+  publication. Its real Postgres regression reproduced publication after
+  takeover on the old implementation; the bound implementation fails and
+  preserves the original ref. Other library callers using a separate pool
+  still need to adopt the bound session.
+  All 13 Hub repair tests pass with an actual Postgres fixture, including caller
+  cancellation while a competing GC owner waits. All 11 retention/barrier tests
+  pass; seven exercise Postgres. Dropping the public barrier immediately closes
+  retained pool handles and permits a new exclusive owner after connection cleanup.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.

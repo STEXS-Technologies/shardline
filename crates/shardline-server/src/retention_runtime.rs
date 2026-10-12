@@ -9,13 +9,52 @@ use crate::{ServerConfig, ServerError, maintenance_barrier};
 /// coordinated. It excludes mutating GC on the configured deployment backend.
 #[derive(Debug)]
 pub struct MetadataWriteBarrier {
-    _guard: maintenance_barrier::MaintenanceBarrierGuard,
+    guard: MetadataWriteBarrierGuard,
+}
+
+#[derive(Debug)]
+enum MetadataWriteBarrierGuard {
+    Local(maintenance_barrier::MaintenanceBarrierGuard),
+    Postgres(sqlx::PgPool),
+}
+
+impl MetadataWriteBarrier {
+    /// Returns the metadata pool whose session owns this barrier, when using Postgres.
+    ///
+    /// Use this pool for protected reads and writes instead of opening another
+    /// pool. It cannot reconnect after ownership loss. Keep the barrier alive
+    /// until the operation finishes, including any blocking work. Dropping the
+    /// barrier closes the pool to further acquisitions, including cloned handles.
+    /// This binds database work; it does not fence external object-store requests.
+    #[must_use]
+    pub const fn postgres_metadata_pool(&self) -> Option<&sqlx::PgPool> {
+        match &self.guard {
+            MetadataWriteBarrierGuard::Local(_guard) => None,
+            MetadataWriteBarrierGuard::Postgres(pool) => Some(pool),
+        }
+    }
+}
+
+impl Drop for MetadataWriteBarrier {
+    fn drop(&mut self) {
+        if let MetadataWriteBarrierGuard::Postgres(pool) = &self.guard {
+            // SQLx marks the pool closed synchronously; awaiting only finishes
+            // graceful connection cleanup. Even retained clones cannot reconnect.
+            drop(pool.close());
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let pool = pool.clone();
+                runtime.spawn(async move { pool.close().await });
+            }
+        }
+    }
 }
 
 /// Acquires the deployment's shared GC/write barrier for a library operation.
 ///
 /// This uses the same local root or Postgres advisory key as [`crate::run_gc`].
-/// Acquire it before resource locks to preserve the server's lock order.
+/// Acquire it before resource locks to preserve the server's lock order. For
+/// Postgres, use [`MetadataWriteBarrier::postgres_metadata_pool`] for protected
+/// database work; a separately opened pool is not bound to this ownership.
 ///
 /// # Errors
 ///
@@ -24,14 +63,15 @@ pub async fn acquire_metadata_write_barrier(
     config: &ServerConfig,
 ) -> Result<MetadataWriteBarrier, ServerError> {
     let guard = if let Some(url) = config.index_postgres_url() {
-        maintenance_barrier::acquire_postgres_shared(
-            &maintenance_barrier::postgres_coordination_pool(url)?,
+        MetadataWriteBarrierGuard::Postgres(
+            maintenance_barrier::postgres_shared_work_pool(url).await?,
         )
-        .await?
     } else {
-        maintenance_barrier::acquire_local_shared(config.root_dir()).await?
+        MetadataWriteBarrierGuard::Local(
+            maintenance_barrier::acquire_local_shared(config.root_dir()).await?,
+        )
     };
-    Ok(MetadataWriteBarrier { _guard: guard })
+    Ok(MetadataWriteBarrier { guard })
 }
 
 /// Persists an administrative hold while excluding mutating garbage collection.
@@ -227,6 +267,42 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_metadata_barrier_closes_retained_pool_handles_on_drop() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let _test_guard = POSTGRES_TEST_LOCK.lock().await;
+        let storage = tempfile::tempdir().unwrap();
+        let config = config(storage.path())
+            .with_index_postgres_url(url.clone())
+            .unwrap();
+        let barrier = acquire_metadata_write_barrier(&config).await.unwrap();
+        let retained = barrier.postgres_metadata_pool().unwrap().clone();
+        drop(barrier);
+        assert!(
+            retained.is_closed(),
+            "dropping ownership must immediately close retained clones"
+        );
+        assert!(matches!(
+            retained.acquire().await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        // Await physical closure before proving a competing owner can acquire.
+        retained.close().await;
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintenance_barrier::acquire_postgres_exclusive(&pool),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(replacement);
+        pool.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
