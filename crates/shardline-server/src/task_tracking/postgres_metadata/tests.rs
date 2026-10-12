@@ -129,6 +129,90 @@ fn library_backend_without_runtime_returns_an_error_without_starting_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_relocation_preserves_scope_associations_and_exact_history() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let scope = scope.unwrap();
+    let legacy = TaskEvidenceStore::from_objects(fixture.backend.object_store());
+    tokio::task::spawn_blocking(move || {
+        for (operation, legacy_deployment, history_scope) in [
+            ("same-login", deployment, None),
+            ("shared-login", Digest::of(b"another login"), Some(scope)),
+            (
+                "other-work-target",
+                deployment,
+                Some(Digest::of(b"another database/schema")),
+            ),
+        ] {
+            let mut tracker = EmbeddedTaskTracker::from_store(legacy.clone(), legacy_deployment);
+            if let Some(scope) = history_scope {
+                tracker = tracker.with_history_scope(scope);
+            }
+            tracker
+                .begin(
+                    operation,
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"original report")
+                .unwrap();
+        }
+        let before: std::collections::BTreeMap<_, _> = legacy
+            .objects
+            .list_prefix(&ObjectPrefix::parse(super::super::TASK_EVIDENCE_PREFIX).unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|artifact| {
+                let suffix = artifact
+                    .key()
+                    .as_str()
+                    .strip_prefix(super::super::TASK_EVIDENCE_PREFIX)
+                    .unwrap()
+                    .to_owned();
+                let bytes = legacy.read(&suffix, artifact.length()).unwrap().unwrap();
+                (suffix, bytes)
+            })
+            .collect();
+        assert!(store.relocate_finished_history(deployment).unwrap() > 0);
+        let history = store
+            .summaries_with_scope(deployment, Some(scope), None, 10)
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .all(|task| task.state == TaskRunState::Completed)
+        );
+        let legacy_history = legacy.summaries(deployment, None, 10).unwrap();
+        assert_eq!(legacy_history.len(), 1);
+        assert_eq!(legacy_history[0].operation, "other-work-target");
+        for (suffix, bytes) in before {
+            assert_eq!(
+                store
+                    .read(&suffix, u64::try_from(bytes.len()).unwrap())
+                    .unwrap(),
+                Some(bytes)
+            );
+        }
+        assert_eq!(store.relocate_finished_history(deployment).unwrap(), 0);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_metadata_preserves_legacy_history_and_retention() {
     let Some(fixture) = Fixture::new().await else {
         return;

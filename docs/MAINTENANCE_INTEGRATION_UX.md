@@ -98,8 +98,12 @@ new fence-table grant. See the [database migration guide](DATABASE_MIGRATIONS.md
 
 New local and upgraded server history stays separate from user payload data.
 Ordinary Postgres GC, rebuild and repair also use metadata history when the
-account supports it. Earlier object-backed history and storage-copy endpoints
-still need that separation verified for mixed-version upgrades and rollback.
+account supports it. Normal maintenance moves verified, finished legacy history
+into metadata in bounded batches, preserving its signed bytes. Interrupted,
+corrupt or unrelated history stays in place. Storage copy keeps its source
+read-only; it does not require new source write permissions.
+Other legacy history and storage-copy endpoints still need separation verified
+for mixed-version upgrades and rollback.
 Jobs using a different database/schema from server startup also need storage
 routing to their actual work target. Narrowly privileged accounts may retain
 legacy tracking; shared history does not bypass row restrictions.

@@ -112,6 +112,11 @@ impl Receipt {
             );
         }
         let mut seed = zeroize::Zeroizing::new([0_u8; 32]);
+        if let Err(error) = store.relocate_finished_history(deployment) {
+            tracing::warn!(
+                "legacy task history relocation unavailable; existing command continues: {error}"
+            );
+        }
         getrandom::fill(seed.as_mut()).map_err(|error| error.to_string())?;
         let key = SigningKey::from_bytes(&seed);
         let identity = TaskRunIdentity {
