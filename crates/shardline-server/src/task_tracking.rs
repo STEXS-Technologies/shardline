@@ -82,7 +82,14 @@ pub fn deployment_fingerprint(
     } else {
         format!("local:{root:?}")
     };
-    let objects = match config.object_storage_adapter() {
+    let objects = deployment_object_target(config, &root);
+    Ok(penelope_core::task::Digest::of(
+        format!("shardline.deployment-target.v1|{metadata}|{objects}").as_bytes(),
+    ))
+}
+
+fn deployment_object_target(config: &ServerConfig, root: &std::path::Path) -> String {
+    match config.object_storage_adapter() {
         crate::ObjectStorageAdapter::Local => {
             format!("local:{:?}", root.join("chunks"))
         }
@@ -92,10 +99,68 @@ pub fn deployment_fingerprint(
                 .s3_object_store_config()
                 .map(|s3| s3.clone().with_credentials(None, None, None))
         ),
-    };
-    Ok(penelope_core::task::Digest::of(
-        format!("shardline.deployment-target.v1|{metadata}|{objects}").as_bytes(),
-    ))
+    }
+}
+
+/// Resolves a PostgreSQL history scope on an existing metadata connection.
+///
+/// Roles using the same configured endpoint, initialized metadata identity,
+/// visible schema and object target agree on this scope. Different schemas and
+/// independently initialized stores behind a proxy stay separate,
+/// even when their connection options match. The connection must belong to the
+/// configured metadata target. No connection is opened or replaced here.
+///
+/// This additive identity does not rewrite legacy task manifests or change
+/// [`deployment_fingerprint`]. Callers must explicitly bind new evidence to it;
+/// it does not authorize merging historical scopes, retries or health claims.
+///
+/// # Errors
+///
+/// Returns missing PostgreSQL configuration, an unavailable or uninitialized
+/// schema, unsupported row-level security,
+/// database query failure, or invalid local object-target resolution.
+pub async fn resolved_postgres_deployment_fingerprint(
+    config: &ServerConfig,
+    connection: &mut sqlx::PgConnection,
+) -> Result<penelope_core::task::Digest, ServerError> {
+    use std::str::FromStr;
+    let url = config.index_postgres_url().ok_or_else(|| {
+        shardline_index::PostgresMetadataStoreError::Unsupported(
+            "resolved history scope requires PostgreSQL configuration".to_owned(),
+        )
+    })?;
+    let options = sqlx::postgres::PgConnectOptions::from_str(url)
+        .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
+    let (database, schema): (String, String) =
+        sqlx::query_as("SELECT current_database(), current_schema()")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
+    let identity: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT {quoted_schema}.shardline_task_history_scope_v1($1)"
+    )))
+    .bind(&schema)
+    .fetch_one(connection)
+    .await
+    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    let root = config
+        .root_dir()
+        .canonicalize()
+        .or_else(|_| std::path::absolute(config.root_dir()))?;
+    // Tuple encoding makes identifier boundaries unambiguous, including names
+    // containing separators or quotes. Credentials never enter this identity.
+    let target = serde_json::to_vec(&(
+        "shardline.deployment-target.postgres-schema.v1",
+        options.get_host(),
+        options.get_port(),
+        options.get_socket(),
+        database,
+        schema,
+        identity,
+        deployment_object_target(config, &root),
+    ))?;
+    Ok(penelope_core::task::Digest::of(&target))
 }
 
 /// Immutable publication in the configured local or S3-compatible object store.

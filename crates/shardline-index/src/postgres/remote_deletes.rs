@@ -156,6 +156,7 @@ impl PostgresIndexStore {
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&mut *transaction)
             .await?;
+        super::task_history_scope::initialize_task_history_scope(&mut transaction, &schema).await?;
         transaction.commit().await
     }
 
@@ -1071,6 +1072,7 @@ mod tests {
             "SELECT shardline_remote_delete_finish_v1('public', 'remote-delete/scope', 1)",
             "SELECT shardline_reference_keys_remote_delete_v1('public', ARRAY['remote-delete/scope'])",
             "SELECT * FROM shardline_pending_remote_deletes_v1('public', 0, 10)",
+            "SELECT shardline_task_history_scope_v1('public')",
         ] {
             let error = query(sql).execute(&pool).await.unwrap_err();
             assert_eq!(
@@ -1144,7 +1146,7 @@ mod tests {
             store.begin_remote_delete(&key).await.unwrap_err(),
             PostgresMetadataStoreError::Unsupported(_)
         ));
-        let count: i64 = query_scalar("SELECT count(*) FROM shardline_resource_fences")
+        let count: i64 = query_scalar("SELECT count(*) FROM shardline_resource_fences WHERE domain LIKE 'maintenance-remote-delete%'")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -1316,6 +1318,11 @@ mod tests {
         let store = PostgresIndexStore::new(pool);
         let mut admissions = tokio::task::JoinSet::new();
         store.initialize_remote_delete_guard().await.unwrap();
+        let scope: String =
+            query_scalar("SELECT shardline_task_history_scope_v1(current_schema())")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
         for number in 0..16 {
             let key = ObjectKey::parse(&format!("remote-delete/concurrent/{number}")).unwrap();
             let task_store = store.clone();
@@ -1334,11 +1341,18 @@ mod tests {
         assert_eq!(epochs.first(), Some(&1));
         assert_eq!(epochs.last(), Some(&16));
         assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_resource_fences")
+            query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_resource_fences WHERE domain IN ('maintenance-remote-delete', 'maintenance-remote-delete-sequence')")
                 .fetch_one(&store.pool)
                 .await
                 .unwrap(),
             1
+        );
+        assert_eq!(
+            query_scalar::<_, String>("SELECT shardline_task_history_scope_v1(current_schema())")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            scope
         );
     }
 

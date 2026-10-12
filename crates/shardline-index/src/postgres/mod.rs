@@ -6,6 +6,7 @@ mod record_store;
 mod remote_deletes;
 mod resumable_sessions;
 mod s3_objects;
+mod task_history_scope;
 mod tree_store;
 mod types;
 
