@@ -41,6 +41,20 @@ This document is for reviewers deciding whether the integration is safe to ship.
   publishes the exact blob bytes for both released/current readers. All 13
   index session tests pass, including direct rejection of all four mutations
   after connection termination with unchanged session and journal state.
+  Standard mutating Postgres requests now lend their GC-owning session to
+  guarded resource publication across frontends. The S3 HTTP fault regression
+  first reproduced PUT returning 200 after request ownership loss; it now
+  rejects the overwrite, preserves the previous bytes and accepts a retry.
+  S3 batch deletion explicitly releases each resource before moving on, while
+  retaining GC ownership. A database test verifies another writer can acquire
+  the released resource, exclusive GC remains excluded, the next resource
+  uses the same session, and final pool reuse leaves no advisory locks behind.
+  All 137 S3 tests, 279 OCI tests and nine provider functional tests pass.
+  S3 fixtures now isolate unrelated metadata/object-storage pairs, and the
+  one-connection progress fixture uses the single production middleware layer.
+  Dedicated provider fault coverage and mutations outside guarded publication
+  remain open; these tests do not prove deployment health or remote exactly-once
+  effects.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.

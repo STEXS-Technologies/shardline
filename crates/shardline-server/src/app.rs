@@ -1131,9 +1131,7 @@ async fn gc_write_barrier_middleware(
         return next.run(request).await;
     }
 
-    if request.uri().path().starts_with("/v2/")
-        && let ServerBackend::Postgres(backend) = &state.backend
-    {
+    if let ServerBackend::Postgres(backend) = &state.backend {
         let session = tokio::time::timeout(
             timeouts::REQUEST_TOTAL,
             crate::maintenance_barrier::RequestSession::acquire(

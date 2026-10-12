@@ -24,7 +24,7 @@ tokio::task_local! {
 }
 
 #[derive(Clone)]
-/// One OCI request's non-replaceable lock-owning session. Resource publications
+/// One request's non-replaceable lock-owning session. Resource publications
 /// borrow this connection rather than acquiring an independent session. The
 /// backend identity prevents a nested call to another backend borrowing it.
 pub(crate) struct RequestSession {
@@ -147,6 +147,25 @@ impl Drop for ResourceWriteGuard {
 }
 
 impl ResourceWriteGuard {
+    /// Releases this request's resource locks while retaining its GC barrier.
+    /// Consuming the guard prevents subsequent use of its released fences.
+    pub(crate) async fn release(mut self) -> Result<(), ServerError> {
+        if let Self::PostgresRequest { connection, fences } = &mut self {
+            let work = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
+            for (key, _) in fences {
+                let released = query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+                    .bind(resource_lock_key(key))
+                    .fetch_one(&mut **work)
+                    .await
+                    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+                if !released {
+                    return Err(ServerError::StaleResourceFence);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn postgres_fences(&self) -> Option<Vec<shardline_index::PostgresResourceFence>> {
         match self {
             Self::Local { .. } => None,
@@ -834,6 +853,80 @@ mod tests {
             .expect("same-resource lock task should complete")
             .unwrap();
         drop(second);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_request_releases_each_resource_without_losing_gc_ownership() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let shared = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let resources = postgres_coordination_pool(&url).unwrap();
+        let competitor = postgres_coordination_pool(&url).unwrap();
+        let identity = Arc::new(());
+        let request = RequestSession::acquire(&shared, Arc::clone(&identity))
+            .await
+            .unwrap();
+        let pid: i32 = request
+            .scope(async {
+                let key = ResourceLockKey::s3_object("request-release", "first");
+                let mut guard = acquire_postgres_request_resources(
+                    &resources,
+                    &identity,
+                    std::slice::from_ref(&key),
+                )
+                .await
+                .unwrap();
+                let pid: i32 = query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(guard.postgres_connection_mut().unwrap())
+                    .await
+                    .unwrap();
+                guard.release().await.unwrap();
+                let competing = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    acquire_postgres_resource_exclusive(&competitor, &key),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                drop(competing);
+                let mut observer = competitor.acquire().await.unwrap();
+                let gc_available: bool = query_scalar("SELECT pg_try_advisory_lock($1)")
+                    .bind(GC_WRITE_BARRIER_KEY)
+                    .fetch_one(&mut *observer)
+                    .await
+                    .unwrap();
+                assert!(
+                    !gc_available,
+                    "resource release must retain the request GC barrier"
+                );
+                let other = ResourceLockKey::s3_object("request-release", "second");
+                let mut next = acquire_postgres_request_resources(&resources, &identity, &[other])
+                    .await
+                    .unwrap();
+                let next_pid: i32 = query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(next.postgres_connection_mut().unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(next_pid, pid);
+                next.release().await.unwrap();
+                pid
+            })
+            .await;
+        request.finish().await;
+        let mut reused = shared.acquire().await.unwrap();
+        let reused_pid: i32 = query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *reused)
+            .await
+            .unwrap();
+        assert_eq!(reused_pid, pid);
+        let remaining: i64 = query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory'",
+        )
+        .fetch_one(&mut *reused)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
