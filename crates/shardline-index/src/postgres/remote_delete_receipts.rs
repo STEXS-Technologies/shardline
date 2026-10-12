@@ -237,5 +237,4 @@ impl PostgresIndexStore {
 }
 
 #[cfg(test)]
-#[path = "remote_delete_receipts_tests.rs"]
 mod tests;

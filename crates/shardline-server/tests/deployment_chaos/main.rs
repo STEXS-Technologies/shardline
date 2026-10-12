@@ -48,13 +48,10 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 
-#[path = "deployment_chaos/readonly_maintenance.rs"]
 mod readonly_maintenance_deployment;
 
-#[path = "deployment_chaos/tracker_replacement.rs"]
 mod tracker_replacement;
 
-#[path = "deployment_chaos/gc_acknowledgement.rs"]
 mod gc_acknowledgement;
 
 // ---------------------------------------------------------------------------
