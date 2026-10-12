@@ -224,7 +224,17 @@ This document is for reviewers deciding whether the integration is safe to ship.
   completed outcomes. Database tests distinguish that
   session's schema from an inspection connection, preserve its PID and reject
   a changed scope or closed pool without replacing the session. Storage-copy
-  jobs, the optional isolated runner, other entry points and binding every
+  jobs use only their copy endpoints, not a metadata connection. Their history
+  cannot safely inherit a server's database scope without a verified association;
+  opening a guessed database connection would also add a deployment dependency.
+  A local current/released copy comparison works with PostgreSQL unavailable
+  and matches payload bytes and output on a clean source. Current recopy also
+  excludes its task artifacts. Released 1.11.3 rollback from the current
+  destination instead scans and copies 11 objects for a one-object fixture,
+  including ten task-history artifacts. This fails the requirement to keep
+  private task state out of storage migration. The storage-copy verifier
+  reproduces this failure; rollback isolation remains required work.
+  Shared grouping for these jobs, the optional isolated runner, other entry points and binding every
   server background operation to its work connection remain unfinished.
   The Hub secret sweep now binds from its own non-replaceable work connection,
   rather than inheriting the startup inspection pool's scope. It remains on the
@@ -369,6 +379,18 @@ All eight remain the completion criteria:
    needing reconciliation without understanding dependency internals.
 
 ## Reproducing the machine tests
+
+The storage-copy compatibility check currently **fails** at released rollback:
+
+```bash
+bash scripts/shardline/verify_maintenance_storage_copy.sh CURRENT RELEASED
+```
+
+It verifies exact payload bytes and matching current/released output on a clean
+source with PostgreSQL unavailable, then checks current recopy and released
+rollback from a destination containing current task history. It retains its
+diagnostics and exits nonzero when released migration copies that history as
+payload. This is a known merge failure, not a passing compatibility drill.
 
 For the saved-reply request-count drill, point `DATABASE_URL` at an isolated,
 owner-accessible PostgreSQL fixture initialized by `shardline db migrate up`:

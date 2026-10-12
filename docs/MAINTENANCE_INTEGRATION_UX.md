@@ -21,8 +21,9 @@ original node disappears, without recovering its container files.
 
 After the usual owner upgrade, new server jobs, GC, rebuild and repair share
 history across logins that use the same database, schema and object storage.
-Older records, storage-copy jobs and the optional runner still follow their
-original login. If shared grouping is unavailable, the API reports
+Older records and the optional runner can still follow their original database
+login. Storage-copy jobs track their copy endpoints; their history is not yet
+grouped with a server's shared database history. If shared grouping is unavailable, the API reports
 `history_grouping: legacy`; otherwise it reports `shared_metadata`.
 
 If history cannot be saved, Shardline warns and the command keeps its existing
@@ -149,8 +150,11 @@ process separation.
 ## Upgrade status
 
 **This branch is not ready to merge.** The version and deployment formats remain
-unchanged. Recovery of missing replies, older GC sources, remaining write paths
-and deployment-scale limits still need work.
+unchanged. Recovery of missing replies, older GC sources, remaining write paths,
+storage-copy rollback isolation and deployment-scale limits still need work.
+Released 1.11.3 storage copies can include the new task-history artifacts as
+payload objects. The branch must keep those artifacts out of the old inventory
+before this upgrade is ready.
 
 The usual owner-run `shardline db migrate up` installs the protection functions,
 even with no pending migration entries. Runtime accounts need no new fence-table
