@@ -503,7 +503,9 @@ where
 /// The index and record adapters must share the non-replaceable connection
 /// holding the exclusive maintenance barrier. The caller retains that barrier
 /// until this future finishes. Unknown outcomes keep their markers pending;
-/// this function never reconnects or retries an uncertain remote delete.
+/// this function never reconnects work or retries an uncertain remote delete.
+/// An explicitly configured acknowledgement recorder may settle only a proved
+/// single-attempt completion; ownership failure still stops GC.
 ///
 /// # Errors
 ///

@@ -9,7 +9,7 @@ use crate::{ServerObjectStore, ServerObjectStoreError};
 /// Failure at the durable remote-delete boundary.
 #[derive(Debug, Error)]
 pub enum GuardedRemoteDeleteError {
-    /// Admission or settlement failed; no replacement session is authorized.
+    /// Admission or settlement failed; no replacement work session is authorized.
     #[error(transparent)]
     Metadata(#[from] PostgresMetadataStoreError),
     /// The remote outcome may be unknown. Its marker must stay pending.
@@ -20,8 +20,10 @@ pub enum GuardedRemoteDeleteError {
 /// Deletes through the same non-replaceable session that owns GC's barrier.
 ///
 /// S3 admission commits before the request. Only a successful single-attempt
-/// response allows exact-epoch settlement on the original ownership session.
-/// Errors and cancellation leave the marker pending. This protects writers that
+/// response allows exact-epoch settlement. An optional independent recorder may
+/// settle that acknowledged attempt after ownership loss, but the original
+/// error still stops GC. Remote errors and cancellation leave the marker pending.
+/// This protects writers that
 /// transactionally enforce the marker; it does not grant ownership or prove
 /// that every publication path enforces it. The caller must hold the exclusive
 /// maintenance barrier for the entire operation.
@@ -45,7 +47,7 @@ pub async fn delete_with_postgres_guard(
         .delete_if_present_single_attempt(key)
         .await
         .map_err(ServerObjectStoreError::from)?;
-    if !index.finish_remote_delete(&permit).await? {
+    if !index.finish_acknowledged_remote_delete(&permit).await? {
         return Err(PostgresMetadataStoreError::Unsupported(
             "remote delete attempt changed before settlement".to_owned(),
         )

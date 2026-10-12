@@ -233,8 +233,9 @@ The real delayed-delete regression originally reproduced this boundary: after
 GC lost its database owner, a later hold was acknowledged before the old request
 removed the bytes. With durable admission, the same regression now rejects the
 later hold with the typed retryable error and prevents a replacement GC from
-issuing a second delete. The old request can finish, but its unknown settlement
-keeps the marker pending and its source records failure.
+issuing a second delete. The old request can finish and its source records
+failure. If its single-attempt successful reply is observed, an independent
+recorder can settle the exact marker; a missing reply keeps it pending.
 
 An ETag precondition alone cannot establish Shardline ownership. Amazon S3's
 [conditional-delete contract](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.html)
@@ -311,8 +312,18 @@ Normal Postgres/S3 GC uses this protocol for quarantine, OCI tombstone and
 resumable-staging deletion. The guarded client sends a single-object DELETE with
 retries disabled, following the dependency's
 [retry configuration contract](https://docs.rs/object_store/0.14.0/object_store/struct.RetryConfig.html).
-A successful response permits exact-epoch settlement only on the original work
-session. Remote errors, cancellation and lost ownership retain the marker.
+A successful response permits exact-epoch settlement. Normal GC supplies a
+lazy one-connection recorder using the same pinned database URL and credentials.
+If settlement on the original work session fails, only that acknowledged
+attempt's marker can be cleared through the recorder. The original error still
+propagates and stops GC; all admissions and ordinary metadata work remain bound
+to the original non-replaceable session. A stale receipt cannot clear a newer
+epoch. The permit captures the admitted schema, and settlement qualifies its
+function explicitly; a changed recorder search path cannot settle a coincident
+key/epoch in another schema. No receipt is inferred from process death, elapsed
+time or object absence.
+Remote errors, cancellation before receiving the reply, and an unavailable
+recorder retain the marker. No background worker or delete replay is introduced.
 The generic legacy GC library entry points preserve their signatures; embedders
 wanting this boundary use `run_postgres_gc_with_remote_delete_protection` with
 the same ownership-bound record and index adapters.

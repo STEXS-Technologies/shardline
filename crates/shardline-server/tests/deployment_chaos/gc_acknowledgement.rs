@@ -462,7 +462,7 @@ async fn run_remote_gc_fault(before_apply: bool, complete: bool, released: Optio
         let rejected_as_pending = hold_result
             .as_ref()
             .is_err_and(|error| error.is_remote_delete_pending());
-        let expected_hold = acknowledged.then_some(hold);
+        let expected_hold = acknowledged.then_some(hold.clone());
         assert_eq!(index.retention_hold(&key).await.unwrap(), expected_hold);
         assert!(
             objects.contains(&key).unwrap(),
@@ -530,9 +530,15 @@ async fn run_remote_gc_fault(before_apply: bool, complete: bool, released: Optio
             "GC must not retry its delete"
         );
         assert_eq!(sqlx::query_scalar::<_, i64>(
-            "SELECT epoch FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1",
-        ).bind(key.as_str()).fetch_one(&pool).await.unwrap(), pending_epoch,
-            "ownership loss must retain the original unresolved marker");
+            "SELECT count(*) FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1",
+        ).bind(key.as_str()).fetch_one(&pool).await.unwrap(), 0,
+            "the observed successful reply settles the exact attempt without restoring GC ownership");
+        shardline_server::set_retention_hold(&config, &hold)
+            .await
+            .unwrap();
+        assert_eq!(index.retention_hold(&key).await.unwrap(), Some(hold));
+        assert!(!objects.contains(&key).unwrap());
+        assert_eq!(proxy.arrived.load(Ordering::Acquire), 1);
         return;
     }
     let before = [0_u32, 1, 2].map(|sequence| {
