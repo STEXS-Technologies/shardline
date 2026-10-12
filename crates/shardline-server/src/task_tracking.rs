@@ -7,6 +7,7 @@ pub(crate) mod embedded;
 pub use embedded::EmbeddedTaskTracker;
 mod owner;
 pub use owner::TaskOwner;
+mod history_scope_binding;
 mod status;
 pub use status::{TaskRunState, TaskRunSummary};
 #[cfg(test)]
