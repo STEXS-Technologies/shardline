@@ -211,16 +211,19 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     let provider_webhook_body_limit =
         bounded_api_body_limit(max_request_body_bytes, MAX_PROVIDER_WEBHOOK_BODY_BYTES);
     let backend = ServerBackend::from_config(&config).await?;
-    let mut task_tracker = crate::task_tracking::EmbeddedTaskTracker::new(
+    let evidence_store = crate::task_tracking::TaskEvidenceStore::from_backend_objects(
+        &config,
         backend.object_store(),
+    );
+    let mut task_tracker = crate::task_tracking::EmbeddedTaskTracker::from_store(
+        evidence_store.clone(),
         crate::task_tracking::deployment_fingerprint(&config)?,
     );
     if let Some(scope) = crate::task_tracking::backend_history_scope(&config, &backend).await {
         task_tracker = task_tracker.with_history_scope(scope);
     }
     let task_tracker = Arc::new(task_tracker);
-    let retention_store =
-        crate::task_tracking::TaskEvidenceStore::from_objects(backend.object_store());
+    let retention_store = evidence_store;
     let retention_deployment = crate::task_tracking::deployment_fingerprint(&config)?;
     tokio::task::spawn_blocking(move || {
         if let Err(error) = retention_store.prune_completed(

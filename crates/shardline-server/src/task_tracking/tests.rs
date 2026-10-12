@@ -13,6 +13,114 @@ fn config(root: &std::path::Path) -> ServerConfig {
 }
 
 #[test]
+fn local_metadata_history_is_verified_without_entering_payload_inventory() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
+    tracker
+        .begin(
+            "metadata-run",
+            b"input",
+            MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap()
+        .finish(true, b"verified report")
+        .unwrap();
+    assert!(
+        store
+            .objects
+            .list_prefix(&ObjectPrefix::parse(TASK_EVIDENCE_PREFIX).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    let reopened = TaskEvidenceStore::from_config(&config).unwrap();
+    let history = reopened.summaries(deployment, None, 10).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].state, TaskRunState::Completed);
+    assert_eq!(
+        reopened
+            .embedded_report(deployment, None, &history[0].id)
+            .unwrap()
+            .unwrap()["report"],
+        "verified report"
+    );
+
+    // A legacy writer is still visible alongside new evidence after an upgrade.
+    EmbeddedTaskTracker::new(store.objects, deployment)
+        .begin(
+            "legacy-run",
+            b"input",
+            MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap()
+        .finish(true, b"legacy report")
+        .unwrap();
+    let history = reopened.summaries(deployment, None, 10).unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(
+        history
+            .iter()
+            .all(|run| run.state == TaskRunState::Completed)
+    );
+    assert_eq!(
+        reopened
+            .prune_completed(
+                deployment,
+                shardline_protocol::unix_now_seconds_lossy() + 31 * 86400
+            )
+            .unwrap(),
+        2
+    );
+    assert!(reopened.summaries(deployment, None, 10).unwrap().is_empty());
+    let mut retained = 0;
+    reopened
+        .visit_prefix(&ObjectPrefix::parse(TASK_EVIDENCE_PREFIX).unwrap(), |_| {
+            retained += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(retained, 0);
+}
+
+#[test]
+fn local_metadata_conflicts_and_duplicate_legacy_evidence_remain_visible() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    store.publish("fixture", b"exact bytes").unwrap();
+    store.publish("fixture", b"exact bytes").unwrap();
+    assert!(store.publish("fixture", b"other bytes").is_err());
+    assert!(matches!(
+        store.read("fixture", 2),
+        Err(ServerError::RequestBodyTooLarge)
+    ));
+    let legacy = TaskEvidenceStore::from_objects(store.objects.clone());
+    legacy.publish("fixture", b"exact bytes").unwrap();
+    let mut count = 0;
+    store
+        .visit_prefix(&ObjectPrefix::parse(TASK_EVIDENCE_PREFIX).unwrap(), |_| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+    store
+        .delete_artifact(&TaskEvidenceStore::key("fixture").unwrap())
+        .unwrap();
+    assert_eq!(store.read("fixture", 100).unwrap(), None);
+    assert_eq!(legacy.read("fixture", 100).unwrap(), None);
+    store.publish("conflicting-copy", b"safe").unwrap();
+    legacy.publish("conflicting-copy", b"wrong").unwrap();
+    assert!(matches!(
+        store.read("conflicting-copy", 100),
+        Err(ServerError::InvalidContentHash)
+    ));
+    assert!(store.publish("conflicting-copy", b"safe").is_err());
+}
+
+#[test]
 fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -1265,6 +1373,7 @@ async fn corrupt_manifests_remain_visible_without_hiding_healthy_jobs() {
     let original = store.summaries(deployment, None, 100).unwrap();
     assert!(original.len() >= 4);
     for (index, job) in original.iter().take(3).enumerate() {
+        let suffix = format!("manifests/{}", job.id);
         let path = root
             .path()
             .join(format!("chunks/{TASK_EVIDENCE_PREFIX}manifests/{}", job.id));
@@ -1272,13 +1381,31 @@ async fn corrupt_manifests_remain_visible_without_hiding_healthy_jobs() {
             0 => b"broken JSON".to_vec(),
             1 => {
                 let mut identity: TaskRunIdentity =
-                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    serde_json::from_slice(&store.read(&suffix, 65536).unwrap().unwrap()).unwrap();
                 identity.schema = 999;
                 serde_json::to_vec(&identity).unwrap()
             }
             _ => vec![b'x'; 65537],
         };
-        std::fs::write(path, bytes).unwrap();
+        let key = TaskEvidenceStore::key(&suffix).unwrap();
+        if store
+            .local_metadata
+            .as_ref()
+            .unwrap()
+            .contains_task_artifact(key.as_str())
+            .unwrap()
+        {
+            // Inject corruption into the actual storage surface. Normal
+            // publication remains immutable and cannot replace this row.
+            let connection =
+                rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+            assert_eq!(connection.execute(
+                "UPDATE shardline_task_artifacts_v1 SET payload = ?2 WHERE artifact_key = ?1",
+                rusqlite::params![key.as_str(), bytes],
+            ).unwrap(), 1);
+        } else {
+            std::fs::write(path, bytes).unwrap();
+        }
     }
     // Existing library callers still receive an error rather than incomplete
     // typed summaries. The admin view can explicitly represent unknown identity.

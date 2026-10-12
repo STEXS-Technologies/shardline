@@ -12,6 +12,8 @@ shardline repair
 There is no tracker service, extra port, new mount or separate configuration.
 Normal startup tracks work inside the server. Maintenance keeps its original
 process and live output. Starting the server does not start GC.
+Local deployments without Postgres save new history in the existing metadata
+database, so payload copies do not include it. Earlier history stays readable.
 
 ## What you gain
 
@@ -149,12 +151,11 @@ process separation.
 
 ## Upgrade status
 
-**This branch is not ready to merge.** The version and deployment formats remain
-unchanged. Recovery of missing replies, older GC sources, remaining write paths,
+**This branch is not ready to merge.** The version remains 1.11.3. Recovery of
+missing replies, older GC sources, remaining write paths,
 storage-copy rollback isolation and deployment-scale limits still need work.
-Released 1.11.3 storage copies can include the new task-history artifacts as
-payload objects. The branch must keep those artifacts out of the old inventory
-before this upgrade is ready.
+New local history now stays out of released payload copies. Earlier object-backed
+history and Postgres/S3 history still need that isolation before the upgrade is ready.
 
 The usual owner-run `shardline db migrate up` installs the protection functions,
 even with no pending migration entries. Runtime accounts need no new fence-table

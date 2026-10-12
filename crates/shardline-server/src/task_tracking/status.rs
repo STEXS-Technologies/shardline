@@ -5,7 +5,7 @@ use penelope_core::task::{
 };
 use serde::{Deserialize, Serialize};
 use shardline_reliability::{MaintenanceArtifactProof, verify_maintenance_artifact};
-use shardline_storage::{ObjectPrefix, ObjectStore};
+use shardline_storage::ObjectPrefix;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Error, ErrorKind},
@@ -122,7 +122,7 @@ impl TaskEvidenceStore {
     ) -> Result<BTreeMap<(u64, String), TaskRunIdentity>, ServerError> {
         let prefix = ObjectPrefix::parse(&format!("{}{category}/", super::TASK_EVIDENCE_PREFIX))?;
         let mut candidates = BTreeMap::new();
-        self.objects.visit_prefix(&prefix, |metadata| {
+        self.visit_prefix(&prefix, |metadata| {
             let id = metadata
                 .key()
                 .as_str()
@@ -195,21 +195,18 @@ impl TaskEvidenceStore {
     fn finish_retirement(&self, identity: &TaskRunIdentity) -> Result<(), ServerError> {
         // Hide the expired history first. Status must not advertise a partly
         // removed native proof; the cleanup marker remains outside status.
-        self.objects
-            .delete_if_present(&Self::key(&format!("manifests/{}", identity.id))?)?;
-        self.objects
-            .delete_if_present(&Self::key(&format!("scope-bindings/{}", identity.id))?)?;
+        self.delete_artifact(&Self::key(&format!("manifests/{}", identity.id))?)?;
+        self.delete_artifact(&Self::key(&format!("scope-bindings/{}", identity.id))?)?;
         let run_prefix = ObjectPrefix::parse(&format!(
             "{}runs/{}/",
             super::TASK_EVIDENCE_PREFIX,
             identity.id
         ))?;
-        self.objects.visit_prefix(&run_prefix, |metadata| {
-            self.objects.delete_if_present(metadata.key())?;
+        self.visit_prefix(&run_prefix, |metadata| {
+            self.delete_artifact(metadata.key())?;
             Ok::<(), ServerError>(())
         })?;
-        self.objects
-            .delete_if_present(&Self::key(&format!("retiring/{}", identity.id))?)?;
+        self.delete_artifact(&Self::key(&format!("retiring/{}", identity.id))?)?;
         Ok(())
     }
 
@@ -253,7 +250,7 @@ impl TaskEvidenceStore {
         }
         let prefix = ObjectPrefix::parse(&format!("{}manifests/", super::TASK_EVIDENCE_PREFIX))?;
         let mut identities = BTreeMap::new();
-        self.objects.visit_prefix(&prefix, |metadata| {
+        self.visit_prefix(&prefix, |metadata| {
             let id = metadata
                 .key()
                 .as_str()
@@ -415,7 +412,7 @@ impl TaskEvidenceStore {
             .map_err(|_error| invalid("invalid task contract"))?;
         let prefix = format!("runs/{}/records/", identity.id);
         let mut sequences = BTreeSet::new();
-        self.objects.visit_prefix(
+        self.visit_prefix(
             &ObjectPrefix::parse(&format!("{}{prefix}", super::TASK_EVIDENCE_PREFIX))?,
             |metadata| {
                 let sequence = metadata
