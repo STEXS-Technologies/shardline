@@ -159,7 +159,9 @@ pub(crate) async fn postgres_shared_work_pool(url: &str) -> Result<PgPool, Serve
     postgres_work_pool(url, false).await
 }
 
-async fn postgres_work_pool(url: &str, exclusive: bool) -> Result<PgPool, ServerError> {
+/// One work session without a maintenance barrier. Callers still enforce their
+/// own mutation boundary; this pool never reconnects after its first session.
+pub(crate) fn postgres_nonreplaceable_work_pool(url: &str) -> Result<PgPool, ServerError> {
     let connected = Arc::new(AtomicBool::new(false));
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
@@ -182,6 +184,11 @@ async fn postgres_work_pool(url: &str, exclusive: bool) -> Result<PgPool, Server
         })
         .connect_lazy(url)
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    Ok(pool)
+}
+
+async fn postgres_work_pool(url: &str, exclusive: bool) -> Result<PgPool, ServerError> {
+    let pool = postgres_nonreplaceable_work_pool(url)?;
     let mut connection = pool
         .acquire()
         .await
