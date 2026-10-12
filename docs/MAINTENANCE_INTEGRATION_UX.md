@@ -29,10 +29,8 @@ schema and object storage. It reuses the existing connection pool. Local
 deployments without Postgres save new history in their existing metadata database.
 
 Postgres provider callbacks save the delivery ID and repository changes
-together. A failed transaction can be retried with the same delivery ID;
-successful deliveries are deduplicated. The startup webhook encryption sweep
-also preserves concurrent secret changes and stops if its work connection is
-lost. Ordinary request handling continues if that sweep fails.
+together, so retrying a successful delivery does not repeat its changes.
+Covered writes stop after losing database ownership.
 
 If optional tracking cannot save history, Shardline warns and preserves the
 command's existing behavior. There is then no verified history result to rely on.
@@ -80,11 +78,9 @@ Use your existing admin token:
 A pending delete may still belong to a running GC. Check the original process
 and logs. These endpoints inspect state; they do not retry or clear a delete.
 
-A `completed` result describes that recorded run. A `failed` or
-`needs_reconciliation` result needs investigation before repeating mutations.
-For `running_or_interrupted`, check whether the original process is alive.
-Treat `corrupt` history as untrusted. Older and interrupted jobs may have no
-saved report. CLI commands retain their existing diagnostics.
+A completed result describes that run. Investigate failed or interrupted work
+before repeating mutations; treat corrupt history as untrusted. Older and
+interrupted jobs may have no saved report. CLI diagnostics remain available.
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.
@@ -102,23 +98,12 @@ account supports it. Normal maintenance moves verified, finished legacy history
 into metadata in bounded batches, preserving its signed bytes. Interrupted,
 corrupt or unrelated history stays in place. Storage copy keeps its source
 read-only; it does not require new source write permissions.
-Other legacy history and storage-copy endpoints still need separation verified
-for mixed-version upgrades and rollback.
-Jobs using a different database/schema from server startup also need storage
-routing to their actual work target. Narrowly privileged accounts may retain
-legacy tracking; shared history does not bypass row restrictions.
-
-Shared history grouping reports `shared_metadata` when available and `legacy`
-otherwise. Storage-copy jobs and the optional runner are not yet covered by
-all of the shared-storage guarantees.
-
-Covered Postgres writes reject publication after losing database ownership.
-OCI failures preserve the previous published tag; incomplete manifests stay
-hidden. Unreferenced bytes may remain for later maintenance. Released 1.11.3
-servers can return a generic server error where updated servers explain the
-pending-delete retry. Older GC sources, remaining write paths, row-restricted
-cleanup, missing-delete replies and deployment-scale limits still have open
-acceptance work. See [the acceptance evidence and remaining gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
+Different work databases or schemas, some legacy history, S3-only storage-copy
+paths and narrowly privileged accounts still need compatibility work. Older GC,
+remaining write paths, missing delete replies and deployment-scale behavior also
+have open checks. Released 1.11.3 servers may return a generic error for a pending
+delete. See [the acceptance evidence and remaining gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md)
+before planning a rolling upgrade or rollback.
 
 ## When to use a separate worker
 
