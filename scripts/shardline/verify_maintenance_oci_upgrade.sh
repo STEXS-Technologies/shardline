@@ -6,7 +6,7 @@ test "$#" = 2 || { echo 'usage: verify_maintenance_oci_upgrade.sh CURRENT RELEAS
 current=$(realpath "$1")
 released=$(realpath "$2")
 test -x "$current" && test -x "$released"
-for tool in docker curl rg sha256sum shuf ps awk; do command -v "$tool" >/dev/null; done
+for tool in docker curl jq rg sha256sum shuf ps awk; do command -v "$tool" >/dev/null; done
 umask 077
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-oci-upgrade.XXXXXX")
 echo "diagnostics: $fixture"
@@ -71,6 +71,7 @@ check_writer_privileges() {
 check_writer_privileges
 mkdir "$fixture/root"
 signing_key=0123456789abcdef0123456789abcdef
+admin_token=owned-native-task-admin-token
 token=$(SHARDLINE_TOKEN_SIGNING_KEY="$signing_key" "$released" admin token \
     --issuer fixture --subject fixture --scope write --provider generic \
     --owner team --repo upgrade --key-env SHARDLINE_TOKEN_SIGNING_KEY)
@@ -89,6 +90,7 @@ start_server() {
         SHARDLINE_AUTH_PROVIDER=local SHARDLINE_TOKEN_SIGNING_KEY="$signing_key" SHARDLINE_SERVER_FRONTENDS=oci,s3 \
         SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=memory SHARDLINE_OBJECT_STORAGE_ADAPTER=local \
         SHARDLINE_INDEX_POSTGRES_URL="$writer_url" \
+        SHARDLINE_ADMIN_READ_TOKEN="$admin_token" \
         "$binary" serve > "$fixture/server-$node.log" 2>&1 &
     server_pids[$node]=$!
     for attempt in $(seq 1 40); do
@@ -102,6 +104,22 @@ start_server() {
     done
     echo "FAIL: server $node did not become ready" >&2
     exit 1
+}
+inspect_task_history() {
+    local phase=$1 grouping=$2 unavailable=$3
+    curl -fsS --max-time 15 -H "Authorization: Bearer $admin_token" \
+        "http://127.0.0.1:${ports[1]}/api/v1/status" > "$fixture/status-$phase.json"
+    jq -e '.state == "ready"' "$fixture/status-$phase.json" > "$fixture/status-$phase-checked.log"
+    curl -fsS --max-time 15 -H "Authorization: Bearer $admin_token" \
+        "http://127.0.0.1:${ports[1]}/api/v1/tasks/maintenance?limit=1" > "$fixture/history-$phase.json"
+    jq -e --arg grouping "$grouping" --argjson unavailable "$unavailable" '
+        .supervision == "embedded" and .history_grouping == $grouping
+        and (.tasks | type == "array")
+        and (if $unavailable then
+            .history_notice | contains("an empty list does not prove maintenance did not run")
+        else .history_notice == null end)
+    ' "$fixture/history-$phase.json" > "$fixture/history-$phase-checked.log"
+    assert_no_server_children 1 "history-$phase"
 }
 media_type=application/vnd.oci.image.index.v1+json
 printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}' > "$fixture/published.json"
@@ -136,6 +154,7 @@ read_manifest 0 "sha256:$published_digest" 200
 # Starting the new binary before the optional owner upgrade must preserve the
 # existing reader/writer experience without putting tracker data into payload.
 start_server "$current" 1
+inspect_task_history preupgrade legacy true
 read_manifest 1 "sha256:$published_digest" 200
 cmp "$fixture/published.json" "$fixture/response-1.body"
 test "$(s3_request 1 PUT preupgrade-current --data-binary before-upgrade)" = 200
@@ -196,6 +215,7 @@ check_writer_privileges
 test "$(sql "SELECT NOT has_table_privilege('existing_oci_writer',
     'shardline_task_artifacts_v1','SELECT,INSERT,UPDATE,DELETE')")" = t
 start_server "$current" 1
+inspect_task_history upgraded shared_metadata false
 for node in 0 1; do read_manifest "$node" latest 200; done
 
 # A fixture-only uncertain delete must block both native publication paths.
@@ -497,6 +517,7 @@ cmp "$fixture/published.json" "$fixture/response-0.body"
 sql 'DROP TRIGGER fixture_pause_publication ON shardline_oci_tags; DROP FUNCTION fixture_pause_publication();' > "$fixture/crash-remove.log"
 mv "$fixture/server-1.log" "$fixture/crashed-server.log"
 start_server "$current" 1
+inspect_task_history restarted shared_metadata false
 read_manifest 1 "sha256:$crashed_digest" 404
 test "$(request 1 PUT crashed --data-binary "@$fixture/crashed.json")" = 201
 for node in 0 1; do

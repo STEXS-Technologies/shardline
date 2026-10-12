@@ -29,6 +29,8 @@ These are scoped results, not a claim that every deployment is compatible:
   preserve domain data, released migration records and existing runtime grants.
   Current startup and writes also pass before the optional owner upgrade,
   without new tracker payload objects. Ordinary startup introduces no worker service.
+  Native admin checks distinguish readiness from unavailable history before the
+  owner upgrade, then select shared history after upgrade and process restart.
 - Public-library local router startup covers all three server roles with an
   existing application logging subscriber. Consecutive startups sweep newly
   expired legacy LFS sessions and save distinct completed runs in existing metadata.

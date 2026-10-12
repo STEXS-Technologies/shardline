@@ -824,3 +824,24 @@ This limits unnecessary metadata enumeration, not all history-related work.
 Filtering large foreign backlogs, legacy walks, retention eligibility scans and
 deployment-scale latency remain open. No process, configuration, cursor format
 or database migration is added.
+
+## Current native binary after history-query changes
+
+The full-feature CLI was rebuilt after cursor seeking and early metadata-page
+termination. Six native released/current drills pass: OCI/S3 upgrade and owner
+loss, local copy, restricted S3 copy, read-only-root commands, injected scratch
+cleanup failure and the existing retention-only role. CLI/server strict Clippy
+also passes. The copy checks retain payload bytes, output and released rollback;
+the cleanup fault retains receipt bytes and never replays completed work.
+
+The OCI/S3 drill now uses the existing optional admin read token to inspect
+the current native server before the owner upgrade, after upgrade and after a
+SIGKILL/restart. All three responses report server state `ready`. Before upgrade,
+history uses legacy grouping and explains that new history is unavailable.
+After upgrade and restart, it selects shared metadata history with no notice.
+The original role's grants, released migration records and payload state remain
+unchanged, and server child-process snapshots remain empty.
+
+These checks cover the owned fixture's roles and storage, not every deployment.
+An absent history notice selects a metadata route; it does not certify future
+publication, current cluster health or exactly-once effects.
