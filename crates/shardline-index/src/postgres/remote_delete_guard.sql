@@ -234,6 +234,49 @@ $references$;
 
 -- OCI keys use the adapter's SHA-256 repository identifier. Native publication
 -- and legacy tag/tombstone SQL writers share the same physical-key boundary.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_oci_publication_references_remote_delete_v1(
+    index_schema TEXT, identities JSONB
+) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $oci_payload_references$
+DECLARE keys TEXT[]; lock_slot INTEGER; pending BOOLEAN;
+BEGIN
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF NOT has_schema_privilege(session_user, index_schema, 'USAGE') OR NOT (
+        has_table_privilege(session_user, format('%I.shardline_oci_object_tombstones', index_schema), 'DELETE')
+        OR has_any_column_privilege(session_user, format('%I.shardline_oci_tags', index_schema), 'INSERT,UPDATE')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'OCI publication access is required for reference checks';
+    END IF;
+    SELECT array_agg(DISTINCT physical) INTO keys FROM (
+        SELECT 'protocols/oci/' || scope_namespace || '/repos/' ||
+            encode(sha256(convert_to(repository, 'UTF8')), 'hex') || '/' || part || '/' || digest_hex AS physical
+        FROM jsonb_to_recordset(identities) AS identity(
+            scope_namespace TEXT, repository TEXT, object_kind TEXT, digest_hex TEXT)
+        CROSS JOIN LATERAL unnest(CASE object_kind
+            WHEN 'blob' THEN ARRAY['blobs']
+            WHEN 'manifest' THEN ARRAY['manifests', 'manifest-media-types']
+            ELSE ARRAY[]::TEXT[] END) part
+        WHERE digest_hex ~ '^[0-9a-f]{64}$'
+          AND (scope_namespace='global' OR scope_namespace ~ '^[0-9a-f]{64}$')
+    ) physical_references;
+    FOR lock_slot IN SELECT DISTINCT
+        (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
+        FROM unnest(keys) physical ORDER BY slot LOOP
+        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+    END LOOP;
+    SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
+        WHERE domain='maintenance-remote-delete' AND resource=ANY(keys)) INTO pending;
+    IF pending THEN
+        RAISE EXCEPTION USING ERRCODE = 'SLD01', MESSAGE = 'object has an unresolved remote delete; retry after reconciliation';
+    END IF;
+END;
+$oci_payload_references$;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_oci_publication_references_remote_delete_v1(TEXT,JSONB) TO PUBLIC;
+
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_oci_publication_remote_delete_v1(
     index_schema TEXT, scope_namespace TEXT, repository TEXT, object_kind TEXT, digest_hex TEXT
 ) RETURNS VOID

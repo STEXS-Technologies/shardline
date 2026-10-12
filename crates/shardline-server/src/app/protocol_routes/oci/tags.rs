@@ -107,6 +107,7 @@ pub(crate) async fn update_oci_tags(
     auth: &AuthorizedRepository,
     tags: &[String],
     digest_hex: &str,
+    references: &[shardline_index::OciObjectKey],
 ) -> Result<(), ServerError> {
     let scope_namespace = scope_namespace(auth.namespace());
     let mut entries = Vec::with_capacity(tags.len());
@@ -121,10 +122,11 @@ pub(crate) async fn update_oci_tags(
     }
     state
         .backend
-        .publish_oci_object_locked(
+        .publish_oci_object_with_references_locked(
             resource_guard,
             &oci_manifest_index_key(repository, digest_hex, auth),
             &entries,
+            references,
         )
         .await
 }

@@ -104,7 +104,41 @@ impl PostgresIndexStore {
         key: &OciObjectKey,
         tags: &[OciTagEntry],
     ) -> Result<(), PostgresMetadataStoreError> {
+        self.publish_oci_object_with_references_on_connection(connection, key, tags, &[])
+            .await
+    }
+
+    /// Publishes an OCI object and checks validated payload references in the
+    /// same transaction. The original publication API remains available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a referenced object has an unresolved delete or the
+    /// publication transaction cannot commit.
+    pub async fn publish_oci_object_with_references_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+        references: &[OciObjectKey],
+    ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
+        if !references.is_empty()
+            && query_scalar::<_, bool>(
+                "SELECT to_regprocedure(format('%I.shardline_oci_publication_references_remote_delete_v1(text,jsonb)', current_schema())) IS NOT NULL",
+            ).fetch_one(&mut *transaction).await?
+        {
+            let identities: Vec<_> = std::iter::once(key).chain(references).map(|identity| {
+                serde_json::json!({
+                    "scope_namespace": identity.scope_namespace,
+                    "repository": identity.repository,
+                    "object_kind": identity.kind.as_str(),
+                    "digest_hex": identity.digest_hex,
+                })
+            }).collect();
+            query("SELECT shardline_oci_publication_references_remote_delete_v1(current_schema(), $1)")
+                .bind(serde_json::Value::Array(identities)).execute(&mut *transaction).await?;
+        }
         let previous_deleted_at = query(
             "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
@@ -583,6 +617,92 @@ mod tests {
             repository: "team/assets".to_owned(),
             tag: name.to_owned(),
             digest_hex: digest.to_string().repeat(64),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_manifest_dependency_rolls_back_publication_and_tags() {
+        use shardline_storage::ObjectKey;
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let repository_id = "378332dde522cf872eb553d009ee7448bfba2fe246d1913eb1fe2ba522ca5189";
+        for (kind, part) in [
+            (OciObjectKind::Blob, "blobs"),
+            (OciObjectKind::Manifest, "manifests"),
+            (OciObjectKind::Manifest, "manifest-media-types"),
+        ] {
+            let target = OciObjectKey {
+                digest_hex: "b".repeat(64),
+                ..object("global")
+            };
+            let dependency = OciObjectKey {
+                kind,
+                ..object("global")
+            };
+            store.publish_oci_object(&target, &[]).await.unwrap();
+            store.delete_oci_object(&target).await.unwrap();
+            let old_tag = tag("global", part, 'f');
+            store.upsert_oci_tag(&old_tag).await.unwrap();
+            let next_tag = OciTagEntry {
+                digest_hex: target.digest_hex.clone(),
+                ..old_tag.clone()
+            };
+            let physical = ObjectKey::parse(&format!(
+                "protocols/oci/global/repos/{repository_id}/{part}/{}",
+                dependency.digest_hex
+            ))
+            .unwrap();
+            let permit = store.begin_remote_delete(&physical).await.unwrap();
+            let before: i64 = query_scalar("SELECT count(*) FROM shardline_reliability_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let mut connection = pool.acquire().await.unwrap();
+            let error = store
+                .publish_oci_object_with_references_on_connection(
+                    &mut connection,
+                    &target,
+                    std::slice::from_ref(&next_tag),
+                    std::slice::from_ref(&dependency),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.is_remote_delete_pending());
+            assert!(store.oci_object_is_deleted(&target).await.unwrap());
+            assert_eq!(
+                store
+                    .oci_tag("global", "team/assets", part)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                old_tag
+            );
+            let after: i64 = query_scalar("SELECT count(*) FROM shardline_reliability_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(before, after);
+            assert!(store.finish_remote_delete(&permit).await.unwrap());
+            store
+                .publish_oci_object_with_references_on_connection(
+                    &mut connection,
+                    &target,
+                    std::slice::from_ref(&next_tag),
+                    &[dependency],
+                )
+                .await
+                .unwrap();
+            assert!(!store.oci_object_is_deleted(&target).await.unwrap());
+            assert_eq!(
+                store
+                    .oci_tag("global", "team/assets", part)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                next_tag
+            );
         }
     }
 
