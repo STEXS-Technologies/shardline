@@ -252,15 +252,28 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn postgres_push_owner_loss_preserves_state_and_delivery_retry() {
-        postgres_provider_owner_loss_preserves_state_and_delivery_retry("push").await;
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("push", false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn postgres_access_owner_loss_preserves_state_and_delivery_retry() {
-        postgres_provider_owner_loss_preserves_state_and_delivery_retry("repository").await;
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("repository", false).await;
     }
 
-    async fn postgres_provider_owner_loss_preserves_state_and_delivery_retry(event_kind: &str) {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_push_owner_loss_preserves_existing_reconciliation() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("push", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_access_owner_loss_preserves_existing_reconciliation() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("repository", true).await;
+    }
+
+    async fn postgres_provider_owner_loss_preserves_state_and_delivery_retry(
+        event_kind: &str,
+        seed_existing: bool,
+    ) {
         use hmac::Mac;
         use tower::ServiceExt;
         if std::env::var("DATABASE_URL").is_err() {
@@ -289,7 +302,10 @@ mod tests {
             ServerBackend::Local(_) => None,
         }
         .unwrap();
-        let label = format!("provider_owner_{}_{event_kind}", std::process::id());
+        let label = format!(
+            "provider_owner_{}_{event_kind}_{seed_existing}",
+            std::process::id()
+        );
         let metadata_label = format!("{label}_metadata");
         let options = backend.index_store().pool().connect_options();
         backend
@@ -317,6 +333,28 @@ mod tests {
                 crate::app::gc_write_barrier_middleware,
             ))
             .with_state(cluster.node_a.clone());
+        let backend = match &cluster.node_a.backend {
+            ServerBackend::Postgres(backend) => Some(backend),
+            ServerBackend::Local(_) => None,
+        }
+        .unwrap();
+        let previous = shardline_index::ProviderRepositoryState::new(
+            ProviderKind::GitHub.repository_provider(),
+            "team".to_owned(),
+            "assets".to_owned(),
+            Some(100),
+            Some(200),
+            Some("refs/heads/previous".to_owned()),
+        )
+        .with_reconciliation(Some(300), Some(400), Some(500));
+        if seed_existing {
+            shardline_index::AsyncIndexStore::upsert_provider_repository_state(
+                backend.index_store(),
+                &previous,
+            )
+            .await
+            .unwrap();
+        }
         sqlx::query("CREATE FUNCTION pause_provider_state() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); RETURN NEW; END $$")
             .execute(&pool).await.unwrap();
         sqlx::query("CREATE TRIGGER pause_provider_state BEFORE INSERT OR UPDATE ON shardline_provider_repository_states FOR EACH ROW EXECUTE FUNCTION pause_provider_state()")
@@ -376,9 +414,18 @@ mod tests {
                 .unwrap();
         assert_eq!(
             (states, deliveries),
-            (0, 0),
+            (i64::from(seed_existing), 0),
             "obsolete request committed provider state or consumed the delivery"
         );
+        let preserved = shardline_index::AsyncIndexStore::provider_repository_state(
+            backend.index_store(),
+            ProviderKind::GitHub.repository_provider(),
+            "team",
+            "assets",
+        )
+        .await
+        .unwrap();
+        assert_eq!(preserved.as_ref(), seed_existing.then_some(&previous));
         assert_eq!(
             app.clone().oneshot(request()).await.unwrap().status(),
             axum::http::StatusCode::ACCEPTED
@@ -412,6 +459,20 @@ mod tests {
             assert_eq!(stored.last_pushed_revision(), Some("refs/heads/main"));
         } else {
             assert!(stored.last_access_changed_at_unix_seconds().is_some());
+        }
+        if seed_existing {
+            assert_eq!(stored.last_cache_invalidated_at_unix_seconds(), Some(300));
+            assert_eq!(
+                stored.last_authorization_rechecked_at_unix_seconds(),
+                Some(400)
+            );
+            assert_eq!(stored.last_drift_checked_at_unix_seconds(), Some(500));
+            if event_kind == "push" {
+                assert_eq!(stored.last_access_changed_at_unix_seconds(), Some(100));
+            } else {
+                assert_eq!(stored.last_revision_pushed_at_unix_seconds(), Some(200));
+                assert_eq!(stored.last_pushed_revision(), Some("refs/heads/previous"));
+            }
         }
     }
 
