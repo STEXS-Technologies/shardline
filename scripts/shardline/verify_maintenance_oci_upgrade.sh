@@ -203,6 +203,47 @@ for node in 0 1; do
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
 
+# Lose the real request's database owner while its server remains alive. The
+# publication session itself must own the shared GC lock: losing a separate
+# middleware connection used to let this upload return 201.
+test "$(request 1 PUT owner-lost --data-binary "@$fixture/published.json")" = 201
+printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[],"annotations":{"fixture":"owner-loss"}}' > "$fixture/owner-lost.json"
+owner_lost_digest=$(sha256sum "$fixture/owner-lost.json" | cut -d ' ' -f 1)
+sql "CREATE FUNCTION fixture_lose_owner() RETURNS trigger LANGUAGE plpgsql AS \$\$
+BEGIN IF NEW.tag='owner-lost' THEN PERFORM pg_sleep(5); END IF; RETURN NEW; END \$\$;
+CREATE TRIGGER fixture_lose_owner BEFORE INSERT OR UPDATE ON shardline_oci_tags
+FOR EACH ROW EXECUTE FUNCTION fixture_lose_owner();" > "$fixture/owner-loss-install.log"
+(request 1 PUT owner-lost --data-binary "@$fixture/owner-lost.json" > "$fixture/owner-lost-status" 2> "$fixture/owner-lost-request.log") &
+request_pid=$!
+publication_pid=''
+for attempt in $(seq 1 50); do
+    publication_pid=$(sql "SELECT pid FROM pg_stat_activity WHERE usename='existing_oci_writer'
+        AND wait_event='PgSleep' AND query LIKE '%INSERT INTO shardline_oci_tags%'")
+    if test -n "$publication_pid"; then break; fi
+    sleep 0.1
+done
+[[ "$publication_pid" =~ ^[0-9]+$ ]]
+test "$(sql "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=$publication_pid
+    AND locktype='advisory' AND mode='ShareLock' AND granted AND objsubid=1
+    AND classid::bigint=1397244242 AND objid::bigint=1145520897)")" = t
+cmp "$fixture/owner-lost.json" "$objects/manifests/$owner_lost_digest"
+test "$(sql "SELECT pg_terminate_backend($publication_pid)")" = t
+wait "$request_pid"
+request_pid=''
+[[ "$(cat "$fixture/owner-lost-status")" =~ ^5[0-9][0-9]$ ]]
+kill -0 "${server_pids[1]}"
+for node in 0 1; do
+    read_manifest "$node" "sha256:$owner_lost_digest" 404
+    read_manifest "$node" owner-lost 200
+    cmp "$fixture/published.json" "$fixture/response-$node.body"
+done
+sql 'DROP TRIGGER fixture_lose_owner ON shardline_oci_tags; DROP FUNCTION fixture_lose_owner();' > "$fixture/owner-loss-remove.log"
+test "$(request 1 PUT owner-lost --data-binary "@$fixture/owner-lost.json")" = 201
+for node in 0 1; do
+    read_manifest "$node" owner-lost 200
+    cmp "$fixture/owner-lost.json" "$fixture/response-$node.body"
+done
+
 # Stop a real server while its publication transaction is sleeping after the
 # immutable writes. Let PostgreSQL observe the dead connection naturally;
 # do not terminate its backend or manufacture rollback from an owner session.
@@ -260,4 +301,4 @@ for node in 0 1; do
     read_manifest "$node" latest 200
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
-echo "PASS: restricted released/current OCI writers preserve visibility after publication failure and SIGKILL, and retry with unchanged migrations and table grants; diagnostics: $fixture"
+echo "PASS: restricted released/current OCI writers preserve visibility after publication failure, database owner loss and SIGKILL, and retry with unchanged migrations and table grants; diagnostics: $fixture"
