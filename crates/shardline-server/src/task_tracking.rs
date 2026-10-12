@@ -46,7 +46,8 @@ pub struct TaskRunIdentity {
     pub definition: penelope_core::task::TaskDefinition,
     /// Verification key pinned before dispatch. Never a private signing key.
     pub public_key: [u8; 32],
-    /// Logical deployment target, independent of credential rotation.
+    /// Logical deployment target, independent of password and S3 secret
+    /// rotation. PostgreSQL login names remain part of the legacy scope.
     pub deployment: penelope_core::task::Digest,
     /// Runtime protection model.
     pub execution: TaskExecutionMode,
@@ -55,6 +56,8 @@ pub struct TaskRunIdentity {
 }
 
 /// Hashes logical metadata and object targets without retaining credentials.
+/// PostgreSQL login and session options remain in the legacy scope because
+/// different roles can resolve to different schemas on the same database.
 /// # Errors
 /// Rejects malformed Postgres connection configuration.
 pub fn deployment_fingerprint(
