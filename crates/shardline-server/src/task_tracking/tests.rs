@@ -817,10 +817,12 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
     }
     let now = shardline_protocol::unix_now_seconds_lossy().saturating_add(31 * 86400);
     let mut cleanup = std::time::Duration::ZERO;
+    let mut surviving_ids = ids.clone();
     for expected in [64, 64, 2, 0] {
         let began = std::time::Instant::now();
         assert_eq!(store.prune_completed(deployment, now).unwrap(), expected);
         cleanup += began.elapsed();
+        let mut deleted_cursor = None;
         for _ in 0..expected {
             let (_, id) = oldest_finished.pop_first().unwrap();
             assert!(
@@ -829,6 +831,26 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
                     .unwrap()
                     .is_none(),
                 "retention must preserve its oldest-first selection"
+            );
+            assert!(surviving_ids.remove(&id));
+            deleted_cursor = Some(id);
+        }
+        if let Some(cursor) = deleted_cursor {
+            let page = store
+                .inspect_summaries(deployment, Some(&cursor), 100)
+                .unwrap();
+            let actual = page
+                .iter()
+                .map(|run| run.id().to_owned())
+                .collect::<Vec<_>>();
+            let expected_ids = surviving_ids
+                .iter()
+                .filter(|id| id.as_str() > cursor.as_str())
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual, expected_ids,
+                "a deleted cursor must not reset or skip the next page"
             );
         }
     }

@@ -283,7 +283,8 @@ impl TaskEvidenceStore {
         }
         let prefix = ObjectPrefix::parse(&format!("{}manifests/", super::TASK_EVIDENCE_PREFIX))?;
         let mut identities: BTreeMap<String, Option<TaskRunIdentity>> = BTreeMap::new();
-        self.visit_prefix(&prefix, |metadata| {
+        let after_key = after.map(|id| format!("{}{id}", prefix.as_str()));
+        self.visit_prefix_after(&prefix, after_key.as_deref(), |metadata| {
             let id = metadata
                 .key()
                 .as_str()
