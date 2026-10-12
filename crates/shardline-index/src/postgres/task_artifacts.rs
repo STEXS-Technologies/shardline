@@ -1,5 +1,5 @@
 //! Opaque evidence primitives, independent of domain execution ownership.
-use sqlx::{Postgres, Transaction};
+use sqlx::{Connection, PgConnection, Postgres, Transaction};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64};
 
@@ -52,26 +52,48 @@ pub(super) async fn initialize_task_artifacts(
 
 impl PostgresIndexStore {
     // Resolve the actual connection's schema once per private transaction.
-    // A five-second statement timeout bounds evidence I/O without altering any
+    // A maximum five-second statement timeout bounds evidence I/O without altering any
     // other work session or assigning this transaction execution ownership.
     async fn task_artifact_transaction(
-        &self,
-    ) -> Result<(Transaction<'_, Postgres>, String), PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT set_config('statement_timeout', '5s', true)")
-            .execute(&mut *transaction)
+        connection: &mut PgConnection,
+    ) -> Result<(Transaction<'_, Postgres>, String, String), PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *transaction)
             .await?;
+        sqlx::query(
+            "SELECT set_config('statement_timeout',
+             (CASE WHEN setting::bigint=0 THEN 5000
+                   ELSE LEAST(setting::bigint,5000) END)::text, true)
+             FROM pg_settings WHERE name='statement_timeout'",
+        )
+        .execute(&mut *transaction)
+        .await?;
         let schema = sqlx::query_scalar("SELECT current_schema()")
             .fetch_one(&mut *transaction)
             .await?;
-        Ok((transaction, schema))
+        Ok((transaction, schema, timeout))
+    }
+
+    async fn finish_task_artifact_transaction(
+        mut transaction: Transaction<'_, Postgres>,
+        timeout: &str,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        // A caller may already have a transaction. Committing our savepoint
+        // must not leave the evidence timeout on that caller's work session.
+        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+            .bind(timeout)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Publishes exact immutable bytes using the owner-installed evidence function.
     /// Identical retries succeed; conflicting bytes fail without replacing them.
     /// Requires existing reliability-read and maintenance-write permissions,
     /// not direct artifact-table access or runtime DDL. RLS schemas are rejected.
-    /// Artifact queries use a five-second transaction-local statement timeout.
+    /// Artifact queries use a transaction-local timeout of at most five seconds.
     ///
     /// # Errors
     /// Returns missing owner installation, authorization, conflict or database errors.
@@ -80,7 +102,25 @@ impl PostgresIndexStore {
         key: &str,
         bytes: &[u8],
     ) -> Result<(), PostgresMetadataStoreError> {
-        let (mut transaction, schema) = self.task_artifact_transaction().await?;
+        let mut connection = self.pool.acquire().await?;
+        Self::publish_task_artifact_on_connection(&mut connection, key, bytes).await
+    }
+
+    /// Publishes immutable evidence on the caller's actual metadata connection.
+    /// Uses that session's current schema and opens no replacement connection.
+    /// Inside a caller transaction, publication remains part of that transaction;
+    /// failures roll back a savepoint without committing the caller's work.
+    /// This operation does not establish or transfer execution ownership.
+    ///
+    /// # Errors
+    /// Returns missing installation, authorization, conflict or database errors.
+    pub async fn publish_task_artifact_on_connection(
+        connection: &mut PgConnection,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let (mut transaction, schema, timeout) =
+            Self::task_artifact_transaction(connection).await?;
         let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {quoted}.shardline_task_artifact_publish_v1($1,$2,$3)"
@@ -90,14 +130,13 @@ impl PostgresIndexStore {
         .bind(bytes)
         .execute(&mut *transaction)
         .await?;
-        transaction.commit().await?;
-        Ok(())
+        Self::finish_task_artifact_transaction(transaction, &timeout).await
     }
 
     /// Reads opaque bytes within the supplied bound on one metadata snapshot.
     /// Absence differs from an oversized body; both avoid unbounded allocation.
     /// Requires existing reliability-read permissions. RLS schemas are rejected.
-    /// Artifact queries use a five-second transaction-local statement timeout.
+    /// Artifact queries use a transaction-local timeout of at most five seconds.
     ///
     /// # Errors
     /// Returns missing installation, authorization or database errors.
@@ -106,7 +145,23 @@ impl PostgresIndexStore {
         key: &str,
         maximum_bytes: u64,
     ) -> Result<Option<PostgresTaskArtifact>, PostgresMetadataStoreError> {
-        let (mut transaction, schema) = self.task_artifact_transaction().await?;
+        let mut connection = self.pool.acquire().await?;
+        Self::read_task_artifact_on_connection(&mut connection, key, maximum_bytes).await
+    }
+
+    /// Reads bounded evidence from the actual session and schema supplied by the
+    /// caller, without acquiring another connection or changing ownership.
+    /// The caller's transaction and statement timeout are preserved.
+    ///
+    /// # Errors
+    /// Returns missing installation, authorization or database errors.
+    pub async fn read_task_artifact_on_connection(
+        connection: &mut PgConnection,
+        key: &str,
+        maximum_bytes: u64,
+    ) -> Result<Option<PostgresTaskArtifact>, PostgresMetadataStoreError> {
+        let (mut transaction, schema, timeout) =
+            Self::task_artifact_transaction(connection).await?;
         let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
         let row: Option<(i64, Option<Vec<u8>>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT byte_length,body FROM {quoted}.shardline_task_artifact_read_v1($1,$2,$3)"
@@ -116,7 +171,7 @@ impl PostgresIndexStore {
         .bind(i64::try_from(maximum_bytes).unwrap_or(i64::MAX))
         .fetch_optional(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        Self::finish_task_artifact_transaction(transaction, &timeout).await?;
         row.map(|(length, bytes)| {
             Ok(PostgresTaskArtifact {
                 length: i64_to_u64(length)?,
@@ -129,7 +184,7 @@ impl PostgresIndexStore {
     /// Returns at most 64 key/length pairs using a literal prefix and lexical cursor.
     /// Stop at the first key outside the prefix. No bodies are loaded; concurrent
     /// inserts behind the cursor can appear on the next inspection.
-    /// Artifact queries use a five-second transaction-local statement timeout.
+    /// Artifact queries use a transaction-local timeout of at most five seconds.
     ///
     /// # Errors
     /// Returns missing installation, authorization or database errors.
@@ -138,7 +193,23 @@ impl PostgresIndexStore {
         prefix: &str,
         after: Option<&str>,
     ) -> Result<Vec<(String, u64)>, PostgresMetadataStoreError> {
-        let (mut transaction, schema) = self.task_artifact_transaction().await?;
+        let mut connection = self.pool.acquire().await?;
+        Self::task_artifact_page_on_connection(&mut connection, prefix, after).await
+    }
+
+    /// Pages at most 64 artifact keys and lengths on the caller's actual session.
+    /// Stop at the first key outside the literal prefix. No bodies are loaded.
+    /// The caller's transaction and statement timeout are preserved.
+    ///
+    /// # Errors
+    /// Returns missing installation, authorization or database errors.
+    pub async fn task_artifact_page_on_connection(
+        connection: &mut PgConnection,
+        prefix: &str,
+        after: Option<&str>,
+    ) -> Result<Vec<(String, u64)>, PostgresMetadataStoreError> {
+        let (mut transaction, schema, timeout) =
+            Self::task_artifact_transaction(connection).await?;
         let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
         let rows: Vec<(String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT artifact_key,byte_length FROM {quoted}.shardline_task_artifact_page_v1($1,$2,$3)"
@@ -148,7 +219,7 @@ impl PostgresIndexStore {
         .bind(after)
         .fetch_all(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        Self::finish_task_artifact_transaction(transaction, &timeout).await?;
         rows.into_iter()
             .map(|(key, length)| Ok((key, i64_to_u64(length)?)))
             .collect()
@@ -156,7 +227,7 @@ impl PostgresIndexStore {
 
     /// Removes evidence with existing maintenance-deletion permissions.
     /// This cannot mutate domain metadata or acquire execution ownership.
-    /// Artifact queries use a five-second transaction-local statement timeout.
+    /// Artifact queries use a transaction-local timeout of at most five seconds.
     ///
     /// # Errors
     /// Returns missing installation, authorization or database errors.
@@ -164,7 +235,22 @@ impl PostgresIndexStore {
         &self,
         key: &str,
     ) -> Result<bool, PostgresMetadataStoreError> {
-        let (mut transaction, schema) = self.task_artifact_transaction().await?;
+        let mut connection = self.pool.acquire().await?;
+        Self::delete_task_artifact_on_connection(&mut connection, key).await
+    }
+
+    /// Deletes evidence with existing maintenance permissions on the supplied
+    /// session. This opens no connection and cannot acquire execution ownership.
+    /// The caller's transaction and statement timeout are preserved.
+    ///
+    /// # Errors
+    /// Returns missing installation, authorization or database errors.
+    pub async fn delete_task_artifact_on_connection(
+        connection: &mut PgConnection,
+        key: &str,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let (mut transaction, schema, timeout) =
+            Self::task_artifact_transaction(connection).await?;
         let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
         let removed = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT {quoted}.shardline_task_artifact_delete_v1($1,$2)"
@@ -173,7 +259,7 @@ impl PostgresIndexStore {
         .bind(key)
         .fetch_one(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        Self::finish_task_artifact_transaction(transaction, &timeout).await?;
         Ok(removed)
     }
 }

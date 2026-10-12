@@ -4,6 +4,155 @@ use super::*;
 const PREFIX: &str = "_shardline_tasks/v1/";
 
 #[tokio::test]
+async fn borrowed_session_preserves_target_transaction_and_timeout() {
+    let Some(pool) = super::super::connect_isolated_postgres().await else {
+        return;
+    };
+    let source = PostgresIndexStore::new(pool);
+    source.initialize_task_history_scope().await.unwrap();
+    let target = PostgresIndexStore::new(super::super::connect_isolated_postgres().await.unwrap());
+    target.initialize_task_history_scope().await.unwrap();
+    let schema: String = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(target.pool())
+        .await
+        .unwrap();
+    let mut connection = source.pool().acquire().await.unwrap();
+    sqlx::query("SELECT set_config('search_path', $1, false)")
+        .bind(format!("\"{}\", public", schema.replace('"', "\"\"")))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("SET statement_timeout='17s'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let key = format!("{PREFIX}borrowed-session");
+    let mut publication_transaction = connection.begin().await.unwrap();
+    PostgresIndexStore::publish_task_artifact_on_connection(
+        &mut publication_transaction,
+        &key,
+        b"original",
+    )
+    .await
+    .unwrap();
+    assert!(
+        PostgresIndexStore::publish_task_artifact_on_connection(
+            &mut publication_transaction,
+            &key,
+            b"conflict"
+        )
+        .await
+        .is_err()
+    );
+    // The failed publication rolls back only its savepoint. Subsequent reads
+    // still work on the original transaction, rather than a replacement session.
+    let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *publication_transaction)
+        .await
+        .unwrap();
+    assert_eq!(timeout, "17s");
+    assert_eq!(
+        PostgresIndexStore::read_task_artifact_on_connection(&mut publication_transaction, &key, 8)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes
+            .as_deref(),
+        Some(b"original".as_slice())
+    );
+    assert_eq!(
+        PostgresIndexStore::task_artifact_page_on_connection(
+            &mut publication_transaction,
+            PREFIX,
+            None
+        )
+        .await
+        .unwrap(),
+        vec![(key.clone(), 8)]
+    );
+    assert!(target.read_task_artifact(&key, 8).await.unwrap().is_none());
+    publication_transaction.rollback().await.unwrap();
+    assert!(target.read_task_artifact(&key, 8).await.unwrap().is_none());
+    PostgresIndexStore::publish_task_artifact_on_connection(&mut connection, &key, b"committed")
+        .await
+        .unwrap();
+    assert!(source.read_task_artifact(&key, 9).await.unwrap().is_none());
+    assert_eq!(
+        target
+            .read_task_artifact(&key, 9)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes
+            .as_deref(),
+        Some(b"committed".as_slice())
+    );
+    let mut deletion_transaction = connection.begin().await.unwrap();
+    assert!(
+        PostgresIndexStore::delete_task_artifact_on_connection(&mut deletion_transaction, &key)
+            .await
+            .unwrap()
+    );
+    deletion_transaction.rollback().await.unwrap();
+    assert!(target.read_task_artifact(&key, 9).await.unwrap().is_some());
+    assert!(
+        PostgresIndexStore::delete_task_artifact_on_connection(&mut connection, &key)
+            .await
+            .unwrap()
+    );
+    let timeout_after_deletion: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(timeout_after_deletion, "17s");
+
+    // A short work deadline must not be relaxed to the evidence ceiling.
+    // Hold the table from another session so publication actually encounters
+    // the deadline, rather than only inspecting a restored configuration value.
+    sqlx::query("SET statement_timeout='100ms'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let mut blocker = target.pool().begin().await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "LOCK TABLE \"{}\".shardline_task_artifacts_v1 IN ACCESS EXCLUSIVE MODE",
+        schema.replace('"', "\"\"")
+    )))
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    let mut blocked_transaction = connection.begin().await.unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        PostgresIndexStore::publish_task_artifact_on_connection(
+            &mut blocked_transaction,
+            &key,
+            b"blocked",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    let code = if let PostgresMetadataStoreError::Sqlx(error) = error {
+        error
+            .as_database_error()
+            .unwrap()
+            .code()
+            .map(|code| code.into_owned())
+    } else {
+        None
+    };
+    assert_eq!(code.as_deref(), Some("57014"));
+    let timeout_after_blocking: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *blocked_transaction)
+        .await
+        .unwrap();
+    assert_eq!(timeout_after_blocking, "100ms");
+    blocked_transaction.rollback().await.unwrap();
+    blocker.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn owner_defaults_cannot_bypass_private_artifact_functions() {
     let Some(pool) = super::super::connect_isolated_postgres().await else {
         return;
