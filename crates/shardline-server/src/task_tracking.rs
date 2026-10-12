@@ -164,6 +164,38 @@ pub async fn resolved_postgres_deployment_fingerprint(
     Ok(penelope_core::task::Digest::of(&target))
 }
 
+pub(crate) async fn backend_history_scope(
+    config: &ServerConfig,
+    backend: &crate::ServerBackend,
+) -> Option<penelope_core::task::Digest> {
+    let crate::ServerBackend::Postgres(backend) = backend else {
+        return None;
+    };
+    // Optional observation must not hold startup or admin inspection indefinitely.
+    // Use the existing metadata pool and perform only reads; no upgrade here.
+    let resolved = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut connection = backend
+            .index_store()
+            .pool()
+            .acquire()
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+        resolved_postgres_deployment_fingerprint(config, &mut connection).await
+    })
+    .await;
+    match resolved {
+        Ok(Ok(scope)) => Some(scope),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "shared task history unavailable; legacy history continues");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, "shared task history timed out; legacy history continues");
+            None
+        }
+    }
+}
+
 /// Immutable publication in the configured local or S3-compatible object store.
 /// Instantiate on a blocking thread when using the synchronous methods.
 #[derive(Debug, Clone)]

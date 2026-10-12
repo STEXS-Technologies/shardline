@@ -100,8 +100,19 @@ shared scope to the exact stored manifest bytes; readers verify the signature
 before comparing scopes. Identical retries succeed, conflicting bindings fail,
 and verified completed-run retirement removes the companion. A binding failure
 warns while original tracking continues. Existing manifests and task formats
-are not rewritten. Ordinary startup and inspection still use the legacy scope;
-connecting this option to normal publishers and merging history remain unfinished.
+are not rewritten. Normal server startup resolves the scope on its existing
+metadata pool and attaches bindings to its embedded task runs. Admin inspection
+resolves its current metadata scope and admits matching signed records across
+logins. Bound records for another scope are excluded; unbound legacy records
+remain visible only under their original deployment fingerprint. Corrupt
+bindings expose an incident reference without trusting the manifest fields.
+Resolution is read-only and limited to five seconds. Missing owner initialization,
+unsupported isolation or database failure falls back to legacy history, with a
+warning and `history_grouping: "legacy"` in the admin response. Local deployments
+also retain legacy grouping. This adds no pool, process or configuration.
+CLI maintenance publishers and operation-connection scope binding still need
+integration; server history association observes startup's metadata target and
+does not fence or prove the target of every later database operation.
 
 The optional `shardline-reliability/task-journal` feature provides
 `SqliteTaskJournal`, a synchronous Penelope `TaskJournal` port pinned to an exact
