@@ -317,6 +317,14 @@ The generic legacy GC library entry points preserve their signatures; embedders
 wanting this boundary use `run_postgres_gc_with_remote_delete_protection` with
 the same ownership-bound record and index adapters.
 
+The existing admin server exposes read-only pending-marker inspection at
+`/api/v1/tasks/maintenance/deletes`. A schema-bound security-definer function
+requires the caller's existing maintenance read privileges and refuses to
+broaden row-level security scopes. A partial epoch index supports pages of at
+most 100 rows plus one lookahead row. Globally unique attempt epochs keep
+cursors compact even for long object keys. Inspection neither issues storage
+requests nor settles markers; pending includes normally in-flight deletes.
+
 Other object publication paths need transactional enforcement, and recovery of
 uncertain markers needs a supported proof of settlement. A successful retry
 cannot prove that an earlier request will never apply later. Older GC binaries
