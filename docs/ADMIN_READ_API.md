@@ -233,6 +233,7 @@ curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
 | --- | --- |
 | `supervision` | `embedded`: tracking is integrated into Shardline. Individual jobs can use other execution modes. |
 | `history_grouping` | `shared_metadata`: includes signed records for the resolved metadata and object target across logins, plus unbound own-login legacy records. `legacy`: original deployment grouping, used for local storage or when shared resolution is unavailable. |
+| `history_notice` | Warning when metadata history could not be selected. Existing history can still be listed, but an empty list does not prove maintenance never ran. Otherwise `null`; this does not certify that future history writes will succeed. |
 | `tasks[].id` | Opaque incident reference; keep it when investigating a run. |
 | `tasks[].operation` | Name of the recorded maintenance operation. |
 | `tasks[].state` | What the available evidence establishes; see the table below. |

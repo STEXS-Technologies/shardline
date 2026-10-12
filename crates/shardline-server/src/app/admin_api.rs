@@ -593,6 +593,9 @@ pub(super) async fn maintenance_tasks(
     let (store, history_scope) =
         crate::task_tracking::TaskEvidenceStore::from_backend(&state.config, &state.backend)
             .await?;
+    let history_notice = (!store.uses_metadata_history()).then_some(
+        "New task history is unavailable. Existing records may still be listed; an empty list does not prove maintenance did not run.",
+    );
     let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
     let mut tasks = spawn_maintenance_inspection(permit, move || {
         store.inspect_summaries_with_scope(
@@ -624,6 +627,7 @@ pub(super) async fn maintenance_tasks(
         "observed_at_unix_seconds": observed_at()?,
         "supervision": "embedded",
         "history_grouping": if history_scope.is_some() { "shared_metadata" } else { "legacy" },
+        "history_notice": history_notice,
         "tasks": tasks,
         "page": page,
     })))

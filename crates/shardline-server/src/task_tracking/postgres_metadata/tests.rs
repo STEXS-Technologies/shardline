@@ -129,6 +129,154 @@ fn library_backend_without_runtime_returns_an_error_without_starting_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row_policies_disable_optional_history_without_stopping_startup_work() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let seed = store.clone();
+    tokio::task::spawn_blocking(move || seed.publish("rls-original", b"existing history"))
+        .await
+        .unwrap()
+        .unwrap();
+    for statement in [
+        format!(
+            "ALTER TABLE {}.shardline_task_artifacts_v1 ENABLE ROW LEVEL SECURITY",
+            fixture.schema
+        ),
+        format!(
+            "ALTER TABLE {}.shardline_task_artifacts_v1 FORCE ROW LEVEL SECURITY",
+            fixture.schema
+        ),
+        format!(
+            "CREATE POLICY deny_history ON {}.shardline_task_artifacts_v1 USING (false) WITH CHECK (false)",
+            fixture.schema
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&fixture.admin)
+            .await
+            .unwrap();
+    }
+    let reader = store.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(reader.read("rls-original", 100).is_err());
+        assert!(
+            reader
+                .publish("rls-new", b"must not bypass policy")
+                .is_err()
+        );
+    })
+    .await
+    .unwrap();
+    let (unsupported, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    assert!(scope.is_none());
+    assert!(!unsupported.uses_metadata_history());
+
+    let sessions = fixture.config.root_dir().join("tmp/lfs-patch");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let oid = "01".repeat(32);
+    let staged = sessions.join(&oid);
+    let touched = sessions.join(format!("{oid}.meta"));
+    std::fs::write(&staged, b"expired legacy staging").unwrap();
+    std::fs::write(&touched, b"0").unwrap();
+    let config = fixture
+        .config
+        .clone()
+        .with_server_frontends([crate::ServerFrontend::Lfs])
+        .unwrap()
+        .with_admin_read_token(b"owned-rls-admin".to_vec())
+        .unwrap();
+    let app = crate::app::router(config).await.unwrap();
+    assert!(
+        !staged.exists(),
+        "optional history must not prevent the original sweep"
+    );
+    assert!(!touched.exists());
+    for path in ["/api/v1/status", "/api/v1/tasks/maintenance"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("Authorization", "Bearer owned-rls-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{path}");
+        if path == "/api/v1/tasks/maintenance" {
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["history_grouping"], "legacy");
+            assert!(body["tasks"].as_array().unwrap().is_empty());
+            assert!(
+                body["history_notice"]
+                    .as_str()
+                    .unwrap()
+                    .contains("an empty list does not prove maintenance did not run")
+            );
+        }
+    }
+    assert!(
+        fixture
+            .backend
+            .object_store()
+            .list_prefix(&ObjectPrefix::parse("_shardline_tasks/v1/").unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_task_artifacts_v1",
+        fixture.schema
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows, 1,
+        "unavailable tracking must neither overwrite nor claim completion"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {}.shardline_task_artifacts_v1 DISABLE ROW LEVEL SECURITY",
+        fixture.schema
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    let (restored, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            restored.read("rls-original", 100).unwrap(),
+            Some(b"existing history".to_vec())
+        );
+        assert!(restored.read("rls-new", 100).unwrap().is_none());
+    })
+    .await
+    .unwrap();
+    drop(app);
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_relocation_preserves_scope_associations_and_exact_history() {
     let Some(fixture) = Fixture::new().await else {
         return;
@@ -459,6 +607,7 @@ async fn normal_router_publishes_and_serves_authenticated_metadata_history() {
     let body: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(body["history_grouping"], "shared_metadata");
+    assert!(body["history_notice"].is_null());
     let startup = body["tasks"]
         .as_array()
         .unwrap()

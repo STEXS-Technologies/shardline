@@ -726,3 +726,28 @@ cargo test -p shardline-server --test embedded_task_history
 This proves the tested local library configuration, not arbitrary embedded
 Postgres routing, row policies or remote storage layouts. Those checks remain
 part of the deployment gates.
+
+## Row policies and unavailable history
+
+A PostgreSQL fixture installs optional history, saves an artifact, then enables
+forced row-level security with a deny policy on the history table. The already
+opened store rejects reads and writes rather than bypassing the new policy.
+The normal router still starts and removes an expired legacy LFS staging session.
+Server status remains available; no new completion or payload history is written.
+After the policy is disabled, the original artifact is readable with unchanged
+bytes, and the rejected artifact is absent.
+
+Legacy history inspection remains available. Its response now includes a
+`history_notice` when metadata history was not selected, explaining that an empty
+list does not prove maintenance never ran. Selected metadata leaves this field
+`null`; that is not a guarantee of future write permissions or database health.
+
+This checks the explicit refusal of schema-wide history under row policies. It
+does not implement tenant-scoped history or certify arbitrary runtime policies.
+
+```bash
+cargo test -p shardline-server --all-features --lib task_tracking::postgres_metadata::tests:: -- --test-threads=1
+```
+
+The six PostgreSQL history tests pass with an owned database bootstrapped by
+released 1.11.3. All 32 admin API tests and strict server Clippy also pass.
