@@ -70,12 +70,51 @@ async fn build_test_state() -> (Arc<AppState>, TempDir) {
 /// Builds the same S3 router over Postgres metadata so multipart uses the
 /// durable object-store session path. Returns `None` outside the Postgres CI job.
 async fn build_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let database_url = isolated_postgres_url().await?;
     let tmp = TempDir::new().ok()?;
     let object_store =
         crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).ok()?;
     let state = build_postgres_state(&database_url, tmp.path(), object_store).await?;
     Some((state, tmp))
+}
+
+async fn isolated_postgres_url() -> Option<String> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let schema = format!(
+        "s3_fixture_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("configured PostgreSQL fixture");
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    let mut scoped = url::Url::parse(&database_url).unwrap();
+    let options = scoped
+        .query_pairs()
+        .find(|(key, _)| key == "options")
+        .map_or_else(String::new, |(_, value)| value.into_owned());
+    let parameters: Vec<_> = scoped
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    scoped.set_query(None);
+    scoped
+        .query_pairs_mut()
+        .extend_pairs(parameters)
+        .append_pair("options", &format!("{options} -csearch_path={schema}"));
+    let pool = sqlx::PgPool::connect(scoped.as_str()).await.unwrap();
+    crate::apply_database_migrations(&pool).await.unwrap();
+    pool.close().await;
+    Some(scoped.into())
 }
 
 async fn build_postgres_state(
@@ -313,6 +352,10 @@ fn s3_router(state: Arc<AppState>) -> Router {
                 .post(s3_post_object)
                 .delete(s3_delete_object),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::app::gc_write_barrier_middleware,
+        ))
         .with_state(state)
 }
 
@@ -341,6 +384,104 @@ fn put_request(uri: String, body: Vec<u8>) -> axum::http::Request<Body> {
 // =========================================================================
 // Object data path
 // =========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_postgres_put_rejects_lost_request_barrier_and_preserves_previous_object() {
+    if std::env::var("DATABASE_URL").is_err() {
+        return;
+    }
+    let (mut state, _tmp) = build_postgres_test_state().await.unwrap();
+    let inner = Arc::get_mut(&mut state).unwrap();
+    let backend = match &mut inner.backend {
+        crate::ServerBackend::Postgres(backend) => backend,
+        crate::ServerBackend::Local(_) => unreachable!(),
+    };
+    let label = format!("s3_owner_loss_{}", std::process::id());
+    let resource_label = format!("{label}_resource");
+    let options = backend.index_store().pool().connect_options();
+    backend.gc_barrier_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*options).clone().application_name(&label));
+    backend.resource_lock_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*options).clone().application_name(&resource_label));
+    let pool = backend.index_store().pool().clone();
+    let app = s3_router(state);
+    let key = format!("ownership-{}", std::process::id());
+    let uri = format!("/{BUCKET}/{key}");
+    assert_eq!(
+        app.clone()
+            .oneshot(put_request(uri.clone(), b"before".to_vec()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    sqlx::query("CREATE FUNCTION pause_s3_publication() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); RETURN NEW; END $$")
+        .execute(&pool).await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER pause_s3_publication BEFORE INSERT OR UPDATE ON shardline_s3_objects FOR EACH ROW WHEN (NEW.object_key='{key}') EXECUTE FUNCTION pause_s3_publication()")))
+        .execute(&pool).await.unwrap();
+    let upload_app = app.clone();
+    let upload_uri = uri.clone();
+    let upload = tokio::spawn(async move {
+        upload_app
+            .oneshot(put_request(upload_uri, b"after".to_vec()))
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let paused: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event='PgSleep' AND application_name IN ($1, $2))")
+                .bind(&label).bind(&resource_label).fetch_one(&pool).await.unwrap();
+            if paused { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let terminated: bool = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name=$1",
+    )
+    .bind(&label)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(terminated);
+    let response = upload.await.unwrap();
+    sqlx::query("DROP TRIGGER pause_s3_publication ON shardline_s3_objects")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION pause_s3_publication()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_server_error(),
+        "PUT acknowledged after losing its GC barrier: {}",
+        response.status()
+    );
+    let auth = sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME));
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, b"before");
+    assert_eq!(
+        app.oneshot(put_request(uri, b"after".to_vec()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_put_get_head_delete_roundtrip() {
@@ -1477,7 +1618,7 @@ async fn s3_postgres_multipart_rejects_wrong_key_before_claiming_completion() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_multipart_resumes_across_nodes_without_shared_rwx() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+    let Some(database_url) = isolated_postgres_url().await else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -1533,7 +1674,7 @@ async fn s3_postgres_multipart_resumes_across_nodes_without_shared_rwx() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_delete_and_put_are_one_cross_replica_order() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+    let Some(database_url) = isolated_postgres_url().await else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -3895,7 +4036,7 @@ async fn s3_read_conditions_and_if_range_preserve_representation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_corrupt_durable_part_preserves_old_object_and_allows_verified_retry() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+    let Some(database_url) = isolated_postgres_url().await else {
         return;
     };
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -4293,7 +4434,7 @@ async fn s3_local_multipart_completion_honors_conditional_headers_and_retry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_multipart_completion_honors_conditional_headers_and_retry() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+    let Some(database_url) = isolated_postgres_url().await else {
         return;
     };
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -4311,7 +4452,7 @@ async fn s3_postgres_multipart_completion_honors_conditional_headers_and_retry()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_multipart_completion_conditional_race_has_one_winner() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+    let Some(database_url) = isolated_postgres_url().await else {
         return;
     };
     let pool = sqlx::postgres::PgPoolOptions::new()

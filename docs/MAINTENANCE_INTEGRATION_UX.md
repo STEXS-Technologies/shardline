@@ -40,6 +40,10 @@ clear retryable error. Other objects remain available. Rejected updates preserve
 the previous metadata. Current native uploads also check the chunk references
 inside their uploaded data.
 
+On Postgres, an S3 overwrite rejected before it commits leaves the current
+object in place. Retry with your usual S3 client; no additional service or
+configuration is needed.
+
 On Postgres, this also covers publishing OCI blobs and manifests, changing a
 manifest tag, and removing a deletion tombstone. A pending manifest or its
 media-type sidecar blocks publication. Rejection preserves the previous tag
