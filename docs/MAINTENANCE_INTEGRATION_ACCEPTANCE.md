@@ -23,8 +23,8 @@ This document is for reviewers deciding whether the integration is safe to ship.
   preserves the original ref. Other library callers using a separate pool
   still need to adopt the bound session.
   All 13 Hub repair tests pass with an actual Postgres fixture, including caller
-  cancellation while a competing GC owner waits. All 11 retention/barrier tests
-  pass; seven exercise Postgres. Dropping the public barrier immediately closes
+  cancellation while a competing GC owner waits. All 12 retention/barrier tests
+  pass; eight exercise Postgres. Dropping the public barrier immediately closes
   retained pool handles and permits a new exclusive owner after connection cleanup.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
@@ -42,6 +42,16 @@ This document is for reviewers deciding whether the integration is safe to ship.
   The chosen behavior is a clear retryable error for a later hold or write to the
   affected object until the earlier delete is settled. The regression requires
   rejection of the racing hold; the current implementation still acknowledges it.
+  A durable per-object marker and transactional retention guard now provide the
+  first part of the fix. Markers survive connection replacement; stale completion
+  attempts cannot clear newer markers. Completed markers are removed and one
+  persistent sequence prevents identity reuse. GC does not yet publish these
+  markers around its remote requests, so this does **not** close the S3 race.
+  The existing owner-run `db migrate up` installs functions and a retention
+  trigger atomically, keeping the 35 released migration records and their
+  checksums unchanged. The trigger also checks older retention writers.
+  No runtime fence-table grant is required. Other object publication paths and
+  safe settlement of remote attempts remain required work.
 - **Large deployments and history growth.** Long operations, large reports and
   total growth of unresolved history still need deployment-scale validation.
   Unfinished evidence is retained, so completed-history cleanup alone does not
@@ -83,6 +93,8 @@ test does not close them.
 | Machine loss during rebuild | A waiting rebuild acquires the barrier after the source VM dies, even while the fixture blocks the dead client's query. It removes one stale record and completes. The lost run remains unresolved. Connection-only loss is covered separately below. |
 | Connection loss during rebuild | The lock and metadata operations share one non-replaceable connection. The two-machine fault drill terminates that connection, observes a verified failed source run and a completed waiter with one stale-record removal. A separate database test rejects a stale pool's attempted write after takeover. |
 | Retention ownership | Hold setting and release use the same session for the shared barrier and metadata writes. Fault tests reject a late setting after exclusive takeover and preserve an active hold when a blocked release loses its connection. Normal hold/GC contention and physical OCI protection also pass. |
+| Pending delete primitives | Seven actual Postgres tests cover durable markers, absent-row serialization, unique concurrent admission identities, stale completion rejection, overflow, unchanged retention metadata/evidence on rejection, and refusal of delete admission without an installed trigger. These are primitive tests; normal GC still needs to use the protocol at its remote effect boundary. |
+| Existing retention role and mixed writers | Released 1.11.3 and current native binaries use the same restricted role with no fence-table grant. Both work before and after the normal owner-run upgrade, reject a fixture-only pending delete, and work again after its settlement. The current error explains that retry must wait for reconciliation. Released migration verification accepts the upgraded schema. This checks hold commands, not every publication path or released-server startup. |
 | Repair ownership | A database regression first demonstrated repair removing an expired hold after losing its separate lock connection during GC takeover. Repair now binds its scan and metadata changes to the lock-owning session. The database regression and two-machine `repair-connection-loss` drill pass: the source records failure, the waiting rebuild completes, and the expired hold remains unchanged. This covers metadata changes, not remote mutations by other operations. |
 | GC database ownership | A real database regression first reproduced GC completing its blocked scan after losing the coordination connection during exclusive takeover. Mutating GC now binds its metadata work to that connection. The regression rejects continuation, creates no quarantine row or clock anchor, and leaves the fixture object intact. The two-machine `gc-connection-loss` drill records a failed source GC and a completed waiting rebuild with one stale-record removal. This does not establish atomic fencing of remote requests already issued or delayed during takeover. |
 | Lock ordering | A queued exclusive owner blocks later shared readers. Cancelling an acquisition closes its session; completed metadata work releases it. |

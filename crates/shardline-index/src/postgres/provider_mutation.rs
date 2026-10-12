@@ -319,6 +319,14 @@ pub(super) async fn lock_retention_hold(
         .bind(format!("shardline:retention-hold:{object_key}"))
         .execute(&mut **transaction)
         .await?;
+    // Match the released writer's order: retention identity first, then the
+    // remote-effect lock also acquired by the compatibility trigger. Retain
+    // both through metadata and evidence publication in this transaction.
+    super::PostgresIndexStore::require_remote_delete_settled(
+        transaction,
+        &shardline_storage::ObjectKey::parse(object_key)?,
+    )
+    .await?;
     Ok(())
 }
 
