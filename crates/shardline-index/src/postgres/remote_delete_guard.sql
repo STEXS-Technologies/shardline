@@ -18,7 +18,11 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '42501',
             MESSAGE = 'retention metadata access is required for the remote delete guard';
     END IF;
+    -- Retain the original single-key lock for in-flight retention writers.
+    -- The bounded slot also arbitrates large reference publications.
     PERFORM pg_advisory_xact_lock(hashtextextended('shardline:remote-delete:' || object_key, 0));
+    PERFORM pg_advisory_xact_lock(1397507140,
+        (hashtextextended('shardline:remote-delete:' || object_key, 0) & 255)::INTEGER);
     EXECUTE format(
         'SELECT EXISTS(SELECT 1 FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=$2)',
         index_schema
@@ -90,6 +94,8 @@ BEGIN
             MESSAGE = 'garbage collection metadata access is required for remote delete settlement';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('shardline:remote-delete:' || object_key, 0));
+    PERFORM pg_advisory_xact_lock(1397507140,
+        (hashtextextended('shardline:remote-delete:' || object_key, 0) & 255)::INTEGER);
     EXECUTE format(
         'DELETE FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=$2 AND epoch=$3', index_schema
     ) USING 'maintenance-remote-delete', object_key, expected_epoch;
@@ -130,9 +136,8 @@ BEGIN
     IF TG_TABLE_SCHEMA IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
         RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
     END IF;
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended('shardline:remote-delete:' || NEW.shard_object_key, 0)
-    );
+    PERFORM pg_advisory_xact_lock(1397507140,
+        (hashtextextended('shardline:remote-delete:' || NEW.shard_object_key, 0) & 255)::INTEGER);
     EXECUTE format(
         'SELECT EXISTS(SELECT 1 FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=$2)',
         TG_TABLE_SCHEMA
@@ -144,6 +149,74 @@ BEGIN
     RETURN NEW;
 END;
 $dedupe$;
+
+-- Direct references are checked at the SQL publication boundary, including
+-- legacy writers. Do not add JSON validation here: corrupt-row inspection and
+-- released record defaults retain their existing contract.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_reference_remote_delete_v1()
+RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $references$
+DECLARE hashes TEXT[]; keys TEXT[]; lock_slot INTEGER; pending BOOLEAN;
+BEGIN
+    IF TG_TABLE_SCHEMA IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF TG_TABLE_NAME = 'shardline_file_records' THEN
+        SELECT array_agg(DISTINCT term->>'hash') INTO hashes
+        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.record->'chunks') = 'array'
+             THEN NEW.record->'chunks' ELSE '[]'::jsonb END) term
+        WHERE term->>'hash' ~ '^[0-9a-f]{64}$';
+        IF NEW.record->>'chunk_size' IS DISTINCT FROM '0' THEN
+            SELECT array_agg(physical) INTO keys FROM (
+                SELECT left(hash, 2) || '/' || hash AS physical FROM unnest(hashes) hash
+                UNION
+                SELECT mapping.shard_object_key FROM shardline_dedupe_shards mapping
+                WHERE mapping.chunk_hash = ANY(hashes)
+            ) direct_chunks;
+        END IF;
+    ELSIF TG_TABLE_NAME = 'shardline_file_reconstructions' THEN
+        SELECT array_agg(DISTINCT term->>'object_hash') INTO hashes
+        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.terms->'terms') = 'array'
+             THEN NEW.terms->'terms' ELSE '[]'::jsonb END) term
+        WHERE term->>'object_hash' ~ '^[0-9a-f]{64}$';
+    ELSIF TG_TABLE_NAME = 'shardline_stored_objects' THEN
+        IF NEW.object_hash ~ '^[0-9a-f]{64}$' THEN
+            hashes := ARRAY[NEW.object_hash];
+        END IF;
+    ELSE
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'unsupported reference publication table';
+    END IF;
+    -- Xet containers and their GC-managed chunk-cache sidecars use these same
+    -- namespaces. Other enabled frontends cannot make a pending key safe.
+    SELECT array_agg(DISTINCT physical ORDER BY physical) INTO keys FROM (
+        SELECT unnest(keys) AS physical
+        UNION
+        SELECT 'xorbs/default/' || left(hash, 2) || '/' || hash || '.xorb'
+        FROM unnest(hashes) hash
+        UNION
+        SELECT '_xorb_chunks/' || left(hash, 2) || '/' || hash
+        FROM unnest(hashes) hash
+    ) references_to_check;
+    -- Bound lock-table usage independently of the number of chunks. Colliding
+    -- keys serialize briefly; the pending lookup still checks the exact key.
+    -- Acquire slots in a stable order within each publication.
+    FOR lock_slot IN SELECT DISTINCT
+        (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
+        FROM unnest(keys) physical ORDER BY slot LOOP
+        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+    END LOOP;
+    SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
+                  WHERE domain='maintenance-remote-delete' AND resource=ANY(keys))
+    INTO pending;
+    IF pending THEN
+        RAISE EXCEPTION USING ERRCODE = 'SLD01',
+            MESSAGE = 'object has an unresolved remote delete; retry after reconciliation';
+    END IF;
+    RETURN NEW;
+END;
+$references$;
 
 -- This read-only check validates the caller's existing schema/retention access.
 -- Keep it usable even with restrictive default function privileges.
@@ -160,3 +233,16 @@ DROP TRIGGER IF EXISTS shardline_dedupe_remote_delete_v1 ON @SCHEMA@.shardline_d
 CREATE TRIGGER shardline_dedupe_remote_delete_v1
 BEFORE INSERT OR UPDATE ON @SCHEMA@.shardline_dedupe_shards
 FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_dedupe_remote_delete_v1();
+
+DROP TRIGGER IF EXISTS shardline_reference_remote_delete_v1 ON @SCHEMA@.shardline_file_records;
+CREATE TRIGGER shardline_reference_remote_delete_v1
+BEFORE INSERT OR UPDATE ON @SCHEMA@.shardline_file_records
+FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_reference_remote_delete_v1();
+DROP TRIGGER IF EXISTS shardline_reference_remote_delete_v1 ON @SCHEMA@.shardline_file_reconstructions;
+CREATE TRIGGER shardline_reference_remote_delete_v1
+BEFORE INSERT OR UPDATE ON @SCHEMA@.shardline_file_reconstructions
+FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_reference_remote_delete_v1();
+DROP TRIGGER IF EXISTS shardline_reference_remote_delete_v1 ON @SCHEMA@.shardline_stored_objects;
+CREATE TRIGGER shardline_reference_remote_delete_v1
+BEFORE INSERT OR UPDATE ON @SCHEMA@.shardline_stored_objects
+FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_reference_remote_delete_v1();

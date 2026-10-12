@@ -128,7 +128,12 @@ impl PostgresIndexStore {
              AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_retention_holds'::regclass
                         AND tgname='shardline_retention_remote_delete_v1' AND tgenabled='O')
              AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_dedupe_shards'::regclass
-                        AND tgname='shardline_dedupe_remote_delete_v1' AND tgenabled='O')",
+                        AND tgname='shardline_dedupe_remote_delete_v1' AND tgenabled='O')
+             AND (SELECT count(*) FROM pg_trigger
+                  WHERE tgrelid IN ('shardline_file_records'::regclass,
+                                    'shardline_file_reconstructions'::regclass,
+                                    'shardline_stored_objects'::regclass)
+                  AND tgname='shardline_reference_remote_delete_v1' AND tgenabled='O') = 3",
         )
         .fetch_one(&mut *transaction)
         .await?;
@@ -228,7 +233,257 @@ impl PostgresIndexStore {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::{AsyncIndexStore, RetentionHold};
+    use crate::{AsyncIndexStore, RecordTraversal, RetentionHold};
+
+    #[tokio::test]
+    async fn file_publication_serializes_delete_admission_before_any_marker_exists() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let hash = "ac".repeat(32);
+        let key = ObjectKey::parse(&format!("ac/{hash}")).unwrap();
+        let mut publication = pool.begin().await.unwrap();
+        query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ('race','version','global','file','content',$1)")
+            .bind(sqlx::types::Json(serde_json::json!({"chunk_size": 1, "chunks": [{"hash": hash}]})))
+            .execute(&mut *publication).await.unwrap();
+        let mut admission = Box::pin(store.begin_remote_delete(&key));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut admission)
+                .await
+                .is_err()
+        );
+        publication.rollback().await.unwrap();
+        let permit = tokio::time::timeout(std::time::Duration::from_secs(5), admission)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn large_file_publication_uses_bounded_delete_locks() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let chunks: Vec<_> = (0..20_000)
+            .map(|ordinal| serde_json::json!({"hash": format!("{ordinal:064x}")}))
+            .collect();
+        let record = serde_json::json!({"chunk_size": 1, "chunks": chunks});
+        let mut transaction = pool.begin().await.unwrap();
+        query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ('large','version','global','large','content',$1)")
+            .bind(sqlx::types::Json(record)).execute(&mut *transaction).await.unwrap();
+        query("INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key)
+               SELECT ordinal::text, 'large/shard/' || ordinal::text FROM generate_series(1, 20000) ordinal")
+            .execute(&mut *transaction).await.unwrap();
+        let locks: i64 = query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory'",
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+        assert!(locks > 0 && locks <= 256);
+        transaction.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_version_publication_preserves_latest_and_version_on_pending_delete() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let index = PostgresIndexStore::new(pool.clone());
+        let records = super::super::PostgresRecordStore::new(pool.clone());
+        let mut record = crate::FileRecord {
+            file_id: "publication.bin".to_owned(),
+            content_hash: "cc".repeat(32),
+            total_bytes: 1,
+            chunk_size: 1,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![crate::FileChunkRecord {
+                hash: "dd".repeat(32),
+                offset: 0,
+                length: 1,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 1,
+            }],
+        };
+        record.validate_reconstruction_plan().unwrap();
+        records.commit_file_version_metadata(&record).await.unwrap();
+        let original = serde_json::to_vec(&record).unwrap();
+        let locator = records.latest_record_locator(&record);
+        record.content_hash = "ee".repeat(32);
+        let chunk = record.chunks.first_mut().unwrap();
+        chunk.hash = "ff".repeat(32);
+        let key = ObjectKey::parse(&format!("ff/{}", chunk.hash)).unwrap();
+        let permit = index.begin_remote_delete(&key).await.unwrap();
+        assert!(
+            records
+                .commit_file_version_metadata(&record)
+                .await
+                .unwrap_err()
+                .is_remote_delete_pending()
+        );
+        let entry = crate::S3ObjectEntry {
+            scope_namespace: "scope".to_owned(),
+            object_key: "publication.bin".to_owned(),
+            file_id: record.file_id.clone(),
+            size_bytes: record.total_bytes,
+            content_hash: record.content_hash.clone(),
+            etag: "etag".to_owned(),
+            user_metadata: Vec::new(),
+            updated_at_unix_seconds: 1,
+        };
+        let mut connection = pool.acquire().await.unwrap();
+        assert!(
+            records
+                .publish_s3_object_on_connection(
+                    &mut connection,
+                    &record,
+                    &entry,
+                    &crate::S3PublishCondition::Unconditional,
+                    None
+                )
+                .await
+                .unwrap_err()
+                .is_remote_delete_pending()
+        );
+        drop(connection);
+        assert_eq!(
+            query_scalar::<_, i64>("SELECT count(*) FROM shardline_s3_objects")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(records.read_record_bytes(&locator).await.unwrap(), original);
+        assert_eq!(
+            query_scalar::<_, i64>("SELECT count(*) FROM shardline_file_records")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(index.finish_remote_delete(&permit).await.unwrap());
+        records.commit_file_version_metadata(&record).await.unwrap();
+        assert_eq!(
+            records.read_record_bytes(&locator).await.unwrap(),
+            serde_json::to_vec(&record).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_file_references_reject_pending_chunk_container_cache_and_dedupe_keys() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let hash = "aa".repeat(32);
+        query("INSERT INTO shardline_dedupe_shards(chunk_hash, shard_object_key) VALUES ($1, 'mapped/shard')")
+            .bind(&hash).execute(&pool).await.unwrap();
+        let insert = "INSERT INTO shardline_file_records
+                      (record_key, record_kind, scope_key, file_id, content_hash, record)
+                      VALUES ($1, $2, 'global', 'file', 'content', $3)
+                      ON CONFLICT(record_key) DO UPDATE SET record=EXCLUDED.record";
+        for physical in [
+            format!("aa/{hash}"),
+            format!("xorbs/default/aa/{hash}.xorb"),
+            format!("_xorb_chunks/aa/{hash}"),
+            "mapped/shard".to_owned(),
+        ] {
+            let key = ObjectKey::parse(&physical).unwrap();
+            let permit = store.begin_remote_delete(&key).await.unwrap();
+            for kind in ["latest", "version"] {
+                let record = serde_json::json!({"chunk_size": 1, "chunks": [{"hash": hash}]});
+                let error = query(insert)
+                    .bind(kind)
+                    .bind(kind)
+                    .bind(sqlx::types::Json(record))
+                    .execute(&pool)
+                    .await
+                    .unwrap_err();
+                assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+            }
+            let count: i64 = query_scalar("SELECT count(*) FROM shardline_file_records")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0);
+            assert!(store.finish_remote_delete(&permit).await.unwrap());
+        }
+        // A term-based record references a container, not a same-hash chunk.
+        let key = ObjectKey::parse(&format!("aa/{hash}")).unwrap();
+        let permit = store.begin_remote_delete(&key).await.unwrap();
+        let record = serde_json::json!({"chunk_size": 0, "chunks": [{"hash": hash}]});
+        query(insert)
+            .bind("term")
+            .bind("version")
+            .bind(sqlx::types::Json(&record))
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        let container_key = ObjectKey::parse(&format!("xorbs/default/aa/{hash}.xorb")).unwrap();
+        let container_permit = store.begin_remote_delete(&container_key).await.unwrap();
+        let error = query(insert)
+            .bind("term")
+            .bind("version")
+            .bind(sqlx::types::Json(record))
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+        assert!(store.finish_remote_delete(&container_permit).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reconstruction_and_object_registration_reject_pending_container_and_cache() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let hash = "bb".repeat(32);
+        for physical in [
+            format!("xorbs/default/bb/{hash}.xorb"),
+            format!("_xorb_chunks/bb/{hash}"),
+        ] {
+            let key = ObjectKey::parse(&physical).unwrap();
+            let permit = store.begin_remote_delete(&key).await.unwrap();
+            let terms = serde_json::json!({"terms": [{"object_hash": hash}]});
+            let error = query(
+                "INSERT INTO shardline_file_reconstructions(file_id, terms) VALUES ('file', $1)",
+            )
+            .bind(sqlx::types::Json(terms))
+            .execute(&pool)
+            .await
+            .unwrap_err();
+            assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+            let registration_error =
+                query("INSERT INTO shardline_stored_objects(object_hash) VALUES ($1)")
+                    .bind(&hash)
+                    .execute(&pool)
+                    .await
+                    .unwrap_err();
+            assert!(
+                PostgresMetadataStoreError::from(registration_error).is_remote_delete_pending()
+            );
+            assert!(store.finish_remote_delete(&permit).await.unwrap());
+        }
+        query("INSERT INTO shardline_file_reconstructions(file_id, terms) VALUES ('file', $1)")
+            .bind(sqlx::types::Json(
+                serde_json::json!({"terms": [{"object_hash": hash}]}),
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+        query("INSERT INTO shardline_stored_objects(object_hash) VALUES ($1)")
+            .bind(&hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn dedupe_publication_holds_the_delete_lock_until_transaction_completion() {
@@ -318,7 +573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dedupe_writer_needs_no_new_retention_or_fence_privileges() {
+    async fn reference_writers_need_no_new_retention_or_fence_privileges() {
         let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
         };
@@ -333,10 +588,19 @@ mod tests {
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE {role_identifier};
              GRANT USAGE ON SCHEMA {identifier} TO {role_identifier};
-             GRANT SELECT, INSERT, UPDATE ON {identifier}.shardline_dedupe_shards TO {role_identifier};"
-        ))).execute(&pool).await.unwrap();
+             GRANT SELECT, INSERT, UPDATE ON {identifier}.shardline_dedupe_shards,
+                 {identifier}.shardline_file_records,
+                 {identifier}.shardline_file_reconstructions,
+                 {identifier}.shardline_stored_objects TO {role_identifier};"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
         let key = ObjectKey::parse("shards/default/aa/limited.shard").unwrap();
         let permit = store.begin_remote_delete(&key).await.unwrap();
+        let hash = "ab".repeat(32);
+        let container = ObjectKey::parse(&format!("xorbs/default/ab/{hash}.xorb")).unwrap();
+        let container_permit = store.begin_remote_delete(&container).await.unwrap();
         let mut connection = pool.acquire().await.unwrap();
         query(sqlx::AssertSqlSafe(format!(
             "SET SESSION AUTHORIZATION {role_identifier}"
@@ -359,12 +623,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+        for hash_to_publish in ["cd".repeat(32), hash.clone()] {
+            let record =
+                serde_json::json!({"chunk_size": 0, "chunks": [{"hash": hash_to_publish}]});
+            let terms = serde_json::json!({"terms": [{"object_hash": hash_to_publish}]});
+            let results = [
+                query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ($1,'version','global','file','content',$2)")
+                    .bind(&hash_to_publish).bind(sqlx::types::Json(record)).execute(&mut *connection).await,
+                query("INSERT INTO shardline_file_reconstructions(file_id,terms) VALUES ($1,$2)")
+                    .bind(&hash_to_publish).bind(sqlx::types::Json(terms)).execute(&mut *connection).await,
+                query("INSERT INTO shardline_stored_objects(object_hash) VALUES ($1)")
+                    .bind(&hash_to_publish).execute(&mut *connection).await,
+            ];
+            for result in results {
+                if hash_to_publish == hash {
+                    assert!(
+                        PostgresMetadataStoreError::from(result.unwrap_err())
+                            .is_remote_delete_pending()
+                    );
+                } else {
+                    result.unwrap();
+                }
+            }
+        }
         query("RESET SESSION AUTHORIZATION")
             .execute(&mut *connection)
             .await
             .unwrap();
         drop(connection);
         assert!(store.finish_remote_delete(&permit).await.unwrap());
+        assert!(store.finish_remote_delete(&container_permit).await.unwrap());
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "DROP OWNED BY {role_identifier}; DROP ROLE {role_identifier};"
         )))
@@ -410,6 +698,9 @@ mod tests {
             "shardline_quarantine_candidates",
             "shardline_resource_fences",
             "shardline_dedupe_shards",
+            "shardline_file_records",
+            "shardline_file_reconstructions",
+            "shardline_stored_objects",
         ] {
             query(sqlx::AssertSqlSafe(format!(
                 "CREATE TABLE {identifier}.{table} (LIKE {table} INCLUDING ALL)"
