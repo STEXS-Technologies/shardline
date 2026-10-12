@@ -69,6 +69,13 @@ impl TaskEvidenceStore {
         if key.verifying_key().as_bytes() != &identity.public_key {
             return Err(invalid());
         }
+        if self
+            .postgres_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.scope != scope)
+        {
+            return Err(invalid());
+        }
         let manifest = Digest::of(&self.binding_manifest(identity)?.ok_or_else(invalid)?);
         let binding = Binding {
             schema: 1,

@@ -590,13 +590,10 @@ pub(super) async fn maintenance_tasks(
     if limit > 100 {
         return Err(ServerError::InvalidAdminQuery);
     }
-    let store = crate::task_tracking::TaskEvidenceStore::from_backend_objects(
-        &state.config,
-        state.backend.object_store(),
-    );
+    let (store, history_scope) =
+        crate::task_tracking::TaskEvidenceStore::from_backend(&state.config, &state.backend)
+            .await?;
     let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
-    let history_scope =
-        crate::task_tracking::backend_history_scope(&state.config, &state.backend).await;
     let mut tasks = spawn_maintenance_inspection(permit, move || {
         store.inspect_summaries_with_scope(
             deployment,
@@ -648,13 +645,10 @@ pub(super) async fn maintenance_report(
         .admission
         .try_acquire(weights::STATS)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let store = crate::task_tracking::TaskEvidenceStore::from_backend_objects(
-        &state.config,
-        state.backend.object_store(),
-    );
+    let (store, history_scope) =
+        crate::task_tracking::TaskEvidenceStore::from_backend(&state.config, &state.backend)
+            .await?;
     let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
-    let history_scope =
-        crate::task_tracking::backend_history_scope(&state.config, &state.backend).await;
     let report = spawn_maintenance_inspection(permit, move || {
         store.embedded_report(deployment, history_scope, &id)
     })

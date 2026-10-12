@@ -11,6 +11,7 @@ mod owner;
 pub use owner::TaskOwner;
 mod history_observation;
 mod history_scope_binding;
+mod postgres_metadata;
 pub(crate) use history_observation::observe_work_pool;
 mod status;
 pub use status::{TaskRunState, TaskRunSummary};
@@ -168,46 +169,16 @@ pub async fn resolved_postgres_deployment_fingerprint(
     Ok(penelope_core::task::Digest::of(&target))
 }
 
-pub(crate) async fn backend_history_scope(
-    config: &ServerConfig,
-    backend: &crate::ServerBackend,
-) -> Option<penelope_core::task::Digest> {
-    let crate::ServerBackend::Postgres(backend) = backend else {
-        return None;
-    };
-    // Optional observation must not hold startup or admin inspection indefinitely.
-    // Use the existing metadata pool and perform only reads; no upgrade here.
-    let resolved = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let mut connection = backend
-            .index_store()
-            .pool()
-            .acquire()
-            .await
-            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-        resolved_postgres_deployment_fingerprint(config, &mut connection).await
-    })
-    .await;
-    match resolved {
-        Ok(Ok(scope)) => Some(scope),
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "shared task history unavailable; legacy history continues");
-            None
-        }
-        Err(error) => {
-            tracing::warn!(%error, "shared task history timed out; legacy history continues");
-            None
-        }
-    }
-}
-
 /// Immutable publication in existing deployment storage. Local deployments use
-/// the metadata database with legacy object-store reads; PostgreSQL/S3 evidence
-/// configurations retain object-backed publication.
+/// the metadata database with legacy object-store reads. Server-backed stores
+/// can use owner-installed PostgreSQL evidence storage on the existing pool;
+/// configuration-only stores retain legacy PostgreSQL/S3 publication.
 /// Instantiate on a blocking thread when using the synchronous methods.
 #[derive(Debug, Clone)]
 pub struct TaskEvidenceStore {
     objects: ServerObjectStore,
     local_metadata: Option<shardline_index::LocalIndexStore>,
+    postgres_metadata: Option<postgres_metadata::PostgresTaskMetadata>,
 }
 
 impl TaskEvidenceStore {
@@ -215,6 +186,7 @@ impl TaskEvidenceStore {
         Self {
             objects,
             local_metadata: None,
+            postgres_metadata: None,
         }
     }
     /// Reuses existing metadata for local payload storage without PostgreSQL.
@@ -231,6 +203,7 @@ impl TaskEvidenceStore {
     pub(crate) fn from_backend_objects(config: &ServerConfig, objects: ServerObjectStore) -> Self {
         Self {
             objects,
+            postgres_metadata: None,
             local_metadata: (config.index_postgres_url().is_none()
                 && config.object_storage_adapter() == crate::ObjectStorageAdapter::Local)
                 .then(|| shardline_index::LocalIndexStore::open(config.root_dir().to_owned())),
@@ -242,6 +215,15 @@ impl TaskEvidenceStore {
     /// Returns invalid keys, unavailable storage or a conflicting publication.
     pub fn publish(&self, suffix: &str, bytes: &[u8]) -> Result<(), ServerError> {
         let key = Self::key(suffix)?;
+        if let Some(metadata) = &self.postgres_metadata {
+            if self.objects.metadata(&key)?.is_some() {
+                if self.read(suffix, u64::try_from(bytes.len())?)?.as_deref() != Some(bytes) {
+                    return Err(ServerError::InvalidContentHash);
+                }
+                return Ok(());
+            }
+            return metadata.publish(key.as_str(), bytes);
+        }
         if let Some(metadata) = &self.local_metadata {
             // Preserve existing immutable legacy publications. New runs use the
             // metadata table; old history is neither rewritten nor discarded.
@@ -277,6 +259,18 @@ impl TaskEvidenceStore {
     /// # Errors
     /// Returns unavailable storage or evidence larger than the requested bound.
     pub fn read(&self, suffix: &str, maximum: u64) -> Result<Option<Vec<u8>>, ServerError> {
+        if let Some(metadata) = &self.postgres_metadata
+            && let Some(artifact) = metadata.read(Self::key(suffix)?.as_str(), maximum)?
+        {
+            let bytes = artifact.bytes.ok_or(ServerError::RequestBodyTooLarge)?;
+            if self
+                .read_objects(suffix, maximum)?
+                .is_some_and(|legacy| legacy != bytes)
+            {
+                return Err(ServerError::InvalidContentHash);
+            }
+            return Ok(Some(bytes));
+        }
         if let Some(metadata) = &self.local_metadata {
             let bytes = match metadata.read_task_artifact(Self::key(suffix)?.as_str(), maximum) {
                 Err(shardline_index::LocalIndexStoreError::MetadataTooLarge { .. }) => {
@@ -324,6 +318,24 @@ impl TaskEvidenceStore {
     where
         F: FnMut(&ObjectMetadata) -> Result<(), ServerError>,
     {
+        if let Some(metadata) = &self.postgres_metadata {
+            let mut after = None;
+            'pages: loop {
+                let page = metadata.page(prefix.as_str(), after.as_deref())?;
+                if page.is_empty() {
+                    break;
+                }
+                for (key, length) in page {
+                    if !key.starts_with(prefix.as_str()) {
+                        break 'pages;
+                    }
+                    let object_key =
+                        ObjectKey::parse(&key).map_err(|_error| ServerError::InvalidPath)?;
+                    after = Some(key);
+                    visit(&ObjectMetadata::new(object_key, length, None))?;
+                }
+            }
+        }
         if let Some(metadata) = &self.local_metadata {
             metadata.visit_task_artifacts::<ServerError, _>(prefix.as_str(), |key, length| {
                 let key = ObjectKey::parse(key).map_err(|_error| ServerError::InvalidPath)?;
@@ -331,6 +343,11 @@ impl TaskEvidenceStore {
             })?;
         }
         self.objects.visit_prefix(prefix, |object| {
+            if let Some(metadata) = &self.postgres_metadata
+                && metadata.read(object.key().as_str(), 0)?.is_some()
+            {
+                return Ok(());
+            }
             if let Some(metadata) = &self.local_metadata {
                 // Do not allocate evidence while suppressing duplicate inventory.
                 if metadata.contains_task_artifact(object.key().as_str())? {
@@ -346,6 +363,9 @@ impl TaskEvidenceStore {
         // Remove the legacy copy first so a partially completed cleanup cannot
         // reveal it again after the metadata copy disappears.
         self.objects.delete_if_present(key)?;
+        if let Some(metadata) = &self.postgres_metadata {
+            metadata.delete(key.as_str())?;
+        }
         if let Some(metadata) = &self.local_metadata {
             metadata.delete_task_artifact(key.as_str())?;
         }

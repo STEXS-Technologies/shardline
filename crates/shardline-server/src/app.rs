@@ -211,15 +211,25 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     let provider_webhook_body_limit =
         bounded_api_body_limit(max_request_body_bytes, MAX_PROVIDER_WEBHOOK_BODY_BYTES);
     let backend = ServerBackend::from_config(&config).await?;
-    let evidence_store = crate::task_tracking::TaskEvidenceStore::from_backend_objects(
-        &config,
-        backend.object_store(),
-    );
+    let (evidence_store, history_scope) =
+        match crate::task_tracking::TaskEvidenceStore::from_backend(&config, &backend).await {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                tracing::warn!(%error, "task metadata unavailable; serving continues with legacy tracking");
+                (
+                    crate::task_tracking::TaskEvidenceStore::from_backend_objects(
+                        &config,
+                        backend.object_store(),
+                    ),
+                    None,
+                )
+            }
+        };
     let mut task_tracker = crate::task_tracking::EmbeddedTaskTracker::from_store(
         evidence_store.clone(),
         crate::task_tracking::deployment_fingerprint(&config)?,
     );
-    if let Some(scope) = crate::task_tracking::backend_history_scope(&config, &backend).await {
+    if let Some(scope) = history_scope {
         task_tracker = task_tracker.with_history_scope(scope);
     }
     let task_tracker = Arc::new(task_tracker);
