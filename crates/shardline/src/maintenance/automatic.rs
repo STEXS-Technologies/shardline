@@ -190,6 +190,9 @@ fn run_inner(
         return Ok(super::shared_inline::run(operation, arguments, &config));
     }
     if !operation.read_only() {
+        if let Err(error) = super::cleanup::retry(&state) {
+            tracing::warn!(workspace = %state.display(), "confirmed scratch cleanup unavailable; existing command continues: {error}");
+        }
         let export_config = super::publication_config(operation, &config)?;
         let retry = (|| -> Result<()> {
             let store = super::evidence::store(operation, &export_config, Some(&state))?;
@@ -225,7 +228,7 @@ fn run_inner(
         // Evidence and streamed output are confirmed in the selected history
         // store. Open capture descriptors survive removal of the scratch files.
         let digest = penelope_core::task::Digest::of(id.as_bytes());
-        if let Err(error) = std::fs::remove_dir_all(state.join(hex::encode(digest.0))) {
+        if let Err(error) = super::cleanup::completed(&state.join(hex::encode(digest.0))) {
             // Work and its receipt are already complete. A scratch-cleanup
             // error must not change the handler's result or authorize a retry.
             tracing::warn!(workspace = %state.display(), "completed maintenance scratch could not be removed; original command result is preserved: {error}");

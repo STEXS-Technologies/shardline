@@ -688,3 +688,21 @@ bash scripts/shardline/verify_maintenance_cleanup_failure.sh CURRENT RELEASED
 This Linux-only drill compiles an owned test library that intercepts directory
 removal only beneath its fixture's private task root. It adds no production
 library, runtime setting or deployment dependency.
+
+## Cleanup after confirmed completion
+
+Confirmed task scratch now moves into a private retirement directory before
+recursive deletion. A partially failed deletion therefore cannot leave an
+unrecognizable journal in the unfinished-task backlog. Later ordinary maintenance
+removes up to 64 retired directories per invocation, using the existing fair
+cursor. It does not rerun work or change saved history.
+
+The native cleanup-failure drill now verifies that the next current invocation
+clears the leftover directory, preserves every previously saved artifact byte
+and records only its own new completion. Released 1.11.3 still runs against the
+same fixture with identical output. Unit tests cover bounded cleanup, untouched
+unfinished state and refusal to replace an existing retirement entry. This is
+an internal cleanup change, with no additional process or operator configuration.
+All 18 focused maintenance tests pass with owned PostgreSQL bootstrapped by
+released 1.11.3. Strict CLI/server Clippy, native local and restricted-S3 copies,
+and all four read-only-root command comparisons also pass.

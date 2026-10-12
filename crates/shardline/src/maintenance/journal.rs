@@ -237,7 +237,7 @@ pub(super) fn retry_exports(
         }
         drop(journal);
         if completed {
-            std::fs::remove_dir_all(directory)?;
+            super::cleanup::completed(directory)?;
         }
     }
     batch.finish()?;

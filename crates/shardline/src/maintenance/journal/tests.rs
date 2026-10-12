@@ -208,6 +208,7 @@ fn unfinished_and_corrupt_backlogs_do_not_starve_completed_export() {
             .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter(|entry| entry.file_name() != "retired")
             .count(),
         130
     );
@@ -229,5 +230,6 @@ fn another_exporter_does_not_block_maintenance_or_delete_its_journals() {
     drop(guard);
     retry_exports(&state, &store, deployment).unwrap();
     assert!(!directory.exists());
-    assert_eq!(fs::read_dir(state).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(state.join("retired")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(state).unwrap().count(), 1);
 }
