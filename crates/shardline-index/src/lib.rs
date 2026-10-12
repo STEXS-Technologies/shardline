@@ -106,8 +106,8 @@ pub use oci_tags::{OciTagEntry, OciTagStore};
 pub use postgres::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresProviderMutation,
     PostgresProviderMutationOutcome, PostgresRecordLocator, PostgresRecordStore,
-    PostgresRemoteDeletePermit, PostgresResourceFence, ProviderRepositoryKey, RemoteDeletePending,
-    RemoteDeleteReceipt, RemoteDeleteReceiptSettlement,
+    PostgresRemoteDeletePermit, PostgresResourceFence, PostgresTaskArtifact, ProviderRepositoryKey,
+    RemoteDeletePending, RemoteDeleteReceipt, RemoteDeleteReceiptSettlement,
 };
 pub use reconstruction::{FileReconstruction, ReconstructionTerm};
 pub use record::{

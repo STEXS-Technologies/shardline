@@ -6,6 +6,7 @@ mod record_store;
 mod remote_deletes;
 mod resumable_sessions;
 mod s3_objects;
+mod task_artifacts;
 mod task_history_scope;
 mod tree_store;
 mod types;
@@ -19,6 +20,7 @@ pub use provider_mutation::{
     ProviderRepositoryKey,
 };
 pub use remote_deletes::{PostgresRemoteDeletePermit, RemoteDeletePending};
+pub use task_artifacts::PostgresTaskArtifact;
 mod remote_delete_receipts;
 pub use remote_delete_receipts::{RemoteDeleteReceipt, RemoteDeleteReceiptSettlement};
 pub(crate) use resumable_sessions::refresh_resumable_state_digest;
