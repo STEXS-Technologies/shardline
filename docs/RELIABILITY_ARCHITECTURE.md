@@ -247,8 +247,9 @@ The protocol needs a durable effect gate: an uncertain issued delete
 must prevent a later successful hold or reference publication from racing with
 it. Later requests for the affected object must return a clear retryable error
 instead of waiting indefinitely or acknowledging protection. This is the chosen
-behavior. Retention writers now enforce it; other publication paths still need
-their transaction checks. Clearing that
+behavior. Retention, dedupe and directly named file/reconstruction references
+now enforce it. References hidden inside xorb payloads and other publication
+paths still need their transaction checks. Clearing that
 gate requires proof that issued requests have settled, rather
 than merely an expired timer, a dead PID or a lost database session. This must
 also work during mixed-version operation and rollback. An additive database
@@ -267,13 +268,23 @@ prevents an old completion from matching a later attempt. Neither process death
 nor connection loss clears an unresolved marker.
 
 The existing owner-run `db migrate up` installs the read check, admission and
-settlement functions, and retention trigger in one transaction, without adding
+settlement functions, and publication triggers in one transaction, without adding
 migration-history records or changing released checksums. The functions check
 the original session role's existing retention and GC metadata permissions;
 runtime roles need no direct fence-table grant. Each function is bound to its
 installed schema, so a caller cannot redirect definer access to another schema.
-The trigger protects older hold writers too. Delete admission refuses
-to create a marker if the guard and trigger are missing. The definer functions
+The triggers protect older SQL writers too. Direct-reference triggers use the
+existing table-write authorization and require no new retention/fence grants.
+Chunk records check physical chunks and dedupe mappings; term records and
+reconstructions check their xorb containers and cache sidecars. Large reference
+publications acquire at most 256 advisory lock slots in sorted order, then
+check exact pending keys. Slot collisions only serialize transactions; they do
+not make an unrelated key pending. Single-key retention checks retain their
+original locks as well. Dedupe publication uses bounded slots, so a large native
+shard transaction does not accumulate one lock per mapping. This does not prove safe takeover from a GC
+admission that predates installation of the new reference protection.
+Delete admission refuses to create a marker if required triggers are missing.
+The definer functions
 use fixed search paths with temporary schemas last, following the
 [Postgres function guidance](https://www.postgresql.org/docs/16/sql-createfunction.html).
 
