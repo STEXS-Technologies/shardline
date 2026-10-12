@@ -17,49 +17,40 @@ runtime a longer grace period so the server's deadline runs before SIGKILL.
 
 ## StateChronicle/Penelope 0.2.0 dependency upgrade
 
-The branch is not yet ready for rollout as a complete automatic supervision
-upgrade. The compatibility guidance below describes the implemented dependency
-and optional-runner changes. Default integration must also satisfy the
-[deployment acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
+**This branch is not ready for rollout.** The version remains 1.11.3; the next
+patch's version bump and release tag belong in a separate PR. Check the
+[acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) before deployment.
 
-The incremental reliability dependency upgrade planned for the next patch
-preserves the evidence formats written by 1.11.3. The dependency change requires
-no new environment variables, signing keys or persistent session format.
-The integration also installs optional metadata and protection functions through
-the usual owner-run `shardline db migrate up`, even when the migration ledger has
-no pending entries. See the [database migration guide](DATABASE_MIGRATIONS.md).
-The version bump and release tag are prepared separately.
+Keep the existing server commands, maintenance commands and GC timer. Tracking
+runs in their existing process, with normal maintenance output streamed live.
+It needs no new service, port, mount, environment variable or signing key.
+Private temporary files use the existing writable root or host temporary storage.
 
-For deployments already on 1.11.3, the dependency upgrade itself does not add a
-same-key write restriction: both versions use the same state machine, journal
-keys, digest encodings, and Merkle projection. Follow the normal role-by-role
-drain and readiness procedure. Existing maintenance coordination remains in
-force. This describes the dependencies themselves; the integration's protection
-for uncertain remote deletes can reject covered writes until reconciliation.
-See the [maintenance guide](MAINTENANCE_INTEGRATION_UX.md).
-Deployments upgrading from earlier versions must still follow every
-applicable schema, session, writer-routing, GC, and repair restriction below;
-this dependency upgrade does not remove those requirements.
+Run the usual owner command, `shardline db migrate up`, to install the optional
+history and protection functions, even if the migration ledger has no pending
+entries. Runtime accounts need no new fence-table grant. See the
+[database migration guide](DATABASE_MIGRATIONS.md).
 
-Native lifecycle semantics now validate the existing evidence without changing
-its encoding. Typed lifecycle resources remain additive APIs; existing deployment
-writers retain their historical envelopes. Server startup initializes an embedded
-tracker and observes its existing sweeps, without starting a separate worker
-service. Normal Linux maintenance stays in its original CLI process with live
-output and private evidence within the existing writable root or temporary
-filesystem. Shared evidence export
-is additive and does not replace the authoritative metadata journals or barriers.
-Linux operators can also opt into
-`shardline maintenance` using a separate owner-only state directory; see
-[durable maintenance](CLI.md#durable-maintenance-linux). Keep that directory and
-the original signing key when resuming. A task ID pins its request, deployment,
-executable and original deadline. New binaries may fence and verify old work,
-but cannot execute an older pinned definition. Reboot expires unfinished tasks;
-moving live task state across machines or PID namespaces is unsupported.
-Use a new task ID for an intentional new run after inspecting ambiguous effects.
-Original maintenance handlers and server owners remain responsible for domain
-effects. Interrupted mutations are not automatically re-executed; shared task
-history and local PID observations are not distributed leases.
+The dependencies preserve the evidence formats written by 1.11.3, including
+existing journal identities, digests and signatures. New validation checks those
+records without rewriting them. Recorded task history supplements the existing
+metadata journals and safety barriers; it does not replace them or automatically
+repeat interrupted work.
+
+Follow the role-by-role drain and readiness procedure below. The integration
+can reject an affected write while an earlier remote delete remains unresolved;
+see [maintenance without another service](MAINTENANCE_INTEGRATION_UX.md) for the
+retryable error and recovery steps. Earlier-version upgrades must still follow
+the schema, session, writer-routing, GC and repair restrictions below.
+
+The optional Linux `shardline maintenance` runner supplies process isolation for
+deadlines and CPU limits. Its existing jobs keep their original state directory,
+signing key, request, deployment, executable and deadline. A new binary can verify
+and fence an old job, but cannot execute its older pinned definition. Reboot
+expires unfinished jobs; moving live job state across hosts or PID namespaces is
+unsupported. Inspect uncertain effects before intentionally starting a new run.
+See [durable maintenance](CLI.md#durable-maintenance-linux) for this optional workflow.
+Task history and PID observations grant no permission to retry or change data.
 
 ## Roles And Upgrade Units
 
