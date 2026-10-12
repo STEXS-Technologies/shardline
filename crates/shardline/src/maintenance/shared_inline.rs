@@ -255,5 +255,4 @@ fn reference(bytes: &[u8]) -> Result<BlobRef> {
 }
 
 #[cfg(test)]
-#[path = "shared_inline_tests.rs"]
 mod tests;
