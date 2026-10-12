@@ -127,36 +127,38 @@ pub async fn run_gc_diagnostics(
 ) -> Result<gc::LocalGcDiagnostics, error::ServerError> {
     let object_store = object_store_from_config(&config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
-        let _gc_barrier = if options.mark || options.sweep {
-            Some(
-                maintenance_barrier::acquire_postgres_exclusive(
-                    &maintenance_barrier::postgres_coordination_pool(index_postgres_url)?,
-                )
-                .await?,
-            )
+        let pool = if options.mark || options.sweep {
+            maintenance_barrier::postgres_exclusive_work_pool(index_postgres_url).await?
         } else {
-            None
+            connect_postgres_metadata_pool(index_postgres_url, 4)?
         };
-        let index_store = PostgresIndexStore::new(pool.clone());
-        let record_store = PostgresRecordStore::new(pool);
-        let staging_report =
-            reclaim_postgres_resumable_staging(&index_store, &object_store, options.sweep).await?;
-        let mut diagnostics = gc::run_gc_with_oci_tombstones(
-            &record_store,
-            &index_store,
-            &object_store,
-            config.server_frontends(),
-            options,
-        )
-        .await
-        .map_err(error::ServerError::from)?;
-        diagnostics.report.scanned_resumable_staging_objects = staging_report.scanned_objects;
-        diagnostics.report.protected_resumable_staging_objects = staging_report.protected_objects;
-        diagnostics.report.reclaimed_resumable_staging_objects = staging_report.reclaimed_objects;
-        diagnostics.report.reclaimed_resumable_staging_bytes = staging_report.reclaimed_bytes;
-        diagnostics.report.reclaimed_resumable_sessions = staging_report.reclaimed_sessions;
-        return Ok(diagnostics);
+        let result = async {
+            let index_store = PostgresIndexStore::new(pool.clone());
+            let record_store = PostgresRecordStore::new(pool.clone());
+            let staging_report =
+                reclaim_postgres_resumable_staging(&index_store, &object_store, options.sweep)
+                    .await?;
+            let mut diagnostics = gc::run_gc_with_oci_tombstones(
+                &record_store,
+                &index_store,
+                &object_store,
+                config.server_frontends(),
+                options,
+            )
+            .await
+            .map_err(error::ServerError::from)?;
+            diagnostics.report.scanned_resumable_staging_objects = staging_report.scanned_objects;
+            diagnostics.report.protected_resumable_staging_objects =
+                staging_report.protected_objects;
+            diagnostics.report.reclaimed_resumable_staging_objects =
+                staging_report.reclaimed_objects;
+            diagnostics.report.reclaimed_resumable_staging_bytes = staging_report.reclaimed_bytes;
+            diagnostics.report.reclaimed_resumable_sessions = staging_report.reclaimed_sessions;
+            Ok(diagnostics)
+        }
+        .await;
+        pool.close().await;
+        return result;
     }
 
     let _gc_barrier = if options.mark || options.sweep {
@@ -180,7 +182,9 @@ pub async fn run_gc_diagnostics(
 #[cfg(test)]
 mod lib_tests {
     use std::collections::HashSet;
+    use std::time::Duration;
 
+    use shardline_index::AsyncIndexStore;
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
 
     use super::*;
@@ -197,6 +201,100 @@ mod lib_tests {
             &integrity,
         )
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_gc_cannot_mark_after_ownership_connection_is_lost() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let storage = tempfile::tempdir().unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://localhost:8080".to_owned(),
+            storage.path().to_path_buf(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_index_postgres_url(url.clone())
+        .unwrap();
+        let objects = object_store_from_config(&config).unwrap();
+        let bytes = storage.path().as_os_str().as_encoded_bytes();
+        let hash = shardline_index::xet_hash_hex_string(shardline_server_core::chunk_hash(bytes));
+        let key = shardline_server_core::chunk_object_key(&hash).unwrap();
+        put_test_staging_object(&objects, &key, bytes);
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let index = PostgresIndexStore::new(pool.clone());
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE shardline_file_records IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let source =
+            tokio::spawn(async move { run_gc(config, gc::LocalGcOptions::mark_only(3600)).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let blocked = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event='relation'
+                     AND query LIKE '%shardline_file_records%')",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let owner = sqlx::query_scalar::<_, i32>(
+            "SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND objsubid=1
+             AND classid::bigint=(($1::bigint >> 32) & 4294967295)
+             AND objid::bigint=($1::bigint & 4294967295)",
+        )
+        .bind(0x5348_4152_4447_4301_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintenance_barrier::acquire_postgres_exclusive(&pool),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        blocker.rollback().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), source)
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = index.quarantine_candidate(&key).await.unwrap();
+        let anchor = shardline_storage::ObjectStore::contains(
+            &objects,
+            &ObjectKey::parse("gc/last-gc-clock-anchor").unwrap(),
+        )
+        .unwrap();
+        drop(replacement);
+        index.delete_quarantine_candidate(&key).await.unwrap();
+        assert!(
+            result.is_err(),
+            "GC continued its old scan after exclusive takeover"
+        );
+        assert!(
+            observed.is_none(),
+            "the obsolete GC owner changed quarantine metadata"
+        );
+        assert!(!anchor, "the obsolete GC owner published a clock anchor");
+        assert!(shardline_storage::ObjectStore::contains(&objects, &key).unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

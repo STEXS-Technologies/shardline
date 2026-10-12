@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Real machine identities, shared evidence, partition and replacement.
-# Usage: bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss]
+# Usage: bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss|gc-connection-loss]
 set -euo pipefail
-test "$#" -ge 2 && test "$#" -le 3 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss]' >&2; exit 2; }
+test "$#" -ge 2 && test "$#" -le 3 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss|gc-connection-loss]' >&2; exit 2; }
 mode=${3:-node-loss}
-test "$mode" = node-loss || test "$mode" = connection-loss || test "$mode" = repair-connection-loss
+test "$mode" = node-loss || test "$mode" = connection-loss || test "$mode" = repair-connection-loss || test "$mode" = gc-connection-loss
 current=$(realpath "$1")
 image=$(realpath "$2")
 repository=$(cd "$(dirname "$0")/../.." && pwd)
@@ -159,6 +159,9 @@ shared_hashes "$id" > "$fixture/records-before"
 # A normal source CLI owns the existing global barrier while its record scan
 # waits on a fixture table lock. The other machine admits its own distinct run.
 source_command='index rebuild'
+if test "$mode" = gc-connection-loss; then
+    source_command='gc --mark'
+fi
 if test "$mode" = repair-connection-loss; then
     source_command='repair lifecycle'
     vm_ssh 0 'sudo systemd-run --wait --pipe --unit shardline-validation-expired-hold -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline hold set --object-key retention/repair-owner --reason ownership-regression --ttl-seconds 0' > "$fixture/expired-hold.log"
@@ -247,7 +250,7 @@ if test "$mode" != node-loss; then
         echo 'PASS: repair stops after ownership connection loss; the expired hold remains unchanged during takeover'
         exit 0
     fi
-    echo 'PASS: coordinator loss stops the original command; the separately admitted waiter completes'
+    echo "PASS: coordinator loss stops the original $source_command command; the separately admitted waiter completes"
     exit 0
 fi
 # Disconnect the source machine while its kernel and original process remain

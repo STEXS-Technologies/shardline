@@ -146,7 +146,7 @@ pub(crate) fn postgres_coordination_pool(url: &str) -> Result<PgPool, ServerErro
 
 /// A single, non-replaceable metadata session that owns the exclusive barrier.
 ///
-/// Rebuild reads and mutations must use this pool, so losing the lock also loses
+/// Protected reads and metadata mutations must use this pool, so losing the lock also loses
 /// their database connection. Reconnecting would let an obsolete scan resume
 /// after another owner acquired the barrier. Pool retirement is disabled for
 /// long scans; only a fresh invocation may create another session.
@@ -314,6 +314,7 @@ pub(crate) async fn acquire_postgres_shared(
     acquire_postgres(pool, false).await
 }
 
+#[cfg(test)]
 pub(crate) async fn acquire_postgres_exclusive(
     pool: &PgPool,
 ) -> Result<MaintenanceBarrierGuard, ServerError> {
