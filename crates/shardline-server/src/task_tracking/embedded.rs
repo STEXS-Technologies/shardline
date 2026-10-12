@@ -200,7 +200,22 @@ impl TaskReceipt {
     }
 
     pub(crate) fn finish(mut self, success: bool, report: &[u8]) -> TrackingResult<()> {
+        // A failed operation can already have changed data. Preserve its report
+        // as a checkpoint, never as evidence that the operation completed safely.
+        let kind = if success {
+            self.kind
+        } else {
+            MaintenanceArtifactKind::Checkpoint
+        };
+        let proof = self.publish_report(report, kind)?;
         if !success {
+            self.commit(
+                TaskExecutionEvent::CheckpointCommitted {
+                    checkpoint: blob(&proof)?,
+                },
+                TaskGeneration::new(1),
+                Some(&proof),
+            )?;
             self.commit(
                 TaskExecutionEvent::FaultObserved {
                     fault: TaskFault::ApplicationFailure,
@@ -216,13 +231,29 @@ impl TaskReceipt {
             tracing::warn!(operation = %self.identity.operation, run = %self.identity.id, "background task needs reconciliation; no automatic retry authorized");
             return Ok(());
         }
+        self.commit(
+            TaskExecutionEvent::Completed {
+                output: blob(&proof)?,
+            },
+            TaskGeneration::new(1),
+            Some(&proof),
+        )?;
+        tracing::info!(operation = %self.identity.operation, run = %self.identity.id, "background task completion evidence committed");
+        Ok(())
+    }
+
+    fn publish_report(
+        &self,
+        report: &[u8],
+        kind: MaintenanceArtifactKind,
+    ) -> TrackingResult<Vec<u8>> {
         let digest = Digest::of(report);
         let artifact = MaintenanceArtifact {
             schema_version: 1,
             scope: self.identity.scope,
             generation: TaskGeneration::new(1),
             step: 1,
-            kind: self.kind,
+            kind,
             digest,
             bytes: u64::try_from(report.len())?,
         };
@@ -244,15 +275,7 @@ impl TaskReceipt {
             ),
             report,
         )?;
-        self.commit(
-            TaskExecutionEvent::Completed {
-                output: blob(&proof)?,
-            },
-            TaskGeneration::new(1),
-            Some(&proof),
-        )?;
-        tracing::info!(operation = %self.identity.operation, run = %self.identity.id, "background task completion evidence committed");
-        Ok(())
+        Ok(proof)
     }
 }
 

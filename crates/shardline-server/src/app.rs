@@ -65,8 +65,8 @@ use crate::{
     },
 };
 use admin_api::{
-    gc as admin_gc, integrity as admin_integrity, maintenance_tasks as admin_maintenance_tasks,
-    metrics as admin_metrics, nodes as admin_nodes,
+    gc as admin_gc, integrity as admin_integrity, maintenance_report as admin_maintenance_report,
+    maintenance_tasks as admin_maintenance_tasks, metrics as admin_metrics, nodes as admin_nodes,
     pending_remote_deletes as admin_pending_remote_deletes, status as admin_status,
     storage as admin_storage, tasks as admin_tasks,
 };
@@ -338,8 +338,10 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             receipt
                 .finish_async(
                     result.is_ok(),
-                    format!("removed: {}", result.as_ref().copied().unwrap_or_default())
-                        .into_bytes(),
+                    result.as_ref().map_or_else(
+                        |_error| b"sweep failed; removed count unavailable".to_vec(),
+                        |removed| format!("removed: {removed}").into_bytes(),
+                    ),
                 )
                 .await;
         }
@@ -383,8 +385,10 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             receipt
                 .finish_async(
                     result.is_ok(),
-                    format!("removed: {}", result.as_ref().copied().unwrap_or_default())
-                        .into_bytes(),
+                    result.as_ref().map_or_else(
+                        |_error| b"sweep failed; removed count unavailable".to_vec(),
+                        |removed| format!("removed: {removed}").into_bytes(),
+                    ),
                 )
                 .await;
         }
@@ -433,6 +437,10 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/api/v1/nodes", get(admin_nodes))
         .route("/api/v1/tasks", get(admin_tasks))
         .route("/api/v1/tasks/maintenance", get(admin_maintenance_tasks))
+        .route(
+            "/api/v1/tasks/maintenance/{id}/report",
+            get(admin_maintenance_report),
+        )
         .route(
             "/api/v1/tasks/maintenance/deletes",
             get(admin_pending_remote_deletes),

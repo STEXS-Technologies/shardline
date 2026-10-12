@@ -263,6 +263,34 @@ History inspection shares Shardline's existing admission limit. Under load it
 can return `503`; retry the read later. Closing a request does not free capacity
 while its storage scan is still running. No extra concurrency setting is needed.
 
+### `GET /api/v1/tasks/maintenance/{id}/report`
+
+Read the saved counts for one embedded server job. Use an `id` returned by the
+maintenance history list and the same admin token:
+
+```bash
+curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
+  "https://cas.example.com/api/v1/tasks/maintenance/$RUN_ID/report"
+```
+
+The response has common API fields and a `task` object containing `id`,
+`operation`, `state`, `report_available` and `report`. A saved report is verified
+before disclosure. For example, an incomplete webhook-secret sweep can report
+`inspected: 3`, `upgraded: 2` and `failures: 1` while its state remains
+`needs_reconciliation`. Saving diagnostic counts does not certify completion,
+current health or permission to retry.
+
+Older failed runs or jobs interrupted before saving a report return
+`report_available: false` and `report: null`. Missing runs, other deployments and
+CLI runs return `404`; ordinary commands retain their existing output and
+diagnostics. Damaged evidence fails the request without exposing an unverified
+report. No query parameters are accepted.
+
+This read uses the existing admission limit and authentication, returns
+`Cache-Control: no-store`, and reads at most 64 KiB per report. It inspects only
+the selected run rather than enumerating every manifest. Closing the request
+keeps its admission capacity charged until inspection finishes.
+
 ### `GET /api/v1/metrics`
 
 | Field | Type | Scope and meaning |

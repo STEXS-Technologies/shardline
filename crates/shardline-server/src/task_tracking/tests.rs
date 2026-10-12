@@ -59,6 +59,25 @@ fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
     }
     operations.sort_unstable();
     assert_eq!(operations, ["foreign-bound", "own-bound", "own-legacy"]);
+    assert_eq!(
+        store
+            .embedded_report(legacy, Some(shared), &foreign_id)
+            .unwrap()
+            .unwrap()["report"],
+        "report"
+    );
+    assert!(
+        store
+            .embedded_report(legacy, None, &foreign_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .embedded_report(legacy, Some(other), &foreign_id)
+            .unwrap()
+            .is_none()
+    );
     let mut after = None;
     for expected in &history {
         let page = store
@@ -83,6 +102,11 @@ fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
         b"corrupt",
     )
     .unwrap();
+    assert!(
+        store
+            .embedded_report(legacy, Some(shared), &foreign_id)
+            .is_err()
+    );
     let corrupt = store
         .inspect_summaries_with_scope(legacy, Some(shared), None, 10)
         .unwrap();
@@ -245,6 +269,24 @@ fn embedded_tasks_publish_verified_success_and_truthful_failure() {
         .unwrap();
     failed.finish(false, b"failures: 1").unwrap();
     let after = store.summaries(deployment, None, 10).unwrap();
+    let failed_id = &after
+        .iter()
+        .find(|task| task.operation == "incomplete-sweep")
+        .unwrap()
+        .id;
+    let diagnostic = store
+        .embedded_report(deployment, None, failed_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(diagnostic["state"], "needs_reconciliation");
+    assert_eq!(diagnostic["report"], "failures: 1");
+    assert_eq!(diagnostic["report_available"], true);
+    assert!(
+        store
+            .embedded_report(penelope_core::task::Digest::of(b"foreign"), None, failed_id)
+            .unwrap()
+            .is_none()
+    );
     assert!(
         after
             .iter()
@@ -265,6 +307,26 @@ fn embedded_tasks_publish_verified_success_and_truthful_failure() {
             )
             .unwrap()
             .is_empty()
+    );
+    let report_path = root
+        .path()
+        .join("chunks/_shardline_tasks/v1/runs")
+        .join(failed_id)
+        .join("artifacts")
+        .join(hex::encode(
+            penelope_core::task::Digest::of(b"failures: 1").0,
+        ));
+    std::fs::write(&report_path, b"failures: 0").unwrap();
+    assert!(store.embedded_report(deployment, None, failed_id).is_err());
+    assert_eq!(
+        store
+            .summaries(deployment, None, 10)
+            .unwrap()
+            .iter()
+            .find(|task| task.id == *failed_id)
+            .unwrap()
+            .state,
+        TaskRunState::Corrupt
     );
 }
 
@@ -326,6 +388,13 @@ fn dropping_an_unfinished_background_job_never_leaves_a_live_success_claim() {
         )
         .unwrap();
     drop(receipt);
+    let id = store.summaries(deployment, None, 10).unwrap().remove(0).id;
+    let diagnostic = store
+        .embedded_report(deployment, None, &id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(diagnostic["report_available"], false);
+    assert!(diagnostic["report"].is_null());
     assert_eq!(
         store.summaries(deployment, None, 10).unwrap()[0].state,
         TaskRunState::NeedsReconciliation
@@ -1102,6 +1171,71 @@ async fn normal_router_starts_tracker_and_exposes_authenticated_job_status() {
                 && job["execution"] == "embedded"
                 && job["owner"]["pid"] == std::process::id())
     );
+}
+
+#[tokio::test]
+async fn failed_startup_sweep_exposes_diagnostics_without_failing_readiness() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("tmp")).unwrap();
+    std::fs::write(
+        root.path().join("tmp/lfs-patch"),
+        b"fixture prevents staging directory creation",
+    )
+    .unwrap();
+    let config = config(root.path())
+        .with_server_frontends([crate::ServerFrontend::Lfs])
+        .unwrap()
+        .with_admin_read_token(b"test-admin-token".to_vec())
+        .unwrap();
+    let app = crate::app::router(config).await.unwrap();
+    let get = |path: &str| {
+        Request::builder()
+            .uri(path)
+            .header("Authorization", "Bearer test-admin-token")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = app
+        .clone()
+        .oneshot(get("/api/v1/tasks/maintenance"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let task = history["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["operation"] == "lfs-startup-session-sweep")
+        .unwrap();
+    assert_eq!(task["state"], "needs_reconciliation");
+    let response = app
+        .clone()
+        .oneshot(get(&format!(
+            "/api/v1/tasks/maintenance/{}/report",
+            task["id"].as_str().unwrap()
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let diagnostic: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(diagnostic["task"]["state"], "needs_reconciliation");
+    assert_eq!(
+        diagnostic["task"]["report"],
+        "sweep failed; removed count unavailable"
+    );
+    let response = app.oneshot(get("/api/v1/status")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let status: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(status["state"], "ready");
 }
 
 #[tokio::test]

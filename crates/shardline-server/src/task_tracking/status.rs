@@ -73,6 +73,12 @@ impl TaskEvidenceEntry {
     }
 }
 
+struct VerifiedTaskState {
+    state: TaskRunState,
+    output_verified: Option<bool>,
+    report: Option<Vec<u8>>,
+}
+
 impl TaskEvidenceStore {
     /// Removes at most 64 verified finished histories older than 30 days.
     /// Unfinished, unobservable and corrupt histories are retained for inspection.
@@ -340,8 +346,71 @@ impl TaskEvidenceStore {
         &self,
         identity: &TaskRunIdentity,
     ) -> Result<(TaskRunState, Option<bool>), ServerError> {
+        self.state_with_report(identity)
+            .map(|verified| (verified.state, verified.output_verified))
+    }
+
+    /// Reads one embedded report without a deployment-wide inventory walk.
+    /// Association and every referenced artifact are verified before disclosure.
+    pub(crate) fn embedded_report(
+        &self,
+        deployment: Digest,
+        history_scope: Option<Digest>,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, ServerError> {
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(ServerError::InvalidAdminQuery);
+        }
+        let Some(bytes) = self.read(&format!("manifests/{id}"), 65536)? else {
+            return Ok(None);
+        };
+        let identity: TaskRunIdentity =
+            serde_json::from_slice(&bytes).map_err(|_error| invalid("invalid task identity"))?;
+        if identity.schema != 1
+            || identity.id != id
+            || identity.scope.definition != identity.definition.fingerprint()
+            || identity.definition.budget.max_history_records > 4096
+            || identity.definition.validate().is_err()
+        {
+            return Err(invalid("invalid task identity"));
+        }
+        let association = history_scope
+            .map(|scope| self.history_scope_binding_match(&identity, scope))
+            .transpose()?
+            .flatten();
+        if association == Some(false)
+            || (association.is_none() && identity.deployment != deployment)
+            || identity.execution != TaskExecutionMode::Embedded
+        {
+            return Ok(None);
+        }
+        let verified = self.state_with_report(&identity)?;
+        let report = verified
+            .report
+            .map(String::from_utf8)
+            .transpose()
+            .map_err(|_error| invalid("embedded report is not text"))?;
+        Ok(Some(serde_json::json!({
+            "id": identity.id,
+            "operation": identity.operation,
+            "state": verified.state,
+            "report": report,
+            "report_available": report.is_some(),
+        })))
+    }
+
+    fn state_with_report(
+        &self,
+        identity: &TaskRunIdentity,
+    ) -> Result<VerifiedTaskState, ServerError> {
         let mut command_success = true;
         let mut output_verified = None;
+        let mut report = None;
         let mut projection = TaskProjection::new(identity.scope, identity.definition)
             .map_err(|_error| invalid("invalid task contract"))?;
         let prefix = format!("runs/{}/records/", identity.id);
@@ -459,11 +528,14 @@ impl TaskEvidenceStore {
                     {
                         command_success = inline_outcome(&materialized)? == 0;
                     }
+                    if identity.execution == TaskExecutionMode::Embedded {
+                        report = Some(materialized);
+                    }
                 }
             }
         }
-        Ok((
-            match projection.status() {
+        Ok(VerifiedTaskState {
+            state: match projection.status() {
                 TaskStatus::Completed => {
                     if command_success {
                         TaskRunState::Completed
@@ -485,7 +557,8 @@ impl TaskEvidenceStore {
                 | TaskStatus::Exhausted => TaskRunState::NeedsReconciliation,
             },
             output_verified,
-        ))
+            report,
+        })
     }
 
     fn blob(&self, identity: &TaskRunIdentity, reference: BlobRef) -> Result<Vec<u8>, ServerError> {
