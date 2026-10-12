@@ -198,7 +198,7 @@ storage configuration. It verifies saved successful delete replies and settles
 their matching attempts without deleting the object again. Repeated runs work
 through the backlog. If no reply was saved, the marker remains pending; elapsed
 time or a missing object cannot safely clear it. See the
-[maintenance guide](MAINTENANCE_INTEGRATION_UX.md#when-a-delete-is-interrupted).
+[maintenance guide](MAINTENANCE_INTEGRATION_UX.md#why-a-write-might-return-a-retryable-error).
 
 Only `limit` (`1..=100`, default `100`) and `cursor` are accepted. Pass
 `page.next_cursor` unchanged to fetch another page. Pages follow delete-attempt

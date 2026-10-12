@@ -307,7 +307,8 @@ This document is for reviewers deciding whether the integration is safe to ship.
   100 ms work timeout. Strict index Clippy also passes.
   Server stores reject a signed work-scope binding that differs from their
   selected metadata target. Jobs whose work target differs from the server's
-  inspection target still need source-specific storage routing; this change
+  inspection target still need source-specific storage routing outside the Hub
+  secret sweep described below; this change
   does not establish that association or switch optional runner storage.
   The native mixed-version OCI/S3 drill passes with this owner extension: the
   released ledger and original table grants are unchanged, the existing writer
@@ -324,6 +325,18 @@ This document is for reviewers deciding whether the integration is safe to ship.
   rather than inheriting the startup inspection pool's scope. It remains on the
   existing server blocking task and stops on its first storage failure; ordinary
   Hub requests and lazy secret encryption retain their existing request pool.
+  Its history storage now also follows that actual work connection. The run
+  begins using the same session; final evidence opens an independent connection
+  only after the work pool closes, verifies the pinned target again, and cannot
+  resume work. A webhook-only writer without metadata-publication privileges
+  retains legacy tracking. Unexpected target failures warn and leave the sweep
+  running without verified history rather than publishing to the startup schema.
+  The PostgreSQL regression passes with different startup/work schemas and a
+  login limited to one connection, without direct artifact-table grants or
+  fence-table access: completed and interrupted metadata history
+  is readable at the work target, the startup schema receives none, the narrow
+  writer retains completed legacy history, and terminated work is not replayed.
+  All 29 tracker regressions and strict server Clippy also pass.
   The existing-role drill
   inspects history using that role's scope.
 

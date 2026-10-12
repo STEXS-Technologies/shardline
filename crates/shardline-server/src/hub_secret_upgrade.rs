@@ -47,20 +47,32 @@ pub(crate) fn run(
     cipher: &WebhookSecretCipher,
     tracker: &EmbeddedTaskTracker,
 ) -> WebhookSecretUpgradeReport {
-    let tracking = tracker.clone().without_history_scope().begin(
-        "hub-webhook-secret-upgrade",
-        b"hub-webhook-secret-upgrade.v1",
-        shardline_reliability::MaintenanceArtifactKind::LifecycleRepair,
-    );
-    if let Err(error) = &tracking {
-        crate::task_tracking::embedded::tracking_error(error.as_ref());
-    }
+    let begin = |selected_tracker: &EmbeddedTaskTracker| {
+        let tracking = selected_tracker.begin(
+            "hub-webhook-secret-upgrade",
+            b"hub-webhook-secret-upgrade.v1",
+            shardline_reliability::MaintenanceArtifactKind::LifecycleRepair,
+        );
+        if let Err(error) = &tracking {
+            crate::task_tracking::embedded::tracking_error(error.as_ref());
+        }
+        tracking
+    };
+    let mut tracking;
     tracing::info!("starting background webhook-secret upgrade sweep");
     let runtime = tokio::runtime::Handle::current();
-    let report = config.index_postgres_url().map_or_else(
-        || shardline_hub_api::secrets::upgrade_webhook_secrets_with_report(local_store, cipher),
-        |url| match runtime.block_on(prepare_postgres(config, url)) {
+    let report = if let Some(url) = config.index_postgres_url() {
+        match runtime.block_on(prepare_postgres(config, url)) {
             Ok((pool, store, scope)) => {
+                // Select history on the actual work session before beginning
+                // this run. Reuse its connection, including restricted logins.
+                tracking = match runtime.block_on(tracker.for_work_pool(config, &pool)) {
+                    Ok(selected) => begin(&selected),
+                    Err(error) => {
+                        tracing::warn!(%error, "Hub history target unavailable; sweep continues without verified history");
+                        Err(error.into())
+                    }
+                };
                 if let (Ok(receipt), Some(scope)) = (&tracking, scope)
                     && let Err(error) = receipt.bind_history_scope(scope)
                 {
@@ -70,10 +82,16 @@ pub(crate) fn run(
                     shardline_hub_api::secrets::upgrade_webhook_secrets_with_report_fail_fast(
                         &store, cipher,
                     );
+                if let Ok(receipt) = &mut tracking
+                    && let Err(error) = receipt.detach_work_history()
+                {
+                    crate::task_tracking::embedded::tracking_error(error.as_ref());
+                }
                 runtime.block_on(pool.close());
                 report
             }
             Err(error) => {
+                tracking = begin(&tracker.clone().without_history_scope());
                 tracing::warn!(%error, "Hub upgrade work session unavailable; lazy per-row upgrade remains available");
                 WebhookSecretUpgradeReport {
                     inspected: 0,
@@ -81,8 +99,11 @@ pub(crate) fn run(
                     failures: 1,
                 }
             }
-        },
-    );
+        }
+    } else {
+        tracking = begin(&tracker.clone().without_history_scope());
+        shardline_hub_api::secrets::upgrade_webhook_secrets_with_report(local_store, cipher)
+    };
     if let Ok(receipt) = tracking
         && let Err(error) = receipt.finish(
             report.failures == 0,

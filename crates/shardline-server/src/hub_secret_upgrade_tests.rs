@@ -22,6 +22,10 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
         .connect(&url)
         .await
         .expect("owned Hub work fixture");
+    PostgresIndexStore::new(admin.clone())
+        .initialize_remote_delete_guard()
+        .await
+        .unwrap();
     let role = format!(
         "hub_work_{}_{}",
         std::process::id(),
@@ -32,10 +36,10 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
     );
     let schema = role.clone();
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "CREATE ROLE {role} LOGIN PASSWORD 'owned_hub_work_fixture'; CREATE SCHEMA {schema};
+        "CREATE ROLE {role} LOGIN CONNECTION LIMIT 1 PASSWORD 'owned_hub_work_fixture'; CREATE SCHEMA {schema};
          ALTER ROLE {role} SET search_path TO {schema},public; GRANT USAGE ON SCHEMA {schema} TO {role};",
     ))).execute(&admin).await.unwrap();
-    let tables: Vec<String> = sqlx::query_scalar("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'shardline_%'")
+    let tables: Vec<String> = sqlx::query_scalar("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'shardline_%' AND tablename <> 'shardline_task_artifacts_v1'")
         .fetch_all(&admin).await.unwrap();
     assert!(!tables.is_empty(), "fixture must have released migrations");
     for table in tables {
@@ -71,7 +75,9 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {role};
          REVOKE SELECT ON {schema}.shardline_resource_fences FROM {role};
+         REVOKE ALL ON {schema}.shardline_task_artifacts_v1 FROM {role};
          GRANT UPDATE ON {schema}.shardline_hub_repos, {schema}.shardline_hub_refs TO {role};
+         GRANT INSERT ON {schema}.shardline_reliability_events TO {role};
          GRANT UPDATE(secret) ON {schema}.shardline_hub_webhooks TO {role};",
     )))
     .execute(&admin)
@@ -104,7 +110,6 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
     .with_index_postgres_url(work_url.to_string())
     .unwrap();
     let objects = ServerObjectStore::local(root.path().join("chunks")).unwrap();
-    let evidence = TaskEvidenceStore::from_objects(objects.clone());
     let deployment = deployment_fingerprint(&config).unwrap();
     let mut inspection = admin.acquire().await.unwrap();
     let inherited = resolved_postgres_deployment_fingerprint(&config, &mut inspection)
@@ -117,7 +122,16 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
         .unwrap();
     drop(actual);
     assert_ne!(expected, inherited);
-    let tracker = EmbeddedTaskTracker::new(objects, deployment).with_history_scope(inherited);
+    let (startup_evidence, startup_scope) = TaskEvidenceStore::from_postgres_pool(&config, &admin)
+        .await
+        .unwrap();
+    assert_eq!(startup_scope, Some(inherited));
+    let (evidence, work_scope) = TaskEvidenceStore::from_postgres_pool(&config, &owner)
+        .await
+        .unwrap();
+    assert_eq!(work_scope, Some(expected));
+    let tracker = EmbeddedTaskTracker::from_store(startup_evidence.clone(), deployment)
+        .with_history_scope(inherited);
     let fallback = owned_store.clone();
     let run_config = config.clone();
     let run_tracker = tracker.clone();
@@ -135,27 +149,73 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
         (healthy.inspected, healthy.upgraded, healthy.failures),
         (1, 1, 0)
     );
-    let summaries = evidence.summaries(deployment, None, 10).unwrap();
-    assert_eq!(summaries.len(), 1);
-    assert_eq!(summaries[0].state, TaskRunState::Completed);
-    let identity: TaskRunIdentity = serde_json::from_slice(
-        &evidence
-            .read(&format!("manifests/{}", summaries[0].id), 65536)
-            .unwrap()
-            .unwrap(),
-    )
+    tokio::task::block_in_place(|| {
+        let summaries = evidence.summaries(deployment, None, 10).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].state, TaskRunState::Completed);
+        let identity: TaskRunIdentity = serde_json::from_slice(
+            &evidence
+                .read(&format!("manifests/{}", summaries[0].id), 65536)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(identity.owner.pid, std::process::id());
+        assert!(
+            startup_evidence
+                .summaries(deployment, None, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            TaskEvidenceStore::from_objects(objects.clone())
+                .summaries(deployment, None, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            evidence
+                .history_scope_binding_matches(&identity, expected)
+                .unwrap()
+        );
+        assert!(
+            !evidence
+                .history_scope_binding_matches(&identity, inherited)
+                .unwrap()
+        );
+    });
+    // A webhook-only writer keeps legacy tracking without acquiring metadata
+    // publication privileges or changing the sweep's behavior.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "REVOKE INSERT ON {schema}.shardline_reliability_events FROM {role}"
+    )))
+    .execute(&admin)
+    .await
     .unwrap();
-    assert_eq!(identity.owner.pid, std::process::id());
-    assert!(
-        evidence
-            .history_scope_binding_matches(&identity, expected)
-            .unwrap()
-    );
-    assert!(
-        !evidence
-            .history_scope_binding_matches(&identity, inherited)
-            .unwrap()
-    );
+    let legacy_config = config.clone();
+    let legacy_store = owned_store.clone();
+    let legacy_tracker = tracker.clone();
+    let legacy_report = tokio::task::spawn_blocking(move || {
+        run(
+            &legacy_config,
+            &legacy_store,
+            &WebhookSecretCipher::new(SecretBytes::new(vec![41; 32])).unwrap(),
+            &legacy_tracker,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(legacy_report.failures, 0);
+    let legacy = TaskEvidenceStore::from_objects(objects);
+    let legacy_history = legacy.summaries(deployment, None, 10).unwrap();
+    assert_eq!(legacy_history.len(), 1);
+    assert_eq!(legacy_history[0].state, TaskRunState::Completed);
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "GRANT INSERT ON {schema}.shardline_reliability_events TO {role}"
+    )))
+    .execute(&admin)
+    .await
+    .unwrap();
     // Hold the table until the real source SELECT is waiting. Its history is
     // bound before work, and terminating that PID must not create a replacement.
     owned_store
@@ -226,24 +286,26 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
             .expose_secret(),
         "still-plaintext"
     );
-    let history = evidence.summaries(deployment, None, 10).unwrap();
-    let failed = history
-        .iter()
-        .find(|entry| entry.state == TaskRunState::NeedsReconciliation)
+    tokio::task::block_in_place(|| {
+        let history = evidence.summaries(deployment, None, 10).unwrap();
+        let failed = history
+            .iter()
+            .find(|entry| entry.state == TaskRunState::NeedsReconciliation)
+            .unwrap();
+        let identity: TaskRunIdentity = serde_json::from_slice(
+            &evidence
+                .read(&format!("manifests/{}", failed.id), 65536)
+                .unwrap()
+                .unwrap(),
+        )
         .unwrap();
-    let identity: TaskRunIdentity = serde_json::from_slice(
-        &evidence
-            .read(&format!("manifests/{}", failed.id), 65536)
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(
-        evidence
-            .history_scope_binding_matches(&identity, expected)
-            .unwrap()
-    );
-    assert_eq!(identity.owner.pid, std::process::id());
+        assert!(
+            evidence
+                .history_scope_binding_matches(&identity, expected)
+                .unwrap()
+        );
+        assert_eq!(identity.owner.pid, std::process::id());
+    });
     owner.close().await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "DROP OWNED BY {role}; DROP ROLE {role}; DROP SCHEMA {schema} CASCADE;"
