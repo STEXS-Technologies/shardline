@@ -623,3 +623,30 @@ bash scripts/shardline/verify_maintenance_s3_copy.sh CURRENT RELEASED
 The script creates and removes its own MinIO fixture. `CONTAINER_ENGINE`,
 `MINIO_IMAGE` and `MC_IMAGE` can select the test environment; these are test-only
 settings, not deployment requirements.
+
+### Automatic tracking before metadata is available
+
+Automatic server and ordinary CLI tracking now require metadata for new history
+publication. If the owner extension is absent, metadata access is denied or its
+database is unavailable, tracking warns and preserves existing work without
+adding control objects to payload storage or claiming a verified receipt.
+Legacy history remains readable and eligible for its existing retention rules.
+Explicit library constructors retain their legacy publication behavior; callers
+can opt into `TaskEvidenceStore::require_metadata_publication()`.
+
+The 30 tracker tests, Hub work-session regression and all 13 CLI maintenance
+tests pass against owned PostgreSQL bootstrapped by released 1.11.3. Coverage
+includes preserving explicit legacy publication, reading old history while
+rejecting new payload history, unavailable metadata, schema-only history readers
+and the webhook writer lacking metadata-publication permission. The latter
+still completes its sweep without extra grants or payload history. Healthy
+metadata history and its signed work bindings remain available.
+
+The native OCI/S3 upgrade drill now also starts current Shardline before the
+optional owner upgrade. Both versions read current writes, the migration ledger
+is unchanged, the optional artifact-read function remains absent, payload storage
+contains no tracker prefix and the ordinary server has no child process. The
+remaining owner-upgrade, publication-failure, ownership-loss, process-crash and
+retry stages also pass. Strict CLI/server Clippy passes. These results cover the
+fixture's existing writer and storage layout, not every deployment permission
+profile.

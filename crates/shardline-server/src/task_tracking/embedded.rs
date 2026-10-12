@@ -40,6 +40,7 @@ impl EmbeddedTaskTracker {
         pool: &sqlx::PgPool,
     ) -> Result<Self, crate::ServerError> {
         let (mut store, history_scope) = TaskEvidenceStore::from_config(config)?
+            .require_metadata_publication()
             .with_postgres_pool(config, pool, false)
             .await?;
         if store.postgres_metadata.is_some() {
@@ -56,8 +57,8 @@ impl EmbeddedTaskTracker {
                     .as_database_error()
                     .is_some_and(|database| database.code().as_deref() == Some("42501"))
                 {
-                    // Read access alone must not redirect an existing Hub
-                    // writer to metadata it cannot publish. No new grant.
+                    // Read access alone does not authorize metadata publication.
+                    // Keep the sweep available without adding payload history.
                     store.postgres_metadata = None;
                 } else {
                     return Err(shardline_index::PostgresMetadataStoreError::from(error).into());

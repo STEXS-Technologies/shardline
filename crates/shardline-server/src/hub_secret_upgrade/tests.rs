@@ -184,8 +184,8 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
                 .unwrap()
         );
     });
-    // A webhook-only writer keeps legacy tracking without acquiring metadata
-    // publication privileges or changing the sweep's behavior.
+    // A webhook-only writer keeps the sweep available without new privileges
+    // or adding tracker objects to its payload inventory.
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "REVOKE INSERT ON {schema}.shardline_reliability_events FROM {role}"
     )))
@@ -208,8 +208,7 @@ async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
     assert_eq!(legacy_report.failures, 0);
     let legacy = TaskEvidenceStore::from_objects(objects);
     let legacy_history = legacy.summaries(deployment, None, 10).unwrap();
-    assert_eq!(legacy_history.len(), 1);
-    assert_eq!(legacy_history[0].state, TaskRunState::Completed);
+    assert!(legacy_history.is_empty());
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "GRANT INSERT ON {schema}.shardline_reliability_events TO {role}"
     )))

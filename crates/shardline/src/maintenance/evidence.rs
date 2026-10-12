@@ -25,7 +25,7 @@ pub(super) fn store(
         return Ok(TaskEvidenceStore::from_config(config)?);
     }
     let Some(url) = config.index_postgres_url() else {
-        return Ok(TaskEvidenceStore::from_config(config)?);
+        return Ok(TaskEvidenceStore::from_config(config)?.require_metadata_publication());
     };
     let handle = tokio::runtime::Handle::try_current()?;
     handle.block_on(async {
@@ -42,12 +42,12 @@ pub(super) fn store(
                 if scope.is_none() {
                     pool.close().await;
                 }
-                Ok(store)
+                Ok(store.require_metadata_publication())
             }
             Err(error) => {
                 pool.close().await;
-                tracing::warn!(%error, "task metadata unavailable; existing command and legacy tracking continue");
-                Ok(TaskEvidenceStore::from_config(config)?)
+                tracing::warn!(%error, "task metadata unavailable; existing command continues without payload history");
+                Ok(TaskEvidenceStore::from_config(config)?.require_metadata_publication())
             }
         }
     })

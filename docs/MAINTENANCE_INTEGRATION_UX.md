@@ -34,6 +34,9 @@ Covered writes stop after losing database ownership.
 
 If optional tracking cannot save history, Shardline warns and preserves the
 command's existing behavior. There is then no verified history result to rely on.
+Automatic tracking does not add history objects to your payload storage when
+metadata history is unavailable, including before the database owner upgrade.
+Existing legacy history remains readable.
 Recorded history does not prove that the cluster is healthy now or guarantee
 cluster-wide exactly-once execution.
 

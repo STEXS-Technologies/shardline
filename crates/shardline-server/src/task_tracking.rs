@@ -180,6 +180,7 @@ pub struct TaskEvidenceStore {
     objects: ServerObjectStore,
     local_metadata: Option<shardline_index::LocalIndexStore>,
     postgres_metadata: Option<postgres_metadata::PostgresTaskMetadata>,
+    metadata_only_publication: bool,
 }
 
 impl TaskEvidenceStore {
@@ -188,6 +189,7 @@ impl TaskEvidenceStore {
             objects,
             local_metadata: None,
             postgres_metadata: None,
+            metadata_only_publication: false,
         }
     }
     /// Reuses existing metadata for local payload storage without PostgreSQL.
@@ -207,10 +209,21 @@ impl TaskEvidenceStore {
         Self {
             objects,
             postgres_metadata: None,
+            metadata_only_publication: false,
             local_metadata: (config.index_postgres_url().is_none()
                 && config.object_storage_adapter() == crate::ObjectStorageAdapter::Local)
                 .then(|| shardline_index::LocalIndexStore::open(config.root_dir().to_owned())),
         }
+    }
+
+    /// Prevents new history from entering payload storage when metadata is unavailable.
+    /// Legacy reads and retention remain available. Publication then returns an
+    /// error instead of adding control objects to the payload inventory.
+    /// Existing constructors retain their legacy publication behavior by default.
+    #[must_use]
+    pub const fn require_metadata_publication(mut self) -> Self {
+        self.metadata_only_publication = true;
+        self
     }
 
     /// Publishes an immutable record, checking exact bytes even on repeated writes.
@@ -241,6 +254,12 @@ impl TaskEvidenceStore {
             }
             metadata.publish_task_artifact(key.as_str(), bytes)?;
             return Ok(());
+        }
+        if self.metadata_only_publication {
+            return Err(ServerError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "task metadata unavailable; history cannot be published into payload storage",
+            )));
         }
         let hash = ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes());
         let length = u64::try_from(bytes.len())?;

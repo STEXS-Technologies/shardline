@@ -215,7 +215,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         match crate::task_tracking::TaskEvidenceStore::from_backend(&config, &backend).await {
             Ok(evidence) => evidence,
             Err(error) => {
-                tracing::warn!(%error, "task metadata unavailable; serving continues with legacy tracking");
+                tracing::warn!(%error, "task metadata unavailable; serving continues without new verified history");
                 (
                     crate::task_tracking::TaskEvidenceStore::from_backend_objects(
                         &config,
@@ -225,6 +225,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 )
             }
         };
+    let evidence_store = evidence_store.require_metadata_publication();
     let mut task_tracker = crate::task_tracking::EmbeddedTaskTracker::from_store(
         evidence_store.clone(),
         crate::task_tracking::deployment_fingerprint(&config)?,

@@ -13,10 +13,41 @@ fn config(root: &std::path::Path) -> ServerConfig {
 }
 
 #[test]
+fn metadata_only_publication_preserves_legacy_reads_without_new_payload_objects() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let legacy = TaskEvidenceStore::from_objects(object_store_from_config(&config).unwrap());
+    legacy
+        .publish("existing-history", b"original bytes")
+        .unwrap();
+    let automatic = legacy.clone().require_metadata_publication();
+    assert_eq!(
+        automatic.read("existing-history", 1024).unwrap(),
+        Some(b"original bytes".to_vec())
+    );
+    assert!(automatic.publish("new-history", b"new bytes").is_err());
+    assert!(automatic.read("new-history", 1024).unwrap().is_none());
+    assert_eq!(
+        automatic
+            .objects
+            .list_prefix(&ObjectPrefix::parse(TASK_EVIDENCE_PREFIX).unwrap())
+            .unwrap()
+            .len(),
+        1
+    );
+    // The explicit legacy API keeps its existing publication contract.
+    legacy
+        .publish("explicit-legacy-history", b"compatible bytes")
+        .unwrap();
+}
+
+#[test]
 fn local_metadata_history_is_verified_without_entering_payload_inventory() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
-    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let store = TaskEvidenceStore::from_config(&config)
+        .unwrap()
+        .require_metadata_publication();
     let deployment = deployment_fingerprint(&config).unwrap();
     let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
     tracker
@@ -1041,8 +1072,9 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
                 .unwrap()
         );
     }
-    // Normal routers resolve their own configured connections, publish bindings
-    // automatically and inspect the other login's signed history without flags.
+    // Normal routers resolve their own configured connections and inspect the
+    // other login's signed history. These schema-only readers cannot publish
+    // metadata, so automatic startup must not add payload history instead.
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "ALTER ROLE {first_role} SET search_path TO public;
          ALTER ROLE {second_role} SET search_path TO public;
@@ -1057,6 +1089,12 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
             http::{Request, StatusCode},
         };
         use tower::ServiceExt;
+        let role_store = TaskEvidenceStore::from_config(role_config).unwrap();
+        let inventory_before = role_store
+            .objects
+            .list_prefix(&ObjectPrefix::parse(TASK_EVIDENCE_PREFIX).unwrap())
+            .unwrap()
+            .len();
         let router_config = role_config
             .clone()
             .with_server_frontends([crate::ServerFrontend::Lfs])
@@ -1085,11 +1123,10 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
                 .count(),
             2
         );
-        let startup = jobs
-            .iter()
-            .find(|job| job["operation"] == "lfs-startup-session-sweep")
-            .unwrap();
-        let role_store = TaskEvidenceStore::from_config(role_config).unwrap();
+        assert!(
+            jobs.iter()
+                .all(|job| job["operation"] != "lfs-startup-session-sweep")
+        );
         assert_eq!(
             role_store
                 .summaries_with_scope(
@@ -1104,20 +1141,13 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
                 .count(),
             2
         );
-        let manifest: TaskRunIdentity = serde_json::from_slice(
-            &role_store
-                .read(
-                    &format!("manifests/{}", startup["id"].as_str().unwrap()),
-                    65536,
-                )
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(
+        assert_eq!(
             role_store
-                .history_scope_binding_matches(&manifest, shared_scope)
+                .objects
+                .list_prefix(&ObjectPrefix::parse(TASK_EVIDENCE_PREFIX).unwrap())
                 .unwrap()
+                .len(),
+            inventory_before
         );
     }
     // Simulate another initialized backend behind the same endpoint with the

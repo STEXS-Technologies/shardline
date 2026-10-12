@@ -133,6 +133,25 @@ start_server "$released" 0
 test "$(s3_request 0 PUT s3-owner-loss --data-binary before)" = 200
 test "$(request 0 PUT latest --data-binary "@$fixture/published.json")" = 201
 read_manifest 0 "sha256:$published_digest" 200
+# Starting the new binary before the optional owner upgrade must preserve the
+# existing reader/writer experience without putting tracker data into payload.
+start_server "$current" 1
+read_manifest 1 "sha256:$published_digest" 200
+cmp "$fixture/published.json" "$fixture/response-1.body"
+test "$(s3_request 1 PUT preupgrade-current --data-binary before-upgrade)" = 200
+test "$(s3_request 0 GET preupgrade-current)" = 200
+test "$(cat "$fixture/s3-response-0.body")" = before-upgrade
+test "$(request 1 PUT preupgrade-current --data-binary "@$fixture/published.json")" = 201
+read_manifest 0 preupgrade-current 200
+test ! -e "$fixture/root/chunks/_shardline_tasks"
+sql 'SELECT * FROM shardline_schema_migrations ORDER BY version' > "$fixture/ledger-preupgrade-current"
+cmp "$fixture/ledger-before" "$fixture/ledger-preupgrade-current"
+test "$(sql "SELECT to_regprocedure('public.shardline_task_artifact_read_v1(text,text,bigint)') IS NULL")" = t
+assert_no_server_children 1 preupgrade
+kill "${server_pids[1]}"
+wait "${server_pids[1]}" || true
+server_pids[1]=''
+mv "$fixture/server-1.log" "$fixture/server-preupgrade-current.log"
 # A released native writer already holds the shared maintenance barrier.
 # The owner upgrade must wait there before changing protection triggers.
 sql "CREATE FUNCTION fixture_pause_upgrade_writer() RETURNS trigger LANGUAGE plpgsql AS \$\$
