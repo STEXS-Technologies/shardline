@@ -1090,6 +1090,20 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
             .find(|job| job["operation"] == "lfs-startup-session-sweep")
             .unwrap();
         let role_store = TaskEvidenceStore::from_config(role_config).unwrap();
+        assert_eq!(
+            role_store
+                .summaries_with_scope(
+                    deployment_fingerprint(role_config).unwrap(),
+                    Some(shared_scope),
+                    None,
+                    100,
+                )
+                .unwrap()
+                .iter()
+                .filter(|run| run.operation == "bound-role-job")
+                .count(),
+            2
+        );
         let manifest: TaskRunIdentity = serde_json::from_slice(
             &role_store
                 .read(

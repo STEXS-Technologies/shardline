@@ -220,7 +220,25 @@ impl TaskEvidenceStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<TaskRunSummary>, ServerError> {
-        self.inspect_summaries(deployment, after, limit)?
+        self.summaries_with_scope(deployment, None, after, limit)
+    }
+
+    /// Lists verified history using the scope resolved by [`Self::from_backend`].
+    /// A signed matching association permits history across database logins;
+    /// unbound legacy records still require their original deployment identity.
+    /// A scope is a history filter, not execution authority or a health claim.
+    /// Run on a blocking thread and admission-gate inspection. Inventory can be O(N).
+    ///
+    /// # Errors
+    /// Returns storage failures, invalid page bounds or a corrupt task identity.
+    pub fn summaries_with_scope(
+        &self,
+        deployment: Digest,
+        history_scope: Option<Digest>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskRunSummary>, ServerError> {
+        self.inspect_summaries_with_scope(deployment, history_scope, after, limit)?
             .into_iter()
             .map(|entry| match entry {
                 TaskEvidenceEntry::Verified(summary) => Ok(summary),
@@ -229,6 +247,7 @@ impl TaskEvidenceStore {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn inspect_summaries(
         &self,
         deployment: Digest,

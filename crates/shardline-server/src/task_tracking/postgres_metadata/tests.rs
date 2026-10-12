@@ -112,6 +112,22 @@ impl Fixture {
     }
 }
 
+#[test]
+fn library_backend_without_runtime_returns_an_error_without_starting_one() {
+    use futures_util::FutureExt;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let Some(fixture) = runtime.block_on(Fixture::new()) else {
+        return;
+    };
+    let error = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .now_or_never()
+        .expect("runtime validation must return immediately")
+        .unwrap_err();
+    assert!(matches!(error, ServerError::Io(error)
+        if error.get_ref().is_some_and(|source| source.is::<tokio::runtime::TryCurrentError>())));
+    runtime.block_on(fixture.finish());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_metadata_preserves_legacy_history_and_retention() {
     let Some(fixture) = Fixture::new().await else {
@@ -185,7 +201,9 @@ async fn server_metadata_preserves_legacy_history_and_retention() {
         .unwrap();
     assert_eq!(reopened_scope, Some(scope));
     tokio::task::spawn_blocking(move || {
-        let history = reader.summaries(deployment, None, 10).unwrap();
+        let history = reader
+            .summaries_with_scope(deployment, Some(scope), None, 10)
+            .unwrap();
         assert_eq!(
             reader
                 .inspect_summaries_with_scope(deployment, Some(scope), None, 10)

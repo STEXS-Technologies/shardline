@@ -191,6 +191,8 @@ impl TaskEvidenceStore {
     }
     /// Reuses existing metadata for local payload storage without PostgreSQL.
     /// Other configurations retain object-backed evidence and its existing permissions.
+    /// For upgraded PostgreSQL history, reuse a running backend with
+    /// [`Self::from_backend`] and its verified history scope instead.
     /// # Errors
     /// Returns adapter initialization failures.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
