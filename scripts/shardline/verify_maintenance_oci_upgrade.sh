@@ -6,7 +6,7 @@ test "$#" = 2 || { echo 'usage: verify_maintenance_oci_upgrade.sh CURRENT RELEAS
 current=$(realpath "$1")
 released=$(realpath "$2")
 test -x "$current" && test -x "$released"
-for tool in docker curl rg sha256sum shuf; do command -v "$tool" >/dev/null; done
+for tool in docker curl rg sha256sum shuf ps awk; do command -v "$tool" >/dev/null; done
 umask 077
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-oci-upgrade.XXXXXX")
 echo "diagnostics: $fixture"
@@ -74,6 +74,13 @@ token=$(SHARDLINE_TOKEN_SIGNING_KEY="$signing_key" "$released" admin token \
     --issuer fixture --subject fixture --scope write --provider generic \
     --owner team --repo upgrade --key-env SHARDLINE_TOKEN_SIGNING_KEY)
 ports=("$(shuf -i 20000-39999 -n 1)" "$(shuf -i 40000-59999 -n 1)")
+assert_no_server_children() {
+    local node=$1 phase=$2 owner=${server_pids[$1]}
+    kill -0 "$owner"
+    local snapshot="$fixture/children-$node-$owner-$phase.txt"
+    ps -eo pid=,ppid=,comm= | awk -v owner="$owner" '$2 == owner { print }' > "$snapshot"
+    test ! -s "$snapshot"
+}
 start_server() {
     local binary=$1 node=$2
     env SHARDLINE_ROOT_DIR="$fixture/root" SHARDLINE_BIND_ADDR="127.0.0.1:${ports[$node]}" \
@@ -86,7 +93,10 @@ start_server() {
     for attempt in $(seq 1 40); do
         kill -0 "${server_pids[$node]}"
         if curl -fsS --max-time 2 -H "Authorization: Bearer $token" \
-            "http://127.0.0.1:${ports[$node]}/v2/" > "$fixture/ready-$node.json" 2>/dev/null; then return; fi
+            "http://127.0.0.1:${ports[$node]}/v2/" > "$fixture/ready-$node.json" 2>/dev/null; then
+            assert_no_server_children "$node" ready
+            return
+        fi
         sleep 1
     done
     echo "FAIL: server $node did not become ready" >&2
@@ -472,4 +482,6 @@ for node in 0 1; do
     read_manifest "$node" latest 200
     cmp "$fixture/published.json" "$fixture/response-$node.body"
 done
-echo "PASS: restricted released/current OCI and S3 writers preserve prior objects and upload state after database owner loss, publication failure and SIGKILL, and retry with unchanged migrations and table grants; diagnostics: $fixture"
+assert_no_server_children 0 finished
+assert_no_server_children 1 finished
+echo "PASS: restricted released/current OCI and S3 writers preserve prior objects and upload state after database owner loss, publication failure and SIGKILL, and retry with unchanged migrations and table grants; ordinary servers have no child processes at readiness and completion; diagnostics: $fixture"
