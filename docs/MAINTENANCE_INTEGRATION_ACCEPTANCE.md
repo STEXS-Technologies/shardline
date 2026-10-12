@@ -91,8 +91,16 @@ This document is for reviewers deciding whether the integration is safe to ship.
   and strict index/server lint
   passes. The first broad run exposed fixture ordering: one xorb test ran before
   another test installed the public schema; rerunning against that schema passes.
-  Native HTTP interruption coverage, upload-intent phase ownership and library
-  callers outside request sessions remain open.
+  A two-node native shard HTTP regression now pauses the real handler's file
+  record write, terminates its request-lock-owning connection and observes a
+  server error. The record snapshot remains unchanged, both nodes can still
+  read the previous reconstruction, and both return 404 for the unpublished
+  reconstruction. A normal POST retry succeeds and both nodes then read it.
+  This uses real Postgres and shared local object storage with the production
+  handler, authorization extractor and request middleware; it does not cover
+  process interruption or every frontend. Other upload HTTP paths,
+  upload-intent phase ownership and library callers outside request sessions
+  remain open.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.
