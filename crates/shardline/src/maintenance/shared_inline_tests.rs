@@ -12,6 +12,125 @@ fn config(root: &Path) -> ServerConfig {
     )
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_cli_tracking_paths_bind_the_actual_postgres_work_session() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    shardline_server::apply_database_migrations(&pool)
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path())
+        .with_index_postgres_url(database_url)
+        .unwrap();
+    let expected_scope = {
+        let mut connection = pool.acquire().await.unwrap();
+        shardline_server::task_tracking::resolved_postgres_deployment_fingerprint(
+            &config,
+            &mut connection,
+        )
+        .await
+        .unwrap()
+    };
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let legacy = shardline_server::task_tracking::deployment_fingerprint(&config).unwrap();
+    for (shared_only, operation_kind) in [true, false]
+        .into_iter()
+        .flat_map(|shared_only| (0..3).map(move |kind| (shared_only, kind)))
+    {
+        let invocation_config = config.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let work_root = invocation_config.root_dir().to_path_buf();
+            let (operation, command) = match operation_kind {
+                0 => (
+                    MaintenanceOperation::IndexRebuild {
+                        root: work_root.clone(),
+                    },
+                    crate::CliCommand::IndexRebuild {
+                        root: Some(work_root),
+                    },
+                ),
+                1 => (
+                    MaintenanceOperation::Gc {
+                        root: work_root.clone(),
+                        mark: true,
+                        sweep: false,
+                        retention_seconds: 3600,
+                    },
+                    crate::CliCommand::Gc {
+                        root: Some(work_root),
+                        mark: true,
+                        sweep: false,
+                        retention_seconds: 3600,
+                        orphan_inventory: None,
+                        retention_report: None,
+                    },
+                ),
+                _ => (
+                    MaintenanceOperation::LifecycleRepair {
+                        root: work_root.clone(),
+                        webhook_retention_seconds: 604800,
+                    },
+                    crate::CliCommand::RepairLifecycle {
+                        root: Some(work_root),
+                        webhook_retention_seconds: 604800,
+                    },
+                ),
+            };
+            let configuration = super::super::configuration::Configuration {
+                command,
+                config: invocation_config.clone(),
+                config_path: None,
+                migration: None,
+            };
+            super::super::configuration::scope(configuration, || {
+                let arguments = vec![OsString::from("shardline"), OsString::from("index-rebuild")];
+                if shared_only {
+                    run(&operation, arguments, &invocation_config)
+                } else {
+                    super::super::inline::run(
+                        &invocation_config.root_dir().join("existing-private-state"),
+                        &format!("ordinary-bound-session-{operation_kind}"),
+                        &operation,
+                        vec![b"index-rebuild".to_vec()],
+                        arguments,
+                    )
+                }
+            })
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(result.success);
+        assert!(result.evidence_published);
+    }
+    let tasks = store.summaries(legacy, None, 10).unwrap();
+    assert_eq!(tasks.len(), 6);
+    for task in tasks {
+        assert_eq!(task.state, TaskRunState::Completed);
+        let identity: TaskRunIdentity = serde_json::from_slice(
+            &store
+                .read(&format!("manifests/{}", task.id), 65536)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(identity.owner.pid, std::process::id());
+        assert!(
+            store
+                .history_scope_binding_matches(&identity, expected_scope)
+                .unwrap()
+        );
+    }
+    pool.close().await;
+}
+
 #[test]
 fn shared_receipts_verify_native_success_failure_and_materialized_tampering() {
     let root = tempfile::tempdir().unwrap();

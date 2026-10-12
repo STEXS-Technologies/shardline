@@ -782,6 +782,87 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
                 .unwrap()
         );
         assert_eq!(own_history[0].state, TaskRunState::Completed);
+        // Observation binds the actual barrier-owning work session, whose
+        // default schema differs from our inspection connection's public schema.
+        let work_pool = crate::maintenance_barrier::postgres_shared_work_pool(
+            role_config.index_postgres_url().unwrap(),
+        )
+        .await
+        .unwrap();
+        let work_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&work_pool)
+            .await
+            .unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let mut observed = role_manifest.clone();
+        observed.id = format!("observed-{}", observed.id);
+        observed.operation = "observed-work-session".to_owned();
+        observed.public_key = *key.verifying_key().as_bytes();
+        observed.scope.task = penelope_core::task::TaskId::from_digest(
+            penelope_core::task::Digest::of(observed.id.as_bytes()),
+        );
+        role_store
+            .publish(
+                &format!("manifests/{}", observed.id),
+                &serde_json::to_vec(&observed).unwrap(),
+            )
+            .unwrap();
+        role_store
+            .observe_history_scopes(observed.clone(), key.clone(), async {
+                observe_work_pool(role_config, &work_pool).await;
+                observe_work_pool(role_config, &work_pool).await;
+            })
+            .await;
+        let actual_scope = if legacy == legacy_first {
+            first_scope
+        } else {
+            second_scope
+        };
+        assert!(
+            role_store
+                .history_scope_binding_matches(&observed, actual_scope)
+                .unwrap()
+        );
+        assert!(
+            !role_store
+                .history_scope_binding_matches(&observed, shared_scope)
+                .unwrap()
+        );
+        assert_eq!(
+            work_pid,
+            sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                .fetch_one(&work_pool)
+                .await
+                .unwrap()
+        );
+        // A later target change conflicts with the immutable first association.
+        sqlx::query("SET search_path TO public")
+            .execute(&work_pool)
+            .await
+            .unwrap();
+        role_store
+            .observe_history_scopes(observed.clone(), key.clone(), async {
+                observe_work_pool(role_config, &work_pool).await;
+            })
+            .await;
+        assert!(
+            role_store
+                .history_scope_binding_matches(&observed, actual_scope)
+                .unwrap()
+        );
+        work_pool.close().await;
+        // A lost session cannot be replaced by the observation layer.
+        role_store
+            .observe_history_scopes(observed.clone(), key, async {
+                observe_work_pool(role_config, &work_pool).await;
+                42
+            })
+            .await;
+        assert!(
+            role_store
+                .history_scope_binding_matches(&observed, actual_scope)
+                .unwrap()
+        );
     }
     // Normal routers resolve their own configured connections, publish bindings
     // automatically and inspect the other login's signed history without flags.

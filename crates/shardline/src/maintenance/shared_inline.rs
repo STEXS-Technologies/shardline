@@ -41,8 +41,21 @@ pub(super) fn run(
             None
         }
     };
-    let status = tokio::runtime::Handle::current()
-        .block_on(Box::pin(crate::entry::run_direct(arguments.into_iter())));
+    let observer = receipt.as_ref().map(|receipt| {
+        (
+            receipt.store.clone(),
+            receipt.identity.clone(),
+            receipt.key.clone(),
+        )
+    });
+    let status = tokio::runtime::Handle::current().block_on(async move {
+        let work = crate::entry::run_direct(arguments.into_iter());
+        if let Some((store, identity, key)) = observer {
+            store.observe_history_scopes(identity, key, work).await
+        } else {
+            work.await
+        }
+    });
     let exit_code = if status == ExitCode::SUCCESS {
         0
     } else if status == ExitCode::FAILURE {
@@ -72,6 +85,7 @@ pub(super) fn run(
 
 struct Receipt {
     store: TaskEvidenceStore,
+    identity: TaskRunIdentity,
     id: String,
     scope: TaskScope,
     key: SigningKey,
@@ -115,6 +129,7 @@ impl Receipt {
         store.publish(&format!("manifests/{id}"), &serde_json::to_vec(&identity)?)?;
         let mut receipt = Self {
             store,
+            identity,
             id: id.to_owned(),
             scope,
             key,

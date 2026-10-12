@@ -170,6 +170,7 @@ pub async fn run_gc_diagnostics(
         } else {
             None
         };
+        crate::task_tracking::observe_work_pool(&config, &pool).await;
         let result = async {
             let index_store = settlement_pool.as_ref().map_or_else(
                 || PostgresIndexStore::new(pool.clone()),

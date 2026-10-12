@@ -39,6 +39,7 @@ pub async fn run_lifecycle_repair(
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool =
             crate::maintenance_barrier::postgres_shared_work_pool(index_postgres_url).await?;
+        crate::task_tracking::observe_work_pool(&config, &pool).await;
         let object_store = object_store_from_config(&config)?;
         let index_store = PostgresIndexStore::new(pool.clone());
         let record_store = PostgresRecordStore::new(pool.clone());
