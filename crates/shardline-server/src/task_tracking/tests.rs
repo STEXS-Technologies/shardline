@@ -799,12 +799,40 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
     }
     assert_eq!(ids.len(), 132);
     let inspection = began.elapsed();
-    let now = shardline_protocol::unix_now_seconds_lossy().saturating_add(31 * 86400);
-    let began = std::time::Instant::now();
-    for expected in [64, 64, 2, 0] {
-        assert_eq!(store.prune_completed(deployment, now).unwrap(), expected);
+    let mut oldest_finished = std::collections::BTreeMap::new();
+    for id in &ids {
+        if id == "unreadable" {
+            continue;
+        }
+        let identity: TaskRunIdentity = serde_json::from_slice(
+            &store
+                .read(&format!("manifests/{id}"), 65536)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        if identity.operation == "finished" {
+            oldest_finished.insert((identity.created_at, identity.id.clone()), identity.id);
+        }
     }
-    let cleanup = began.elapsed();
+    let now = shardline_protocol::unix_now_seconds_lossy().saturating_add(31 * 86400);
+    let mut cleanup = std::time::Duration::ZERO;
+    for expected in [64, 64, 2, 0] {
+        let began = std::time::Instant::now();
+        assert_eq!(store.prune_completed(deployment, now).unwrap(), expected);
+        cleanup += began.elapsed();
+        for _ in 0..expected {
+            let (_, id) = oldest_finished.pop_first().unwrap();
+            assert!(
+                store
+                    .read(&format!("manifests/{id}"), 65536)
+                    .unwrap()
+                    .is_none(),
+                "retention must preserve its oldest-first selection"
+            );
+        }
+    }
+    assert!(oldest_finished.is_empty());
     let remaining = store.inspect_summaries(deployment, None, 100).unwrap();
     assert_eq!(remaining.len(), 2);
     assert!(remaining.iter().any(|run| matches!(run,

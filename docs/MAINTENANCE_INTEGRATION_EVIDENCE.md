@@ -771,3 +771,19 @@ cargo test -p shardline-server --all-features --lib metadata_backlog_paginates -
 
 All 32 task-tracking tests pass with an owned PostgreSQL database bootstrapped
 by released 1.11.3. Strict server Clippy also passes.
+
+### Avoiding reads outside the selected page
+
+Once inspection has selected a full page, a higher-sorting ID cannot replace
+one of those entries. Inspection now avoids reading and resolving its identity.
+Retention similarly avoids native-state verification for newer candidates once
+its eligible oldest-first batch is full. Lower candidates still receive the
+usual checks, including deployment binding and completion verification.
+These checks also work with unordered enumeration and preserve the existing
+selection rules; they do not introduce a new task limit or cursor format.
+
+The 132-run fixture additionally verifies the exact oldest-first deletion order.
+It measured about 2.0 seconds for inspection and 4.9 seconds for retention after
+the change. The shared-host debug timings are indicative rather than a controlled
+benchmark. Inventory enumeration remains O(N), so deployment-scale cost is still
+open. All 32 tracking tests, 32 admin API tests and strict server Clippy pass.
