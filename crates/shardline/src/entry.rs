@@ -36,6 +36,7 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
     // Embedders may already own the process-wide subscriber, and this public
     // entry point can be called more than once. Keep their subscriber in place.
     let _initialization = tracing_subscriber::fmt()
+        .with_writer(crate::logging::CommandLogWriter)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),

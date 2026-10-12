@@ -47,6 +47,11 @@ permissions, service or mount. Dry runs publish no task history.
 Other automatic maintenance also avoids new history objects in payload storage:
 when metadata history is unavailable, it warns and keeps the original command
 behavior without a verified receipt. Existing legacy history remains readable.
+Private tracking setup can fall back before work starts. After work finishes,
+receipt and scratch-cleanup failures preserve its original exit status and do
+not retry the handler. The CLI sends tracking diagnostics to stderr, preserving
+command stdout and the existing stream for other application logs. Embedders
+retain their own logging subscriber.
 
 With a local journal, a history-export failure retains local evidence and logs a warning;
 it does not disable local supervision or change the application's result. Later

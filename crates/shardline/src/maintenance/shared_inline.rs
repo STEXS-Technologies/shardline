@@ -18,20 +18,23 @@ pub(super) fn run(
     operation: &MaintenanceOperation,
     arguments: Vec<OsString>,
     config: &shardline_server::ServerConfig,
-) -> Result<super::CommandOutput> {
-    let mut nonce = [0_u8; 16];
-    getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
-    let id = hex::encode(nonce);
-    let command = arguments
-        .iter()
-        .map(|argument| argument.as_os_str().as_encoded_bytes().to_vec())
-        .collect();
-    let (input, definition, scope) = super::inline::prepare(config, &id, operation, command)?;
-    let admission = if operation.read_only() {
-        Ok(None)
-    } else {
-        Receipt::begin(operation, &id, config, &input, definition, scope).map(Some)
-    };
+) -> super::CommandOutput {
+    let mut id = String::new();
+    let admission = (|| -> Result<Option<Receipt>> {
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
+        id = hex::encode(nonce);
+        let command = arguments
+            .iter()
+            .map(|argument| argument.as_os_str().as_encoded_bytes().to_vec())
+            .collect();
+        let (input, definition, scope) = super::inline::prepare(config, &id, operation, command)?;
+        if operation.read_only() {
+            Ok(None)
+        } else {
+            Receipt::begin(operation, &id, config, &input, definition, scope).map(Some)
+        }
+    })();
     let mut receipt = match admission {
         Ok(receipt) => receipt,
         Err(error) => {
@@ -74,13 +77,13 @@ pub(super) fn run(
             }
         }
     });
-    Ok(super::CommandOutput {
+    super::CommandOutput {
         text: String::new(),
         success: exit_code == 0,
         capture: None,
         evidence_published,
         exit_code: Some(exit_code),
-    })
+    }
 }
 
 struct Receipt {
