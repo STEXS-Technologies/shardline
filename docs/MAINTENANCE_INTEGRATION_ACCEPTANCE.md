@@ -60,9 +60,17 @@ This document is for reviewers deciding whether the integration is safe to ship.
   and both unchanged 1.11.3 version strings are captured with the fixture.
   S3 fixtures now isolate unrelated metadata/object-storage pairs, and the
   one-connection progress fixture uses the single production middleware layer.
-  Dedicated provider fault coverage and mutations outside guarded publication
-  remain open; these tests do not prove deployment health or remote exactly-once
-  effects.
+  Provider push and access callbacks now commit the delivery claim, repository
+  state and their evidence on the resource-lock-owning connection, as rename
+  and delete callbacks already do. The push regression first reproduced a
+  failed request leaving both state and delivery committed. The fixed push and
+  access regressions terminate ownership during the state write, require both
+  rows to roll back, retry the same delivery successfully, verify the saved
+  state through its evidence, and deduplicate a later replay. Existing
+  opportunistic delivery-history cleanup is retained. All 584 server tests
+  selected for provider behavior pass. Callback rename/delete
+  interruption drills and mutations outside guarded publication remain open;
+  these tests do not prove deployment health or remote exactly-once effects.
   Other entry points that keep coordination
   separate from effects still require review and fault coverage. Polling or
   cancellation alone does not establish protection at their mutation boundaries.
