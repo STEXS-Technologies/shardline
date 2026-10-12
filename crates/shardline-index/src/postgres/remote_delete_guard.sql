@@ -232,6 +232,75 @@ BEGIN
 END;
 $references$;
 
+-- OCI keys use the adapter's SHA-256 repository identifier. Native publication
+-- and legacy tag/tombstone SQL writers share the same physical-key boundary.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_oci_publication_remote_delete_v1(
+    index_schema TEXT, scope_namespace TEXT, repository TEXT, object_kind TEXT, digest_hex TEXT
+) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $oci_publication$
+DECLARE base TEXT; keys TEXT[]; lock_slot INTEGER; pending BOOLEAN;
+BEGIN
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF NOT has_schema_privilege(session_user, index_schema, 'USAGE') OR NOT (
+        has_table_privilege(session_user, format('%I.shardline_oci_object_tombstones', index_schema), 'DELETE')
+        OR has_any_column_privilege(session_user, format('%I.shardline_oci_tags', index_schema), 'INSERT,UPDATE')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'OCI publication access is required for reference checks';
+    END IF;
+    -- Preserve inspection/repair of malformed legacy metadata. These values
+    -- cannot be reclaimed through the validated OCI physical-key adapter.
+    IF digest_hex !~ '^[0-9a-f]{64}$'
+       OR (scope_namespace <> 'global' AND scope_namespace !~ '^[0-9a-f]{64}$') THEN
+        RETURN;
+    END IF;
+    base := 'protocols/oci/' || scope_namespace || '/repos/' || encode(sha256(convert_to(repository, 'UTF8')), 'hex') || '/';
+    IF object_kind = 'blob' THEN
+        keys := ARRAY[base || 'blobs/' || digest_hex];
+    ELSIF object_kind = 'manifest' THEN
+        keys := ARRAY[base || 'manifests/' || digest_hex, base || 'manifest-media-types/' || digest_hex];
+    ELSE
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'unsupported OCI publication kind';
+    END IF;
+    FOR lock_slot IN SELECT DISTINCT
+        (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
+        FROM unnest(keys) physical ORDER BY slot LOOP
+        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+    END LOOP;
+    SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
+        WHERE domain='maintenance-remote-delete' AND resource=ANY(keys)) INTO pending;
+    IF pending THEN
+        RAISE EXCEPTION USING ERRCODE = 'SLD01', MESSAGE = 'object has an unresolved remote delete; retry after reconciliation';
+    END IF;
+END;
+$oci_publication$;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_oci_publication_remote_delete_v1(TEXT,TEXT,TEXT,TEXT,TEXT) TO PUBLIC;
+
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_oci_reference_remote_delete_v1()
+RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $oci_reference$
+BEGIN
+    IF TG_TABLE_SCHEMA IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF TG_TABLE_NAME = 'shardline_oci_tags' THEN
+        PERFORM shardline_oci_publication_remote_delete_v1(TG_TABLE_SCHEMA,
+            NEW.scope_namespace, NEW.repository, 'manifest', NEW.digest_hex);
+        RETURN NEW;
+    ELSIF TG_TABLE_NAME = 'shardline_oci_object_tombstones' THEN
+        PERFORM shardline_oci_publication_remote_delete_v1(TG_TABLE_SCHEMA,
+            OLD.scope_namespace, OLD.repository, OLD.object_kind, OLD.digest_hex);
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'unsupported OCI publication table';
+END;
+$oci_reference$;
+
 -- Payload-derived references are supplied by the native xorb validator and
 -- checked inside the metadata publication transaction, never as a preflight.
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_reference_keys_remote_delete_v1(
@@ -336,6 +405,15 @@ DROP TRIGGER IF EXISTS shardline_reference_remote_delete_v1 ON @SCHEMA@.shardlin
 CREATE TRIGGER shardline_reference_remote_delete_v1
 BEFORE INSERT OR UPDATE ON @SCHEMA@.shardline_file_records
 FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_reference_remote_delete_v1();
+
+DROP TRIGGER IF EXISTS shardline_oci_reference_remote_delete_v1 ON @SCHEMA@.shardline_oci_tags;
+CREATE TRIGGER shardline_oci_reference_remote_delete_v1
+BEFORE INSERT OR UPDATE ON @SCHEMA@.shardline_oci_tags
+FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_oci_reference_remote_delete_v1();
+DROP TRIGGER IF EXISTS shardline_oci_reference_remote_delete_v1 ON @SCHEMA@.shardline_oci_object_tombstones;
+CREATE TRIGGER shardline_oci_reference_remote_delete_v1
+BEFORE DELETE ON @SCHEMA@.shardline_oci_object_tombstones
+FOR EACH ROW EXECUTE FUNCTION @SCHEMA@.shardline_oci_reference_remote_delete_v1();
 DROP TRIGGER IF EXISTS shardline_reference_remote_delete_v1 ON @SCHEMA@.shardline_file_reconstructions;
 CREATE TRIGGER shardline_reference_remote_delete_v1
 BEFORE INSERT OR UPDATE ON @SCHEMA@.shardline_file_reconstructions

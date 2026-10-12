@@ -43,6 +43,12 @@ clear retryable error. Other objects remain available. Rejected updates preserve
 the previous metadata. Current native uploads check the chunks inside their
 xorbs as well as directly named objects.
 
+On Postgres, this also covers publishing OCI blobs and manifests, changing a
+manifest tag, and removing a deletion tombstone. A pending manifest or its
+media-type sidecar blocks publication. Rejection preserves the previous tag
+and tombstone; publication can succeed after the delete is reconciled.
+References inside manifest payloads still need additional protection.
+
 If GC received a successful delete reply, it tries to save that reply in your
 existing object storage before recording completion in the database. The next
 sweep or ordinary repair command can settle that saved result:
