@@ -826,6 +826,18 @@ mod tests {
                     .unwrap();
             }
         }
+        // The cheap inventory prefilter also sees malformed legacy identities.
+        // Full candidate parsing must retain their old ignored behavior.
+        for (scope, repository) in [("global", ""), ("not-a-scope", "team/assets")] {
+            let digest = "f".repeat(64);
+            query("INSERT INTO shardline_reliability_events(operation_kind,operation_id,sequence,event_json,created_at_unix_seconds)
+                VALUES('Visibility',$1,0,$2,1)")
+                .bind(format!("{scope}:{repository}:manifest:{digest}"))
+                .bind(serde_json::json!({"after":{"identity":{"scope_namespace":scope,
+                    "repository":repository,"object_kind":"manifest","digest_hex":digest},
+                    "state":"Deleted","deleted_at_unix_seconds":1}}))
+                .execute(&mut *connection).await.unwrap();
+        }
         assert!(
             store.restore_staged_oci_tombstones_for_gc().await.is_err(),
             "a separate unowned session cannot restore stages"
