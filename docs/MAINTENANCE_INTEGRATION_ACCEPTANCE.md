@@ -50,6 +50,14 @@ This document is for reviewers deciding whether the integration is safe to ship.
   the released resource, exclusive GC remains excluded, the next resource
   uses the same session, and final pool reuse leaves no advisory locks behind.
   All 137 S3 tests, 279 OCI tests and nine provider functional tests pass.
+  The combined native-process drill also starts released 1.11.3 with OCI and
+  S3 enabled before the owner upgrade, then starts current Shardline on the
+  same restricted account, Postgres database and local object storage. It
+  verifies the S3 publication session itself owns the GC lock, terminates it,
+  observes a server error with the server still alive, preserves the old bytes
+  for both readers, then accepts a normal current retry and a later released
+  overwrite. The OCI interruption/restart phases still pass. Binary checksums
+  and both unchanged 1.11.3 version strings are captured with the fixture.
   S3 fixtures now isolate unrelated metadata/object-storage pairs, and the
   one-connection progress fixture uses the single production middleware layer.
   Dedicated provider fault coverage and mutations outside guarded publication
