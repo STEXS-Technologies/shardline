@@ -94,6 +94,12 @@ Use `/api/v1/status` for server readiness. Maintenance history does not prove
 current deployment health. The [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 covers pagination and all states.
 
+History currently uses the configured PostgreSQL login as part of its scope.
+If GC and the server use different logins, the server may not show GC's history.
+Changing a password keeps the history visible. Sharing history across logins
+that use the same deployment remains work needed before merging this branch;
+an empty history is not evidence that a job succeeded or never ran.
+
 If Shardline cannot save the history, it warns. The command keeps its existing
 behavior, but you cannot rely on a verified result in history. Shared-only
 deployments have no local backup of an unpublished result.

@@ -366,6 +366,93 @@ fn postgres_password_rotation_preserves_deployment_identity() {
 }
 
 #[tokio::test]
+async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_options() {
+    use std::str::FromStr;
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let first_role = format!("sl_history_{}_{}_a", std::process::id(), nonce);
+    let second_role = format!("sl_history_{}_{}_b", std::process::id(), nonce);
+    // These identifiers contain only generated ASCII letters, digits and '_'.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {first_role} LOGIN PASSWORD 'owned_history_fixture';
+         CREATE ROLE {second_role} LOGIN PASSWORD 'owned_history_fixture';
+         CREATE SCHEMA {first_role} AUTHORIZATION {first_role};
+         CREATE SCHEMA {second_role} AUTHORIZATION {second_role};"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let options = sqlx::postgres::PgConnectOptions::from_str(&database_url).unwrap();
+    let first_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            options
+                .clone()
+                .username(&first_role)
+                .password("owned_history_fixture"),
+        )
+        .await
+        .unwrap();
+    let second_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            options
+                .username(&second_role)
+                .password("owned_history_fixture"),
+        )
+        .await
+        .unwrap();
+    let first_schema: String = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(&first_pool)
+        .await
+        .unwrap();
+    let second_schema: String = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(&second_pool)
+        .await
+        .unwrap();
+    assert_eq!(first_schema, first_role);
+    assert_eq!(second_schema, second_role);
+    let root = tempfile::tempdir().unwrap();
+    let mut first_url = url::Url::parse(&database_url).unwrap();
+    first_url.set_username(&first_role).unwrap();
+    first_url
+        .set_password(Some("owned_history_fixture"))
+        .unwrap();
+    let mut second_url = first_url.clone();
+    second_url.set_username(&second_role).unwrap();
+    let first = config(root.path())
+        .with_index_postgres_url(first_url.to_string())
+        .unwrap();
+    let second = config(root.path())
+        .with_index_postgres_url(second_url.to_string())
+        .unwrap();
+    assert_ne!(
+        deployment_fingerprint(&first).unwrap(),
+        deployment_fingerprint(&second).unwrap()
+    );
+    first_pool.close().await;
+    second_pool.close().await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA {first_role}; DROP SCHEMA {second_role};
+         DROP ROLE {first_role}; DROP ROLE {second_role};"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn normal_router_starts_tracker_and_exposes_authenticated_job_status() {
     use axum::{
         body::{Body, to_bytes},
