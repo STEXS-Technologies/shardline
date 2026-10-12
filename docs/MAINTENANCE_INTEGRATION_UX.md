@@ -68,7 +68,14 @@ optional chunk cache cannot bypass this check. Older writers, other object
 writes and safe recovery of uncertain deletes still
 need work before this integration is ready to ship.
 
-Inspect `/api/v1/tasks/maintenance` with your existing admin token:
+When a write reports an unresolved delete, inspect
+`/api/v1/tasks/maintenance/deletes` with your existing admin token. It shows the
+affected object keys. A pending entry can mean GC is still running; check the
+original command and logs. This read does not retry or clear anything. Safe
+recovery of an uncertain delete remains unfinished, so this branch is not yet
+ready to merge.
+
+Inspect `/api/v1/tasks/maintenance` with the same token for recorded job results:
 
 | State | What to do |
 | --- | --- |

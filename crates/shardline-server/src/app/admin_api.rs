@@ -625,6 +625,85 @@ pub(super) async fn maintenance_tasks(
     })))
 }
 
+/// Inspects pending delete markers without replaying or settling any request.
+pub(super) async fn pending_remote_deletes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Result<AdminJson<serde_json::Value>, ServerError> {
+    authorize_admin(&state, &headers)?;
+    let query = parse_collection_query(
+        raw_query.as_deref(),
+        AllowedFilters {
+            state: false,
+            prefix: false,
+            capability: false,
+        },
+    )?;
+    let after = query
+        .cursor
+        .as_ref()
+        .map(|cursor| decode_cursor(cursor.as_str(), &query))
+        .transpose()?
+        .map(|cursor| cursor.after);
+    let after_epoch = after
+        .as_ref()
+        .map(|key| {
+            key.as_str()
+                .parse::<u64>()
+                .map_err(|_error| ServerError::InvalidAdminQuery)
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let limit = query.limit.map_or(DEFAULT_PAGE_LIMIT, AdminPageLimit::get);
+    if limit > 100 || after_epoch > i64::MAX.unsigned_abs() {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let _permit = state
+        .admission
+        .try_acquire(weights::STATS)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let pending = match &state.backend {
+        crate::ServerBackend::Postgres(backend) => {
+            backend
+                .index_store()
+                .pending_remote_deletes(after_epoch, limit.saturating_add(1))
+                .await?
+        }
+        crate::ServerBackend::Local(_) => None,
+    };
+    let supported = pending.is_some();
+    let mut pending = pending.unwrap_or_default();
+    let has_more = pending.len() > limit;
+    pending.truncate(limit);
+    let next_cursor = if has_more {
+        pending
+            .last()
+            .map(|(_, epoch)| encode_cursor(&epoch.to_string(), &query))
+            .transpose()?
+    } else {
+        None
+    };
+    let page = AdminPage {
+        limit,
+        returned: pending.len(),
+        next_cursor,
+    };
+    let pending: Vec<_> = pending
+        .into_iter()
+        .map(|(key, epoch)| {
+            serde_json::json!({
+                "object_key": key, "attempt": epoch.to_string(), "state": "pending",
+                "reason": "delete has not been proved settled",
+            })
+        })
+        .collect();
+    Ok(admin_json(serde_json::json!({
+        "api_version": ADMIN_API_VERSION, "observed_at_unix_seconds": observed_at()?,
+        "supported": supported, "pending_deletes": pending, "page": page,
+    })))
+}
+
 /// Lists in-flight durable resumable uploads using bounded metadata keyset reads.
 pub(super) async fn tasks(
     State(state): State<Arc<AppState>>,
@@ -764,7 +843,7 @@ mod tests {
     use crate::{DeploymentMode, ServerConfig, ServerFrontend, ServerRole, app::router};
 
     const ADMIN_TOKEN: &str = "admin-read-secret";
-    const ADMIN_PATHS: [&str; 8] = [
+    const ADMIN_PATHS: [&str; 9] = [
         "/api/v1/status",
         "/api/v1/storage",
         "/api/v1/gc",
@@ -772,6 +851,7 @@ mod tests {
         "/api/v1/nodes",
         "/api/v1/tasks",
         "/api/v1/tasks/maintenance",
+        "/api/v1/tasks/maintenance/deletes",
         "/api/v1/metrics",
     ];
 
@@ -1515,6 +1595,119 @@ mod tests {
             decode_cursor(&invalid_newtype_cursor, &AdminCollectionQuery::default()),
             Err(ServerError::InvalidAdminQuery)
         ));
+    }
+
+    #[tokio::test]
+    async fn pending_delete_endpoint_paginates_long_keys_without_changing_markers() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("configured PostgreSQL fixture");
+        crate::apply_database_migrations(&pool).await.unwrap();
+        let temp = TempDir::new().unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65536).unwrap(),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .unwrap()
+        .with_index_postgres_url(database_url)
+        .unwrap()
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .unwrap();
+        let app = router(config).await.unwrap();
+        let index = PostgresIndexStore::new(pool.clone());
+        let long_key =
+            shardline_storage::ObjectKey::parse(&format!("inspection/{}", "a".repeat(3500)))
+                .unwrap();
+        let first = index.begin_remote_delete(&long_key).await.unwrap();
+        let other_key = shardline_storage::ObjectKey::parse("inspection/other").unwrap();
+        let second = index.begin_remote_delete(&other_key).await.unwrap();
+        let path = "/api/v1/tasks/maintenance/deletes?limit=1";
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], true);
+        assert_eq!(body["pending_deletes"][0]["object_key"], long_key.as_str());
+        assert_eq!(
+            body["pending_deletes"][0]["attempt"],
+            first.epoch().to_string()
+        );
+        assert_eq!(body["pending_deletes"][0]["state"], "pending");
+        let cursor = body["page"]["next_cursor"].as_str().unwrap();
+        assert!(cursor.len() < 1024);
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("{path}&cursor={cursor}"),
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let next = json_body(response).await;
+        assert_eq!(next["pending_deletes"][0]["object_key"], other_key.as_str());
+        assert!(next["page"]["next_cursor"].is_null());
+        assert_eq!(
+            index
+                .pending_remote_deletes(0, 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            index
+                .begin_remote_delete(&other_key)
+                .await
+                .unwrap_err()
+                .is_remote_delete_pending()
+        );
+        for invalid in ["limit=101", "state=pending"] {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    Method::GET,
+                    &format!("/api/v1/tasks/maintenance/deletes?{invalid}"),
+                    Some(ADMIN_TOKEN),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(index.finish_remote_delete(&first).await.unwrap());
+        assert!(index.finish_remote_delete(&second).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_pending_delete_endpoint_reports_unsupported_without_claiming_health() {
+        let (app, _root) = app(Some(ADMIN_TOKEN)).await;
+        let response = app
+            .oneshot(request(
+                Method::GET,
+                "/api/v1/tasks/maintenance/deletes",
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], false);
+        assert_eq!(body["pending_deletes"], serde_json::json!([]));
+        assert!(body.get("ready").is_none());
     }
 
     #[tokio::test]

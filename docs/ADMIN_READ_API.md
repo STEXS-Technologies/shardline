@@ -177,6 +177,38 @@ reset on restart and are not cluster totals.
 
 Pagination is keyset-ordered by session id and pushed into the store query, so a filtered page always returns a full bounded window of matching sessions; terminal sessions interleaved in id order never truncate a page or falsify the end of the list.
 
+### `GET /api/v1/tasks/maintenance/deletes`
+
+Use this endpoint when a write or retention hold reports an unresolved remote
+delete. It lists affected object keys using the existing admin read token:
+
+```bash
+curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
+  'https://cas.example.com/api/v1/tasks/maintenance/deletes?limit=20'
+```
+
+Each `pending_deletes` entry contains `object_key`, a string `attempt` identifier,
+`state: pending` and `reason: delete has not been proved settled`. A pending
+delete may still be running normally. Check the original GC command and its
+logs before deciding what happened.
+
+Only `limit` (`1..=100`, default `100`) and `cursor` are accepted. Pass
+`page.next_cursor` unchanged to fetch another page. Pages follow delete-attempt
+order, not object-key order; each request observes current markers rather than
+a fixed snapshot. `observed_at_unix_seconds` records the observation time.
+
+`supported: false` means inspection is unavailable: the backend is local, the
+usual owner-run database upgrade has not installed this view, or the database
+role lacks the existing maintenance read privileges. Databases using row-level
+security on these metadata tables also report unsupported, preserving their
+access boundary. An empty list in that response makes no safety claim. Other
+database failures fail the request instead of returning an empty list.
+
+This endpoint reads markers only. It sends no storage request and never clears
+or retries a delete. It uses the existing admin authorization, no-store headers
+and admission limit; an overloaded server can return `503`. It does not prove
+deployment health or replace the still-needed safe recovery procedure.
+
 ### `GET /api/v1/tasks/maintenance`
 
 Use `/api/v1/status` to check this server's readiness. Use this endpoint to
@@ -276,9 +308,10 @@ This endpoint returns a bounded dashboard summary of process-lifetime integer co
 
 ## Cursor pagination and filtering
 
-`nodes`, resumable `tasks` and maintenance history are keyset-paginated. The
-maintenance endpoint has the narrower limits documented above; the table below
-describes `nodes` and resumable `tasks`. Other endpoints reject all query
+`nodes`, resumable `tasks`, maintenance history and pending deletes are
+keyset-paginated. The two maintenance endpoints have the narrower limits
+documented above; the table below describes `nodes` and resumable `tasks`.
+Other endpoints reject all query
 parameters.
 
 | Parameter | Applicable endpoints | Contract |

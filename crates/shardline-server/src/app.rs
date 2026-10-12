@@ -66,7 +66,8 @@ use crate::{
 };
 use admin_api::{
     gc as admin_gc, integrity as admin_integrity, maintenance_tasks as admin_maintenance_tasks,
-    metrics as admin_metrics, nodes as admin_nodes, status as admin_status,
+    metrics as admin_metrics, nodes as admin_nodes,
+    pending_remote_deletes as admin_pending_remote_deletes, status as admin_status,
     storage as admin_storage, tasks as admin_tasks,
 };
 #[cfg(feature = "fuzzing")]
@@ -428,6 +429,10 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/api/v1/nodes", get(admin_nodes))
         .route("/api/v1/tasks", get(admin_tasks))
         .route("/api/v1/tasks/maintenance", get(admin_maintenance_tasks))
+        .route(
+            "/api/v1/tasks/maintenance/deletes",
+            get(admin_pending_remote_deletes),
+        )
         .route("/api/v1/metrics", get(admin_metrics));
     if role.serves_api() {
         app = app

@@ -260,6 +260,48 @@ END;
 $member_references$;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_reference_keys_remote_delete_v1(TEXT, TEXT[]) TO PUBLIC;
 
+-- Inspection never settles an attempt. Epochs are globally unique and never
+-- reused by admission, giving a compact cursor even for long object keys.
+CREATE INDEX IF NOT EXISTS shardline_pending_remote_deletes_v1
+ON @SCHEMA@.shardline_resource_fences(epoch)
+WHERE domain='maintenance-remote-delete';
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_pending_remote_deletes_v1(
+    index_schema TEXT, after_epoch BIGINT, page_limit INTEGER
+) RETURNS TABLE(object_key TEXT, attempt_epoch BIGINT)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $inspect_deletes$
+BEGIN
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF NOT has_schema_privilege(session_user, index_schema, 'USAGE')
+       OR NOT has_table_privilege(session_user,
+           format('%I.shardline_retention_holds', index_schema), 'SELECT')
+       OR NOT has_table_privilege(session_user,
+           format('%I.shardline_quarantine_candidates', index_schema), 'SELECT') THEN
+        RAISE EXCEPTION USING ERRCODE = 'SLD03', MESSAGE = 'maintenance metadata read access is required for inspection';
+    END IF;
+    IF after_epoch < 0 OR after_epoch IS NULL OR page_limit IS NULL OR page_limit NOT BETWEEN 1 AND 101 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid pending delete page';
+    END IF;
+    -- Do not broaden a tenant role's row visibility through definer access.
+    IF EXISTS(SELECT 1 FROM pg_class WHERE relrowsecurity AND oid IN (
+        to_regclass(format('%I.shardline_retention_holds', index_schema)),
+        to_regclass(format('%I.shardline_quarantine_candidates', index_schema)),
+        to_regclass(format('%I.shardline_resource_fences', index_schema))
+    )) THEN
+        RAISE EXCEPTION USING ERRCODE = 'SLD03', MESSAGE = 'row-scoped pending delete inspection is unsupported';
+    END IF;
+    RETURN QUERY EXECUTE format(
+        'SELECT resource, epoch FROM %I.shardline_resource_fences
+         WHERE domain=''maintenance-remote-delete'' AND epoch > $1
+         ORDER BY epoch LIMIT $2', index_schema
+    ) USING after_epoch, page_limit;
+END;
+$inspect_deletes$;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_pending_remote_deletes_v1(TEXT, BIGINT, INTEGER) TO PUBLIC;
+
 -- This read-only check validates the caller's existing schema/retention access.
 -- Keep it usable even with restrictive default function privileges.
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_remote_delete_guard_v1(TEXT, TEXT) TO PUBLIC;

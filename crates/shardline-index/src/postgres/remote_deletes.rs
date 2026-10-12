@@ -72,6 +72,59 @@ impl PostgresMetadataStoreError {
 }
 
 impl PostgresIndexStore {
+    /// Lists pending remote deletes without changing their markers or issuing
+    /// storage requests. An attempt may still be running; a row is not proof
+    /// of failure. Epoch cursors are unique under the admission protocol.
+    ///
+    /// Returns `None` when the compatibility inspection function is absent or
+    /// metadata uses row-level security whose visibility cannot be preserved,
+    /// or the caller lacks existing maintenance read privileges.
+    /// Pages contain at most 101 rows, including a pagination sentinel. Object
+    /// keys remain raw strings so malformed metadata stays inspectable.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid page bounds, numeric overflow, or a database failure.
+    pub async fn pending_remote_deletes(
+        &self,
+        after_epoch: u64,
+        limit: usize,
+    ) -> Result<Option<Vec<(String, u64)>>, PostgresMetadataStoreError> {
+        if !(1..=101).contains(&limit) {
+            return Err(PostgresMetadataStoreError::Unsupported(
+                "pending delete page limit must be between 1 and 101".to_owned(),
+            ));
+        }
+        let installed = query_scalar::<_, bool>(
+            "SELECT to_regprocedure('shardline_pending_remote_deletes_v1(text,bigint,integer)') IS NOT NULL",
+        ).fetch_one(&self.pool).await?;
+        if !installed {
+            return Ok(None);
+        }
+        let result = sqlx::query_as::<_, (String, i64)>(
+            "SELECT object_key, attempt_epoch FROM shardline_pending_remote_deletes_v1(current_schema(), $1, $2)",
+        ).bind(super::u64_to_i64(after_epoch)?).bind(i32::try_from(limit).map_err(|_error| PostgresMetadataStoreError::IntegerOutOfRange("pending delete page".to_owned()))?)
+            .fetch_all(&self.pool).await;
+        let rows = match result {
+            Ok(rows) => rows,
+            Err(error)
+                if error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref()
+                    == Some("SLD03") =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let rows = rows
+            .into_iter()
+            .map(|(key, epoch)| Ok((key, super::i64_to_u64(epoch)?)))
+            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        Ok(Some(rows))
+    }
+
     /// Installs the compatibility guard using the existing migration-owner role.
     ///
     /// Called by `db migrate up` after the released schema is complete. This
@@ -235,6 +288,147 @@ impl PostgresIndexStore {
 mod tests {
     use super::*;
     use crate::{AsyncIndexStore, RecordTraversal, RetentionHold};
+
+    #[tokio::test]
+    async fn pending_delete_inspection_needs_no_fence_grant_and_respects_row_scoped_metadata() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let schema: String = query_scalar("SELECT current_schema()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let identifier = format!("\"{}\"", schema.replace('"', "\"\""));
+        let role_identifier = format!("\"{}_reader\"", schema.replace('"', "\"\""));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE ROLE {role_identifier}; GRANT USAGE ON SCHEMA {identifier} TO {role_identifier};
+             GRANT SELECT ON {identifier}.shardline_retention_holds, {identifier}.shardline_quarantine_candidates TO {role_identifier};"
+        ))).execute(&pool).await.unwrap();
+        let key = ObjectKey::parse("inspection/restricted-reader").unwrap();
+        let permit = store.begin_remote_delete(&key).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        query(sqlx::AssertSqlSafe(format!(
+            "SET SESSION AUTHORIZATION {role_identifier}"
+        )))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            "SELECT object_key, attempt_epoch FROM shardline_pending_remote_deletes_v1(current_schema(), 0, 10)"
+        ).fetch_all(&mut *connection).await.unwrap();
+        assert_eq!(rows, vec![(key.as_str().to_owned(), permit.epoch())]);
+        assert!(
+            query("SELECT * FROM shardline_resource_fences")
+                .execute(&mut *connection)
+                .await
+                .is_err()
+        );
+        query("RESET SESSION AUTHORIZATION")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        query(sqlx::AssertSqlSafe(format!(
+            "REVOKE SELECT ON {identifier}.shardline_quarantine_candidates FROM {role_identifier}"
+        )))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        query(sqlx::AssertSqlSafe(format!(
+            "SET SESSION AUTHORIZATION {role_identifier}"
+        )))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        let error =
+            query("SELECT * FROM shardline_pending_remote_deletes_v1(current_schema(), 0, 10)")
+                .execute(&mut *connection)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("SLD03")
+        );
+        query("RESET SESSION AUTHORIZATION")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        query("ALTER TABLE shardline_retention_holds ENABLE ROW LEVEL SECURITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(store.pending_remote_deletes(0, 10).await.unwrap().is_none());
+        query("ALTER TABLE shardline_retention_holds DISABLE ROW LEVEL SECURITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "DROP OWNED BY {role_identifier}; DROP ROLE {role_identifier};"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_delete_inspection_paginates_without_settling_or_reusing_attempts() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let mut permits = Vec::new();
+        for name in ["inspection/third", "inspection/first", "inspection/second"] {
+            permits.push(
+                store
+                    .begin_remote_delete(&ObjectKey::parse(name).unwrap())
+                    .await
+                    .unwrap(),
+            );
+        }
+        let first = store.pending_remote_deletes(0, 2).await.unwrap().unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first.first().unwrap().0, "inspection/third");
+        let next = store
+            .pending_remote_deletes(first.last().unwrap().1, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next.first().unwrap().0, "inspection/second");
+        let count: i64 = query_scalar("SELECT count(*) FROM shardline_resource_fences WHERE domain='maintenance-remote-delete'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 3);
+        for permit in &permits {
+            assert!(store.finish_remote_delete(permit).await.unwrap());
+        }
+        assert!(
+            store
+                .pending_remote_deletes(0, 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        let newest = store
+            .begin_remote_delete(&ObjectKey::parse("inspection/third").unwrap())
+            .await
+            .unwrap();
+        let resumed = store
+            .pending_remote_deletes(next.last().unwrap().1, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resumed,
+            vec![(
+                "inspection/third".to_owned(),
+                u64::try_from(newest.epoch()).unwrap()
+            )]
+        );
+        assert!(store.finish_remote_delete(&newest).await.unwrap());
+    }
 
     #[tokio::test]
     async fn file_publication_serializes_delete_admission_before_any_marker_exists() {
@@ -675,6 +869,7 @@ mod tests {
             "SELECT shardline_remote_delete_begin_v1('public', 'remote-delete/scope')",
             "SELECT shardline_remote_delete_finish_v1('public', 'remote-delete/scope', 1)",
             "SELECT shardline_reference_keys_remote_delete_v1('public', ARRAY['remote-delete/scope'])",
+            "SELECT * FROM shardline_pending_remote_deletes_v1('public', 0, 10)",
         ] {
             let error = query(sql).execute(&pool).await.unwrap_err();
             assert_eq!(
