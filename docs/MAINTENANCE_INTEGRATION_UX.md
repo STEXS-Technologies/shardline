@@ -49,34 +49,23 @@ On Postgres, an S3 overwrite rejected before it commits leaves the current
 object in place. Retry with your usual S3 client; no additional service or
 configuration is needed.
 
-On Postgres, this also covers publishing OCI blobs and manifests, changing a
-manifest tag, and removing a deletion tombstone. A pending manifest or its
-media-type sidecar blocks publication. Rejection preserves the previous tag
-and tombstone; publication can succeed after the delete is reconciled.
-During a rolling upgrade, released 1.11.3 servers reject covered OCI writes too,
-but return a generic server error. Updated servers explain when retry is safe.
-New manifest uploads also check their validated config, layer, child-manifest
-and subject references in the publication transaction. Legacy tag-only writes
-cannot inspect those payload references and still need additional protection.
+For OCI uploads on Postgres, a rejected publication preserves the previous tag
+and manifest. Incomplete new manifests stay hidden until a retry publishes them.
+If Shardline loses its database lock before an upload part or session change
+commits, it rejects that change without advancing recorded progress. Check the
+upload with your usual client and retry.
 
-New Postgres-backed manifests stay hidden until publication succeeds. If an
-upload is interrupted after storing bytes, those bytes remain hidden from
-manifest reads; a successful retry can publish them. Existing published
-manifests remain visible during retries. This adds a storage existence check,
-with no extra service or grants.
-OCI publication also stops if the database connection holding its GC lock is
-lost. A rejected publication preserves the previous tag and manifest.
-Partial-upload writes use the same protection. If ownership is lost before a
-part commits, that part does not advance recorded progress. The client can
-check the upload and retry.
-Upload-session creation and completion changes also stop when that connection
-is lost. No extra service or configuration is needed.
-The usual owner-run database upgrade adds hidden manifests to the existing OCI
-deletion inventory. Ordinary GC also discovers missing entries from interrupted
-uploads, including uploads made by accounts with row policies. It reclaims them
-after the configured retention period and preserves active holds. This uses the
-existing maintenance account. If that account also has active row restrictions,
-automatic discovery remains unsupported and reports a warning.
+A pending delete also blocks covered OCI publication. New manifest uploads
+check their config, layer, child-manifest and subject references before saving
+them. Older tag-only writes still need additional protection. During a rolling
+upgrade, released 1.11.3 servers reject covered writes with a generic server
+error; updated servers explain when retry is safe.
+
+After the owner-run database upgrade, ordinary GC can find hidden manifests
+left by interrupted uploads. It keeps active holds and waits for your configured
+retention period before reclaiming them. This uses the existing maintenance
+account. Automatic discovery warns and remains unsupported if that account
+has active row restrictions.
 
 If GC received a successful delete reply, it tries to save that reply in your
 existing object storage before recording completion in the database. The next

@@ -67,7 +67,12 @@ This document is for reviewers deciding whether the integration is safe to ship.
   access regressions terminate ownership during the state write, require both
   rows to roll back, retry the same delivery successfully, verify the saved
   state through its evidence, and deduplicate a later replay. Existing
-  opportunistic delivery-history cleanup is retained. All 584 server tests
+  state regressions also require the failed request to preserve its entire
+  previous snapshot. A successful push keeps access and reconciliation fields;
+  a successful access change keeps revision and reconciliation fields. All
+  four real-Postgres ownership-loss cases pass, alongside the other ten route
+  tests and strict server lint.
+  Opportunistic delivery-history cleanup is retained. All 584 server tests
   selected for provider behavior pass. Callback rename/delete
   interruption drills and mutations outside guarded publication remain open;
   these tests do not prove deployment health or remote exactly-once effects.
