@@ -2,6 +2,53 @@
 use super::*;
 
 #[tokio::test]
+async fn older_owner_installation_preserves_legacy_admission_without_receipt_functions() {
+    let Some(pool) = super::super::connect_isolated_postgres().await else {
+        return;
+    };
+    sqlx::raw_sql(
+        "DROP FUNCTION shardline_remote_delete_receipt_namespace_v1(TEXT);
+         DROP FUNCTION shardline_remote_delete_receipt_begin_v1(TEXT,TEXT,TEXT);
+         DROP FUNCTION shardline_remote_delete_receipt_pending_v1(TEXT,TEXT);
+         DROP FUNCTION shardline_remote_delete_receipt_key_v1(TEXT,TEXT,BIGINT);
+         DROP FUNCTION shardline_remote_delete_receipt_finish_v1(TEXT,TEXT,BIGINT,TEXT);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let store = PostgresIndexStore::new(pool.clone());
+    assert_eq!(store.remote_delete_receipt_namespace().await.unwrap(), None);
+    let object = ObjectKey::parse("receipt/older-owner-installation").unwrap();
+    let permit = store.begin_remote_delete(&object).await.unwrap();
+    assert!(
+        store
+            .begin_remote_delete(&object)
+            .await
+            .unwrap_err()
+            .is_remote_delete_pending()
+    );
+    // The same owner upgrade enables receipts without rewriting pending history
+    // or requiring runtime schema creation.
+    store.initialize_remote_delete_guard().await.unwrap();
+    assert!(
+        store
+            .remote_delete_receipt_namespace()
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .begin_remote_delete(&object)
+            .await
+            .unwrap_err()
+            .is_remote_delete_pending()
+    );
+    assert!(store.finish_remote_delete(&permit).await.unwrap());
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn receipts_pin_admission_and_reject_tampering_stale_attempts_and_other_targets() {
     let Some(pool) = super::super::connect_isolated_postgres().await else {
         return;

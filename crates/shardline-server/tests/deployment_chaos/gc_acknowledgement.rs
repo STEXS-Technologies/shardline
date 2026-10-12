@@ -33,6 +33,8 @@ struct FaultProxy {
     applied: Arc<AtomicUsize>,
     arrived: Arc<AtomicUsize>,
     before_apply: bool,
+    deny_saved_replies: bool,
+    denied_replies: Arc<AtomicUsize>,
     acknowledge: Arc<Semaphore>,
     client: reqwest::Client,
 }
@@ -43,6 +45,20 @@ async fn forward(
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
     let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+    if proxy.deny_saved_replies
+        && parts.method == axum::http::Method::PUT
+        && parts
+            .uri
+            .path()
+            .contains("/_shardline_tasks/v1/delete-replies/")
+    {
+        proxy.denied_replies.fetch_add(1, Ordering::Release);
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "saved reply writes denied by fixture policy",
+        )
+            .into_response();
+    }
     // object_store 0.14 routes single-object deletion through S3's bulk API.
     // Match the actual object in either protocol, not every bucket mutation.
     let is_target_delete = (parts.method == axum::http::Method::DELETE
@@ -123,8 +139,56 @@ async fn drill_gc_existing_role_needs_no_new_fence_grant() {
     run_remote_gc_fault(false, true, Some(&released)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill_gc_saved_reply_recovers_after_database_outage() {
+    run_remote_gc_fault_with_recovery(true, false, None, SavedReplyScenario::DatabaseOutage).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill_gc_sweep_recovers_saved_reply_after_database_outage() {
+    run_remote_gc_fault_with_recovery(true, false, None, SavedReplyScenario::DatabaseOutageSweep)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill_gc_optional_receipt_write_denial_preserves_existing_completion() {
+    run_remote_gc_fault_with_recovery(false, true, None, SavedReplyScenario::WriteDenied).await;
+}
+
+enum SavedReplyScenario {
+    Normal,
+    DatabaseOutage,
+    DatabaseOutageSweep,
+    WriteDenied,
+}
+
 async fn run_remote_gc_fault(before_apply: bool, complete: bool, released: Option<&Path>) {
-    let drill = if released.is_some() {
+    run_remote_gc_fault_with_recovery(before_apply, complete, released, SavedReplyScenario::Normal)
+        .await;
+}
+
+async fn run_remote_gc_fault_with_recovery(
+    before_apply: bool,
+    complete: bool,
+    released: Option<&Path>,
+    saved_reply_scenario: SavedReplyScenario,
+) {
+    let recover_after_outage = matches!(
+        saved_reply_scenario,
+        SavedReplyScenario::DatabaseOutage | SavedReplyScenario::DatabaseOutageSweep
+    );
+    let recover_by_sweep = matches!(
+        saved_reply_scenario,
+        SavedReplyScenario::DatabaseOutageSweep
+    );
+    let deny_saved_replies = matches!(saved_reply_scenario, SavedReplyScenario::WriteDenied);
+    let drill = if recover_by_sweep {
+        "drill_gc_sweep_recovers_saved_reply_after_database_outage"
+    } else if recover_after_outage {
+        "drill_gc_saved_reply_recovers_after_database_outage"
+    } else if deny_saved_replies {
+        "drill_gc_optional_receipt_write_denial_preserves_existing_completion"
+    } else if released.is_some() {
         "drill_gc_existing_role_needs_no_new_fence_grant"
     } else if complete {
         "drill_gc_acknowledged_remote_delete_settles_its_marker"
@@ -152,6 +216,8 @@ async fn run_remote_gc_fault(before_apply: bool, complete: bool, released: Optio
         applied: Arc::new(AtomicUsize::new(0)),
         arrived: Arc::new(AtomicUsize::new(0)),
         before_apply,
+        deny_saved_replies,
+        denied_replies: Arc::new(AtomicUsize::new(0)),
         acknowledge: Arc::new(Semaphore::new(0)),
         client: reqwest::Client::new(),
     };
@@ -393,6 +459,12 @@ async fn run_remote_gc_fault(before_apply: bool, complete: bool, released: Optio
         assert_eq!(String::from_utf8_lossy(&exited.stdout).trim(), "0");
         assert_eq!(proxy.applied.load(Ordering::Acquire), 1);
         assert!(!objects.contains(&key).unwrap());
+        if deny_saved_replies {
+            assert!(
+                proxy.denied_replies.load(Ordering::Acquire) > 0,
+                "fixture must actually deny receipt writes before proving existing GC still completes"
+            );
+        }
         assert!(sqlx::query_scalar::<_, i64>(
             "SELECT epoch FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1",
         ).bind(key.as_str()).fetch_optional(&pool).await.unwrap().is_none());
@@ -496,6 +568,22 @@ async fn run_remote_gc_fault(before_apply: bool, complete: bool, released: Optio
         assert_eq!(proxy.arrived.load(Ordering::Acquire), 1);
         assert_eq!(proxy.applied.load(Ordering::Acquire), 0);
         assert!(objects.contains(&key).unwrap());
+        if recover_by_sweep {
+            assert!(
+                index.quarantine_candidate(&key).await.unwrap().is_none(),
+                "the fresh sweep must have no candidate requiring a second user-object DELETE"
+            );
+        }
+        let reply_namespace = index
+            .remote_delete_receipt_namespace()
+            .await
+            .unwrap()
+            .unwrap();
+        if recover_after_outage {
+            let stopped =
+                docker_run_owned(vec!["stop".to_owned(), CONTAINER_POSTGRES.to_owned()]).await;
+            assert!(stopped.status.success());
+        }
         proxy.acknowledge.add_permits(1);
         let exited = tokio::time::timeout(
             Duration::from_secs(25),
@@ -506,6 +594,95 @@ async fn run_remote_gc_fault(before_apply: bool, complete: bool, released: Optio
         assert!(exited.status.success());
         assert_ne!(String::from_utf8_lossy(&exited.stdout).trim(), "0");
         assert_eq!(proxy.applied.load(Ordering::Acquire), 1);
+        if recover_after_outage {
+            let prefix = shardline_storage::ObjectPrefix::parse(&format!(
+                "_shardline_tasks/v1/delete-replies/{reply_namespace}/replies/",
+            ))
+            .unwrap();
+            assert_eq!(
+                objects.list_prefix(&prefix).unwrap().len(),
+                1,
+                "the observed reply must survive failed database settlement"
+            );
+            let restarted =
+                docker_run_owned(vec!["start".to_owned(), CONTAINER_POSTGRES.to_owned()]).await;
+            assert!(restarted.status.success());
+            assert!(ready_within(chaos_postgres_tcp_ready, Duration::from_secs(30)).await);
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if let Ok(ready_pool) = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(1)
+                        .acquire_timeout(Duration::from_secs(2))
+                        .connect(&stack.pg_url)
+                        .await
+                    {
+                        let ready = sqlx::query_scalar::<_, i32>("SELECT 1")
+                            .fetch_one(&ready_pool)
+                            .await
+                            .is_ok();
+                        ready_pool.close().await;
+                        if ready {
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("restarted PostgreSQL must accept metadata queries");
+            assert!(
+                shardline_server::set_retention_hold(&config, &hold)
+                    .await
+                    .unwrap_err()
+                    .is_remote_delete_pending()
+            );
+            let recovery_command: &[&str] = if recover_by_sweep {
+                &["gc", "--sweep", "--retention-seconds", "0"]
+            } else {
+                &["repair"]
+            };
+            let repaired = docker_run_owned(
+                super::readonly_maintenance_deployment::readonly_cli_arguments(
+                    &binary,
+                    &stack,
+                    recovery_command,
+                    false,
+                ),
+            )
+            .await;
+            assert!(
+                repaired.status.success(),
+                "repair: {}",
+                String::from_utf8_lossy(&repaired.stderr)
+            );
+            assert_eq!(sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1",
+            ).bind(key.as_str()).fetch_one(&pool).await.unwrap(), 0);
+            assert!(objects.list_prefix(&prefix).unwrap().is_empty());
+            shardline_server::set_retention_hold(&config, &hold)
+                .await
+                .unwrap();
+            assert_eq!(index.retention_hold(&key).await.unwrap(), Some(hold));
+            assert!(!objects.contains(&key).unwrap());
+            assert_eq!(
+                proxy.arrived.load(Ordering::Acquire),
+                1,
+                "repair must not issue a user-object DELETE"
+            );
+            assert_eq!(proxy.applied.load(Ordering::Acquire), 1);
+            assert_eq!(
+                store
+                    .summaries(deployment, None, 10)
+                    .unwrap()
+                    .iter()
+                    .find(|task| task.id == interrupted.id)
+                    .unwrap()
+                    .state,
+                TaskRunState::Failed,
+                "settling a saved reply cannot turn failed GC into successful history"
+            );
+            return;
+        }
         assert_eq!(index.retention_hold(&key).await.unwrap(), expected_hold);
         let after = store.summaries(deployment, None, 10).unwrap();
         assert_eq!(

@@ -108,6 +108,7 @@ mod provider_events;
 mod rebuild;
 mod reconstruction_cache;
 mod record_store;
+mod remote_delete_recovery;
 mod repository_scope_path;
 mod retention_runtime;
 mod route_policy;

@@ -214,7 +214,7 @@ impl PostgresIndexStore {
             ));
         }
         let begin = if receipt_key.is_some() {
-            "SELECT current_schema(), shardline_remote_delete_receipt_begin_v1(current_schema(), $1, $2), shardline_task_history_scope_v1(current_schema())"
+            "SELECT current_schema(), shardline_remote_delete_receipt_begin_v1(current_schema(), $1, $2), shardline_remote_delete_receipt_namespace_v1(current_schema())"
         } else {
             "SELECT current_schema(), shardline_remote_delete_begin_v1(current_schema(), $1), NULL::TEXT"
         };
@@ -268,7 +268,7 @@ impl PostgresIndexStore {
         let quoted_schema = format!("\"{}\"", permit.schema.replace('"', "\"\""));
         if permit.receipt_key.is_some() {
             let namespace = query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
-                "SELECT {quoted_schema}.shardline_task_history_scope_v1($1)"
+                "SELECT {quoted_schema}.shardline_remote_delete_receipt_namespace_v1($1)"
             )))
             .bind(&permit.schema)
             .fetch_one(&mut *transaction)
