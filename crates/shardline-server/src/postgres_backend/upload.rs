@@ -135,9 +135,23 @@ impl super::PostgresBackend {
                     )
                     .await?;
             }
-            self.record_store
-                .commit_file_version_metadata(&record)
-                .await?;
+            if let Some(mut connection) =
+                crate::maintenance_barrier::RequestSession::connection_for(
+                    &self.request_session_identity,
+                )
+                .await
+            {
+                self.record_store
+                    .commit_file_version_metadata_on_connection(
+                        connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                        &record,
+                    )
+                    .await?;
+            } else {
+                self.record_store
+                    .commit_file_version_metadata(&record)
+                    .await?;
+            }
             if let Some(intent) = &intent {
                 coordinator
                     .transition_upload_scoped(
@@ -244,6 +258,7 @@ impl super::PostgresBackend {
         let object_key = format!("shards/{prefix}/{body_hash_hex}.shard");
         let intent = UploadIntent::new(intent_id.clone(), object_key, body_hash_hex, body_length);
         let record_store = self.record_store.clone();
+        let request_session_identity = self.request_session_identity.clone();
         let coordinator = CasCoordinator::new(
             self.index_store.clone(),
             (),
@@ -266,13 +281,31 @@ impl super::PostgresBackend {
                                 repository_scope,
                                 shard_metadata_limits,
                                 move |records, mappings, references| async move {
-                                    record_store
+                                    if let Some(mut connection) =
+                                        crate::maintenance_barrier::RequestSession::connection_for(
+                                            &request_session_identity,
+                                        )
+                                        .await
+                                    {
+                                        record_store
+                                            .commit_native_shard_metadata_on_connection(
+                                                connection
+                                                    .as_mut()
+                                                    .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                                                &records,
+                                                &mappings,
+                                                &references,
+                                            )
+                                            .await?;
+                                    } else {
+                                        record_store
                                         .commit_native_shard_metadata_with_remote_delete_references(
                                             &records,
                                             &mappings,
                                             &references,
                                         )
                                         .await?;
+                                    }
                                     Ok(())
                                 },
                             )
@@ -285,13 +318,31 @@ impl super::PostgresBackend {
                                 repository_scope,
                                 shard_metadata_limits,
                                 move |records, mappings, references| async move {
-                                    record_store
+                                    if let Some(mut connection) =
+                                        crate::maintenance_barrier::RequestSession::connection_for(
+                                            &request_session_identity,
+                                        )
+                                        .await
+                                    {
+                                        record_store
+                                            .commit_native_shard_metadata_on_connection(
+                                                connection
+                                                    .as_mut()
+                                                    .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                                                &records,
+                                                &mappings,
+                                                &references,
+                                            )
+                                            .await?;
+                                    } else {
+                                        record_store
                                         .commit_native_shard_metadata_with_remote_delete_references(
                                             &records,
                                             &mappings,
                                             &references,
                                         )
                                         .await?;
+                                    }
                                     Ok(())
                                 },
                             )
@@ -327,6 +378,110 @@ mod tests {
     use crate::protocol_support::shared_sha256_object_key;
     use crate::test_fixtures::single_chunk_xorb;
     use crate::upload_ingest::RequestBodyReader;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_upload_publication_rejects_lost_request_owner_and_allows_retry() {
+        if postgres_url().is_none() {
+            return;
+        }
+        let cluster = crate::app::build_oci_postgres_test_cluster().await.unwrap();
+        let backend = match &cluster.node_a.backend {
+            crate::backend::ServerBackend::Postgres(backend) => Some(backend),
+            crate::backend::ServerBackend::Local(_) => None,
+        }
+        .unwrap();
+        let pool = backend.index_store().pool();
+        backend
+            .upload_file("owner-loss-file", Bytes::from_static(b"previous"), None)
+            .await
+            .unwrap();
+        let payload = b"owner-loss-native-shard";
+        let (xorb, hash) = single_chunk_xorb(payload);
+        backend.upload_xorb(&hash, xorb).await.unwrap();
+        let (shard, _) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
+        let before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let session = crate::maintenance_barrier::RequestSession::acquire(
+            &backend.gc_barrier_pool,
+            backend.request_session_identity.clone(),
+        )
+        .await
+        .unwrap();
+        let pid: i32 = session
+            .scope(async {
+                let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                    &backend.request_session_identity,
+                )
+                .await
+                .unwrap();
+                sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut **owner.as_mut().unwrap())
+                    .await
+                    .unwrap()
+            })
+            .await;
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        );
+        session
+            .scope(async {
+                assert!(
+                    backend
+                        .upload_file("owner-loss-file", Bytes::from_static(b"replacement"), None)
+                        .await
+                        .is_err(),
+                    "file publication replaced its lost request owner"
+                );
+                assert!(
+                    backend
+                        .upload_shard_stream(
+                            RequestBodyReader::from_bytes(shard.clone()),
+                            None,
+                            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+                        )
+                        .await
+                        .is_err(),
+                    "shard publication replaced its lost request owner"
+                );
+            })
+            .await;
+        session.finish().await;
+        let after: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        backend
+            .upload_file("owner-loss-file", Bytes::from_static(b"replacement"), None)
+            .await
+            .unwrap();
+        backend
+            .upload_shard_stream(
+                RequestBodyReader::from_bytes(shard),
+                None,
+                shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            )
+            .await
+            .unwrap();
+        let records: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            records, 5,
+            "retry must publish the new version and shard records"
+        );
+    }
 
     #[tokio::test]
     async fn native_shard_publication_rejects_pending_payload_member_despite_empty_cache() {

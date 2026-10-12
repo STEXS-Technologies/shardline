@@ -49,6 +49,11 @@ On Postgres, an S3 overwrite rejected before it commits leaves the current
 object in place. Retry with your usual S3 client; no additional service or
 configuration is needed.
 
+File and native shard uploads on Postgres also reject final publication if the
+request loses its database lock. Existing file records remain available; retry
+with your usual client. An interrupted attempt may leave unreferenced bytes
+for later maintenance to reclaim.
+
 For OCI uploads on Postgres, a rejected publication preserves the previous tag
 and manifest. Incomplete new manifests stay hidden until a retry publishes them.
 If Shardline loses its database lock before an upload part or session change
