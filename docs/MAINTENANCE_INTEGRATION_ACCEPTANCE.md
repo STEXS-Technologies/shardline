@@ -65,7 +65,9 @@ The following still need implementation or stronger evidence before merge:
   remote effects outside the covered paths need further checks.
 - **Scale and retained history.** Bounded pages are tested; whole-operation cost,
   large reports, broad deployment performance and total unresolved-history
-  growth are not fully established.
+  growth are not fully established. A 132-run metadata fixture drains completed
+  history in batches while retaining unfinished and corrupt history, but inspection
+  and retention still walk the inventory; bounded output does not bound latency.
 - **Remaining deployment layouts.** Work-specific database/schema routing,
   row policies, narrower accounts, library embedding and legacy history need
   coverage beyond the passing fixtures. Corrupt, unfinished or unrelated legacy

@@ -747,6 +747,102 @@ fn unfinished_history_does_not_starve_finished_history_retention() {
 }
 
 #[test]
+fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_history() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let store = TaskEvidenceStore::from_config(&config)
+        .unwrap()
+        .require_metadata_publication();
+    let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
+    std::fs::create_dir_all(root.path().join("chunks")).unwrap();
+    let payload = root.path().join("chunks/user-payload");
+    std::fs::write(&payload, b"existing payload bytes").unwrap();
+    for _ in 0..130 {
+        tracker
+            .begin(
+                "finished",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+    }
+    let unfinished = tracker
+        .begin(
+            "unfinished",
+            b"input",
+            MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap();
+    store
+        .publish("manifests/unreadable", b"invalid legacy identity")
+        .unwrap();
+    let original = store.read("manifests/unreadable", 100).unwrap();
+
+    let began = std::time::Instant::now();
+    let mut ids = std::collections::BTreeSet::new();
+    let mut after = None;
+    loop {
+        let page = store
+            .inspect_summaries(deployment, after.as_deref(), 100)
+            .unwrap();
+        assert!(page.len() <= 100);
+        if page.is_empty() {
+            break;
+        }
+        for run in &page {
+            assert!(ids.insert(run.id().to_owned()), "pagination repeated a run");
+        }
+        after = page.last().map(|run| run.id().to_owned());
+    }
+    assert_eq!(ids.len(), 132);
+    let inspection = began.elapsed();
+    let now = shardline_protocol::unix_now_seconds_lossy().saturating_add(31 * 86400);
+    let began = std::time::Instant::now();
+    for expected in [64, 64, 2, 0] {
+        assert_eq!(store.prune_completed(deployment, now).unwrap(), expected);
+    }
+    let cleanup = began.elapsed();
+    let remaining = store.inspect_summaries(deployment, None, 100).unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.iter().any(|run| matches!(run,
+        status::TaskEvidenceEntry::Verified(summary) if summary.operation == "unfinished"
+    )));
+    assert!(remaining.iter().any(|run| matches!(run,
+        status::TaskEvidenceEntry::Unreadable { id, .. } if id == "unreadable"
+    )));
+    assert_eq!(store.read("manifests/unreadable", 100).unwrap(), original);
+    let mut retiring = 0;
+    store
+        .visit_prefix(
+            &ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}retiring/")).unwrap(),
+            |_| {
+                retiring += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        retiring, 0,
+        "completed cleanup must not leave retirement markers"
+    );
+    assert_eq!(std::fs::read(&payload).unwrap(), b"existing payload bytes");
+    assert!(
+        store
+            .objects
+            .list_prefix(&ObjectPrefix::parse(TASK_EVIDENCE_PREFIX).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    eprintln!(
+        "132-run metadata fixture: full paginated inspection {inspection:?}; four retention calls {cleanup:?}"
+    );
+    drop(unfinished);
+}
+
+#[test]
 fn credential_source_changes_do_not_change_a_shared_deployment_target() {
     use shardline_protocol::SecretString;
     let root = tempfile::tempdir().unwrap();

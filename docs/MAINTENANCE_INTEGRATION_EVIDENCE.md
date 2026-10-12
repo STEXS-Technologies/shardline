@@ -751,3 +751,23 @@ cargo test -p shardline-server --all-features --lib task_tracking::postgres_meta
 
 The six PostgreSQL history tests pass with an owned database bootstrapped by
 released 1.11.3. All 32 admin API tests and strict server Clippy also pass.
+
+## Metadata history across several pages
+
+A local metadata fixture stores 130 verified completed runs, one unfinished
+run and one unreadable manifest. Paginated inspection visits all 132 IDs once.
+Successive retention calls remove 64, 64, 2 and 0 completed runs. The unfinished
+run, unreadable bytes and existing payload bytes remain intact. Cleanup leaves
+no retirement markers and publishes no task objects into payload storage.
+
+The debug build on this shared host measured about 2.0 seconds for full paginated
+inspection and 5.8 seconds for four retention calls. These are fixture timings,
+not production performance guarantees. Both operations still walk the inventory;
+large-scale latency and unresolved-history growth remain open checks.
+
+```bash
+cargo test -p shardline-server --all-features --lib metadata_backlog_paginates -- --nocapture
+```
+
+All 32 task-tracking tests pass with an owned PostgreSQL database bootstrapped
+by released 1.11.3. Strict server Clippy also passes.
