@@ -88,12 +88,21 @@ pub fn upgrade_webhook_secrets_with_report(
             }
             match cipher.encrypt(&webhook.repo_id, stored.expose_secret()) {
                 Ok(encrypted) => {
-                    match store.update_webhook_secret(
+                    match store.compare_and_swap_webhook_secret(
                         &webhook.repo_id,
                         &webhook.id,
+                        stored.expose_secret(),
                         Some(&encrypted),
                     ) {
-                        Ok(()) => report.upgraded = report.upgraded.saturating_add(1),
+                        Ok(Some(true)) => report.upgraded = report.upgraded.saturating_add(1),
+                        Ok(Some(false)) => {}
+                        Ok(None) => {
+                            report.failures = report.failures.saturating_add(1);
+                            tracing::warn!(
+                                webhook_id = webhook.id,
+                                "webhook secret upgrade requires atomic storage comparison"
+                            );
+                        }
                         Err(e) => {
                             report.failures = report.failures.saturating_add(1);
                             tracing::warn!("failed to upgrade webhook secret {}: {e}", webhook.id);

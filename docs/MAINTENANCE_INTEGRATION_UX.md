@@ -28,6 +28,10 @@ original login scope. If shared grouping is unavailable, the API reports
 If history cannot be saved, Shardline warns and the command keeps its existing
 behavior. You cannot then rely on a verified history result.
 
+Webhook secret encryption also preserves a secret rotated or removed by another
+node. Background and lazy upgrades change only the exact value they read; a
+concurrent change wins without extra configuration or a worker service.
+
 ## When a delete is interrupted
 
 A later hold or covered write to an object with an unresolved delete returns a
