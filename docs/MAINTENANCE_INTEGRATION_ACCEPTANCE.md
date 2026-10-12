@@ -234,6 +234,17 @@ This document is for reviewers deciding whether the integration is safe to ship.
   including ten task-history artifacts. This fails the requirement to keep
   private task state out of storage migration. The storage-copy verifier
   reproduces this failure; rollback isolation remains required work.
+  A separate prototype stores opaque bytes in an extra table in the existing
+  SQLite metadata database. Released fsck output stays identical; released
+  copy scans only the one payload object and leaves the metadata bytes intact.
+  This establishes a possible local separation mechanism, not an implemented
+  task backend. The real change must preserve artifact verification and legacy
+  reads, support Postgres/S3 and object-only copies, and retain the existing
+  restricted-root behavior without adding a database service or mount.
+  Reproduce the local prototype with
+  `bash scripts/shardline/verify_maintenance_metadata_inventory.sh RELEASED`,
+  where `RELEASED` is the official 1.11.3 executable. This checks the proposed
+  storage surface only; it does not pass the production rollback gate.
   Shared grouping for these jobs, the optional isolated runner, other entry points and binding every
   server background operation to its work connection remain unfinished.
   The Hub secret sweep now binds from its own non-replaceable work connection,
