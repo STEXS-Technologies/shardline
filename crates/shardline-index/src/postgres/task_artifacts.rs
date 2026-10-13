@@ -133,6 +133,39 @@ impl PostgresIndexStore {
         Self::finish_task_artifact_transaction(transaction, &timeout).await
     }
 
+    /// Admits automatic evidence on the caller's actual connection. New histories
+    /// share a schema-wide retained-run budget; later artifacts need a manifest.
+    /// Existing identical publications succeed even at capacity. Legacy imports
+    /// can use [`Self::publish_task_artifact_on_connection`] without this budget.
+    ///
+    /// # Errors
+    /// Returns installation, authorization, conflict or database errors. Admission
+    /// requires READ COMMITTED; caller isolation is never changed.
+    pub async fn publish_task_artifact_bounded_on_connection(
+        connection: &mut PgConnection,
+        key: &str,
+        bytes: &[u8],
+        maximum_runs: u64,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let maximum_runs = i64::try_from(maximum_runs).map_err(|_error| {
+            PostgresMetadataStoreError::IntegerOutOfRange(maximum_runs.to_string())
+        })?;
+        let (mut transaction, schema, timeout) =
+            Self::task_artifact_transaction(connection).await?;
+        let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
+        let published = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT {quoted}.shardline_task_artifact_publish_bounded_v1($1,$2,$3,$4)"
+        )))
+        .bind(&schema)
+        .bind(key)
+        .bind(bytes)
+        .bind(maximum_runs)
+        .fetch_one(&mut *transaction)
+        .await?;
+        Self::finish_task_artifact_transaction(transaction, &timeout).await?;
+        Ok(published)
+    }
+
     /// Reads opaque bytes within the supplied bound on one metadata snapshot.
     /// Absence differs from an oversized body; both avoid unbounded allocation.
     /// Requires existing reliability-read permissions. RLS schemas are rejected.

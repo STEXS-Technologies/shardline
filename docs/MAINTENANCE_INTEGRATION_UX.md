@@ -54,7 +54,20 @@ Ordinary maintenance admits up to 4,096 retained private workspaces, including c
 scratch awaiting deletion. At capacity, ordinary maintenance warns and uses
 shared metadata history when available. It preserves retained files and still
 runs the requested command. Verified exports and cleanup continue after work
-to free space. Shared-history growth remains part of the open storage audit.
+to free space.
+
+Automatic metadata history also admits up to 4,096 retained runs per SQLite
+database or Postgres schema. Cleanup markers conservatively count toward that
+capacity. When full, Shardline keeps existing evidence and runs your command;
+it warns that a new verified history entry could not be recorded. Already
+admitted runs can still record their outcome. Verified cleanup continues after
+work, even if recording the new run was refused. No manual history deletion is
+required. New automatic artifacts are limited to 64 KiB; existing evidence and
+explicit legacy imports keep their original publication behavior.
+
+These limits bound automatic admission, not database disk usage or history
+created by older binaries. Total inspection cost and remaining storage cases
+are still part of the open acceptance audit.
 
 ## Handle a retryable write
 

@@ -112,6 +112,147 @@ impl Fixture {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_metadata_admission_preserves_runs_and_caller_isolation() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let mut connection = fixture.index().pool().acquire().await.unwrap();
+    let first = "_shardline_tasks/v1/manifests/first";
+    let second = "_shardline_tasks/v1/manifests/second";
+    let third = "_shardline_tasks/v1/manifests/third";
+    for (key, body) in [(first, b"first".as_slice()), (second, b"second".as_slice())] {
+        assert!(
+            PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+                &mut connection,
+                key,
+                body,
+                2,
+            )
+            .await
+            .unwrap()
+        );
+    }
+    assert!(
+        !PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            third,
+            b"third",
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            first,
+            b"first",
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            first,
+            b"conflict",
+            2,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            "_shardline_tasks/v1/runs/first/completion",
+            &vec![1; 65536],
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            "_shardline_tasks/v1/runs/third/completion",
+            b"orphan",
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            "_shardline_tasks/v1/runs/first/large",
+            &vec![1; 65537],
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    let mut transaction = connection.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let error = PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+        &mut transaction,
+        third,
+        b"third",
+        2,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, PostgresMetadataStoreError::Sqlx(ref error)
+        if error.as_database_error().unwrap().code().as_deref() == Some("SLD04")));
+    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+    assert_eq!(isolation, "repeatable read");
+    transaction.rollback().await.unwrap();
+    assert!(
+        PostgresIndexStore::read_task_artifact_on_connection(&mut connection, third, 16,)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut contender = fixture.admin.acquire().await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET search_path TO {}",
+        fixture.schema
+    )))
+    .execute(&mut *contender)
+    .await
+    .unwrap();
+    let (first_admission, second_admission) = tokio::join!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            third,
+            b"third",
+            3,
+        ),
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut contender,
+            "_shardline_tasks/v1/manifests/fourth",
+            b"fourth",
+            3,
+        ),
+    );
+    assert_ne!(first_admission.unwrap(), second_admission.unwrap());
+    drop(contender);
+    drop(connection);
+    fixture.finish().await;
+}
+
 #[test]
 fn library_backend_without_runtime_returns_an_error_without_starting_one() {
     use futures_util::FutureExt;

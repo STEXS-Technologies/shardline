@@ -49,6 +49,31 @@ impl LocalIndexStore {
         key: &str,
         bytes: &[u8],
     ) -> Result<(), LocalIndexStoreError> {
+        self.publish_task_artifact_inner(key, bytes, None)
+            .map(|_published| ())
+    }
+
+    /// Admits automatic histories within a retained-run budget. Existing exact
+    /// publications remain idempotent; new artifacts require a live manifest.
+    /// Returns false at capacity, without adding rows. New bodies are at most 64 KiB.
+    /// Legacy imports can keep using [`Self::publish_task_artifact`].
+    /// # Errors
+    /// Returns invalid automatic keys, conflicts or database failures.
+    pub fn publish_task_artifact_bounded(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        maximum_runs: u64,
+    ) -> Result<bool, LocalIndexStoreError> {
+        self.publish_task_artifact_inner(key, bytes, Some(maximum_runs))
+    }
+
+    fn publish_task_artifact_inner(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        maximum_runs: Option<u64>,
+    ) -> Result<bool, LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -58,6 +83,67 @@ impl LocalIndexStore {
                 payload BLOB NOT NULL
             ) WITHOUT ROWID;",
         )?;
+        let existing: Option<bool> = transaction
+            .query_row(
+                "SELECT payload=?2 FROM shardline_task_artifacts_v1 WHERE artifact_key=?1",
+                params![key, bytes],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(identical) = existing {
+            if !identical {
+                return Err(std::io::Error::other("task artifact publication conflict").into());
+            }
+            transaction.commit()?;
+            return Ok(true);
+        }
+        if let Some(maximum_runs) = maximum_runs {
+            if bytes.len() > 65536 {
+                return Ok(false);
+            }
+            let suffix = key
+                .strip_prefix("_shardline_tasks/v1/")
+                .ok_or_else(|| std::io::Error::other("invalid automatic task artifact key"))?;
+            let (category, rest) = suffix
+                .split_once('/')
+                .ok_or_else(|| std::io::Error::other("invalid automatic task artifact key"))?;
+            let id = if category == "runs" {
+                rest.split('/').next().unwrap_or_default()
+            } else {
+                rest
+            };
+            if !matches!(
+                category,
+                "manifests" | "retiring" | "scope-bindings" | "runs"
+            ) || id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return Err(std::io::Error::other("invalid automatic task artifact key").into());
+            }
+            if category == "manifests" {
+                let limit = i64::try_from(maximum_runs).map_err(std::io::Error::other)?;
+                let count: i64 = transaction.query_row(
+                    "SELECT count(*) FROM (SELECT artifact_key FROM shardline_task_artifacts_v1
+                     WHERE (artifact_key >= '_shardline_tasks/v1/manifests/' AND artifact_key < '_shardline_tasks/v1/manifests0')
+                        OR (artifact_key >= '_shardline_tasks/v1/retiring/' AND artifact_key < '_shardline_tasks/v1/retiring0')
+                     LIMIT ?1)", [limit], |row| row.get(0),
+                )?;
+                if count >= limit {
+                    return Ok(false);
+                }
+            } else {
+                let admitted: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM shardline_task_artifacts_v1 WHERE artifact_key=?1)",
+                    [format!("_shardline_tasks/v1/manifests/{id}")], |row| row.get(0),
+                )?;
+                if !admitted {
+                    return Ok(false);
+                }
+            }
+        }
         transaction.execute(
             "INSERT INTO shardline_task_artifacts_v1 (artifact_key, payload)
              VALUES (?1, ?2) ON CONFLICT (artifact_key) DO NOTHING",
@@ -73,7 +159,7 @@ impl LocalIndexStore {
             return Err(std::io::Error::other("task artifact publication conflict").into());
         }
         transaction.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Reads opaque evidence without allocating a blob above the caller's bound.
@@ -270,6 +356,100 @@ impl LocalIndexStore {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn concurrent_admission_cannot_exceed_the_last_available_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(root.path().to_owned()).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = ["first", "second"].map(|id| {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store
+                    .publish_task_artifact_bounded(
+                        &format!("_shardline_tasks/v1/manifests/{id}"),
+                        b"manifest",
+                        1,
+                    )
+                    .unwrap()
+            })
+        });
+        let results = handles.map(|handle| handle.join().unwrap());
+        assert_eq!(results.iter().filter(|published| **published).count(), 1);
+    }
+
+    #[test]
+    fn bounded_admission_preserves_admitted_runs_and_rejects_orphans() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::open(root.path().to_owned());
+        let first = "_shardline_tasks/v1/manifests/first";
+        let second = "_shardline_tasks/v1/manifests/second";
+        let third = "_shardline_tasks/v1/manifests/third";
+        assert!(
+            store
+                .publish_task_artifact_bounded(first, b"first", 2)
+                .unwrap()
+        );
+        assert!(
+            store
+                .publish_task_artifact_bounded(second, b"second", 2)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .publish_task_artifact_bounded(third, b"third", 2)
+                .unwrap()
+        );
+        assert!(!store.contains_task_artifact(third).unwrap());
+        assert!(
+            store
+                .publish_task_artifact_bounded(first, b"first", 2)
+                .unwrap()
+        );
+        assert!(
+            store
+                .publish_task_artifact_bounded(first, b"conflict", 2)
+                .is_err()
+        );
+        let record = "_shardline_tasks/v1/runs/first/completion";
+        assert!(
+            store
+                .publish_task_artifact_bounded(record, &vec![1; 65536], 2)
+                .unwrap()
+        );
+        let orphan = "_shardline_tasks/v1/runs/third/completion";
+        assert!(
+            !store
+                .publish_task_artifact_bounded(orphan, b"orphan", 2)
+                .unwrap()
+        );
+        assert!(!store.contains_task_artifact(orphan).unwrap());
+        assert!(
+            !store
+                .publish_task_artifact_bounded(
+                    "_shardline_tasks/v1/runs/first/large",
+                    &vec![1; 65537],
+                    2,
+                )
+                .unwrap()
+        );
+        assert!(store.delete_task_artifact(second).unwrap());
+        assert!(
+            store
+                .publish_task_artifact_bounded(third, b"third", 2)
+                .unwrap()
+        );
+        let legacy = "legacy/large";
+        let body = vec![2; 65537];
+        store.publish_task_artifact(legacy, &body).unwrap();
+        assert!(
+            store
+                .publish_task_artifact_bounded(legacy, &body, 0)
+                .unwrap()
+        );
+    }
 
     #[test]
     fn bounded_payload_pages_keep_literal_prefix_limits_and_deleted_cursor() {
