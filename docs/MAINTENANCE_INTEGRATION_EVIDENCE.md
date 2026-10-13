@@ -3309,6 +3309,13 @@ manifest until cleanup finishes, and the run retires exactly once. Unfinished
 history remains inspectable; corrupt history and user payload bytes remain
 unchanged throughout.
 
+After scoped local prefix pruning, the exact fixture also passes in the optimized
+profile: one passed, zero failed, zero ignored, with 40 cleanup calls in 1.211
+seconds and 2.16 seconds for the whole test. Every call retains its 256-key
+progress assertion and checks the signed retirement marker, unfinished history,
+corrupt bytes and user payload. This is a local fixture result, not a remote
+storage latency guarantee.
+
 The exact ignored test passes when explicitly selected: one passed, zero failed,
 zero ignored. Retirement takes 40 calls; the debug fixture reports 1.865 seconds
 for its cleanup/check loop and 3.04 seconds for the whole test. These are local
