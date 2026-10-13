@@ -134,12 +134,12 @@ struct ResumableStagingGcReport {
 /// }
 /// ```
 ///
-/// See [`LocalGcOptions`] for the supported modes: `dry_run`, `mark_only`,
+/// See [`gc::LocalGcOptions`] for the supported modes: `dry_run`, `mark_only`,
 /// `sweep_only`, and `mark_and_sweep`.
 ///
 /// # Errors
 ///
-/// Returns [`ServerError`] when metadata cannot be read, quarantine state cannot be
+/// Returns [`error::ServerError`] when metadata cannot be read, quarantine state cannot be
 /// updated, or deletion fails.
 pub async fn run_gc(
     config: ServerConfig,
@@ -152,7 +152,7 @@ pub async fn run_gc(
 ///
 /// # Errors
 ///
-/// Returns [`ServerError`] when metadata cannot be read, quarantine state cannot be
+/// Returns [`error::ServerError`] when metadata cannot be read, quarantine state cannot be
 /// updated, or deletion fails.
 pub async fn run_gc_diagnostics(
     config: ServerConfig,

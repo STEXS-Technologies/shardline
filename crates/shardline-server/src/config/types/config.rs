@@ -740,7 +740,7 @@ impl ServerConfig {
     ///
     /// Marks the mode as explicitly selected so the plaintext-secret gate can
     /// distinguish "operator chose Insecure" from "insecure default left in
-    /// place" (see [`Self::validate_plaintext_secrets_in_production`]).
+    /// place" during plaintext-secret validation.
     #[must_use]
     pub const fn with_deployment_mode(mut self, mode: DeploymentMode) -> Self {
         self.deployment_mode = mode;
@@ -1277,9 +1277,8 @@ impl ServerConfig {
     /// Sets the OIDC audience (`aud` claim) validated for tokens issued by the
     /// OIDC auth provider.
     ///
-    /// When set, tokens whose `aud` claim does not match are rejected. When
-    /// unset, the `aud` claim is not validated (see the startup warning in
-    /// [`crate::app::build_auth_provider`]).
+    /// Tokens whose `aud` claim does not match are rejected. Server startup
+    /// requires an audience when the OIDC provider is selected.
     #[must_use]
     pub fn with_auth_oidc_audience(mut self, audience: String) -> Self {
         self.auth.auth_oidc_audience = Some(audience);
