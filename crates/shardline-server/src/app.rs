@@ -219,7 +219,7 @@ async fn router_with_housekeeping_guard(
     );
     let provider_webhook_body_limit =
         bounded_api_body_limit(max_request_body_bytes, MAX_PROVIDER_WEBHOOK_BODY_BYTES);
-    let backend = ServerBackend::from_config(&config).await?;
+    let (backend, pending_files) = ServerBackend::from_config_for_router(&config).await?;
     let (evidence_store, history_scope) =
         match crate::task_tracking::TaskEvidenceStore::from_backend(&config, &backend).await {
             Ok(evidence) => evidence,
@@ -245,16 +245,17 @@ async fn router_with_housekeeping_guard(
     let task_tracker = Arc::new(task_tracker);
     let retention_store = evidence_store.with_housekeeping_stop(housekeeping_stopped.clone());
     let retention_deployment = crate::task_tracking::deployment_fingerprint(&config)?;
+    let retention_stopped = housekeeping_stopped.clone();
     tokio::task::spawn_blocking(move || {
         if let Err(error) = retention_store.prune_completed_incrementally(
             retention_deployment,
             shardline_protocol::unix_now_seconds_lossy(),
-        ) && !housekeeping_stopped.load(Ordering::Relaxed)
+        ) && !retention_stopped.load(Ordering::Relaxed)
         {
             tracing::warn!("task evidence retention unavailable; serving continues: {error}");
         }
         if let Err(error) = retention_store.relocate_finished_history(retention_deployment)
-            && !housekeeping_stopped.load(Ordering::Relaxed)
+            && !retention_stopped.load(Ordering::Relaxed)
         {
             tracing::warn!(
                 "legacy task history relocation unavailable; serving continues: {error}"
@@ -554,6 +555,14 @@ async fn router_with_housekeeping_guard(
     // Apply CORS after every optional frontend has been registered and the Hub
     // router has been merged, so preflight and normal requests are covered by
     // the same policy regardless of which protocol owns the route.
+    let file_recovery = pending_files.then(|| {
+        Arc::new(
+            crate::upload_intent_recovery::startup::RecoveryGuard::start(
+                state.backend.clone(),
+                housekeeping_stopped.clone(),
+            ),
+        )
+    });
     let app = app
         .layer(middleware::from_fn_with_state(
             state,
@@ -575,7 +584,9 @@ async fn router_with_housekeeping_guard(
     register_route_policies(&mut policy_registry);
     tracing::debug!("registered {} route auth policies", policy_registry.len());
 
-    Ok(app.layer(axum::Extension(Arc::new(housekeeping_guard))))
+    Ok(app
+        .layer(axum::Extension(Arc::new(housekeeping_guard)))
+        .layer(axum::Extension(file_recovery)))
 }
 
 /// Runs the Shardline HTTP server.

@@ -8,6 +8,7 @@ use shardline_protocol::RepositoryScope;
 use shardline_reliability::LifecycleEvent;
 
 const FILE_SCOPE_PREFIX: &str = "scope-json-v1:";
+pub(crate) mod startup;
 
 pub(crate) enum FileRecoveryScope {
     Known(Option<RepositoryScope>),
@@ -56,27 +57,39 @@ pub(crate) const fn file_publication_may_have_completed(intent: &UploadIntent) -
     )
 }
 
-/// Verify the candidate's bytes before recovering a logical file intent.
+/// Check metadata identity without reading payload bytes or proving completion.
 /// Opaque legacy repository identities cannot safely identify a scoped record.
+pub(crate) fn file_record_has_expected_identity(
+    intent: &UploadIntent,
+    events: &[LifecycleEvent],
+    record: &FileRecord,
+) -> bool {
+    let FileRecoveryScope::Known(scope) = file_recovery_scope(events) else {
+        return false;
+    };
+    record.repository_scope == scope
+        && intent.object_key().strip_prefix("record/") == Some(record.file_id.as_str())
+        && (intent.object_length() == 0 || intent.object_length() == record.total_bytes)
+        && intent.object_hash().len() == 64
+        && intent
+            .object_hash()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Content verification is separate from startup's metadata identity checks.
 pub(crate) async fn file_record_matches_intent(
     intent: &UploadIntent,
     events: &[LifecycleEvent],
     record: FileRecord,
     objects: ServerObjectStore,
     pool: BoundedPool,
+    pass: &startup::RecoveryPass,
 ) -> Result<bool, ServerError> {
-    let FileRecoveryScope::Known(scope) = file_recovery_scope(events) else {
+    if pass.stopped() {
         return Ok(false);
-    };
-    if record.repository_scope != scope
-        || intent.object_key().strip_prefix("record/") != Some(record.file_id.as_str())
-        || (intent.object_length() != 0 && intent.object_length() != record.total_bytes)
-        || intent.object_hash().len() != 64
-        || !intent
-            .object_hash()
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    }
+    if !file_record_has_expected_identity(intent, events, &record) {
         return Ok(false);
     }
     let expected_length = record.total_bytes;
@@ -85,11 +98,17 @@ pub(crate) async fn file_record_matches_intent(
     let mut digest = sha2::Sha256::new();
     let mut length = 0_u64;
     while let Some(bytes) = stream.next().await {
+        if pass.stopped() {
+            return Ok(false);
+        }
         let bytes = bytes?;
         length = crate::overflow::checked_add(length, u64::try_from(bytes.len())?)?;
         digest.update(&bytes);
+        tokio::task::yield_now().await;
     }
-    Ok(length == expected_length && hex::encode(digest.finalize()) == intent.object_hash())
+    Ok(!pass.stopped()
+        && length == expected_length
+        && hex::encode(digest.finalize()) == intent.object_hash())
 }
 
 /// Missing original request bytes cannot establish that a native shard failed.

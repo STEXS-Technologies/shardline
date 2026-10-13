@@ -7,7 +7,11 @@ The compatibility guard now preserves all four unfinished states in both scoped
 and default namespaces during actual released-server startup on PostgreSQL and
 SQLite. Legacy control records still recover, and current recovery remains
 functional. The earlier listener-based pass is superseded: it stopped too early.
-Remaining deployment combinations and large-file startup cost still need review.
+Remaining deployment combinations and overall startup cost still need review.
+Normal router startup now defers eligible file-byte verification to its own
+process lifetime. Held-read fixtures cover 65 MiB files across multiple containers
+on SQLite and PostgreSQL for all three server roles. Startup still checks saved
+evidence and candidate metadata; these fixtures do not bound all startup work.
 
 The full compatibility and failure audit is still open. The version remains 1.11.3;
 the version bump belongs in a separate PR.
@@ -105,8 +109,11 @@ The following still need implementation or stronger evidence before merge:
   saved SHA-256 before completing progress. New scoped file intents now preserve
   exact repository components and recover within that scope. Unrelated or
   missing file metadata cannot settle a logical file intent. Ambiguous legacy
-  scoped identities remain preserved; mixed-version interpretation of new
-  scope evidence and the cost of reading large saved files remain open.
+  scoped identities remain preserved. Actual released-server startup preserves
+  new scope evidence with the compatibility guard installed. Router-owned file
+  verification now runs outside readiness startup; all-role SQLite/PostgreSQL
+  fixtures cover multi-container 65 MiB files. Larger backlogs, remote-storage
+  cost and remaining deployment combinations still need review.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and

@@ -35,17 +35,11 @@ use crate::{
 type LocalObjectReadHook = Box<dyn FnOnce() + Send>;
 
 #[cfg(test)]
-struct LocalObjectReadHookRegistration {
-    path: PathBuf,
-    hook: LocalObjectReadHook,
-}
-
-#[cfg(test)]
-type LocalObjectReadHookSlot = Option<LocalObjectReadHookRegistration>;
+type LocalObjectReadHookSlot = std::collections::HashMap<PathBuf, LocalObjectReadHook>;
 
 #[cfg(test)]
 static BEFORE_LOCAL_OBJECT_READ_HOOK: LazyLock<Mutex<LocalObjectReadHookSlot>> =
-    LazyLock::new(|| Mutex::new(None));
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 impl From<ServerObjectStoreError> for ServerError {
     fn from(value: ServerObjectStoreError) -> Self {
@@ -774,10 +768,7 @@ fn take_local_object_read_hook_for_path(
     slot: &mut LocalObjectReadHookSlot,
     path: &Path,
 ) -> Option<LocalObjectReadHook> {
-    if !matches!(slot, Some(registration) if registration.path == path) {
-        return None;
-    }
-    slot.take().map(|registration| registration.hook)
+    slot.remove(path)
 }
 
 #[cfg(not(test))]
@@ -792,10 +783,7 @@ pub(crate) fn set_before_local_object_read_hook(
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    *slot = Some(LocalObjectReadHookRegistration {
-        path,
-        hook: Box::new(hook),
-    });
+    slot.insert(path, Box::new(hook));
 }
 
 /// Constructs the deployment's immutable object store without initializing metadata.
@@ -1695,7 +1683,7 @@ mod tests {
     #[test]
     fn take_local_object_read_hook_for_path_returns_none_for_mismatched_path() {
         let result = super::take_local_object_read_hook_for_path(
-            &mut None,
+            &mut std::collections::HashMap::new(),
             std::path::Path::new("/nonexistent"),
         );
         assert!(result.is_none());
@@ -1967,24 +1955,23 @@ mod tests {
     }
 
     #[test]
-    fn set_before_local_object_read_hook_overwrites_previous_registration() {
+    fn set_before_local_object_read_hook_preserves_independent_paths() {
         let path1 = std::path::PathBuf::from("/tmp/hook-overwrite-1");
         let path2 = std::path::PathBuf::from("/tmp/hook-overwrite-2");
         let called1 = std::sync::atomic::AtomicBool::new(false);
         let called2 = std::sync::atomic::AtomicBool::new(false);
 
-        set_before_local_object_read_hook(path1, move || {
+        set_before_local_object_read_hook(path1.clone(), move || {
             called1.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         set_before_local_object_read_hook(path2.clone(), move || {
             called2.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        // Only the second registration should be stored
-        let slot = super::BEFORE_LOCAL_OBJECT_READ_HOOK.lock().unwrap();
-        assert!(slot.is_some());
-        let registration = slot.as_ref().unwrap();
-        assert_eq!(registration.path, path2);
+        // Independent fixture paths must not overwrite one another.
+        let mut slot = super::BEFORE_LOCAL_OBJECT_READ_HOOK.lock().unwrap();
+        assert!(slot.remove(&path1).is_some());
+        assert!(slot.remove(&path2).is_some());
     }
 
     // ── reconstruct_chunk_file_bytes: local store exact capacity ─────────

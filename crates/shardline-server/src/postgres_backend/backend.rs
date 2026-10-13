@@ -172,17 +172,34 @@ impl PostgresBackend {
         &self,
         minimum_age: std::time::Duration,
     ) -> Result<(), ServerError> {
+        self.reconcile_upload_intents(
+            minimum_age,
+            &crate::upload_intent_recovery::startup::RecoveryPass::Complete,
+        )
+        .await
+        .map(|_pending| ())
+    }
+
+    pub(crate) async fn reconcile_upload_intents(
+        &self,
+        minimum_age: std::time::Duration,
+        pass: &crate::upload_intent_recovery::startup::RecoveryPass,
+    ) -> Result<bool, ServerError> {
         use shardline_index::{UploadIntentState, UploadIntentStore};
         use shardline_storage::{AsyncObjectStore, ObjectKey};
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         let mut reconciled = 0u64;
+        let mut pending_files = false;
         for state in &[
             UploadIntentState::Created,
             UploadIntentState::Storing,
             UploadIntentState::Stored,
             UploadIntentState::MetadataCommitted,
         ] {
+            if pass.stopped() {
+                return Ok(pending_files);
+            }
             let intents = match self.index_store.intents_by_state(*state).await {
                 Ok(intents) => intents,
                 Err(e) => {
@@ -193,6 +210,12 @@ impl PostgresBackend {
                 }
             };
             for intent in &intents {
+                if pass.stopped() {
+                    return Ok(pending_files);
+                }
+                if !pass.visits(intent) {
+                    continue;
+                }
                 let reliability_events = self
                     .index_store
                     .reliability_events(intent.intent_id())
@@ -244,12 +267,17 @@ impl PostgresBackend {
                     };
                     match self.read_record(file_id, None, scope.as_ref()).await {
                         Ok(record) => {
+                            if pass.defers_file_bytes() {
+                                pending_files |= crate::upload_intent_recovery::file_record_has_expected_identity(intent, &reliability_events, &record);
+                                continue;
+                            }
                             match crate::upload_intent_recovery::file_record_matches_intent(
                                 intent,
                                 &reliability_events,
                                 record,
                                 self.object_store(),
                                 self.stream_work_pool.clone(),
+                                pass,
                             )
                             .await
                             {
@@ -266,6 +294,9 @@ impl PostgresBackend {
                 } else {
                     false
                 };
+                if pass.stopped() {
+                    return Ok(pending_files);
+                }
                 if visible_file_record {
                     // The atomic file-record commit is the visibility boundary.
                     // Walk every durable boundary so recovery remains valid even
@@ -277,6 +308,9 @@ impl PostgresBackend {
                         UploadIntentState::MetadataCommitted,
                         UploadIntentState::Visible,
                     ] {
+                        if pass.stopped() {
+                            return Ok(pending_files);
+                        }
                         let transitioned = transition_intent_for_recovery(
                             &self.index_store,
                             intent.intent_id(),
@@ -357,7 +391,7 @@ impl PostgresBackend {
         if reconciled > 0 {
             tracing::info!(count = reconciled, "intent reconciliation complete");
         }
-        Ok(())
+        Ok(pending_files)
     }
 
     /// Resolves a single canonical path to its tree entry, if any.
