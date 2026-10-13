@@ -112,6 +112,8 @@ Verified finished history expires after 30 days; each startup or maintenance
 invocation can remove up to 64 old runs. Interrupted and corrupt history stays
 for investigation. Save reports separately if you need a permanent audit archive.
 Large or legacy archives can still slow inspection and final command cleanup.
+Server startup does not wait for history cleanup. Maintenance commands perform
+it after their application work finishes, so it can delay command exit.
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.
