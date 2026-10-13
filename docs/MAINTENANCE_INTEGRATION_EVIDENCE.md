@@ -2918,3 +2918,23 @@ It does not cancel that write or establish a runtime-drop deadline. SQLite
 connections retain their existing 30-second busy timeout; arbitrary filesystem
 or remote storage delays remain outside this fixture. No runtime behavior or
 version changed.
+
+## Stop retention traversal when its deletion budget is reached
+
+Retirement now uses a distinct scan purpose that honors early stopping across
+metadata and legacy object inventory. History-page selection still considers
+all unordered legacy entries. Storage failures remain errors; stopping a scan
+does not delete unvisited objects or finish a deferred retirement marker.
+
+Two new inventory tests verify a single legacy visit before retirement stops,
+all 40 legacy visits for pagination, storage-error propagation, and skipping
+legacy traversal after metadata stops. Three SQLite retention tests preserve
+exact deletion budgets, shared budgets across runs, resumable batch failure and
+payload bytes. Two HTTP pagination tests pass unchanged. The configured
+PostgreSQL fixture passes both retirement tests in 2.24 seconds, including
+binding preservation and second-batch recovery; its log is
+`/tmp/shardline-batched-deletion.NNleol/test.log`.
+
+Strict server library/test Clippy, formatting and diff checks pass. This removes
+post-budget traversal, not initial inventory cost or storage-call latency.
+The version remains unchanged.
