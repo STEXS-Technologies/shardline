@@ -144,6 +144,8 @@ for authentication, pagination and response fields.
 1. Pause destructive GC and let existing GC commands finish.
 2. Run the usual owner-run `shardline db migrate up` with the upgraded binary
    and your existing database and schema configuration.
+   Finish all pending migrations; follow the database migration guide's
+   maintenance-window requirements if your schema is behind.
 3. Replace server roles using your normal drain and restart procedure. Replace
    the binaries or images used by existing maintenance jobs too.
 4. Check pending deletes and investigate interrupted work, then resume your
