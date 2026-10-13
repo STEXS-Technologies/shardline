@@ -1439,7 +1439,7 @@ async fn normal_router_publishes_and_serves_authenticated_metadata_history() {
         .unwrap()
         .with_admin_read_token(b"owned-task-admin".to_vec())
         .unwrap();
-    let app = crate::app::router(config).await.unwrap();
+    let app = crate::app::router(config.clone()).await.unwrap();
     let denied = app
         .clone()
         .oneshot(
@@ -1518,6 +1518,38 @@ async fn normal_router_publishes_and_serves_authenticated_metadata_history() {
             .unwrap()
             .contains("Task history is full")
     );
+    let snapshot = sqlx::query_as::<_, (String, Vec<u8>)>(sqlx::AssertSqlSafe(format!(
+        "SELECT artifact_key,payload FROM {}.shardline_task_artifacts_v1 ORDER BY artifact_key",
+        fixture.schema,
+    )))
+    .fetch_all(&fixture.admin)
+    .await
+    .unwrap();
+    let sessions = fixture.config.root_dir().join("tmp/lfs-patch");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let oid = "02".repeat(32);
+    let staged = sessions.join(&oid);
+    let touched = sessions.join(format!("{oid}.meta"));
+    std::fs::write(&staged, b"expired staging at capacity").unwrap();
+    std::fs::write(&touched, b"0").unwrap();
+    let restarted = crate::app::router(config).await.unwrap();
+    assert!(
+        !staged.exists(),
+        "recording capacity must not stop the startup sweep"
+    );
+    assert!(!touched.exists());
+    let after_restart = sqlx::query_as::<_, (String, Vec<u8>)>(sqlx::AssertSqlSafe(format!(
+        "SELECT artifact_key,payload FROM {}.shardline_task_artifacts_v1 ORDER BY artifact_key",
+        fixture.schema,
+    )))
+    .fetch_all(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot, after_restart,
+        "no fabricated outcome or orphan records at capacity"
+    );
+    drop(restarted);
     let status = app
         .clone()
         .oneshot(

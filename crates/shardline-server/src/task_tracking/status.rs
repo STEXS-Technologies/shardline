@@ -39,7 +39,7 @@ impl TaskRunState {
                 "No completion is recorded. Check the original command and logs before starting work again."
             }
             Self::Running => {
-                "The recorded local process is alive. Check its logs and wait for its result; do not start a duplicate job."
+                "The recorded process is alive, but no completion is confirmed. The work may still be running or its result may not have been saved. Check the original command and logs before starting work again."
             }
             Self::RunningOrInterrupted => {
                 "Check the owning node and original command logs. This node cannot confirm whether the work is still running; investigate effects before retrying."
