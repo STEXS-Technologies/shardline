@@ -42,6 +42,9 @@ These are scoped results, not a claim that every deployment is compatible:
 - Ordinary maintenance keeps its original PID, output and handlers. Fixtures
   cover read-only roots, fresh runs, contention and loss of database ownership.
   Private-state and receipt faults preserve results; tracking warnings use stderr.
+  Optimized two-machine drills cover node partition/loss plus connection loss
+  during rebuild, repair and GC mark. Independent contenders complete after
+  ownership releases; lost work is not promoted to completion or replayed.
 - Local and S3 copies preserve payload bytes, counts and released rollback.
   Their tracker does not write control objects into payload inventory or require
   source write access. S3-only destination history is temporary and host-local.

@@ -1022,3 +1022,33 @@ Reproduce with optimized binaries using
 It retains raw JSON, stderr, time/RSS observations, binary checksums and host
 information in its owned diagnostic directory. Native execution, shell syntax
 and whitespace checks pass.
+
+## Optimized two-machine replacement and ownership loss
+
+The cross-host verifier now hashes shared records from PostgreSQL task metadata
+rather than assuming they are payload objects. It also checks metadata history
+selection and rejects tracker objects in the payload bucket. PostgreSQL readiness
+uses TCP so fixture setup cannot observe the temporary bootstrap socket.
+
+The optimized full-feature binary passes all four modes against two disposable
+Debian 13 KVM guests with different machine and boot identities:
+
+- Node loss: a network partition keeps the existing database owner and its
+  contender blocked. Killing the source guest releases that ownership; the
+  independently admitted rebuild completes. Lost runs remain unresolved and
+  their saved record bytes remain unchanged. Replacement startup reports ready
+  with one Shardline process and no extra tracker directory.
+- Rebuild connection loss: the source command is checked alive before its
+  owning backend is terminated. It records failure rather than continuing via
+  another session. The distinct waiting rebuild completes and removes the one
+  stale fixture record.
+- Repair connection loss: the same takeover preserves the expired hold's exact
+  row bytes while the source repair fails and the waiting rebuild completes.
+- GC-mark connection loss: the source mark fails after coordinator loss and the
+  distinct waiting rebuild completes. This covers the metadata boundary, not
+  a remote DELETE already issued.
+
+Every mode keeps automatic history in metadata rather than payload objects.
+Native execution, shell syntax and whitespace checks pass. Guests and isolated
+backend volumes are removed on exit. These results do not establish protection
+for every library caller, in-flight remote mutation or older GC binary.

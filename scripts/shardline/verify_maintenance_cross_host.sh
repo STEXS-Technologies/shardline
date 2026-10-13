@@ -9,7 +9,7 @@ current=$(realpath "$1")
 image=$(realpath "$2")
 repository=$(cd "$(dirname "$0")/../.." && pwd)
 test -x "$current" && test -f "$image"
-for tool in docker qemu-system-x86_64 qemu-img genisoimage ssh ssh-keygen scp curl jq socat; do
+for tool in docker qemu-system-x86_64 qemu-img genisoimage ssh ssh-keygen scp curl jq socat base64 sha256sum; do
     command -v "$tool" >/dev/null
 done
 test -r /dev/kvm && test -w /dev/kvm
@@ -34,10 +34,10 @@ cleanup() {
 trap cleanup EXIT
 compose up -d chaos-postgres chaos-minio chaos-minio-init > "$fixture/backend.log" 2>&1
 for attempt in $(seq 1 40); do
-    if compose exec -T chaos-postgres pg_isready -U shardline -d shardline >/dev/null 2>&1; then break; fi
+    if compose exec -T chaos-postgres pg_isready -h 127.0.0.1 -U shardline -d shardline >/dev/null 2>&1; then break; fi
     sleep 1
 done
-compose exec -T chaos-postgres pg_isready -U shardline -d shardline
+compose exec -T chaos-postgres pg_isready -h 127.0.0.1 -U shardline -d shardline
 test "$(docker wait "$(compose ps -aq chaos-minio-init)")" = 0
 pg_port=$(compose port chaos-postgres 5432 | head -n 1 | awk -F: '{print $NF}')
 s3_port=$(compose port chaos-minio 9000 | head -n 1 | awk -F: '{print $NF}')
@@ -85,10 +85,24 @@ history() {
 shared_hashes() {
     local id=$1
     local sequences=${2:-'0000000000 0000000001'}
-    compose run --rm --no-deps --entrypoint /bin/sh chaos-minio-init -c \
-        "set -e; mc alias set local http://chaos-minio:9000 shardline shardline-dev-password >/dev/null; for sequence in $sequences; do mc cat local/shardline/_shardline_tasks/v1/runs/$id/records/\$sequence > /tmp/record; test -s /tmp/record; sha256sum /tmp/record; done"
+    local sequence encoded
+    for sequence in $sequences; do
+        encoded=$(sql "SELECT encode(payload,'base64') FROM shardline_task_artifacts_v1 WHERE artifact_key='_shardline_tasks/v1/runs/$id/records/$sequence'")
+        test -n "$encoded"
+        printf '%s' "$encoded" | base64 -d | sha256sum
+    done
 }
 sql() { compose exec -T chaos-postgres psql -U shardline -d shardline -At -v ON_ERROR_STOP=1 -c "$1"; }
+assert_metadata_only_history() {
+    test "$(sql "SELECT count(*) > 0 FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '_shardline_tasks/v1/manifests/%'")" = t
+    compose run --rm --no-deps --entrypoint /bin/sh chaos-minio-init -c \
+        'set -e; mc alias set local http://chaos-minio:9000 shardline shardline-dev-password >/dev/null; mc ls --recursive local/shardline' \
+        > "$fixture/payload-inventory.log"
+    if grep -F '_shardline_tasks/v1/' "$fixture/payload-inventory.log"; then
+        echo 'automatic history entered payload storage' >&2
+        exit 1
+    fi
+}
 barrier_filter="locktype = 'advisory' AND objsubid = 1 AND classid::bigint = (x'5348415244474301'::bit(64)::bigint >> 32) AND objid::bigint = (x'5348415244474301'::bit(64)::bigint & 4294967295)"
 contended_barrier() {
     # Require one owner and one queued contender, not just two admitted tasks.
@@ -134,7 +148,7 @@ for attempt in $(seq 1 20); do
     if history > "$fixture/initial.json"; then break; fi
     sleep 1
 done
-jq -e '(.tasks | length) == 0' "$fixture/initial.json"
+jq -e '(.tasks | length) == 0 and .history_grouping == "shared_metadata" and .history_notice == null' "$fixture/initial.json"
 vm_ssh 0 'bash -s' <<'GUEST'
 set -euo pipefail
 sudo install -d -m 0755 -o fixture -g fixture /var/lib/shardline/tmp/lfs-patch
@@ -214,6 +228,7 @@ if test "$mode" != node-loss; then
     # Losing ownership must fail the original command, not reconnect its scan.
     coordinator=$(sql "SELECT pid FROM pg_locks WHERE $barrier_filter AND granted")
     [[ "$coordinator" =~ ^[0-9]+$ ]]
+    vm_ssh 0 "kill -0 $source_cli_pid"
     test "$(sql "SELECT pg_terminate_backend($coordinator)")" = t
     for attempt in $(seq 1 15); do
         replacement_coordinator=$(sql "SELECT pid FROM pg_locks WHERE $barrier_filter AND granted")
@@ -243,6 +258,7 @@ if test "$mode" != node-loss; then
     vm_ssh 1 'sudo journalctl -u shardline-validation-waiter-rebuild -o cat --no-pager' > "$fixture/connection-waiter-report.log"
     grep -Fx 'removed_stale_latest_records: 1' "$fixture/connection-waiter-report.log"
     test "$(sql "SELECT COUNT(*) FROM shardline_file_records WHERE file_id='stale.bin'")" = 0
+    assert_metadata_only_history
     if test "$mode" = repair-connection-loss; then
         sql "SELECT row_to_json(hold)::text FROM shardline_retention_holds hold WHERE object_key='retention/repair-owner'" > "$fixture/expired-hold-after.json"
         cmp "$fixture/expired-hold-before.json" "$fixture/expired-hold-after.json"
@@ -307,4 +323,5 @@ shared_hashes "$id" > "$fixture/records-after"
 cmp "$fixture/records-before" "$fixture/records-after"
 shared_hashes "$source_run" '0000000000 0000000001 0000000002' > "$fixture/source-cli-records-after"
 cmp "$fixture/source-cli-records-before" "$fixture/source-cli-records-after"
+assert_metadata_only_history
 echo 'PASS: cross-machine partition preserves ownership; backend session death releases a waiting ordinary rebuild; lost runs stay unresolved'
