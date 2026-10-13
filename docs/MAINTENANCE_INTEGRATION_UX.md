@@ -39,6 +39,12 @@ these routes return `404`; tracking still runs and command/server logs remain
 available. To inspect history over HTTP, use the existing
 [admin token configuration](ADMIN_READ_API.md#enable-and-authenticate).
 
+There is currently no CLI command for browsing shared automatic history.
+Use logs when the admin API is disabled. Do not rerun maintenance just to
+inspect its previous result: ordinary commands start fresh work. The optional
+`shardline maintenance ...` runner's task IDs refer to its own pinned tasks;
+they do not browse the history of ordinary commands.
+
 | What you see | What to do next |
 | --- | --- |
 | Server readiness fails | Check server logs and its storage/database dependencies. Maintenance history does not establish readiness. |
