@@ -42,11 +42,12 @@ if mkdir "$root/permission-probe" 2> "$fixture/permission-probe.log"; then
     echo 'fixture unexpectedly permits new root entries' >&2
     exit 1
 fi
-for operation in fsck rebuild repair gc; do
+for operation in fsck rebuild repair repair-default gc; do
     case "$operation" in
         fsck) arguments=(fsck);;
         rebuild) arguments=(index rebuild);;
         repair) arguments=(repair lifecycle);;
+        repair-default) arguments=(repair);;
         gc) arguments=(gc --mark);;
     esac
     for version in released current; do
@@ -65,8 +66,8 @@ for operation in fsck rebuild repair gc; do
 done
 test "$(stat -c '%a' "$root")" = 555
 test ! -e "$root/chunks/_shardline_tasks"
-test "$(sqlite3 "$root/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key GLOB '_shardline_tasks/v1/manifests/*';")" = 4
-echo "PASS: four released/current commands preserve output and save metadata-backed history under a 0555 root; diagnostics: $fixture"
+test "$(sqlite3 "$root/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key GLOB '_shardline_tasks/v1/manifests/*';")" = 5
+echo "PASS: five released/current command forms preserve output and save metadata-backed history under a 0555 root; diagnostics: $fixture"
 
 # Optional recording must not turn read-only fsck into a failed operation.
 # Keep WAL/SHM present but deny new writable opens of all SQLite files.
@@ -90,7 +91,7 @@ rg -qF 'the command will still run, but its result will not be confirmed in hist
 rg -qF 'Check command output and logs before retrying' "$fixture/readonly-fsck-current.stderr"
 sha256sum "$root/metadata.sqlite3" "$root/metadata.sqlite3-wal" > "$fixture/readonly-after.sha256"
 cmp "$fixture/readonly-before.sha256" "$fixture/readonly-after.sha256"
-test "$(sqlite3 "$root/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key GLOB '_shardline_tasks/v1/manifests/*';")" = 4
+test "$(sqlite3 "$root/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key GLOB '_shardline_tasks/v1/manifests/*';")" = 5
 test ! -e "$root/.shardline-maintenance"
 test ! -e "$root/chunks/_shardline_tasks"
 echo 'PASS: fully read-only SQLite fsck preserves released output/status and existing evidence; optional history warns without recording completion'
