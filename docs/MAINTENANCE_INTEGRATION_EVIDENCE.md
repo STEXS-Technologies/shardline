@@ -4077,6 +4077,23 @@ All 22 local backend cases pass in 0.45 seconds, including matching recovery,
 preservation of a checksum-failed `Storing` attempt and an unrelated `Stored`
 attempt at the same filename.
 
+### Released-server recovery of exact scoped file evidence
+
+The configured PostgreSQL publication suite passed all 19 tests using the actual
+released 1.11.3 executable (`/tmp/shardline-batched-deletion.dsgFqn/test.log`).
+The new rollback fixture creates a scoped file and a different default-scope file
+with the same name, then starts the released server against that database and
+payload root. It waits for the server listener, verifies that startup logged
+intent reconciliation, stops its own child process, and checks that the scoped
+Stored intent and its complete event history remain unchanged. The scoped file
+record remains readable. No database protection change was needed for this case.
+
+This proves this specific Stored checkpoint survives released-server startup;
+it does not prove every unfinished state or SQLite rollback. An initial `fsck`
+experiment was discarded as startup evidence because that command opens stores
+directly without server reconciliation. Large-file recovery startup cost and the
+remaining acceptance gates remain open.
+
 ### Exact scope identity for new file recovery
 
 New scoped file intents encode their validated repository components in the

@@ -468,6 +468,143 @@ async fn scoped_file_recovery_distinguishes_colliding_legacy_labels() {
 }
 
 #[tokio::test]
+async fn released_server_preserves_unfinished_scoped_file_evidence() {
+    use sha2::Digest;
+    use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
+        eprintln!("SKIPPED: rollback fixture requires SHARDLINE_N_MINUS_ONE_BINARY");
+        return;
+    };
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: rollback fixture requires DATABASE_URL");
+        return;
+    };
+    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+    let payload = Bytes::from_static(b"scoped rollback evidence");
+    fixture
+        .postgres()
+        .upload_file("rollback-scoped", payload.clone(), Some(&scope))
+        .await
+        .unwrap();
+    fixture
+        .postgres()
+        .upload_file(
+            "rollback-scoped",
+            Bytes::from_static(b"unrelated default file"),
+            None,
+        )
+        .await
+        .unwrap();
+    let intent = UploadIntent::new(
+        "rollback-scoped-evidence".to_owned(),
+        "record/rollback-scoped".to_owned(),
+        hex::encode(sha2::Sha256::digest(&payload)),
+        0,
+    );
+    let repository =
+        crate::upload_intent_recovery::file_intent_repository_scope(Some(&scope)).unwrap();
+    fixture
+        .index()
+        .create_intent_scoped(&intent, "shardline", &repository)
+        .await
+        .unwrap();
+    for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+        assert!(
+            fixture
+                .index()
+                .transition_intent(intent.intent_id(), state)
+                .await
+                .unwrap()
+        );
+    }
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {}.shardline_upload_intents SET created_at=now()-interval '1 minute' WHERE intent_id=$1", fixture.schema
+    ))).bind(intent.intent_id()).execute(&fixture.admin).await.unwrap();
+    let before = serde_json::to_value(
+        fixture
+            .index()
+            .reliability_events(intent.intent_id())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let root = fixture.config.root_dir().to_path_buf();
+    let database_url = fixture.config.index_postgres_url().unwrap().to_owned();
+    let (started, logs) = tokio::task::spawn_blocking(move || {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut child = std::process::Command::new(binary)
+            .env_clear()
+            .current_dir(&root)
+            .env("SHARDLINE_ROOT_DIR", &root)
+            .env("SHARDLINE_BIND_ADDR", address.to_string())
+            .env("RUST_LOG", "debug")
+            .env("SHARDLINE_INDEX_POSTGRES_URL", database_url)
+            .env("SHARDLINE_AUTH_PROVIDER", "local")
+            .env(
+                "SHARDLINE_TOKEN_SIGNING_KEY",
+                "0123456789abcdef0123456789abcdef",
+            )
+            .arg("serve")
+            .stdout(log.reopen().unwrap())
+            .stderr(log.reopen().unwrap())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut started = false;
+        while std::time::Instant::now() < deadline {
+            if std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(100))
+                .is_ok()
+            {
+                started = true;
+                break;
+            }
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let _ = child.kill();
+        child.wait().unwrap();
+        (started, std::fs::read_to_string(log.path()).unwrap())
+    })
+    .await
+    .unwrap();
+    assert!(started, "released server did not finish startup: {logs}");
+    assert!(
+        logs.contains("reconciling stuck intent"),
+        "released recovery did not inspect the fixture: {logs}"
+    );
+    let state = fixture
+        .index()
+        .intent_by_id(intent.intent_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .state();
+    let after = serde_json::to_value(
+        fixture
+            .index()
+            .reliability_events(intent.intent_id())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let record = fixture
+        .postgres()
+        .read_record("rollback-scoped", None, Some(&scope))
+        .await
+        .unwrap();
+    fixture.finish().await;
+    assert_eq!(state, UploadIntentState::Stored);
+    assert_eq!(after, before);
+    assert_eq!(record.file_id, "rollback-scoped");
+}
+
+#[tokio::test]
 async fn digest_file_upload_keeps_progress_with_the_original_request_owner() {
     use sha2::Digest;
     use shardline_index::{UploadIntentState, UploadIntentStore};
