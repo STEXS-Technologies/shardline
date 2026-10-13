@@ -11,6 +11,34 @@ commands. Earlier observations describe their tested revision; later notes recor
 subsequent fixes. They are not a substitute for the current checklist or proof of
 untested deployments.
 
+## Shared history retention after configuration changes
+
+Retention previously selected only the legacy configuration fingerprint, even
+when shared inspection accepted a verified database-scope binding. Completed
+history could therefore remain after a database-login change. Retention now
+accepts verified matching Postgres scope bindings for metadata-only history.
+Foreign unbound runs, other scopes, corrupt bindings and legacy object copies
+remain protected; existing maintenance-delete permissions still apply.
+
+Retirement preserves the exact original manifest bytes. The signed binding
+stays available through artifact cleanup, and its final deletion commits in the
+same Postgres transaction as deletion of the retirement marker. A replacement
+configuration can therefore resume interrupted cleanup without relying on the
+former login's fingerprint. No migration, new function or runtime grant is added.
+
+All nine server metadata tests passed with disposable Postgres 16 configured.
+The new checks cover differing configuration fingerprints, unbound history,
+another signed scope and a legacy copy. A forced marker-delete failure rolls
+back binding deletion, preserving exact pretty-printed manifest bytes; a later
+invocation finishes after the fault is removed. Local retention regressions also
+pass, including the larger backlog fixture. Database tests in that local-only
+run had no `DATABASE_URL`; the separate configured nine-test run is the database
+evidence. Formatting and strict all-feature, all-target server Clippy passed.
+
+This fixes retention grouping for verified shared metadata. It does not bound
+full-scan latency or total unresolved-history growth, and does not extend
+cross-configuration cleanup to legacy object-backed history.
+
 ## Retention batch reads
 
 After both batching changes, the optimized all-feature binary built from

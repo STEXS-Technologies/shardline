@@ -5,7 +5,7 @@ use penelope_core::task::{
 };
 use serde::{Deserialize, Serialize};
 use shardline_reliability::{MaintenanceArtifactProof, verify_maintenance_artifact};
-use shardline_storage::ObjectPrefix;
+use shardline_storage::{ObjectPrefix, ObjectStore};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Error, ErrorKind},
@@ -132,6 +132,9 @@ impl TaskEvidenceStore {
     /// Removes at most 64 verified finished histories older than 30 days.
     /// Unfinished, unobservable and corrupt histories are retained for inspection.
     /// This is evidence retention only; it never deletes deployment data.
+    /// Verified Postgres scope bindings allow metadata-only history from earlier
+    /// configurations to retire. Legacy object copies keep their original
+    /// deployment restriction.
     /// # Errors
     /// Returns storage failures; callers must preserve serving/maintenance availability.
     pub fn prune_completed(&self, deployment: Digest, now: u64) -> Result<usize, ServerError> {
@@ -243,9 +246,11 @@ impl TaskEvidenceStore {
                 && identity.scope.definition == identity.definition.fingerprint()
                 && identity.definition.validate().is_ok()
                 && identity.definition.budget.max_history_records <= 4096
-                && identity.deployment == deployment
                 && identity.created_at.saturating_add(30 * 24 * 60 * 60) < now
             {
+                if !self.retention_scope_matches(&identity, &bytes, deployment)? {
+                    return Ok(());
+                }
                 // Only identities older than the newest selected candidate can
                 // enter this bounded page. Avoid verifying an entire finished
                 // backlog after the page is full. Earlier unfinished runs still
@@ -280,6 +285,53 @@ impl TaskEvidenceStore {
         Ok(candidates)
     }
 
+    fn retention_scope_matches(
+        &self,
+        identity: &TaskRunIdentity,
+        manifest: &[u8],
+        deployment: Digest,
+    ) -> Result<bool, ServerError> {
+        let legacy_matches = identity.deployment == deployment;
+        let Some(postgres) = &self.postgres_metadata else {
+            return Ok(legacy_matches);
+        };
+        match self.history_scope_binding_match_for_manifest(identity, postgres.scope, manifest) {
+            Ok(Some(false)) => return Ok(false),
+            Ok(None) => return Ok(legacy_matches),
+            Ok(Some(true)) if legacy_matches => return Ok(true),
+            Ok(Some(true)) => {}
+            Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {
+                return Ok(false);
+            }
+            Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+        // Cross-login cleanup is limited to metadata-only evidence. Legacy
+        // object copies cannot atomically retire their authorization marker.
+        for category in ["manifests", "retiring", "scope-bindings"] {
+            if self
+                .objects
+                .metadata(&Self::key(&format!("{category}/{}", identity.id))?)?
+                .is_some()
+            {
+                return Ok(false);
+            }
+        }
+        let prefix = ObjectPrefix::parse(&format!(
+            "{}runs/{}/",
+            super::TASK_EVIDENCE_PREFIX,
+            identity.id
+        ))?;
+        let mut legacy_artifacts = false;
+        self.objects.visit_prefix(&prefix, |_| {
+            legacy_artifacts = true;
+            Ok::<(), ServerError>(())
+        })?;
+        Ok(!legacy_artifacts)
+    }
+
     pub(super) fn begin_retirement(&self, identity: &TaskRunIdentity) -> Result<bool, ServerError> {
         if !matches!(
             self.state(identity),
@@ -287,10 +339,15 @@ impl TaskEvidenceStore {
         ) {
             return Ok(false);
         }
-        self.publish(
-            &format!("retiring/{}", identity.id),
-            &serde_json::to_vec(identity)?,
-        )?;
+        let Some(manifest) = self.read(&format!("manifests/{}", identity.id), 65536)? else {
+            return Ok(false);
+        };
+        let stored: TaskRunIdentity = serde_json::from_slice(&manifest)
+            .map_err(|_error| invalid("invalid retirement identity"))?;
+        if serde_json::to_vec(&stored)? != serde_json::to_vec(identity)? {
+            return Err(invalid("retirement identity changed"));
+        }
+        self.publish(&format!("retiring/{}", identity.id), &manifest)?;
         Ok(true)
     }
 
@@ -298,7 +355,6 @@ impl TaskEvidenceStore {
         // Hide the expired history first. Status must not advertise a partly
         // removed native proof; the cleanup marker remains outside status.
         self.delete_artifact(&Self::key(&format!("manifests/{}", identity.id))?)?;
-        self.delete_artifact(&Self::key(&format!("scope-bindings/{}", identity.id))?)?;
         let run_prefix = ObjectPrefix::parse(&format!(
             "{}runs/{}/",
             super::TASK_EVIDENCE_PREFIX,
@@ -308,7 +364,18 @@ impl TaskEvidenceStore {
             self.delete_artifact(metadata.key())?;
             Ok::<(), ServerError>(())
         })?;
-        self.delete_artifact(&Self::key(&format!("retiring/{}", identity.id))?)?;
+        if let Some(postgres) = &self.postgres_metadata {
+            // Keep the signed binding until the marker disappears atomically;
+            // a replacement login can still authorize interrupted cleanup.
+            postgres.finish_retirement(&identity.id)?;
+            for category in ["scope-bindings", "retiring"] {
+                self.objects
+                    .delete_if_present(&Self::key(&format!("{category}/{}", identity.id))?)?;
+            }
+        } else {
+            self.delete_artifact(&Self::key(&format!("scope-bindings/{}", identity.id))?)?;
+            self.delete_artifact(&Self::key(&format!("retiring/{}", identity.id))?)?;
+        }
         Ok(())
     }
 

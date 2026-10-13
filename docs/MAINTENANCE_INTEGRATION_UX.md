@@ -105,6 +105,9 @@ remove verified finished runs created more than 30 days ago, up to 64 per invoca
 Interrupted and corrupt evidence is retained for investigation and can keep
 growing; monitor metadata storage. An old run disappearing is not evidence
 that it never ran. Save reports separately if you need longer retention.
+An upgraded Postgres node can clean up verified shared metadata history after
+a database login change. Legacy object-based history keeps its original
+configuration restriction.
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.

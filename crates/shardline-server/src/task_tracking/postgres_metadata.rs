@@ -3,7 +3,7 @@ use std::{fmt, future::Future, time::Duration};
 
 use penelope_core::task::Digest;
 use shardline_index::{PostgresIndexStore, PostgresMetadataStoreError, PostgresTaskArtifact};
-use sqlx::{PgPool, Postgres, pool::PoolConnection};
+use sqlx::{Connection, PgPool, Postgres, pool::PoolConnection};
 
 use super::{TaskEvidenceStore, resolved_postgres_deployment_fingerprint};
 use crate::{ServerBackend, ServerConfig, ServerError};
@@ -309,6 +309,32 @@ impl PostgresTaskMetadata {
                     .await
                     .map(|_| ())
                     .map_err(ServerError::from);
+            self.finish(connection, result).await
+        })
+    }
+
+    pub(super) fn finish_retirement(&self, id: &str) -> Result<(), ServerError> {
+        self.run(async {
+            let mut connection = self.connection().await?;
+            let result = async {
+                let mut transaction = connection
+                    .begin()
+                    .await
+                    .map_err(PostgresMetadataStoreError::from)?;
+                for category in ["scope-bindings", "retiring"] {
+                    PostgresIndexStore::delete_task_artifact_on_connection(
+                        &mut transaction,
+                        &format!("{}{category}/{id}", super::TASK_EVIDENCE_PREFIX),
+                    )
+                    .await?;
+                }
+                transaction
+                    .commit()
+                    .await
+                    .map_err(PostgresMetadataStoreError::from)?;
+                Ok::<(), ServerError>(())
+            }
+            .await;
             self.finish(connection, result).await
         })
     }
