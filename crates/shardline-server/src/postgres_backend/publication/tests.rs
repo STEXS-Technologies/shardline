@@ -158,6 +158,74 @@ async fn native_upload_recovery_preserves_each_durable_boundary() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_xorb_upload_rejects_an_already_lost_request_owner_before_creating_intent() {
+    use shardline_index::UploadIntentStore;
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: raw xorb ownership fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(b"lost raw xorb request owner");
+    let intent_id = format!("xorb-{hash}");
+    let session = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    session
+        .scope(async {
+            let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                &backend.request_session_identity,
+            )
+            .await
+            .unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **owner.as_mut().unwrap())
+                .await
+                .unwrap();
+            drop(owner);
+            assert!(
+                sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                    .bind(pid)
+                    .fetch_one(&fixture.admin)
+                    .await
+                    .unwrap()
+            );
+            let error = backend.upload_xorb(&hash, xorb.clone()).await.unwrap_err();
+            assert!(matches!(error, crate::ServerError::StaleResourceFence));
+            let response = axum::response::IntoResponse::into_response(error);
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+        })
+        .await;
+    assert!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    session.finish().await;
+    backend.upload_xorb(&hash, xorb).await.unwrap();
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        shardline_index::UploadIntentState::Visible
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_native_upload_owner_cannot_be_recovered_from_intent_bookkeeping() {
     use shardline_index::{UploadIntentState, UploadIntentStore};
     let Some(fixture) = PostgresFixture::new().await else {

@@ -37,7 +37,7 @@ database_url="postgres://postgres:owned_inspection_fixture@127.0.0.1:$port/shard
 ) > "$fixture/bootstrap.log" 2>&1
 env -i DATABASE_URL="$database_url" CARGO_BIN_EXE_shardline="$fixture/shardline" \
     "$test_binary" --nocapture > "$fixture/test.log" 2>&1
-if rg -ni 'SKIPPED:|skipping:|panicked at|0 passed;' "$fixture/test.log"; then exit 1; fi
+if rg -ni 'SKIPPED:|skipping:|panicked at|(^|[^0-9])0 passed;' "$fixture/test.log"; then exit 1; fi
 rg -F 'configured_pending_delete_cli_paginates_without_changing_attempts ... ok' "$fixture/test.log"
 rg -F 'unavailable_postgres_inspection_gives_recovery_guidance_without_starting_work ... ok' "$fixture/test.log"
 rg -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' "$fixture/test.log"

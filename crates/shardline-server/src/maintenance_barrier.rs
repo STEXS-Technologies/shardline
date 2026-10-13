@@ -36,6 +36,18 @@ pub(crate) struct RequestSession {
 }
 
 impl RequestSession {
+    /// Rejects a lost request session without acquiring a replacement connection.
+    pub(crate) async fn verify_for(backend: &Arc<()>) -> Result<(), ServerError> {
+        if let Some(mut owner) = Self::connection_for(backend).await {
+            let connection = owner.as_mut().ok_or(ServerError::StaleResourceFence)?;
+            sqlx::query("SELECT 1")
+                .execute(&mut **connection)
+                .await
+                .map_err(|_error| ServerError::StaleResourceFence)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn connection_for(
         backend: &Arc<()>,
     ) -> Option<tokio::sync::OwnedMutexGuard<Option<PoolConnection<Postgres>>>> {

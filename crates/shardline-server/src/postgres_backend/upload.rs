@@ -205,8 +205,12 @@ impl super::PostgresBackend {
         expected_hash: &str,
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
+        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+            .await?;
         let object_store = self.object_store();
         let staged = stage_body_for_object_store(&mut body, &object_store).await?;
+        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+            .await?;
         let body_length = staged.length();
         let intent_id = format!("xorb-{expected_hash}");
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
@@ -222,9 +226,12 @@ impl super::PostgresBackend {
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
+        let request_session_identity = self.request_session_identity.clone();
         coordinator
             .with_upload_intent(&intent, move || async move {
-                match staged {
+                crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
+                    .await?;
+                let result = match staged {
                     StagedRequestBody::Memory { bytes, .. } => {
                         store_uploaded_xorb_bytes(&object_store, expected_hash, &bytes)
                             .await
@@ -235,7 +242,10 @@ impl super::PostgresBackend {
                             .await
                             .map_err(ServerError::from)
                     }
-                }
+                };
+                crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
+                    .await?;
+                result
             })
             .await
     }

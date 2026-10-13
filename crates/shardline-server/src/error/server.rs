@@ -510,7 +510,10 @@ impl IntoResponse for ServerError {
         if self.is_retryable_publication()
             || matches!(
                 self,
-                Self::TransferLimiterTimedOut | Self::WorkQueueSaturated | Self::RequestTimedOut
+                Self::TransferLimiterTimedOut
+                    | Self::WorkQueueSaturated
+                    | Self::RequestTimedOut
+                    | Self::StaleResourceFence
             )
         {
             response
