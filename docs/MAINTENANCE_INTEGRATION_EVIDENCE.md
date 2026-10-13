@@ -986,3 +986,39 @@ settlement path. All 32 admin API tests pass with the owned fixture bootstrapped
 from released 1.11.3 migrations, without skips. Strict server Clippy and
 formatting pass. This preserves the access boundary and makes no health or
 retry-authorization claim.
+
+## Optimized existing-workload compatibility
+
+The full-feature release build completed from production source `894aaf06`;
+the version remains 1.11.3. The new verifier runs the repository's existing
+full local benchmark matrix at concurrency 1, 32 and 128, with three iterations,
+a 1 MiB asset, a 64 KiB mutation and 64 KiB chunk configuration. Each binary
+uses fresh owned stores and an empty configuration with inherited runtime
+settings removed.
+
+All report schemas and non-performance counters match released 1.11.3,
+including bytes, chunks, inventory and cache hits. Private filesystem locations,
+measured latency, CPU timing, throughput and derived scaling ratios are excluded
+from value equality, while their field names remain in the schema comparison.
+Released and current fsck both read all nine current-generated stores and return
+matching stdout/stderr. Each current fsck invocation records one completion in
+SQLite metadata without adding task objects to the payload inventory.
+
+One sequential run measured:
+
+| Concurrency | Released wall seconds | Current wall seconds | Released peak RSS KiB | Current peak RSS KiB |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.08 | 0.08 | 34,668 | 33,896 |
+| 32 | 0.48 | 0.51 | 339,076 | 392,704 |
+| 128 | 1.45 | 1.43 | 671,964 | 653,480 |
+
+These are fixture observations, not a statistically established performance
+improvement, regression threshold or deployment SLO. The benchmark exercises
+uploads, reads, reuse and cache behavior, not multi-node maintenance ownership
+or large task-history inspection. Those remain separate acceptance checks.
+
+Reproduce with optimized binaries using
+`scripts/shardline/verify_maintenance_benchmark_compatibility.sh CURRENT RELEASED`.
+It retains raw JSON, stderr, time/RSS observations, binary checksums and host
+information in its owned diagnostic directory. Native execution, shell syntax
+and whitespace checks pass.

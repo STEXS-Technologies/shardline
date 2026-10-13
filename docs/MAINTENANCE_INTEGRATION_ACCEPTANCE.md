@@ -54,6 +54,11 @@ These are scoped results, not a claim that every deployment is compatible:
   with 4,096 synthetic orphan entries. Both diagnostic exports exceed 1 MiB;
   all entries and persisted timestamps match. This does not establish reclamation
   safety or production performance.
+- Optimized released/current binaries pass the repository's local full benchmark
+  matrix at concurrency 1, 32 and 128. Report schema and non-performance counters
+  match. Both binaries' fsck reads the nine current-generated stores with matching
+  output; current maintenance records completion separately from payload data.
+  This measures the existing workload, not distributed capacity or history scaling.
 
 See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
 and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)
