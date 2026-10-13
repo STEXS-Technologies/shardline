@@ -2938,3 +2938,17 @@ binding preservation and second-batch recovery; its log is
 Strict server library/test Clippy, formatting and diff checks pass. This removes
 post-budget traversal, not initial inventory cost or storage-call latency.
 The version remains unchanged.
+
+The optimized build containing this traversal change completes successfully
+and reports version 1.11.3. Its SHA-256 is
+`32f9b631dbea3d80b5999a28a42bf0dff18468ac3b9ae3d79b6328f214f2473e`.
+The ordinary-command incremental cleanup verifier passes against released
+1.11.3, preserving stdout, stderr, exit status and payload bytes while deleting
+exactly 256 keys, keeping the retirement marker, and finishing on the next
+invocation. Diagnostics are in `/tmp/shardline-incremental-cleanup.pG6Gmx`.
+
+All 19 maintenance CLI tests also pass against these optimized bytes in
+0.725 seconds (Nextest `044396c6-f671-434b-9936-7d6084c354be`), including
+same-PID ordinary work, interruption, configuration binding, legacy relocation,
+read-only roots and optional-worker recovery. These results cover the named
+workflows; broader deployment and scale gates remain open.
