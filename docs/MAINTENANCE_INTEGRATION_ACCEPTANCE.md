@@ -126,6 +126,11 @@ The following still need implementation or stronger evidence before merge:
   to preserve page ordering. This removes work after a retention budget break;
   selecting eligible histories and reaching that break can still require
   inventory scans, so it does not establish a whole-operation latency bound.
+  A separate legacy object-store fixture retires one completed run with over
+  10,000 artifacts across 40 calls, reopening the history store each time.
+  It checks the 256-key budget, resumable markers and unchanged unfinished
+  evidence, corrupt history and user payload. This does not cover a large
+  inventory of distinct legacy runs or establish production latency.
   An optimized ordinary CLI fixture verifies exact
   256-key progress over two invocations, released output/status and unchanged
   payload bytes. Metadata inspection

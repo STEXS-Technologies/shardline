@@ -3298,3 +3298,29 @@ The pinned binaries in both original runs have matching hashes. This is 23
 passing named scenarios across complementary runs and a focused assertion
 correction, not an initially green 23-test run or proof of every deployment.
 Strict deployment-test Clippy passes; runtime behavior and version are unchanged.
+
+### Large legacy-run incremental retirement
+
+The explicit object-store fixture adds 10,000 legacy artifacts to a verified
+completed run. It reopens the history store between every cleanup call and
+checks positive progress of at most 256 run-artifact keys per call. The expired
+manifest stays hidden, the retirement marker preserves the original signed
+manifest until cleanup finishes, and the run retires exactly once. Unfinished
+history remains inspectable; corrupt history and user payload bytes remain
+unchanged throughout.
+
+The exact ignored test passes when explicitly selected: one passed, zero failed,
+zero ignored. Retirement takes 40 calls; the debug fixture reports 1.865 seconds
+for its cleanup/check loop and 3.04 seconds for the whole test. These are local
+diagnostics, not optimized performance results or a production latency bound.
+This covers a large artifact inventory within one legacy run, not a large
+inventory of distinct legacy histories. Existing smaller retirement fixtures
+and all merge gates remain unchanged.
+
+Reproduce with:
+
+```sh
+cargo test --locked -p shardline-server --all-features --lib \
+  task_tracking::tests::legacy_retention_capacity::large_legacy_run_retires_incrementally_without_touching_unresolved_evidence \
+  -- --ignored --exact --nocapture
+```
