@@ -73,6 +73,24 @@ accounts and shared retention, not a cross-host failure or current cluster healt
 
 ## Retention batch reads
 
+Ordinary CLI housekeeping now runs after fresh work and outcome recording.
+Both private-state and shared-only paths use the same evidence-retirement helper.
+Configuration validation still precedes application mutation. Cleanup, history
+relocation and pending receipt exports cannot replace the command's result or
+rerun application work. This removes old-history scans from before work starts;
+housekeeping can still delay final exit and remains subject to the scale audit.
+
+An actual-command SQLite regression covers both paths with successful and denied
+cleanup. Its trigger rejects retirement until the new command's report exists.
+Fresh rebuilds complete in the original PID, preserve exit status and verified
+history, and retire expired history after work. Denied cleanup preserves old
+evidence; removing the fault permits later cleanup. The automatic fallback,
+private corrupt-journal and shared receipt tests passed. The database-only test
+in the local shared suite had no database configured; a separate disposable
+Postgres run passed the exact CLI work-session test in 32.74 seconds. It covers
+rebuild, GC mark and lifecycle repair through both paths with a login limited to
+one connection. Formatting and strict all-feature, all-target CLI Clippy passed.
+
 History inspection now shares retention's bounded manifest reader through the
 conventional `task_tracking::manifest_reader` module. Both metadata backends
 load at most 64 bodies of at most 64 KiB per page. Legacy-only and unordered

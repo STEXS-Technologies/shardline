@@ -189,38 +189,27 @@ fn run_inner(
         tracing::debug!(workspace = %state.display(), "private maintenance tracking unavailable; existing command continues with available metadata history: {error}");
         return Ok(super::shared_inline::run(operation, arguments, &config));
     }
-    if !operation.read_only() {
-        if let Err(error) = super::cleanup::retry(&state) {
-            tracing::warn!(workspace = %state.display(), "confirmed scratch cleanup unavailable; existing command continues: {error}");
-        }
-        let export_config = super::publication_config(operation, &config)?;
-        let retry = (|| -> Result<()> {
-            let store = super::evidence::store(operation, &export_config, Some(&state))?;
-            let deployment =
-                shardline_server::task_tracking::deployment_fingerprint(&export_config)?;
-            if let Err(error) =
-                store.prune_completed(deployment, shardline_protocol::unix_now_seconds_lossy())
-            {
-                tracing::warn!(
-                    "maintenance evidence retention unavailable; existing command continues: {error}"
-                );
-            }
-            if let Err(error) = store.relocate_finished_history(deployment) {
-                tracing::warn!(
-                    "legacy task history relocation unavailable; existing command continues: {error}"
-                );
-            }
-            super::journal::retry_exports(&state, &store, deployment)
-        })();
-        if let Err(error) = retry {
-            tracing::warn!(workspace = %state.display(), "retained evidence could not be inspected or exported; no application retry authorized: {error}");
-        }
-    }
+    // Preserve configuration validation before any application mutation.
+    let export_config = super::publication_config(operation, &config)?;
     let command = arguments
         .iter()
         .map(|argument| argument.as_os_str().as_bytes().to_vec())
         .collect();
     let output = super::inline::run(&state, &id, operation, command, arguments);
+    // Old history and retired scratch must not delay starting fresh work. The
+    // result is already fixed; housekeeping cannot retry or replace that work.
+    if let Err(error) = super::cleanup::retry(&state) {
+        tracing::warn!(workspace = %state.display(), "confirmed scratch cleanup unavailable; original command result is preserved: {error}");
+    }
+    let retry = (|| -> Result<()> {
+        let store = super::evidence::store(operation, &export_config, Some(&state))?;
+        let deployment = shardline_server::task_tracking::deployment_fingerprint(&export_config)?;
+        super::evidence::retire_finished_history(&store, deployment);
+        super::journal::retry_exports(&state, &store, deployment)
+    })();
+    if let Err(error) = retry {
+        tracing::warn!(workspace = %state.display(), "retained evidence could not be inspected or exported; original command result is preserved; no application retry authorized: {error}");
+    }
     if output
         .as_ref()
         .is_ok_and(|result| result.evidence_published)

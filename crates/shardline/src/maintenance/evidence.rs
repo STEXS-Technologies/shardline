@@ -2,6 +2,26 @@
 use super::{MaintenanceOperation, Result};
 use shardline_server::{ServerConfig, task_tracking::TaskEvidenceStore};
 
+/// Best-effort history housekeeping after application work and its outcome.
+/// This never executes application work or changes the command's result.
+pub(super) fn retire_finished_history(
+    store: &TaskEvidenceStore,
+    deployment: penelope_core::task::Digest,
+) {
+    if let Err(error) =
+        store.prune_completed(deployment, shardline_protocol::unix_now_seconds_lossy())
+    {
+        tracing::warn!(
+            "maintenance evidence retention unavailable; original command result is preserved: {error}"
+        );
+    }
+    if let Err(error) = store.relocate_finished_history(deployment) {
+        tracing::warn!(
+            "legacy task history relocation unavailable; original command result is preserved: {error}"
+        );
+    }
+}
+
 pub(super) fn store(
     operation: &MaintenanceOperation,
     config: &ServerConfig,

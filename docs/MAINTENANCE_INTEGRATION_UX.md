@@ -47,6 +47,9 @@ setup. Shardline never repeats work to repair history or claims verified
 completion from a missing receipt. Later maintenance can
 retry temporary-file cleanup without repeating completed work.
 
+Ordinary maintenance cleans old history after the requested work and its result
+recording. A large history archive can still delay the command's final exit.
+
 ## Handle a retryable write
 
 If an earlier remote delete has an uncertain outcome, a later hold or covered
