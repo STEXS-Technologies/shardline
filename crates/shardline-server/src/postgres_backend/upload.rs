@@ -261,7 +261,7 @@ impl super::PostgresBackend {
         let prefix = &body_hash_hex[..2];
         let object_key = format!("shards/{prefix}/{body_hash_hex}.shard");
         let intent = UploadIntent::new(intent_id.clone(), object_key, body_hash_hex, body_length);
-        let record_store = self.record_store.clone();
+        let publication_backend = self.clone();
         let request_session_identity = self.request_session_identity.clone();
         let coordinator = CasCoordinator::new(
             self.index_store.clone(),
@@ -278,7 +278,7 @@ impl super::PostgresBackend {
                 move || async move {
                     match staged {
                         StagedRequestBody::Memory { bytes, .. } => {
-                            let record_store = record_store.clone();
+                            let publication_backend = publication_backend.clone();
                             register_uploaded_shard_bytes_with_member_references(
                                 &object_store,
                                 &bytes,
@@ -291,8 +291,8 @@ impl super::PostgresBackend {
                                         )
                                         .await
                                     {
-                                        record_store
-                                            .commit_native_shard_metadata_on_connection(
+                                        publication_backend
+                                            .commit_validated_native_shard_on_connection(
                                                 connection
                                                     .as_mut()
                                                     .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
@@ -302,8 +302,8 @@ impl super::PostgresBackend {
                                             )
                                             .await?;
                                     } else {
-                                        record_store
-                                        .commit_native_shard_metadata_with_remote_delete_references(
+                                        publication_backend
+                                        .commit_validated_native_shard(
                                             &records,
                                             &mappings,
                                             &references,
@@ -328,8 +328,8 @@ impl super::PostgresBackend {
                                         )
                                         .await
                                     {
-                                        record_store
-                                            .commit_native_shard_metadata_on_connection(
+                                        publication_backend
+                                            .commit_validated_native_shard_on_connection(
                                                 connection
                                                     .as_mut()
                                                     .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
@@ -339,8 +339,8 @@ impl super::PostgresBackend {
                                             )
                                             .await?;
                                     } else {
-                                        record_store
-                                        .commit_native_shard_metadata_with_remote_delete_references(
+                                        publication_backend
+                                        .commit_validated_native_shard(
                                             &records,
                                             &mappings,
                                             &references,

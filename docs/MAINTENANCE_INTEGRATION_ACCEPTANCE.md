@@ -81,6 +81,12 @@ These are scoped results, not a claim that every deployment is compatible:
   response, successful fresh retry, unchanged failed preconditions and lock
   lifetime. It uses local CAS for the deterministic interleaving; this does not
   establish the behavior of arbitrary legacy records or unguarded deletion.
+- Native Postgres shard publication also checks physical xorbs and normalized
+  shard bodies inside its existing transaction. A real native-payload fixture
+  verifies pending rejection, post-settlement byte loss, rollback of file and
+  dedupe rows, actionable retry errors, successful retry through the ordinary
+  handler and a matching download. Its local-CAS payload store does not prove
+  remote-S3 faults or storage presence for lower-level metadata-only callers.
 - Covered PostgreSQL publication rejects a Repeatable Read or Serializable
   snapshot that predates delete admission. Real database fixtures verify no
   visible publication, retryable HTTP/OCI/S3 responses, successful fresh retries

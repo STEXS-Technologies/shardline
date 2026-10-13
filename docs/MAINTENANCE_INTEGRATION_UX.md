@@ -75,6 +75,11 @@ retry the upload`, resend it. For covered Postgres uploads, this means staged
 bytes were removed before publication and the file was not made visible. This
 also returns HTTP 503 with `Retry-After: 1`.
 
+Native Xet shard uploads can likewise return a retryable error if backing
+content disappeared before publication. Upload missing xorbs again, then resend
+the shard. Resending the shard also restores its normalized shard body. The
+failed publication does not leave new file metadata or dedupe mappings visible.
+
 A write can also return `database transaction snapshot changed; retry the
 request in a new transaction`. Retry the request. Applications managing their
 own database transaction must roll it back and start a new one before retrying.

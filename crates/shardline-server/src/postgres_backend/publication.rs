@@ -11,6 +11,86 @@ use sqlx::{Connection as _, PgConnection};
 use crate::{ServerError, chunk_store::chunk_object_key, object_store::ServerObjectStore};
 
 impl super::PostgresBackend {
+    pub(super) async fn commit_validated_native_shard(
+        &self,
+        records: &[FileRecord],
+        mappings: &[shardline_index::DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+    ) -> Result<(), crate::xet_adapter::XetAdapterError> {
+        let mut connection = self
+            .record_store
+            .pool()
+            .acquire()
+            .await
+            .map_err(PostgresMetadataStoreError::from)?;
+        self.commit_validated_native_shard_on_connection(
+            &mut connection,
+            records,
+            mappings,
+            references,
+        )
+        .await
+    }
+
+    /// Recheck validated native backing objects before the actual transaction
+    /// releases the reference locks. Member chunk keys can live inside an xorb;
+    /// only the physical xorbs and normalized shard bodies require presence.
+    pub(super) async fn commit_validated_native_shard_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        records: &[FileRecord],
+        mappings: &[shardline_index::DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+    ) -> Result<(), crate::xet_adapter::XetAdapterError> {
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(PostgresMetadataStoreError::from)?;
+        self.record_store
+            .commit_native_shard_metadata_on_connection(
+                &mut transaction,
+                records,
+                mappings,
+                references,
+            )
+            .await?;
+        let protected: bool = sqlx::query_scalar(
+            "SELECT to_regprocedure(format('%I.shardline_reference_keys_remote_delete_v1(text,text[])', current_schema())) IS NOT NULL",
+        ).fetch_one(&mut *transaction).await
+            .map_err(PostgresMetadataStoreError::from)?;
+        if protected && !matches!(self.object_store, ServerObjectStore::Blackhole) {
+            let mut keys = records
+                .iter()
+                .flat_map(|record| &record.chunks)
+                .map(|chunk| crate::xet_adapter::xorb_object_key(&chunk.hash))
+                .collect::<Result<Vec<_>, _>>()?;
+            for mapping in mappings {
+                keys.push(mapping.shard_object_key().clone());
+            }
+            keys.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+            keys.dedup();
+            stream::iter(
+                keys.into_iter()
+                    .map(Ok::<_, crate::xet_adapter::XetAdapterError>),
+            )
+            .try_for_each_concurrent(self.upload_max_in_flight_chunks.get(), |key| async move {
+                if AsyncObjectStore::metadata(&self.object_store, &key)
+                    .await?
+                    .is_none()
+                {
+                    return Err(crate::error::publication::native_content_unavailable_io().into());
+                }
+                Ok(())
+            })
+            .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(PostgresMetadataStoreError::from)?;
+        Ok(())
+    }
+
     /// Caller must keep its transaction open through metadata publication.
     /// This applies only to fresh ingestor records: a hash names either a
     /// packed xorb or a direct CAS chunk. Legacy records can instead depend on
