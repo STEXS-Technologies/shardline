@@ -13,6 +13,26 @@ untested deployments.
 
 ## Recording capacity in the admin response
 
+The optimized all-feature binary built from `3b1a0359` passed all 11 selected
+deployment drills in 144.440 seconds with no runtime skips; 12 unrelated tests
+were filtered out. This revalidates restricted commands, concurrent owners,
+remote-delete faults, replacement, shutdown, mixed-node rollout and rollback
+after the capacity notice and scope/copy fixes. The verifier used immutable
+copies of both binaries. Current/released local copies also passed, including
+byte-for-byte legacy relocation, released rollback and execute-only binaries.
+Restricted real-MinIO copies passed without extra payload-bucket permissions.
+The 4,096-entry mark-only diagnostic comparison preserved released output,
+status, payload bytes and exports larger than 1 MiB. The binary reports 1.11.3.
+
+A further actual rebuild-handler fixture passed in 19.84 seconds. It retained
+the native records of a completed run, modeled that run as expired, filled the
+remaining 4,095 slots with unresolved evidence and made private tracking
+unavailable. Admission was refused but the command succeeded without claiming
+a new verified outcome. Post-work verified retention freed the expired slot;
+the next fresh command recorded completion. All unresolved bytes and the private
+operator file remained unchanged. This proves capacity recovery through the
+existing command path, not a distributed disk quota or current cluster health.
+
 Automatic work-session scope bindings and storage-copy histories use the same
 bounded admission policy. The actual work connection is retained; a legacy
 manifest alone cannot authorize an orphan metadata association after its live
