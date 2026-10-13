@@ -15,6 +15,8 @@ use std::{
 pub enum S3ProxyFault {
     /// Forward a successful PUT, then close the client connection before its response.
     DropAcceptedPut,
+    /// Forward a successful PUT, then pause before returning its original response.
+    DelaySuccessfulPutResponse(Duration),
     /// Return one retryable `503 Service Unavailable` without contacting the provider.
     ServiceUnavailableOnce,
     /// Forward successful GET headers, pause, then forward the original body.
@@ -173,6 +175,14 @@ fn proxy_one_s3_request(
     {
         client.shutdown(Shutdown::Both)?;
         return Ok(());
+    }
+    if is_put
+        && accepted
+        && let S3ProxyFault::DelaySuccessfulPutResponse(delay) = fault
+        && mark_injected(armed, injected)
+    {
+        thread::sleep(delay);
+        return client.write_all(&response);
     }
     if is_get
         && accepted

@@ -288,6 +288,131 @@ async fn raw_xorb_upload_rejects_owner_loss_while_reading_the_request_body() {
     fixture.finish().await;
 }
 
+#[cfg(feature = "docker")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_xorb_owner_loss_after_provider_put_preserves_unfinished_intent_and_bytes() {
+    use shardline_index::{UploadIntentState, UploadIntentStore};
+    use shardline_test_support::{DockerLocalStack, S3FaultProxy, S3ProxyFault};
+    use std::time::Duration;
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: provider-backed xorb ownership fixture requires DATABASE_URL");
+        return;
+    };
+    let stack = tokio::task::spawn_blocking(|| {
+        DockerLocalStack::builder()
+            .with_minio()
+            .start()
+            .unwrap()
+            .expect("owned MinIO fixture required")
+    })
+    .await
+    .unwrap();
+    let raw = stack.s3_raw_config(Some("xorb-owner-loss")).unwrap();
+    let proxy = S3FaultProxy::start(
+        raw.endpoint.as_deref().unwrap(),
+        S3ProxyFault::DelaySuccessfulPutResponse(Duration::from_secs(10)),
+    )
+    .unwrap();
+    let config = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(Some(proxy.endpoint().to_owned()))
+        .with_credentials(
+            raw.access_key.map(shardline_protocol::SecretString::new),
+            raw.secret_key.map(shardline_protocol::SecretString::new),
+            raw.session_token.map(shardline_protocol::SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
+    let mut backend = fixture.postgres().clone();
+    backend.object_store = crate::ServerObjectStore::s3(config).unwrap();
+    let (xorb, hash) =
+        crate::test_fixtures::single_chunk_xorb(b"provider accepted xorb before owner loss");
+    let session = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    session
+        .scope(async {
+            let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                &backend.request_session_identity,
+            )
+            .await
+            .unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **owner.as_mut().unwrap())
+                .await
+                .unwrap();
+            drop(owner);
+            let interrupt = async {
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    while !proxy.fault_was_injected() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(
+                    sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                        .bind(pid)
+                        .fetch_one(&fixture.admin)
+                        .await
+                        .unwrap()
+                );
+            };
+            let (result, ()) = tokio::join!(backend.upload_xorb(&hash, xorb.clone()), interrupt);
+            assert!(matches!(
+                result,
+                Err(crate::ServerError::StaleResourceFence)
+            ));
+        })
+        .await;
+    assert!(proxy.fault_was_injected());
+    let intent_id = format!("xorb-{hash}");
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Storing
+    );
+    let key = crate::xet_adapter::xorb_object_key(&hash).unwrap();
+    let stored = backend
+        .object_store()
+        .read_range(
+            &key,
+            shardline_protocol::ByteRange::new(
+                0,
+                u64::try_from(xorb.len()).unwrap().checked_sub(1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(stored.as_slice(), xorb.as_ref());
+    session.finish().await;
+    backend.upload_xorb(&hash, xorb.clone()).await.unwrap();
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Visible
+    );
+    fixture.finish().await;
+    tokio::task::spawn_blocking(move || {
+        drop(proxy);
+        drop(stack);
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_native_upload_owner_cannot_be_recovered_from_intent_bookkeeping() {
     use shardline_index::{UploadIntentState, UploadIntentStore};
