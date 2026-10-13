@@ -128,7 +128,7 @@ for attempt in $(seq 1 30); do
 done
 run_id=$(jq -er '.tasks[] | select(.state == "running") | .id' "$fixture/before.json")
 [[ "$run_id" =~ ^[a-f0-9]{32}$ ]]
-vm_ssh "sudo find /var/lib/shardline/chunks/_shardline_tasks/v1/runs/$run_id/records -type f -exec sha256sum {} \\; | sort; sync" > "$fixture/records-before"
+vm_ssh "sudo sqlite3 -readonly /var/lib/shardline/metadata.sqlite3 \"SELECT artifact_key,hex(payload) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '_shardline_tasks/v1/runs/$run_id/records/%' ORDER BY artifact_key;\"; sync" > "$fixture/records-before"
 test "$(wc -l < "$fixture/records-before")" -eq 3
 printf 'system_reset\n' | socat - "UNIX-CONNECT:$fixture/monitor.sock" > "$fixture/reset.log"
 wait_for_guest "$fixture/boot-after"
@@ -152,7 +152,7 @@ for attempt in $(seq 1 20); do
     sleep 1
 done
 jq -e --arg id "$run_id" '(.tasks | length) == 4 and ([.tasks[] | select(.id == $id and .state == "needs_reconciliation")] | length) == 1 and all(.tasks[]; if .id == $id then .state == "needs_reconciliation" else .state == "completed" end)' "$fixture/after.json"
-vm_ssh "sudo find /var/lib/shardline/chunks/_shardline_tasks/v1/runs/$run_id/records -type f -exec sha256sum {} \\; | sort" > "$fixture/records-after"
+vm_ssh "sudo sqlite3 -readonly /var/lib/shardline/metadata.sqlite3 \"SELECT artifact_key,hex(payload) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '_shardline_tasks/v1/runs/$run_id/records/%' ORDER BY artifact_key;\"" > "$fixture/records-after"
 cmp "$fixture/records-before" "$fixture/records-after"
 # Positive control: the orphan really is discoverable by GC. Only an explicit
 # new invocation may mark it; the old run must remain unresolved afterward.
@@ -225,7 +225,7 @@ sudo sqlite3 -readonly -json /var/lib/shardline/metadata.sqlite3 "SELECT * FROM 
 test -s /var/tmp/report-candidate-before.json
 sudo cat "$body"
 sudo sha256sum "$body" > /var/tmp/report-body-before.sha256
-sudo find "/var/lib/shardline/chunks/_shardline_tasks/v1/runs/$id/records" -type f -exec sha256sum {} \; | sort > /var/tmp/report-records-before.sha256
+sudo sqlite3 -readonly /var/lib/shardline/metadata.sqlite3 "SELECT artifact_key,hex(payload) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '_shardline_tasks/v1/runs/$id/records/%' ORDER BY artifact_key;" > /var/tmp/report-records-before.sha256
 test "$(wc -l < /var/tmp/report-records-before.sha256)" -eq 3
 printf '%s\n' "$directory" > /var/tmp/report-directory
 sync
@@ -250,7 +250,7 @@ test "$(cat /var/lib/shardline/chunks/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 directory=$(cat /var/tmp/report-directory)
 test "$(sudo sqlite3 -readonly "$directory/tasks.sqlite" 'SELECT count(*) FROM penelope_records_v1')" -eq 3
 sudo sha256sum -c /var/tmp/report-body-before.sha256
-sudo find "/var/lib/shardline/chunks/_shardline_tasks/v1/runs/$id/records" -type f -exec sha256sum {} \; | sort > /var/tmp/report-records-after.sha256
+sudo sqlite3 -readonly /var/lib/shardline/metadata.sqlite3 "SELECT artifact_key,hex(payload) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '_shardline_tasks/v1/runs/$id/records/%' ORDER BY artifact_key;" > /var/tmp/report-records-after.sha256
 cmp /var/tmp/report-records-before.sha256 /var/tmp/report-records-after.sha256
 GUEST
 for attempt in $(seq 1 20); do
