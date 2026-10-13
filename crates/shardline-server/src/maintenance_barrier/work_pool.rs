@@ -1,6 +1,8 @@
 use sqlx::PgPool;
 
-/// Closes every handle to a work pool when its operation exits or is cancelled.
+/// Closes a work pool when its operation exits or is cancelled.
+/// Borrowed connections retain their original session locks until released;
+/// closing a pool does not authorize competing work to bypass those locks.
 pub(crate) struct WorkPoolCleanup(PgPool);
 
 impl WorkPoolCleanup {
@@ -26,6 +28,53 @@ pub(crate) fn close_work_pool(pool: &PgPool) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn cancellation_keeps_borrowed_connection_owned_until_release() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let owner_url = url.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let pool = super::super::postgres_exclusive_work_pool(&owner_url)
+                .await
+                .unwrap();
+            let _cleanup = super::WorkPoolCleanup::new(&pool);
+            let connection = pool.acquire().await.unwrap();
+            sender.send((pool.clone(), connection)).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (retained, mut connection) = receiver.await.unwrap();
+        let mut waiter =
+            tokio::spawn(async move { super::super::postgres_exclusive_work_pool(&url).await });
+        owner.abort();
+        assert!(owner.await.unwrap_err().is_cancelled());
+        assert!(retained.is_closed());
+        assert!(matches!(
+            retained.acquire().await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiter)
+                .await
+                .is_err(),
+            "replacement must not bypass the borrowed original owner"
+        );
+        let owns_lock: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory' AND granted)")
+            .fetch_one(&mut *connection).await.unwrap();
+        assert!(owns_lock);
+        drop(connection);
+        let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        replacement.close().await;
+        retained.close().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::unwrap_used)]
     async fn cancelled_operation_releases_postgres_ownership_with_retained_handles() {
