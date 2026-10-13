@@ -2821,3 +2821,35 @@ workflows with completed-history reuse. Fourteen tests are selection exclusions.
 The strengthened test observes the child stopped before invoking recovery;
 recovery still rejects the uncertain mutation. This does not cancel remote
 effects already issued. Formatting, diff checks and the AST graph update pass.
+
+## Full maintenance CLI suite against metadata-backed history
+
+All 18 `maintenance_e2e` tests pass in 3.740 seconds with optimized CLI SHA-256
+`aee2f7cba208a6e669bae90b24cacd9f4c7a494dc853e973b3e677cad86691c2`.
+Log: `/tmp/shardline-maintenance-cli-audit.yiJA8O/final.log`; no selected runtime
+skip or panic is logged. This includes fresh ordinary invocations, verified native
+records and signed/materialized outcomes, non-UTF-8 paths, same-PID execution,
+permission preservation, failure status, configuration pinning, local storage
+migration, optional-worker lifetime and interruption recovery.
+
+The first complete run had 12 passes and six failures; its log is retained as
+`before.log` in the same fixture. Five tests still read automatic history from
+the old payload-directory layout, and one still required the duplicate tracking
+warning that the released-error compatibility fix removed. Tests now read actual
+SQLite manifests while retaining their native projection, signature, outcome,
+fresh-run and owner-PID assertions. They also check that ordinary history stays
+outside payload inventory. The invalid-root case preserves its original status
+and diagnostic without requiring the duplicate warning.
+
+The shared-publication fault now installs a SQLite insert trigger on the actual
+task-artifact table. Application work succeeds, private native evidence remains,
+and removing the trigger allows the next invocation to publish both histories
+and clean their workspaces. The unrelated seed evidence is preserved. Cleanup
+assertions allow only an empty `retired` directory, rather than treating that
+infrastructure directory as an unremoved workspace. The intermediate result
+with those two stale cleanup assertions is retained as `metadata.log`.
+
+Strict CLI library/test Clippy, formatting and diff checks pass. These changes
+repair verification against the current storage contract; no runtime behavior
+or version changed. They do not close the remaining deployment-layout and
+external-mutation audits.
