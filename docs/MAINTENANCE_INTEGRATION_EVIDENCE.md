@@ -2161,3 +2161,36 @@ assertions passed. Log: `/tmp/shardline-postgres-capacity.gGST2u/test.log`;
 verifier output: `.codex/validation/ux-batched-deletion-pg-capacity.log`.
 Strict index/server library and test Clippy and diff checks passed.
 These measurements leave production latency and larger legacy archives open.
+
+## Optional history cleanup at shutdown
+
+Normal serving now signals optional history housekeeping to stop when shutdown
+starts and when serving finishes. Public-library routers also stop it when the
+last router guard is dropped. The stop flag belongs only to the housekeeping
+store clone; request ownership, actual maintenance jobs and ordinary CLI history
+keep their existing behavior. Public `AppState` fields and router signatures
+remain unchanged. No service, process or operator setting is added.
+
+Cancellation is cooperative: scans and evidence I/O check it between operations;
+an already running storage call can finish. Partial retirement remains resumable.
+This does not establish a fixed shutdown deadline for arbitrary storage adapters.
+
+Three local fault tests passed in 0.12 seconds: dropping the last guard stops only
+its housekeeping store, a scan stops after its first visited item without changing
+the inventory, and a cancelled partial retirement preserves its marker for a
+fresh store. The real router lifetime test, authenticated startup/status fixture
+and existing signal-relative shutdown-timeout test also passed. Logs:
+`.codex/validation/ux-housekeeping-shutdown-tests.log`,
+`.codex/validation/ux-router-housekeeping-shutdown-tests.log`,
+`.codex/validation/ux-housekeeping-router-status-tests.log` and
+`.codex/validation/ux-housekeeping-existing-shutdown-tests.log`.
+Strict library/test Clippy, formatting, diff checks and AST graph refresh passed.
+
+The final optimized CLI reports 1.11.3 and has SHA-256
+`65221eb7c90328b6449f86c5638e7beb8daa632e90b65f638e5f40e8d1a3767d`.
+Its restricted released/current OCI/S3 process drill passed owner loss,
+publication failure, SIGKILL, fresh retry and released rollback with the ledger
+and grants unchanged. Ordinary servers had no child processes at readiness and
+completion. Fixture logs contain no matching Tokio shutdown panic. Diagnostics:
+`/tmp/shardline-oci-upgrade.pjXI8A`; verifier output:
+`.codex/validation/ux-housekeeping-oci-upgrade.log`.

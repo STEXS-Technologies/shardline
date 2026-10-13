@@ -201,6 +201,15 @@ impl Drop for ActiveProtocolRequestGuard<'_> {
 ///
 /// Returns [`ServerError`] when the configured backend cannot initialize.
 pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
+    let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
+    router_with_housekeeping_guard(config, guard, stopped).await
+}
+
+async fn router_with_housekeeping_guard(
+    config: ServerConfig,
+    housekeeping_guard: crate::task_tracking::housekeeping::HousekeepingGuard,
+    housekeeping_stopped: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Router, ServerError> {
     config.validate_runtime_requirements()?;
     let role = config.server_role();
     let max_request_body_bytes = config.max_request_body_bytes();
@@ -234,16 +243,19 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         task_tracker = task_tracker.with_history_scope(scope);
     }
     let task_tracker = Arc::new(task_tracker);
-    let retention_store = evidence_store;
+    let retention_store = evidence_store.with_housekeeping_stop(housekeeping_stopped.clone());
     let retention_deployment = crate::task_tracking::deployment_fingerprint(&config)?;
     tokio::task::spawn_blocking(move || {
         if let Err(error) = retention_store.prune_completed(
             retention_deployment,
             shardline_protocol::unix_now_seconds_lossy(),
-        ) {
+        ) && !housekeeping_stopped.load(Ordering::Relaxed)
+        {
             tracing::warn!("task evidence retention unavailable; serving continues: {error}");
         }
-        if let Err(error) = retention_store.relocate_finished_history(retention_deployment) {
+        if let Err(error) = retention_store.relocate_finished_history(retention_deployment)
+            && !housekeeping_stopped.load(Ordering::Relaxed)
+        {
             tracing::warn!(
                 "legacy task history relocation unavailable; serving continues: {error}"
             );
@@ -563,7 +575,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     register_route_policies(&mut policy_registry);
     tracing::debug!("registered {} route auth policies", policy_registry.len());
 
-    Ok(app)
+    Ok(app.layer(axum::Extension(Arc::new(housekeeping_guard))))
 }
 
 /// Runs the Shardline HTTP server.
@@ -650,21 +662,24 @@ async fn serve_with_listener_until<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let app = router(config.clone()).await?;
+    let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
+    let app = router_with_housekeeping_guard(config.clone(), guard, stopped.clone()).await?;
     shardline_metrics::metrics().system.start_uptime();
     tracing::info!("router initialized, starting HTTP serve");
     let shutdown_timeout = config.shutdown_timeout();
     let (shutdown_started_tx, shutdown_started_rx) = oneshot::channel();
+    let shutdown_stopped = stopped.clone();
     let graceful_shutdown = async move {
         shutdown_signal.await;
+        shutdown_stopped.store(true, Ordering::Relaxed);
         tracing::info!("shutdown signal received, draining connections");
         let _ignored = shutdown_started_tx.send(());
     };
     let serve = serve_http(listener, app).with_graceful_shutdown(graceful_shutdown);
-    if let Some(timeout) = shutdown_timeout {
+    let result = if let Some(timeout) = shutdown_timeout {
         tokio::select! {
             result = serve => {
-                result.map_err(ServerError::from)?;
+                result.map_err(ServerError::from)
             }
             () = async {
                 if shutdown_started_rx.await.is_ok() {
@@ -674,12 +689,14 @@ where
                 }
             } => {
                 tracing::warn!("graceful shutdown timed out after {timeout:?}, aborting");
+                Ok(())
             }
         }
     } else {
-        serve.await.map_err(ServerError::from)?;
-    }
-    Ok(())
+        serve.await.map_err(ServerError::from)
+    };
+    stopped.store(true, Ordering::Relaxed);
+    result
 }
 
 fn register_frontend_routes(

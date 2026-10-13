@@ -108,6 +108,11 @@ These are scoped results, not a claim that every deployment is compatible:
   do not close the broader merge gates below.
 - History distinguishes completed, failed and unresolved runs. Signed records
   and reports are verified; unfinished and corrupt evidence is retained.
+  Optional archive cleanup now observes server shutdown and router lifetime,
+  with tests for stopping inventory scans and resuming partial evidence retirement.
+  Its stop signal does not cancel application jobs or ordinary CLI commands;
+  storage I/O already in progress can finish. The final optimized CLI also passes
+  the restricted released/current OCI/S3 process drill with no server children.
 - A mark-only GC comparison preserves released output, status and payload bytes
   with 4,096 synthetic orphan entries. Both diagnostic exports exceed 1 MiB;
   all entries and persisted timestamps match. This does not establish reclamation

@@ -1652,3 +1652,22 @@ fn sigterm_drains_public_server() {
 fn sigint_drains_public_server() {
     assert_process_signal_drains_server("-INT");
 }
+#[tokio::test]
+async fn router_lifetime_stops_optional_history_housekeeping() {
+    let root = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://localhost:8080".to_owned(),
+        root.path().to_owned(),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
+    let app = super::router_with_housekeeping_guard(config, guard, stopped.clone())
+        .await
+        .unwrap();
+    let cloned = app.clone();
+    drop(app);
+    assert!(!stopped.load(std::sync::atomic::Ordering::Relaxed));
+    drop(cloned);
+    assert!(stopped.load(std::sync::atomic::Ordering::Relaxed));
+}

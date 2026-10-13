@@ -114,6 +114,9 @@ for investigation. Save reports separately if you need a permanent audit archive
 Large or legacy archives can still slow inspection and final command cleanup.
 Server startup does not wait for history cleanup. Maintenance commands perform
 it after their application work finishes, so it can delay command exit.
+Server shutdown asks optional history cleanup to stop between storage operations.
+A storage call already in progress can finish before cleanup stops.
+A later startup can finish interrupted evidence cleanup.
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.

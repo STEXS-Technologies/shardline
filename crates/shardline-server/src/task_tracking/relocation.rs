@@ -56,12 +56,14 @@ impl TaskEvidenceStore {
     /// Returns storage or conflicting-byte failures. Every removed artifact
     /// already has its exact bytes in metadata, including after partial failure.
     pub fn relocate_finished_history(&self, deployment: Digest) -> Result<usize, ServerError> {
+        self.check_housekeeping()?;
         if self.local_metadata.is_none() && self.postgres_metadata.is_none() {
             return Ok(0);
         }
         let prefix = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}manifests/"))?;
         let mut budget = Budget::default();
         let result = self.objects.visit_prefix(&prefix, |manifest| {
+            self.check_housekeeping()?;
             if budget.moved == 64 || budget.bytes == 16 * 1024 * 1024 {
                 return Err(VisitError::Budget);
             }
@@ -178,14 +180,18 @@ impl TaskEvidenceStore {
             return Ok(true);
         };
         let confirmed = if let Some(metadata) = &self.postgres_metadata {
+            self.check_housekeeping()?;
             metadata.publish(artifact.key().as_str(), &bytes)?;
+            self.check_housekeeping()?;
             metadata
                 .read(artifact.key().as_str(), artifact.length())?
                 .and_then(|saved| saved.bytes)
         } else if let Some(metadata) = &self.local_metadata {
+            self.check_housekeeping()?;
             metadata
                 .publish_task_artifact(artifact.key().as_str(), &bytes)
                 .map_err(ServerError::from)?;
+            self.check_housekeeping()?;
             metadata
                 .read_task_artifact(artifact.key().as_str(), artifact.length())
                 .map_err(ServerError::from)?
