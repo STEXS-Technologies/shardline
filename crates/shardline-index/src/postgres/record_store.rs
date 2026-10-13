@@ -1305,7 +1305,45 @@ mod tests {
         // Cleanup has read the loser; another node publishes before deletion.
         let mut winner = loser.clone();
         winner.content_hash = "c".repeat(64);
-        store.commit_file_version_metadata(&winner).await.unwrap();
+        let mut publication = pool.begin().await.unwrap();
+        let publisher_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *publication)
+            .await
+            .unwrap();
+        store
+            .commit_file_version_metadata_on_connection(&mut publication, &winner)
+            .await
+            .unwrap();
+        let cleanup_pool = pool.clone();
+        let cleanup_record = loser.clone();
+        let cleanup = tokio::spawn(async move {
+            super::super::PostgresRecordStore::new(cleanup_pool)
+                .delete_file_version_metadata_if_latest(&cleanup_record)
+                .await
+        });
+        // Observe the actual database lock wait, rather than assuming a sleep
+        // is long enough for the cleanup transaction to reach its DELETE.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(publisher_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup must wait on the concurrent publication");
+        assert!(!cleanup.is_finished());
+        publication.commit().await.unwrap();
+        assert!(!cleanup.await.unwrap().unwrap());
         assert!(
             !store
                 .delete_file_version_metadata_if_latest(&loser)
