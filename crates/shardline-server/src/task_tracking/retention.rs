@@ -208,14 +208,14 @@ impl TaskEvidenceStore {
             super::TASK_EVIDENCE_PREFIX,
             identity.id
         ))?;
-        if let Some(postgres) = &self.postgres_metadata {
+        if self.postgres_metadata.is_some() || self.local_metadata.is_some() {
             let delete_metadata_batch = |keys: &[String]| {
                 self.check_housekeeping()?;
-                postgres.delete_batch(keys)?;
+                if let Some(postgres) = &self.postgres_metadata {
+                    postgres.delete_batch(keys)?;
+                }
                 if let Some(local) = &self.local_metadata {
-                    for key in keys {
-                        local.delete_task_artifact(key)?;
-                    }
+                    local.delete_task_artifacts(keys)?;
                 }
                 Ok::<(), ServerError>(())
             };
