@@ -2,7 +2,7 @@
 use super::*;
 use shardline_server::{
     ObjectStorageAdapter, ServerConfig,
-    task_tracking::{TaskEvidenceStore, TaskRunState, deployment_fingerprint},
+    task_tracking::{TaskRunState, deployment_fingerprint},
 };
 use std::{fs, num::NonZeroUsize, os::unix::fs::PermissionsExt};
 
@@ -119,7 +119,7 @@ async fn drill_tracker_container_replacement_and_graceful_shutdown() {
         eprintln!("SKIPPED: {drill} — current executable unavailable");
         return;
     };
-    migrate_chaos_postgres(&stack.pg_url).await;
+    migrate_chaos_postgres_with_binary(&binary, &stack.pg_url).await;
     let s3 = S3ObjectStoreConfig::new(OBJECT_BUCKET.to_owned(), "us-east-1".to_owned())
         .with_endpoint(Some(stack.s3_endpoint.clone()))
         .with_credentials(
@@ -137,7 +137,9 @@ async fn drill_tracker_container_replacement_and_graceful_shutdown() {
     .with_index_postgres_url(stack.pg_url.clone())
     .unwrap()
     .with_object_storage(ObjectStorageAdapter::S3, Some(s3));
-    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
+    let store =
+        super::maintenance_history::MaintenanceHistory::from_postgres_pool(&config, &pool).await;
     let deployment = deployment_fingerprint(&config).unwrap();
     let first_root = TempDir::new().unwrap();
     let sessions = first_root.path().join("tmp/lfs-patch");

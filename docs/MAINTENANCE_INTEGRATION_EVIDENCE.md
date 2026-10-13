@@ -1200,3 +1200,28 @@ CARGO_BUILD_JOBS=2 cargo nextest run --locked -p shardline-server --all-features
 
 Check for runtime skips as well as the test summary; an unavailable fixture is
 not evidence that the mutation boundaries passed.
+
+## Optimized container replacement and graceful shutdown
+
+`drill_tracker_container_replacement_and_graceful_shutdown` passes with the
+optimized current binary and isolated real PostgreSQL/MinIO/Redis backends.
+The fixture blocks an existing LFS startup sweep, observes admission, preserves
+the old PID namespace identity, and kills the original server container. A new
+container with a fresh root becomes ready, records a distinct completed sweep,
+and retains the old unresolved run with unchanged published records. The
+replacement has one server process and no private tracker directory. SIGTERM
+exits with status zero without forced kill; a third startup records new work
+while both earlier completed and interrupted records remain unchanged.
+
+The test uses the normal optimized binary's owner migration and reads automatic
+history in metadata. Shared test-only inspection now lives in the conventional
+`deployment_chaos::maintenance_history` module, using blocking execution for
+synchronous history calls and a caller-owned inspection pool. No path override
+or production process/configuration change is introduced.
+
+The container drill and acknowledged-GC smoke drill both pass after this shared
+reader refactor, with no runtime skips. Native log:
+`.codex/validation/ux-optimized-container-replacement.log`. Strict test-target
+Clippy, formatting and whitespace checks pass. Fixtures are removed on exit.
+This covers these container startup and shutdown boundaries, not every operation
+during connection drain or every external mutation.
