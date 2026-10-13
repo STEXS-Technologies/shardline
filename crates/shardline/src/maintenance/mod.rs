@@ -1,4 +1,4 @@
-//! Opt-in maintenance execution. Existing commands and deployment schemas stay intact.
+//! In-process tracking for ordinary maintenance and an optional isolated runner.
 mod archive_lease;
 mod artifact;
 mod automatic;
