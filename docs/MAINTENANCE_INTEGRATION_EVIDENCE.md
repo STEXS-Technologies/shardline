@@ -28,6 +28,14 @@ handling, caller transaction preservation, row policies and legacy retention.
 Strict all-feature, all-target Clippy passed for both crates. This reduces
 per-manifest round trips; the full scan and unresolved-history growth remain open.
 
+A further real-Postgres regression crosses the 64-entry payload-page boundary.
+It creates 65 completed runs, reverses their creation timestamps relative to key
+order, and adds an unfinished run and unreadable identity. Cleanup removes the
+oldest 64, then the last completed run, and a third invocation removes nothing.
+The unfinished and unreadable identity bytes remain unchanged. The configured
+disposable Postgres 16 fixture passed in 8.85 seconds; this is a functional result,
+not a production latency target. Formatting and strict server Clippy also passed.
+
 ## Retention ownership cleanup
 
 The metadata retention chronology regression creates 65 completed runs, with

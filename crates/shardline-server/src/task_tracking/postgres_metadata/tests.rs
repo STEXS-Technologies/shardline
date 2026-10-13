@@ -129,6 +129,102 @@ fn library_backend_without_runtime_returns_an_error_without_starting_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batched_retention_crosses_pages_without_losing_oldest_first_or_unfinished_history() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    assert!(store.postgres_metadata.is_some());
+    let store = store.require_metadata_publication();
+    tokio::task::spawn_blocking(move || {
+        let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
+        for _ in 0..65 {
+            tracker
+                .begin(
+                    "finished",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"complete")
+                .unwrap();
+        }
+        let mut ids: Vec<_> = store
+            .summaries(deployment, None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect();
+        ids.sort();
+        for (position, id) in ids.iter().enumerate() {
+            let suffix = format!("manifests/{id}");
+            let mut identity: super::super::TaskRunIdentity =
+                serde_json::from_slice(&store.read(&suffix, 65536).unwrap().unwrap()).unwrap();
+            identity.created_at = 65_u64
+                .checked_sub(u64::try_from(position).unwrap())
+                .unwrap();
+            store
+                .delete_artifact(&super::super::TaskEvidenceStore::key(&suffix).unwrap())
+                .unwrap();
+            store
+                .publish(&suffix, &serde_json::to_vec(&identity).unwrap())
+                .unwrap();
+        }
+        let unfinished = tracker
+            .begin(
+                "unfinished",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap();
+        let unfinished_id = store
+            .summaries(deployment, None, 100)
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.operation == "unfinished")
+            .unwrap()
+            .id;
+        let unfinished_suffix = format!("manifests/{unfinished_id}");
+        let original = store.read(&unfinished_suffix, 65536).unwrap();
+        store
+            .publish("manifests/unreadable", b"invalid identity")
+            .unwrap();
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 64);
+        for (position, id) in ids.iter().enumerate() {
+            assert_eq!(
+                store
+                    .read(&format!("manifests/{id}"), 65536)
+                    .unwrap()
+                    .is_some(),
+                position == 0
+            );
+        }
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 0);
+        assert_eq!(store.read(&unfinished_suffix, 65536).unwrap(), original);
+        assert_eq!(
+            store
+                .read("manifests/unreadable", 65536)
+                .unwrap()
+                .as_deref(),
+            Some(b"invalid identity".as_slice())
+        );
+        drop(unfinished);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn row_policies_disable_optional_history_without_stopping_startup_work() {
     use axum::{
         body::{Body, to_bytes},
