@@ -485,6 +485,80 @@ fn saved_report_without_completion_acknowledgement_stays_unresolved() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_command_preserves_success_when_report_or_acknowledgement_is_denied() {
+    for denied_suffix in ["artifacts/*", "records/0000000003"] {
+        let root = tempfile::tempdir().unwrap();
+        let configured = config(root.path());
+        let work_config = configured.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            let store = TaskEvidenceStore::from_config(&work_config).unwrap();
+            store
+                .publish("runs/fixture/blobs/seed", b"fixture")
+                .unwrap();
+            let connection =
+                rusqlite::Connection::open(work_config.root_dir().join("metadata.sqlite3"))
+                    .unwrap();
+            connection
+                .execute_batch(&format!(
+                "CREATE TRIGGER fixture_reject_result BEFORE INSERT ON shardline_task_artifacts_v1
+                 WHEN NEW.artifact_key GLOB '_shardline_tasks/v1/runs/*/{denied_suffix}'
+                 BEGIN SELECT RAISE(ABORT, 'fixture rejects result recording'); END;"
+            ))
+                .unwrap();
+            let operation = MaintenanceOperation::IndexRebuild {
+                root: work_config.root_dir().to_owned(),
+            };
+            let configuration = super::super::configuration::Configuration {
+                command: crate::CliCommand::IndexRebuild {
+                    root: Some(work_config.root_dir().to_owned()),
+                },
+                config: work_config.clone(),
+                config_path: None,
+                migration: None,
+            };
+            super::super::configuration::scope(configuration, || -> Result<_> {
+                Ok(run(
+                    &operation,
+                    vec![OsString::from("shardline"), OsString::from("index-rebuild")],
+                    &work_config,
+                ))
+            })
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(output.success);
+        assert_eq!(output.exit_code, Some(0));
+        assert!(!output.evidence_published);
+        assert!(output.capture.is_none());
+        let store = TaskEvidenceStore::from_config(&configured).unwrap();
+        let deployment =
+            shardline_server::task_tracking::deployment_fingerprint(&configured).unwrap();
+        let history = store.summaries(deployment, None, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        let task = history.first().unwrap();
+        assert!(!matches!(
+            task.state,
+            TaskRunState::Completed | TaskRunState::Failed
+        ));
+        assert!(
+            store
+                .read(&format!("runs/{}/records/0000000003", task.id), 65536)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 0);
+        assert_eq!(
+            store
+                .read("runs/fixture/blobs/seed", 65536)
+                .unwrap()
+                .as_deref(),
+            Some(b"fixture".as_slice())
+        );
+    }
+}
+
 #[test]
 fn shared_completion_write_failure_never_claims_a_finished_task() {
     let root = tempfile::tempdir().unwrap();
