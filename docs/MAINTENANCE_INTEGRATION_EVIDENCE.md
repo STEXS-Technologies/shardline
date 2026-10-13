@@ -2713,3 +2713,31 @@ completed-history pruning. Handler summaries remain live on stdout.
 Strict CLI library/test Clippy and diff checks pass. This tests successful empty
 local rebuilds; it does not substitute for released/current output comparisons,
 failure-outcome coverage or the external-mutation audit.
+
+## Incremental automatic history retirement
+
+Normal command and startup housekeeping now uses
+`prune_completed_incrementally`, with a shared budget of 256 run-artifact keys
+per invocation and the existing ceiling of 64 finished runs. A key may have both
+metadata and legacy object copies; both are removed before its metadata batch
+commits. Manifest, scope-binding and retirement-marker operations are outside
+the artifact-key count. The existing public `prune_completed` API retains its
+previous behavior.
+
+When the budget runs out, the hidden run keeps its retirement marker and its
+remaining artifacts. A later invocation resumes it before admitting new
+retirements. This never repeats application work, changes command status or
+deletes payload objects. Inventory scans and active I/O remain outside a wall
+clock bound; legacy relocation is a separate housekeeping step.
+
+Three local retention tests pass in 1.21 seconds, including 400-extra-artifact
+SQLite and legacy-object histories, exact 256-key progress, metadata/object
+copies, reopening, marker preservation, payload preservation and the existing
+second-batch failure regression. The configured PostgreSQL fixture passes both
+retention tests in 2.45 seconds:
+`/tmp/shardline-batched-deletion.v0oRLD/test.log`. It verifies exact progress,
+retained scope binding and marker, fresh-backend resumption and final cleanup.
+The ordinary command/cleanup-order fixture passes all four combinations in
+39.58 seconds, preserving command status when cleanup fails. Strict server and
+CLI library/test Clippy and diff checks pass. These checks establish incremental
+retirement semantics, not a production speedup or a hard command-exit deadline.

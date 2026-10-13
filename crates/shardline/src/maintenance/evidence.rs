@@ -8,8 +8,8 @@ pub(super) fn retire_finished_history(
     store: &TaskEvidenceStore,
     deployment: penelope_core::task::Digest,
 ) {
-    if let Err(error) =
-        store.prune_completed(deployment, shardline_protocol::unix_now_seconds_lossy())
+    if let Err(error) = store
+        .prune_completed_incrementally(deployment, shardline_protocol::unix_now_seconds_lossy())
     {
         tracing::warn!(
             "maintenance evidence retention unavailable; original command result is preserved: {error}"
