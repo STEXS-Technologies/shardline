@@ -225,6 +225,49 @@ impl PostgresIndexStore {
             .collect()
     }
 
+    /// Pages at most 64 artifacts, each with at most 64 KiB of payload.
+    /// Larger artifacts retain their length with no body. Keys outside the
+    /// literal prefix are excluded. Uses the existing read/page permissions and
+    /// functions, without a schema upgrade or another connection.
+    ///
+    /// # Errors
+    /// Returns missing installation, authorization or database errors.
+    pub async fn task_artifact_bounded_page_on_connection(
+        connection: &mut PgConnection,
+        prefix: &str,
+        after: Option<&str>,
+    ) -> Result<Vec<(String, PostgresTaskArtifact)>, PostgresMetadataStoreError> {
+        let (mut transaction, schema, timeout) =
+            Self::task_artifact_transaction(connection).await?;
+        let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
+        let rows: Vec<(String, i64, Option<Vec<u8>>)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT page.artifact_key, artifact.byte_length, artifact.body
+                 FROM {quoted}.shardline_task_artifact_page_v1($1,$2,$3) page
+                 CROSS JOIN LATERAL {quoted}.shardline_task_artifact_read_v1(
+                     $1,page.artifact_key,65536) artifact
+                 WHERE left(page.artifact_key,char_length($2))=$2
+                 ORDER BY page.artifact_key COLLATE \"C\""
+            )))
+            .bind(&schema)
+            .bind(prefix)
+            .bind(after)
+            .fetch_all(&mut *transaction)
+            .await?;
+        Self::finish_task_artifact_transaction(transaction, &timeout).await?;
+        rows.into_iter()
+            .map(|(key, length, bytes)| {
+                Ok((
+                    key,
+                    PostgresTaskArtifact {
+                        length: i64_to_u64(length)?,
+                        bytes,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     /// Removes evidence with existing maintenance-deletion permissions.
     /// This cannot mutate domain metadata or acquire execution ownership.
     /// Artifact queries use a transaction-local timeout of at most five seconds.

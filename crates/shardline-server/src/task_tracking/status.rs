@@ -171,6 +171,8 @@ impl TaskEvidenceStore {
     ) -> Result<BTreeMap<(u64, String), TaskRunIdentity>, ServerError> {
         let prefix = ObjectPrefix::parse(&format!("{}{category}/", super::TASK_EVIDENCE_PREFIX))?;
         let mut candidates: BTreeMap<(u64, String), TaskRunIdentity> = BTreeMap::new();
+        let mut payloads = BTreeMap::new();
+        let mut payload_cursor: Option<String> = None;
         self.visit_prefix(&prefix, |metadata| {
             let id = metadata
                 .key()
@@ -178,7 +180,32 @@ impl TaskEvidenceStore {
                 .rsplit('/')
                 .next()
                 .ok_or(ServerError::InvalidPath)?;
-            let bytes = match self.read(&format!("{category}/{id}"), 65536) {
+            let suffix = format!("{category}/{id}");
+            let read = (|| {
+                let key = metadata.key().as_str();
+                if let Some(postgres) = &self.postgres_metadata {
+                    if !payloads.contains_key(key)
+                        && payload_cursor.as_deref().is_none_or(|after| key > after)
+                    {
+                        let page =
+                            postgres.bounded_page(prefix.as_str(), payload_cursor.as_deref())?;
+                        payload_cursor = page.last().map(|(last_key, _)| last_key.clone());
+                        payloads = page.into_iter().collect();
+                    }
+                    if let Some(artifact) = payloads.remove(key) {
+                        let bytes = artifact.bytes.ok_or(ServerError::RequestBodyTooLarge)?;
+                        if self
+                            .read_objects(&suffix, 65536)?
+                            .is_some_and(|legacy| legacy != bytes)
+                        {
+                            return Err(ServerError::InvalidContentHash);
+                        }
+                        return Ok(Some(bytes));
+                    }
+                }
+                self.read(&suffix, 65536)
+            })();
+            let bytes = match read {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => return Ok::<(), ServerError>(()),
                 Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {

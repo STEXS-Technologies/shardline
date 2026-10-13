@@ -11,6 +11,23 @@ commands. Earlier observations describe their tested revision; later notes recor
 subsequent fixes. They are not a substitute for the current checklist or proof of
 untested deployments.
 
+## Retention batch reads
+
+Postgres retention now fetches bounded manifest payloads in pages instead of
+reading each manifest separately. A page contains at most 64 bodies of at most
+64 KiB each. Oversized records retain their length without transferring their
+body. The query composes the existing read/page functions on the same caller
+connection, preserving transaction, schema, timeout and permission checks.
+It introduces no migration, function installation or runtime grant.
+
+Retention still checks legacy byte conflicts and verifies eligible outcomes,
+selects the oldest finished runs, and retains corrupt or unresolved history.
+Seven index artifact tests and six server metadata tests passed with a disposable
+Postgres 16 database configured, including prefix/cursor boundaries, oversize
+handling, caller transaction preservation, row policies and legacy retention.
+Strict all-feature, all-target Clippy passed for both crates. This reduces
+per-manifest round trips; the full scan and unresolved-history growth remain open.
+
 ## Retention ownership cleanup
 
 The metadata retention chronology regression creates 65 completed runs, with
