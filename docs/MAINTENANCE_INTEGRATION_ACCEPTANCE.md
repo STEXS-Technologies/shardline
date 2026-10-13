@@ -98,6 +98,16 @@ The following still need implementation or stronger evidence before merge:
   Atomic event recording alone does not prove
   request ownership, and this finding does not show that file publication bypasses
   its fence.
+  The next ownership audit must distinguish native shards from raw xorbs.
+  `PostgresBackend::upload_shard_stream` performs validated file publication
+  inside the coordinator's work callback. Only after that callback succeeds
+  does the coordinator advance `Stored`, `MetadataCommitted` and `Visible`.
+  Those later intent transitions describe progress; they do not authorize the
+  earlier publication. `upload_xorb_stream` uses the same pool-backed intent
+  coordinator but its callback stores the content-addressed xorb instead of
+  publishing file metadata. The native-publication tests therefore do not prove
+  request-owner fencing for raw-xorb intent transitions. Audit both paths at
+  each mutation boundary before claiming every upload lifecycle is fenced.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and
