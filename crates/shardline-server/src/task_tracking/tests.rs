@@ -787,6 +787,57 @@ fn larger_metadata_backlog_preserves_pagination_and_safe_retention() {
     verify_metadata_backlog(1024);
 }
 
+#[test]
+fn metadata_retention_uses_creation_time_instead_of_key_order() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let store = TaskEvidenceStore::from_config(&config)
+        .unwrap()
+        .require_metadata_publication();
+    let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
+    for _ in 0..65 {
+        tracker
+            .begin(
+                "finished",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+    }
+    let mut ids: Vec<_> = store
+        .summaries(deployment, None, 100)
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.id)
+        .collect();
+    ids.sort();
+    for (position, id) in ids.iter().enumerate() {
+        let path = format!("manifests/{id}");
+        let mut identity: TaskRunIdentity =
+            serde_json::from_slice(&store.read(&path, 65536).unwrap().unwrap()).unwrap();
+        // Fixture timestamps deliberately oppose ordered metadata keys.
+        identity.created_at = 65_u64
+            .checked_sub(u64::try_from(position).unwrap())
+            .unwrap();
+        store
+            .delete_artifact(&ObjectKey::parse(&format!("{TASK_EVIDENCE_PREFIX}{path}")).unwrap())
+            .unwrap();
+        store
+            .publish(&path, &serde_json::to_vec(&identity).unwrap())
+            .unwrap();
+    }
+    assert_eq!(store.prune_completed(deployment, 31 * 86400).unwrap(), 64);
+    let remaining = store.summaries(deployment, None, 100).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(&remaining.first().unwrap().id, ids.first().unwrap());
+    assert_eq!(remaining.first().unwrap().state, TaskRunState::Completed);
+    assert_eq!(store.prune_completed(deployment, 31 * 86400).unwrap(), 1);
+    assert!(store.summaries(deployment, None, 100).unwrap().is_empty());
+}
+
 fn verify_metadata_backlog(finished_count: usize) {
     let total_count = finished_count.checked_add(2).unwrap();
     let root = tempfile::tempdir().unwrap();
