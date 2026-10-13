@@ -8,6 +8,38 @@ fn status_for(error: &ServerError) -> StatusCode {
 }
 
 #[tokio::test]
+async fn lost_write_ownership_is_retryable_across_protocols() {
+    use axum::http::header::RETRY_AFTER;
+    let responses = [
+        ServerError::StaleResourceFence.into_response(),
+        OciError(ServerError::StaleResourceFence).into_response(),
+        shardline_s3_adapter::S3Error::from(ServerError::StaleResourceFence).into_response(),
+    ];
+    for (protocol, response) in ["HTTP", "OCI", "S3"].into_iter().zip(responses) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(RETRY_AFTER),
+            Some(&axum::http::HeaderValue::from_static("1")),
+            "{protocol} must tell the client when to retry"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(
+            body.contains("retry with a fresh request"),
+            "{protocol}: {body}"
+        );
+        if protocol == "OCI" {
+            let value: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(value["errors"][0]["code"], "INTERNAL");
+        } else if protocol == "S3" {
+            assert!(body.contains("<Code>SlowDown</Code>"), "{body}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn missing_staged_content_is_retryable_across_protocols() {
     use axum::http::header::RETRY_AFTER;
     let responses = [
