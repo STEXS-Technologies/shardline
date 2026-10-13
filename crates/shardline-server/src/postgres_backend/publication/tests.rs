@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Publication must not expose chunks removed after immutable staging.
+mod library_ownership;
 mod native_scope;
 mod xorb_retry;
 use crate::{test_support::postgres_fixture::PostgresFixture, upload_ingest::RequestBodyReader};

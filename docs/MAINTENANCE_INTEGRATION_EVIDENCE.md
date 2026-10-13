@@ -4498,3 +4498,31 @@ Its isolated partition drill passes: GET fails with 500 during the confirmed
 partition and recovery succeeds after reconnection
 (`/tmp/shardline-eager-first-partition.JcmidC/test.log`). This targeted replay
 does not replace the outstanding broader acceptance review.
+
+The complete complementary protocol-fault suite subsequently passes all 12
+configured scenarios on that same optimized executable
+(`/tmp/shardline-protocol-faults.zb1kkZ/test.log`, 136.394 seconds). This includes
+the partition regression and rejects runtime fixture skips. These results
+precede the public-library ownership changes described below.
+
+### Automatic ownership for public PostgreSQL uploads
+
+A configured library fixture reproduced public `PostgresBackend::upload_xorb`
+completion while an exclusive GC barrier was held. Public file and xorb uploads
+now establish their request session automatically before executing upload work.
+Calls within the matching HTTP session reuse it; a lost session is rejected
+without reacquisition. Cancellation retains the existing close-on-drop lock
+release behavior. No public method signature or configuration changes.
+
+The new tests verify waiting for exclusive GC, successful completion after
+release, and rejection of both public upload methods after actual termination
+of the existing database owner. The configured publication suite passes all 25
+tests, including actual released-server recovery, with no runtime fixture skips
+(`/tmp/shardline-batched-deletion.MIB6wX/test.log`). Strict server Clippy passes
+(`/tmp/shardline-library-ownership-clippy.log`). The earlier 24-test attempt
+omitted the released binary environment setting and was rejected by the fixture
+wrapper for runtime skips; it is not the complete suite result.
+
+This strengthens the public upload boundary. Lower-level metadata-only methods
+still require caller ownership and physical-reference validation. Broader cost,
+deployment and mutation-phase gates remain open.

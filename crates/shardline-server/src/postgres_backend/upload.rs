@@ -60,11 +60,15 @@ impl super::PostgresBackend {
         body: Bytes,
         repository_scope: Option<&RepositoryScope>,
     ) -> Result<UploadFileResponse, ServerError> {
-        self.upload_file_stream(
-            file_id,
-            RequestBodyReader::from_bytes(body),
-            repository_scope,
-            None,
+        crate::maintenance_barrier::RequestSession::scope_if_needed(
+            &self.gc_barrier_pool,
+            &self.request_session_identity,
+            self.upload_file_stream(
+                file_id,
+                RequestBodyReader::from_bytes(body),
+                repository_scope,
+                None,
+            ),
         )
         .await
     }
@@ -210,8 +214,12 @@ impl super::PostgresBackend {
         expected_hash: &str,
         body: Bytes,
     ) -> Result<XorbUploadResponse, ServerError> {
-        self.upload_xorb_stream(expected_hash, RequestBodyReader::from_bytes(body))
-            .await
+        crate::maintenance_barrier::RequestSession::scope_if_needed(
+            &self.gc_barrier_pool,
+            &self.request_session_identity,
+            self.upload_xorb_stream(expected_hash, RequestBodyReader::from_bytes(body)),
+        )
+        .await
     }
 
     /// Stores a bounded raw xorb body under its content hash.
