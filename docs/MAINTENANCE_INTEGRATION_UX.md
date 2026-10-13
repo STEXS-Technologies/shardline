@@ -91,6 +91,8 @@ for `processed saved remote delete replies`: `settled` counts cleared attempts,
 and `retained` counts evidence that could not settle an attempt. A run examining
 64 replies may have more to check; it does not mean all pending objects were
 recovered. Inspect pending deletes again after repair.
+Repair also logs guidance when it reaches that limit or retains evidence that
+could not settle an attempt. These messages do not change its exit status.
 Missing or invalid replies leave the object blocked for investigation; absence
 alone cannot clear it. Repair does not mark an interrupted GC run completed.
 `Retry-After: 1` suggests when to retry, not when recovery will finish.

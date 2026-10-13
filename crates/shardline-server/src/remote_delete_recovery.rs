@@ -19,6 +19,17 @@ pub(crate) async fn recover_saved_replies(index: &PostgresIndexStore, objects: &
                 retained = recovery.retained,
                 "processed saved remote delete replies"
             );
+            if recovery.retained > 0 {
+                tracing::warn!(
+                    retained = recovery.retained,
+                    "some saved delete replies could not settle their attempts; inspect the original GC and storage logs and pending deletes before retrying affected writes"
+                );
+            }
+            if recovery.examined == 64 {
+                tracing::info!(
+                    "saved delete reply recovery reached its per-run limit; repeat repair with the same configuration to check later replies, then inspect pending deletes"
+                );
+            }
         }
         Ok(_) => {}
         Err(error) => {
