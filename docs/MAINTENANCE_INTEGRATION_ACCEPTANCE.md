@@ -81,6 +81,12 @@ These are scoped results, not a claim that every deployment is compatible:
   response, successful fresh retry, unchanged failed preconditions and lock
   lifetime. It uses local CAS for the deterministic interleaving; this does not
   establish the behavior of arbitrary legacy records or unguarded deletion.
+- Covered PostgreSQL publication rejects a Repeatable Read or Serializable
+  snapshot that predates delete admission. Real database fixtures verify no
+  visible publication, retryable HTTP/OCI/S3 responses, successful fresh retries
+  without changing isolation, and consistent snapshot/physical lock ordering.
+  Long transactions at these isolation levels can delay unrelated delete
+  admissions; broader concurrency and cost still need assessment.
 - History distinguishes completed, failed and unresolved runs. Signed records
   and reports are verified; unfinished and corrupt evidence is retained.
 - A mark-only GC comparison preserves released output, status and payload bytes

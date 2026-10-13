@@ -6,6 +6,207 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_old_transaction_snapshot_cannot_hide_a_pending_delete() {
+    for (protocol, isolation) in ["REPEATABLE READ", "SERIALIZABLE", "REPEATABLE READ"]
+        .into_iter()
+        .enumerate()
+    {
+        let Some(fixture) = PostgresFixture::new().await else {
+            return;
+        };
+        fixture
+            .index()
+            .initialize_remote_delete_guard()
+            .await
+            .unwrap();
+        let backend = fixture.postgres();
+        let (record, _) = backend
+            .prepare_file_stream(
+                "snapshot-file",
+                RequestBodyReader::from_bytes(Bytes::from_static(
+                    b"pending deletion after snapshot",
+                )),
+                None,
+            )
+            .await
+            .unwrap();
+        let physical = crate::xet_adapter::xorb_object_key(&record.chunks[0].hash).unwrap();
+        assert!(
+            backend
+                .object_store()
+                .metadata(&physical)
+                .unwrap()
+                .is_some()
+        );
+        let mut snapshot = fixture.index().pool().begin().await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SET TRANSACTION ISOLATION LEVEL {isolation}"
+        )))
+        .execute(&mut *snapshot)
+        .await
+        .unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_resource_fences WHERE domain='maintenance-remote-delete'")
+            .fetch_one(&mut *snapshot).await.unwrap();
+        assert_eq!(before, 0);
+        let epoch: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT {}.shardline_remote_delete_begin_v1($1, $2)",
+            fixture.schema,
+        )))
+        .bind(&fixture.schema)
+        .bind(physical.as_str())
+        .fetch_one(&fixture.admin)
+        .await
+        .unwrap();
+        let publication = backend
+            .commit_staged_file_on_connection(&mut snapshot, &record)
+            .await;
+        if publication.is_ok() {
+            snapshot.commit().await.unwrap();
+        } else {
+            snapshot.rollback().await.unwrap();
+        }
+        let visible: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {}.shardline_file_records",
+            fixture.schema,
+        )))
+        .fetch_one(&fixture.admin)
+        .await
+        .unwrap();
+        let settled: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT {}.shardline_remote_delete_finish_v1($1, $2, $3)",
+            fixture.schema,
+        )))
+        .bind(&fixture.schema)
+        .bind(physical.as_str())
+        .bind(epoch)
+        .fetch_one(&fixture.admin)
+        .await
+        .unwrap();
+        let mut retry = fixture.index().pool().begin().await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SET TRANSACTION ISOLATION LEVEL {isolation}"
+        )))
+        .execute(&mut *retry)
+        .await
+        .unwrap();
+        let retried = backend
+            .commit_staged_file_on_connection(&mut retry, &record)
+            .await;
+        let retained_isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+            .fetch_one(&mut *retry)
+            .await
+            .unwrap();
+        retry.commit().await.unwrap();
+        fixture.finish().await;
+        assert!(settled);
+        assert!(
+            publication.is_err(),
+            "{isolation} must not publish through an invisible pending marker: {publication:?}"
+        );
+        assert_eq!(visible, 0, "{isolation} must preserve publication safety");
+        assert!(
+            retried.is_ok(),
+            "a fresh {isolation} retry must succeed: {retried:?}"
+        );
+        assert_eq!(retained_isolation, isolation.to_lowercase());
+        let error = publication.unwrap_err();
+        assert!(!error.is_remote_delete_pending());
+        use axum::response::IntoResponse;
+        let response = match protocol {
+            0 => error.into_response(),
+            1 => crate::error::OciError(error).into_response(),
+            _ => shardline_s3_adapter::S3Error::from(error).into_response(),
+        };
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("retry the request in a new transaction")
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_publication_does_not_wait_on_a_delete_holding_physical_locks() {
+    for isolation in ["REPEATABLE READ", "SERIALIZABLE"] {
+        let Some(fixture) = PostgresFixture::new().await else {
+            return;
+        };
+        fixture
+            .index()
+            .initialize_remote_delete_guard()
+            .await
+            .unwrap();
+        let mut publication = fixture.index().pool().begin().await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SET TRANSACTION ISOLATION LEVEL {isolation}"
+        )))
+        .execute(&mut *publication)
+        .await
+        .unwrap();
+        sqlx::query("SELECT shardline_remote_delete_guard_v1(current_schema()::text, $1)")
+            .bind("snapshot-order/first")
+            .execute(&mut *publication)
+            .await
+            .unwrap();
+        let statement = sqlx::AssertSqlSafe(format!(
+            "SELECT {}.shardline_remote_delete_begin_v1($1, $2)",
+            fixture.schema,
+        ));
+        let mut admission = Box::pin(
+            sqlx::query_scalar::<_, i64>(statement)
+                .bind(&fixture.schema)
+                .bind("snapshot-order/second")
+                .fetch_one(&fixture.admin),
+        );
+        let waiting = tokio::time::timeout(std::time::Duration::from_millis(100), &mut admission)
+            .await
+            .is_err();
+        // While admission waits on the snapshot lock, this same transaction
+        // must still be able to publish a second physical key.
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sqlx::query("SELECT shardline_remote_delete_guard_v1(current_schema()::text, $1)")
+                .bind("snapshot-order/second")
+                .execute(&mut *publication),
+        )
+        .await;
+        publication.rollback().await.unwrap();
+        let epoch = tokio::time::timeout(std::time::Duration::from_secs(5), admission)
+            .await
+            .unwrap()
+            .unwrap();
+        let settled: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT {}.shardline_remote_delete_finish_v1($1, $2, $3)",
+            fixture.schema,
+        )))
+        .bind(&fixture.schema)
+        .bind("snapshot-order/second")
+        .bind(epoch)
+        .fetch_one(&fixture.admin)
+        .await
+        .unwrap();
+        fixture.finish().await;
+        assert!(
+            waiting,
+            "{isolation} must hold delete admission until publication ends"
+        );
+        assert!(
+            matches!(second, Ok(Ok(_))),
+            "{isolation} must avoid reversed lock ordering: {second:?}"
+        );
+        assert!(settled);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_publication_rejects_a_chunk_deleted_after_staging() {
     let Some(fixture) = PostgresFixture::new().await else {
         return;

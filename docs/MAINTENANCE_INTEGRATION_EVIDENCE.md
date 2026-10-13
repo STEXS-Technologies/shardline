@@ -13,6 +13,42 @@ untested deployments.
 
 ## Staged upload publication
 
+### Transactions with older snapshots
+
+A configured PostgreSQL 16 fixture reproduced unsafe publication when a
+Repeatable Read transaction could not see a subsequently admitted delete.
+An initial `FOR KEY SHARE` fix also failed the regression. The corrected guard
+uses `FOR SHARE` on an internal coordination row before physical-key locks;
+delete admission updates that row before taking physical-key locks. This makes
+stale Repeatable Read and Serializable snapshots fail with SQLSTATE `40001`.
+The normal Read Committed publication path does not lock this row. Delete
+admission adds one row update, committed before the remote delete request.
+Long transactions at stronger isolation can delay otherwise unrelated delete
+admissions; this cost and broader concurrency still need assessment.
+
+The regression verifies rejected publication leaves no visible metadata and a
+fresh retry succeeds after the marker settles, preserving the configured
+isolation level. Server responses map serialization failures to retryable 503
+errors rather than calling them pending deletes. The separate coordination
+domain preserves the existing first permit epoch and subsequent identities.
+Schema identifiers remain outside dollar-quoted function bodies; the existing
+adversarial schema-name test exercises this installation boundary.
+
+Four configured publication tests pass in 2.27 seconds. They also exercise
+actual serialization-error responses through HTTP, OCI and S3, checking 503,
+`Retry-After: 1` and guidance to start a new transaction. A two-connection
+fixture at both stronger isolation levels verifies waiting delete admission
+does not hold a physical lock that prevents the publisher checking a second
+key. All 21 configured PostgreSQL delete-guard tests pass in 14.58 seconds,
+including restricted writers, adversarial schema names and permit identities.
+Strict all-feature, all-target Clippy passes for the index, CLI, server and S3
+adapter; formatting and the AST graph update pass. These are PostgreSQL 16
+fixtures bootstrapped with the released 1.11.3 migration command, not a new
+optimized deployment or throughput validation.
+
+These changes are additional to the revision-scoped deployment results below.
+Those optimized binaries do not contain this snapshot protection.
+
 New publication logic lives in `postgres_backend::publication`, with its tests
 in `publication::tests`. Shared PostgreSQL fixtures live in `test_support`.
 These use ordinary Rust module declarations; there are no `#[path]` overrides.
