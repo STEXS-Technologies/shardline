@@ -5,6 +5,8 @@ use crate::test_support::postgres_fixture::PostgresFixture as Fixture;
 use shardline_reliability::MaintenanceArtifactKind;
 use shardline_storage::{ObjectPrefix, ObjectStore};
 
+mod deadline;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bounded_metadata_admission_preserves_runs_and_caller_isolation() {
     let Some(fixture) = Fixture::new().await else {

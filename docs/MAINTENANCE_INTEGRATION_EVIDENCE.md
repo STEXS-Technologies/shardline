@@ -2588,6 +2588,16 @@ all four existing histories remain unchanged, with no private workspace or
 task payload objects. SHM coordination bytes are excluded from the durable-byte
 comparison. This tests read-only fsck, not mutation commands on a read-only store.
 
+The PostgreSQL deadline regression holds an exclusive lock on the history table
+while a separate blocking reader attempts optional evidence inspection. The
+reader returns `TimedOut` through the existing five-second I/O deadline before
+the fixture releases the lock. A later read recovers the exact original bytes.
+All 17 configured PostgreSQL history tests passed in 10.36 seconds; log:
+`/tmp/shardline-batched-deletion.dXBbDM/test.log`. Strict server library/test
+Clippy, formatting and graph update passed. This checks a blocked PostgreSQL
+read; it does not prove cancellation of arbitrary object-store I/O or a server
+shutdown latency bound. Housekeeping still stops cooperatively between calls.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
