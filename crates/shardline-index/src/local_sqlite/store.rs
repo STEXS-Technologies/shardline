@@ -305,6 +305,7 @@ impl LocalIndexStore {
             helpers::ensure_local_schema_migrations_table(&connection)?;
             helpers::apply_pending_local_migrations(&mut connection)?;
             helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
+            super::upload_recovery_guard::install(&connection)?;
             *initialized = true;
         }
         let import_state = connection

@@ -10,5 +10,5 @@ pub(crate) fn upload_attempt_id(file_id: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     let sequence = UPLOAD_ATTEMPT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("file-{file_id}-{timestamp:x}-{sequence:x}")
+    format!("file-v2-{file_id}-{timestamp:x}-{sequence:x}")
 }

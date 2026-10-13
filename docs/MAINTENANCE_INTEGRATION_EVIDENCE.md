@@ -4093,11 +4093,49 @@ and payload root, then compares each unfinished state and complete event history
 The corrected readiness-based run failed in
 `/tmp/shardline-batched-deletion.BRPnNV/test.log`: released recovery changed the
 new scoped `Created` intent to `Visible` using the unrelated default-scope file.
-This is a demonstrated compatibility defect requiring protection before merge,
-not a passing rollback drill. The regression fixture remains under development.
+That run demonstrated a compatibility defect requiring protection before merge.
 An initial `fsck` experiment also does not establish startup behavior because
-that command opens stores directly without server reconciliation. Rollback proof,
-large-file recovery startup cost and the remaining acceptance gates remain open.
+that command opens stores directly without server reconciliation.
+
+The fix installs a compatibility trigger through the existing PostgreSQL owner
+setup and automatically during writable SQLite initialization. New default file
+attempts use opaque `file-v2-` IDs; exact scoped evidence also protects arbitrary
+intent IDs. Existing IDs, domain records and signed history are unchanged. The
+guard suppresses state changes from older code for these new logical file
+intents, causing the released atomic transition to append no event. Legacy
+intents remain eligible for the released behavior.
+
+Current writers identify their atomic transitions automatically. PostgreSQL uses
+an intent-specific transaction-local setting and restores its previous value
+before releasing a nested savepoint. Protected transitions add two fixed queries;
+raw xorb/native/legacy transitions add none. SQLite puts an intent-specific marker
+in a private table within the same transaction and removes it before commit;
+other connections cannot observe it, and interruption rolls it back. These
+markers are compatibility checks, not ownership, authorization or execution
+proof. No tracker process, operator flag or new runtime grants are introduced.
+An initial SQLite function-discovery prototype was rejected by the existing
+trusted-schema protections and replaced without relaxing those protections.
+
+The configured PostgreSQL publication suite passed 19 tests with the corrected
+readiness-based fixture (`/tmp/shardline-batched-deletion.Z1q5RI/test.log`). It
+checks all four unfinished states in scoped and default namespaces: the actual
+released 1.11.3 server inspects all eight records and preserves their states and
+complete event histories, while completing an unprotected legacy control record.
+Current recovery subsequently completes Stored/MetadataCommitted records after
+scope/content verification and preserves Created/Storing. The equivalent actual
+released-server SQLite fixture passed within the 105-test local backend suite
+(`/tmp/shardline-upload-rollback-local.log`). Both namespaces remain readable.
+The final SQLite rollback fixture also verifies the marker table is empty after
+current recovery (`/tmp/shardline-upload-rollback-local-final.log`, one test).
+All 189 configured PostgreSQL index tests passed
+(`/tmp/shardline-batched-deletion.kqJ7vN/test.log`), including nested marker
+restoration and a quoted schema containing template tokens. All 316 selected
+SQLite index tests passed (`/tmp/shardline-upload-guard-sqlite-index.log`), including
+read-only metadata, schema initialization and existing inventory behavior.
+Strict index/server Clippy, workspace formatting and whitespace checks passed.
+These cases establish this guard's behavior, not every deployment layout or
+closure of the full rollback gate. Large-file recovery startup cost and the
+remaining acceptance gates remain open.
 
 ### Exact scope identity for new file recovery
 
