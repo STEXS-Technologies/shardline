@@ -2,6 +2,35 @@
 use std::process::Command;
 
 #[test]
+fn oversized_history_cursor_is_rejected_before_database_access() {
+    let root = tempfile::tempdir().unwrap();
+    let binary = std::env::var_os("CARGO_BIN_EXE_shardline")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_shardline").into());
+    let output = Command::new(binary)
+        .env_clear()
+        .current_dir(root.path())
+        .env(
+            "SHARDLINE_INDEX_POSTGRES_URL",
+            "postgres://127.0.0.1:1/unavailable",
+        )
+        .args(["history", "--after"])
+        .arg("a".repeat(129))
+        .arg("--root")
+        .arg(root.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--after must be a next_after value of at most 128 bytes"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("pool timed out"), "{stderr}");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn history_reuses_explicit_config_and_environment_file_from_another_directory() {
     let deployment = tempfile::tempdir().unwrap();
     let invocation = tempfile::tempdir().unwrap();

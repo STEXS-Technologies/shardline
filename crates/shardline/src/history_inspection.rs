@@ -30,6 +30,15 @@ pub(crate) async fn run(
     after: Option<String>,
     limit: usize,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    if after.as_ref().is_some_and(|cursor| cursor.len() > 128) {
+        return Err(
+            "history --after must be a next_after value of at most 128 bytes from the history page"
+                .into(),
+        );
+    }
+    if !(1..=100).contains(&limit) {
+        return Err("history --limit must be between 1 and 100".into());
+    }
     let config = crate::config::load_server_config(root, None)?;
     let deployment = deployment_fingerprint(&config)?;
     // Inspection never creates a server backend or runs its startup sweeps.
