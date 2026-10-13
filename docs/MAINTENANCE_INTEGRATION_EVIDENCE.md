@@ -3275,3 +3275,26 @@ in 39.02 seconds. Strict CLI library/test Clippy passes.
 These cases use empty deployment fixtures and prove recording-failure behavior,
 not each operation's external-mutation interleaving. Storage-copy destination
 publication failure has its separate actual CLI fixture above.
+
+### Deployment drills with corrected native recovery and actionable warnings
+
+All 23 deployment scenarios now have passing results against the same optimized
+CLI bytes (`355ccbcf7b276cab60e1f6f1c01e0f8337045e1e588aa5169b1b2dcc68ae38c4`).
+The protocol run passes all 12 in 142.798 seconds:
+`/tmp/shardline-protocol-faults.A27K1j/test.log`.
+The complementary run passes nine initially but fails two saved-reply recovery
+cases on an outdated warning assertion:
+`/tmp/shardline-maintenance-deployments.feVMRw/test.log`.
+Those cases expected the word `unconfirmed`; the command correctly emitted the
+new actionable wording, `its result was not confirmed in history`.
+
+The corrected assertion requires both that wording and guidance to inspect
+command logs and affected data before retrying. It changes no marker, reply,
+delete-count, ownership or reconciliation assertions. Both complete scenarios
+then pass in 83.531 seconds (Nextest
+`88c2d4e7-3f1e-4b79-b20c-3a2a652fcae6`), with no runtime skips or panics:
+`.codex/validation/ux-saved-reply-warning-rerun.log`.
+The pinned binaries in both original runs have matching hashes. This is 23
+passing named scenarios across complementary runs and a focused assertion
+correction, not an initially green 23-test run or proof of every deployment.
+Strict deployment-test Clippy passes; runtime behavior and version are unchanged.
