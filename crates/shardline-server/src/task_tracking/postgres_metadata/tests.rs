@@ -1411,6 +1411,31 @@ async fn normal_router_publishes_and_serves_authenticated_metadata_history() {
             .unwrap()
             .contains("Task history is full")
     );
+    let cursor = full["page"]["next_cursor"].as_str().unwrap();
+    let next = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/tasks/maintenance?limit=1&cursor={cursor}"))
+                .header("Authorization", "Bearer owned-task-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+    let next: serde_json::Value =
+        serde_json::from_slice(&to_bytes(next.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(next["history_grouping"], "shared_metadata");
+    assert_eq!(next["history_notice"], full["history_notice"]);
+    assert_eq!(next["page"]["returned"], 1);
+    let incident = &next["tasks"][0];
+    assert_ne!(incident["id"], full["tasks"][0]["id"]);
+    assert_eq!(incident["state"], "corrupt");
+    assert_eq!(incident["identity_verified"], false);
+    assert!(incident.get("owner").is_none());
+    assert!(incident.get("operation").is_none());
+    assert!(incident["next_step"].as_str().unwrap().contains("Preserve"));
     let snapshot = sqlx::query_as::<_, (String, Vec<u8>)>(sqlx::AssertSqlSafe(format!(
         "SELECT artifact_key,payload FROM {}.shardline_task_artifacts_v1 ORDER BY artifact_key",
         fixture.schema,
