@@ -2,7 +2,7 @@
 use super::*;
 use shardline_server::{
     ObjectStorageAdapter, ServerConfig,
-    task_tracking::{TaskEvidenceStore, TaskExecutionMode, TaskRunState, deployment_fingerprint},
+    task_tracking::{TaskExecutionMode, TaskRunState, deployment_fingerprint},
 };
 use std::num::NonZeroUsize;
 
@@ -131,14 +131,40 @@ async fn drill_readonly_postgres_cli_preserves_released_commands() {
     .with_index_postgres_url(stack.pg_url.clone())
     .unwrap()
     .with_object_storage(ObjectStorageAdapter::S3, Some(s3));
-    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let objects = shardline_server::object_store_from_config(&config).unwrap();
+    let prefix = ObjectPrefix::parse("_shardline_tasks/v1/").unwrap();
+    assert!(objects.list_prefix(&prefix).unwrap().is_empty());
+    let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT to_regclass('shardline_task_artifacts_v1') IS NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "pre-upgrade commands must not install optional history"
+    );
+    migrate_chaos_postgres_with_binary(&current, &stack.pg_url).await;
+    for command in [&["fsck"][..], &["index", "rebuild"][..], &["gc"][..]] {
+        let baseline = readonly_cli(&previous, &stack, command, false).await;
+        let upgraded = readonly_cli(&current, &stack, command, false).await;
+        assert!(
+            baseline.status.success(),
+            "released {command:?}: {baseline:?}"
+        );
+        assert!(
+            upgraded.status.success(),
+            "current {command:?}: {upgraded:?}"
+        );
+        assert_eq!(upgraded.stdout, baseline.stdout);
+    }
+    let store =
+        super::maintenance_history::MaintenanceHistory::from_postgres_pool(&config, &pool).await;
     let tasks = store
         .summaries(deployment_fingerprint(&config).unwrap(), None, 10)
         .unwrap();
     assert_eq!(
         tasks.len(),
         2,
-        "fsck and rebuild publish; read-only GC creates no task objects"
+        "fsck and rebuild publish metadata history; read-only GC creates no run"
     );
     assert!(
         tasks
@@ -146,8 +172,8 @@ async fn drill_readonly_postgres_cli_preserves_released_commands() {
             .all(|task| task.state == TaskRunState::Completed
                 && task.execution == TaskExecutionMode::Inline)
     );
-    // Existing read-only S3 credentials must not require permission changes just
-    // to inspect Postgres metadata, nor produce an invented verified outcome.
+    // Existing read-only S3 credentials need no permission changes: automatic
+    // tracking writes only to the already-upgraded Postgres metadata.
     let policy = docker_run_owned(vec![
         "compose".to_owned(), "-f".to_owned(), stack.compose_file.display().to_string(),
         "-p".to_owned(), stack.project.clone(), "run".to_owned(), "--rm".to_owned(),
@@ -172,21 +198,21 @@ async fn drill_readonly_postgres_cli_preserves_released_commands() {
         "upgraded read-only S3 fsck: {}",
         String::from_utf8_lossy(&upgraded.stderr)
     );
-    let stdout = String::from_utf8_lossy(&upgraded.stdout);
-    let stderr = String::from_utf8_lossy(&upgraded.stderr);
-    assert!(
-        stdout.contains("maintenance tracking unavailable")
-            || stderr.contains("maintenance tracking unavailable")
-    );
-    assert!(stdout.contains(String::from_utf8_lossy(&baseline.stdout).as_ref()));
+    assert_eq!(upgraded.stdout, baseline.stdout);
+    let tasks = store
+        .summaries(deployment_fingerprint(&config).unwrap(), None, 10)
+        .unwrap();
     assert_eq!(
-        store
-            .summaries(deployment_fingerprint(&config).unwrap(), None, 10)
-            .unwrap()
-            .len(),
-        2,
-        "unconfirmed execution cannot add verified completion"
+        tasks.len(),
+        3,
+        "read-only payload access does not prevent verified metadata history"
     );
+    assert!(
+        tasks
+            .iter()
+            .all(|task| task.state == TaskRunState::Completed)
+    );
+    assert!(objects.list_prefix(&prefix).unwrap().is_empty());
     eprintln!(
         "chaos({drill}): PASS — released/current fsck, rebuild and read-only GC preserve output without a writable root or /tmp; native outcomes verify"
     );
@@ -204,7 +230,7 @@ async fn drill_concurrent_ordinary_rebuilds_keep_shared_ownership() {
         eprintln!("SKIPPED: {drill} — current executable unavailable");
         return;
     };
-    migrate_chaos_postgres(&stack.pg_url).await;
+    migrate_chaos_postgres_with_binary(&binary, &stack.pg_url).await;
     let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
     let records = PostgresRecordStore::new(pool.clone());
     records
@@ -237,7 +263,8 @@ async fn drill_concurrent_ordinary_rebuilds_keep_shared_ownership() {
     .with_index_postgres_url(stack.pg_url.clone())
     .unwrap()
     .with_object_storage(ObjectStorageAdapter::S3, Some(s3));
-    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let store =
+        super::maintenance_history::MaintenanceHistory::from_postgres_pool(&config, &pool).await;
     let deployment = deployment_fingerprint(&config).unwrap();
 
     // Block the actual version scan after the first CLI owns the maintenance

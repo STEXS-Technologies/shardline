@@ -1263,3 +1263,41 @@ CARGO_BUILD_JOBS=2 cargo test --locked -p shardline-index --all-features --lib \
 
 Set `DATABASE_URL` to that disposable fixture before running; without it the
 database tests can return early and their summary alone is insufficient proof.
+
+## Optimized upgrade and read-only deployment matrix
+
+The mixed-version rollout fixture now checks the documented owner-upgrade
+boundary. Before owner setup, current and released nodes read and overwrite the
+same synthetic S3 data correctly, and current inspection returns an explicit
+unavailable-history notice with no invented task result. The usual current
+`db migrate up` installs optional history despite an already-current domain
+ledger. After restarting the current node, the same data remains readable,
+shared metadata history records its completed startup sweep, and released
+rollback preserves reads. No new domain migration is required for this branch.
+
+The read-only container fixture covers released/current fsck, rebuild and
+non-mutating GC before and after owner setup. Pre-upgrade commands do not create
+the optional history table or payload task objects. After setup, fsck and rebuild
+save verified inline outcomes in Postgres while non-mutating GC creates no run.
+A read-only S3 login also completes fsck with exact released stdout and saves a
+third completed metadata result. The existing read-only root, unwritable `/tmp`,
+non-root user and no-new-privileges restriction remain; no S3 grant is added.
+
+The concurrent ordinary-rebuild drill also passes with the metadata reader.
+Both commands remain unresolved while a fixture scan lock blocks the owner;
+only one acquires the maintenance lock. After release, the first removes the
+one stale record and the next independently finds zero; both record distinct
+completed runs. This does not reuse the first scan as the second invocation.
+
+Native log: `.codex/validation/ux-optimized-upgrade-readonly-matrix.log` records
+all three executed tests passing with no runtime skips. The broader eleven-test
+selection records ten passes and the old pre-owner-history assertion failure in
+`.codex/validation/ux-optimized-maintenance-deployment-matrix.log`; the corrected
+mixed-version test passes in the three-test rerun. Those ten include all seven
+GC acknowledgement drills and container replacement. The selected-test counts
+exclude unrelated tests, not unavailable backend fixtures.
+
+Strict test-target Clippy passes. These are the tested default-schema native
+deployment paths; they do not close every narrow-account, legacy-reference,
+work-specific schema or production-scale gap. Production binary source remains
+`894aaf06`, the released comparator is official 1.11.3, and version stays unchanged.
