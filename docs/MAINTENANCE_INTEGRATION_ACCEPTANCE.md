@@ -92,6 +92,11 @@ The following still need implementation or stronger evidence before merge:
   mappings as reachability authority, and reconciliation never publishes files
   solely from an intent. Already-active remote storage calls may still finish
   after connection loss. Broader mutation coverage remains part of this audit.
+  File-intent recovery now preserves attempts without a `Stored` checkpoint.
+  For later default-scope attempts, it checks the published bytes against the
+  saved SHA-256 before completing progress. Unrelated or missing file metadata
+  cannot settle a logical file intent. Exact recovery of legacy scoped identities
+  and the cost of reading large saved files remain open.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and

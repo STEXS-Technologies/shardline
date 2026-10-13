@@ -90,6 +90,43 @@ async fn healthy_upload_owner_preserves_body_and_digest_errors() {
             .await
             .is_ok()
     );
+    backend
+        .upload_file(
+            "failed-checksum-file",
+            Bytes::from_static(b"later valid upload"),
+            None,
+        )
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {}.shardline_upload_intents SET created_at=now()-interval '1 minute' WHERE intent_id=$1",
+        fixture.schema
+    )))
+    .bind(&intent_id)
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    backend.reconcile_stuck_upload_intents().await.unwrap();
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Storing,
+        "an unrelated later upload cannot complete a failed checksum attempt"
+    );
+    assert_eq!(
+        fixture
+            .index()
+            .reliability_events(&intent_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     fixture.finish().await;
 }
 
@@ -199,6 +236,83 @@ async fn file_upload_without_digest_returns_retryable_owner_loss_without_intents
             .await
             .is_ok()
     );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn stored_file_intent_recovery_requires_matching_published_bytes() {
+    use sha2::Digest;
+    use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: file recovery identity fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    for (file_id, expected, publish) in [
+        (
+            "matching-recovery-file",
+            b"published bytes".as_slice(),
+            true,
+        ),
+        ("unrelated-recovery-file", b"other attempt".as_slice(), true),
+        ("absent-recovery-file", b"published bytes".as_slice(), false),
+    ] {
+        if publish {
+            backend
+                .upload_file(file_id, Bytes::from_static(b"published bytes"), None)
+                .await
+                .unwrap();
+        }
+        let intent = UploadIntent::new(
+            format!("recovery-{file_id}"),
+            format!("record/{file_id}"),
+            hex::encode(sha2::Sha256::digest(expected)),
+            0,
+        );
+        fixture.index().create_intent(&intent).await.unwrap();
+        for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+            assert!(
+                fixture
+                    .index()
+                    .transition_intent(intent.intent_id(), state)
+                    .await
+                    .unwrap()
+            );
+        }
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {}.shardline_upload_intents SET created_at=now()-interval '1 minute' WHERE intent_id=$1",
+            fixture.schema
+        ))).bind(intent.intent_id()).execute(&fixture.admin).await.unwrap();
+        backend.reconcile_stuck_upload_intents().await.unwrap();
+        let completed = file_id == "matching-recovery-file";
+        assert_eq!(
+            fixture
+                .index()
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            if completed {
+                UploadIntentState::Visible
+            } else {
+                UploadIntentState::Stored
+            }
+        );
+        assert_eq!(
+            fixture
+                .index()
+                .reliability_events(intent.intent_id())
+                .await
+                .unwrap()
+                .len(),
+            if completed { 5 } else { 3 }
+        );
+        assert_eq!(
+            backend.read_record(file_id, None, None).await.is_ok(),
+            publish
+        );
+    }
     fixture.finish().await;
 }
 

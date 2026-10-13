@@ -226,16 +226,40 @@ impl PostgresBackend {
                     age_secs = age.as_secs(),
                     "reconciling stuck intent"
                 );
-                let visible_file_record =
-                    if let Some(file_id) = intent.object_key().strip_prefix("record/") {
-                        match self.read_record(file_id, None, None).await {
-                            Ok(_record) => true,
-                            Err(ServerError::NotFound) => false,
-                            Err(error) => return Err(error),
+                let file_intent = intent.object_key().starts_with("record/");
+                if file_intent
+                    && !crate::upload_intent_recovery::file_publication_may_have_completed(intent)
+                {
+                    tracing::warn!(intent_id = %intent.intent_id(), "file upload has no Stored checkpoint; preserving unfinished intent for a fresh validated request");
+                    continue;
+                }
+                let visible_file_record = if let Some(file_id) =
+                    intent.object_key().strip_prefix("record/")
+                {
+                    match self.read_record(file_id, None, None).await {
+                        Ok(record) => {
+                            match crate::upload_intent_recovery::file_record_matches_intent(
+                                intent,
+                                &reliability_events,
+                                record,
+                                self.object_store(),
+                                self.stream_work_pool.clone(),
+                            )
+                            .await
+                            {
+                                Ok(matches) => matches,
+                                Err(error) => {
+                                    tracing::warn!(intent_id = %intent.intent_id(), %error, "file upload verification unavailable; preserving unfinished intent");
+                                    false
+                                }
+                            }
                         }
-                    } else {
-                        false
-                    };
+                        Err(ServerError::NotFound) => false,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    false
+                };
                 if visible_file_record {
                     // The atomic file-record commit is the visibility boundary.
                     // Walk every durable boundary so recovery remains valid even
@@ -268,6 +292,12 @@ impl PostgresBackend {
                         }
                     }
                     reconciled = reconciled.saturating_add(1);
+                    continue;
+                }
+                if file_intent {
+                    // This is a logical record key, not a physical CAS object.
+                    // Missing or unrelated latest metadata cannot settle it.
+                    tracing::warn!(intent_id = %intent.intent_id(), "file upload outcome cannot be verified; preserving unfinished intent for a fresh validated request");
                     continue;
                 }
                 let target_state = match ObjectKey::parse(intent.object_key()) {
