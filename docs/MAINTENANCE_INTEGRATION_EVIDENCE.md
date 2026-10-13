@@ -3473,3 +3473,14 @@ All 20 maintenance CLI scenarios pass with zero skips in 2.105 seconds (Nextest
 `e9bf0275-a02d-42ec-ab5e-15a02b564c56`). The released/current permissions verifier
 passes all five command forms and fully read-only SQLite fsck:
 `/tmp/shardline-local-permissions.eE1lHR`.
+
+Both complementary deployment runs also pass against that same rebuilt CLI.
+The maintenance run passes all 11 selected scenarios in 144.797 seconds:
+`/tmp/shardline-maintenance-deployments.v2HamP/test.log`.
+The protocol run passes all 12 selected scenarios in 133.525 seconds:
+`/tmp/shardline-protocol-faults.pDyX43/test.log`.
+Both pinned copies have the SHA-256 above. Each run excludes the other run's
+scenarios; all 23 have passing results, with no selected runtime skips or panics.
+This covers the named startup, ownership, interruption, remote-delete, backend
+loss and rollout/rollback faults after prefix pruning. It does not certify every
+deployment or close the broader compatibility, phase and cost gates.
