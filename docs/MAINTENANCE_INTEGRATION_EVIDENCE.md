@@ -2755,3 +2755,16 @@ preserve released stdout, stderr and successful exit status, payload bytes stay
 identical, and two fresh run manifests remain. The release build completed in
 2m42s. This proves the tested CLI cleanup boundary; inventory latency and broader
 deployment guarantees remain open.
+
+The same optimized binary subsequently passes all 11 selected deployment drills
+in 143.877 seconds: `/tmp/shardline-maintenance-deployments.m5MAri/test.log`.
+There are no selected runtime skips or logged panics. Twelve protocol drills
+are outside this selection; their earlier passing run used the preceding binary
+and does not establish their results for these new bytes.
+
+The aggregate-backlog regression passes in 0.50 seconds. Three completed local
+histories each contain 140 extra artifacts. One incremental call retires exactly
+256 keys across run boundaries and completes one history; the second completes
+the remaining two. No run artifacts or retirement markers remain. This checks
+that the budget is shared across histories and that a partially retired run does
+not lose later finished runs.
