@@ -3342,3 +3342,26 @@ All 20 maintenance CLI scenarios pass with zero skips in 2.117 seconds (Nextest
 `e4962a00-3e45-458e-a012-559717270f10`). This verifies the named CLI behaviors;
 the earlier deployment fault results belong to their separately identified
 binary, and this run does not replace those results or close the merge gates.
+
+### Many distinct legacy histories
+
+The explicit legacy archive fixture creates 1,024 verified completed runs, one
+unfinished run and one corrupt manifest in the object store. It follows history
+cursors in pages of at most 64 and checks that all 1,026 IDs appear exactly once.
+Cleanup reopens the history store on each invocation, retires all 1,024 finished
+runs, and checks the 64-run limit, unchanged corrupt bytes and unchanged user
+payload. The remaining two histories include the verified unfinished run.
+No existing smaller fixture or merge gate is removed.
+
+The exact ignored test passes when explicitly selected: one passed, zero failed,
+zero ignored, in 544.85 seconds using the debug test profile. An optimized CLI
+build overlapped part of the run. This establishes the fixture's pagination and
+preservation behavior, not a production performance bound. Inventory scanning,
+larger archives and deployment-scale cost remain open. Strict server library/test
+Clippy, formatting and diff checks pass, and the AST graph is updated.
+
+```sh
+cargo test --locked -p shardline-server --all-features --lib \
+  task_tracking::tests::legacy_retention_capacity::many_legacy_runs_paginate_and_retire_without_losing_unresolved_history \
+  -- --ignored --exact --nocapture
+```
