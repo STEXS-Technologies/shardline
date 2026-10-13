@@ -28,7 +28,7 @@ export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
 cargo test --release --locked -p shardline-server --all-features --lib \
     task_tracking::tests::postgres_capacity::full_postgres_history_capacity_preserves_unresolved_evidence \
     -- --ignored --exact --nocapture > "$fixture/test.log" 2>&1
-if rg -ni 'SKIPPED:|skipping:' "$fixture/test.log"; then exit 1; fi
+if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/test.log"; then exit 1; fi
 rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/test.log"
 rg -F '4096-run PostgreSQL history:' "$fixture/test.log"
 echo 'PASS: full PostgreSQL history admission, pagination, cleanup and preserved unresolved evidence'

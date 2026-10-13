@@ -402,6 +402,19 @@ impl TaskEvidenceStore {
         })?;
         let mut reader =
             super::evidence_reader::EvidencePageReader::new(self, &record_prefix, None);
+        let blob_prefix = ObjectPrefix::parse(&format!(
+            "{}runs/{}/blobs/",
+            super::TASK_EVIDENCE_PREFIX,
+            identity.id
+        ))?;
+        let artifact_prefix = ObjectPrefix::parse(&format!(
+            "{}runs/{}/artifacts/",
+            super::TASK_EVIDENCE_PREFIX,
+            identity.id
+        ))?;
+        let mut blobs = super::evidence_reader::EvidencePageReader::new(self, &blob_prefix, None);
+        let mut artifacts =
+            super::evidence_reader::EvidencePageReader::new(self, &artifact_prefix, None);
         for sequence in sequences {
             if sequence != projection.next_sequence().get() {
                 return Err(invalid("task history contains a gap"));
@@ -433,7 +446,7 @@ impl TaskEvidenceStore {
                 | TaskExecutionEvent::RecoveryExhausted => None,
             };
             if let Some(reference) = reference {
-                let body = self.blob(identity, reference)?;
+                let body = self.blob(identity, reference, &mut blobs)?;
                 if !matches!(record.event, TaskExecutionEvent::IntentCommitted { .. }) {
                     let proof = MaintenanceArtifactProof::from_json(&body)
                         .map_err(|_error| invalid("invalid native task proof"))?;
@@ -463,15 +476,14 @@ impl TaskEvidenceStore {
                             "native artifact role does not match its history record",
                         ));
                     }
-                    let materialized = self
-                        .read(
-                            &format!(
-                                "runs/{}/artifacts/{}",
-                                identity.id,
-                                hex::encode(artifact.digest.0)
-                            ),
-                            65536,
-                        )?
+                    let artifact_suffix = format!(
+                        "runs/{}/artifacts/{}",
+                        identity.id,
+                        hex::encode(artifact.digest.0)
+                    );
+                    let artifact_key = Self::key(&artifact_suffix)?;
+                    let materialized = artifacts
+                        .read(artifact_key.as_str(), &artifact_suffix)?
                         .ok_or_else(|| invalid("missing materialized task report"))?;
                     artifact
                         .verify_materialized(materialized.as_slice())
@@ -533,19 +545,23 @@ impl TaskEvidenceStore {
         })
     }
 
-    fn blob(&self, identity: &TaskRunIdentity, reference: BlobRef) -> Result<Vec<u8>, ServerError> {
+    fn blob(
+        &self,
+        identity: &TaskRunIdentity,
+        reference: BlobRef,
+        reader: &mut super::evidence_reader::EvidencePageReader<'_>,
+    ) -> Result<Vec<u8>, ServerError> {
         if reference.bytes > 65536 || reference.schema != 1 {
             return Err(invalid("task blob quota violated"));
         }
-        let body = self
-            .read(
-                &format!(
-                    "runs/{}/blobs/{}",
-                    identity.id,
-                    hex::encode(reference.digest.0)
-                ),
-                65536,
-            )?
+        let suffix = format!(
+            "runs/{}/blobs/{}",
+            identity.id,
+            hex::encode(reference.digest.0)
+        );
+        let key = Self::key(&suffix)?;
+        let body = reader
+            .read(key.as_str(), &suffix)?
             .ok_or_else(|| invalid("missing task blob"))?;
         reference
             .verify(&body, reference.schema)
