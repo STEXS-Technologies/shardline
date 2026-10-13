@@ -2526,6 +2526,18 @@ with a slowest call of 4.613 seconds. This run overlapped compilation and graph
 work; it does not demonstrate an overall speedup over the preceding run.
 Atomicity and fewer SQLite commits are established; broader cost remains open.
 
+The current release-mode full SQLite capacity drill then passed with all 4,096
+automatic slots occupied. It verifies admission rejection, complete pagination,
+oldest-first cleanup, preservation of unfinished/corrupt history and unchanged
+user payload bytes. Full inspection took 6.264 seconds; 65 retention calls
+totaled 36.619 seconds, with the slowest call at 0.690 seconds. The explicitly
+selected capacity test passed in 76.20 seconds with no ignored tests, runtime
+skips or panic messages. Log:
+`/tmp/shardline-history-capacity.TeWlaN/test.log`. This validates full-capacity
+behavior after SQLite batching, not a production latency bound or a controlled
+performance comparison. Larger legacy archives and unresolved-history growth
+retain the limits described in the acceptance checklist.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
