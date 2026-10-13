@@ -613,7 +613,10 @@ async fn run_remote_gc_fault_with_recovery(
             let source_logs = docker_run_owned(vec!["logs".to_owned(), container.0.clone()]).await;
             assert!(source_logs.status.success());
             assert!(
-                String::from_utf8_lossy(&source_logs.stderr).contains("unconfirmed"),
+                String::from_utf8_lossy(&source_logs.stderr)
+                    .contains("its result was not confirmed in history")
+                    && String::from_utf8_lossy(&source_logs.stderr)
+                        .contains("Check command logs and affected data before retrying"),
                 "the original command must warn that metadata completion was not recorded: {}",
                 String::from_utf8_lossy(&source_logs.stderr)
             );
