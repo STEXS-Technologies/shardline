@@ -73,6 +73,7 @@ lz4_flex = "0.11"
 zeroize.workspace = true
 
 [dev-dependencies]
+shardline-cas = { workspace = true, features = ["test-fault-injection"] }
 async-trait.workspace = true
 dotenvy.workspace = true
 ed25519-dalek.workspace = true

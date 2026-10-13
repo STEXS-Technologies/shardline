@@ -41,8 +41,9 @@ These results cover named fixtures. They do not certify every deployment.
 | Operator guidance | HTTP tests distinguish readiness, failed jobs, corrupt or unavailable history, full recording capacity and pending deletes. The guide gives actions for each. | Historical completion does not certify current deployment health. |
 
 The optimized deployment evidence includes all 23 fault scenarios across two
-complementary runs of the same binary. The CLI suite passed its original 19
-scenarios; the subsequently added destination-history failure test also passes.
+complementary runs of the same binary. After the native recovery correction,
+the optimized CLI suite passes all 20 scenarios, including destination-history
+failure.
 These counts supplement the behavior checks above and do not close a gate on
 their own.
 
@@ -86,6 +87,9 @@ The following still need implementation or stronger evidence before merge:
   verifies rejected metadata publication and incomplete intent state, runs
   reconciliation, then succeeds with a fresh validated upload. It exposed and
   fixed premature terminal failure when normalization changes the shard key.
+  A separate real-PostgreSQL native upload test now interrupts each of the six
+  coordinator durability boundaries, checks actual file visibility through
+  reconciliation, and succeeds with a fresh validated retry.
   Transitions after other mutation phases still need checks before extending
   the stale-writer guarantee to all upload intent state.
   Atomic event recording alone does not prove

@@ -3238,3 +3238,27 @@ runs, and preserves diagnostics at
 `/tmp/shardline-batched-deletion.KVYmvG/test.log`.
 This extends the focused native recovery proof without establishing every
 external-storage fault phase. The optimized CLI rebuild is still pending.
+
+### Six native upload durability boundaries and optimized CLI verification
+
+The configured PostgreSQL publication suite now passes all nine tests in
+2.93 seconds, including native upload interruptions after intent creation,
+storing, object work, stored acknowledgement, metadata acknowledgement and
+visibility acknowledgement. Each case invokes actual native upload with typed
+CAS fault injection, checks its persisted lifecycle state and actual file
+visibility, runs aged-intent reconciliation, and succeeds with a fresh validated
+upload. No pre-publication interruption becomes visible during reconciliation.
+The fault-injection feature is enabled as a server dev dependency only;
+production dependency configuration and the lockfile remain unchanged.
+Diagnostics: `/tmp/shardline-batched-deletion.Wy4WRB/test.log`.
+
+The optimized production CLI rebuild completed in 3m04s, reports 1.11.3 and has
+SHA-256 `355ccbcf7b276cab60e1f6f1c01e0f8337045e1e588aa5169b1b2dcc68ae38c4`.
+All 20 maintenance CLI scenarios pass in 0.737 seconds (Nextest run
+`c2378239-a17c-4983-a6e3-34d967fd2bd2`). The released/current permission verifier
+also passes all five command forms and fully read-only SQLite fsck with this
+binary: `/tmp/shardline-local-permissions.xIWzft`.
+These results verify the corrected native recovery and named CLI workflows;
+they do not establish every remote-storage fault or close the broader gates.
+Strict server library/test Clippy passes with the test feature enabled; formatting,
+diff checks and the AST graph update also pass.
