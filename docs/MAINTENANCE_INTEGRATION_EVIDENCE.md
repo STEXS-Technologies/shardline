@@ -2302,3 +2302,19 @@ remains compatible. Diagnostics: `/tmp/shardline-cleanup-failure.CH81A3`;
 verifier output: `.codex/validation/ux-quiet-fallback-cleanup-failure.log`.
 These local fixtures require writable existing SQLite/WAL sidecars; they do not
 prove availability with fully read-only metadata.
+
+## Explicit retention-writer grant comparison
+
+The restricted PostgreSQL retention-writer process fixture passed with the
+corrected optimized CLI above and released 1.11.3. It now compares sorted explicit
+table grants before and after the usual owner upgrade and asserts that the writer
+has no direct SELECT/INSERT/UPDATE/DELETE privileges on the fence or task-artifact
+tables. Both binaries can maintain holds with the existing credentials, reject a
+fixture pending delete without publishing a hold, and work again after removal
+of that marker. No remote delete was sent; manual removal is confined to that
+disposable fixture and is not an operator recovery procedure.
+
+Diagnostics: `/tmp/shardline-retention-permissions.jFWv4Z`; verifier output:
+`.codex/validation/ux-final-retention-permissions.log`. Shell syntax and diff
+checks passed. This proves the named retention-writer permission boundary; full
+GC accounts and row-policy history behavior have their separate fixtures above.
