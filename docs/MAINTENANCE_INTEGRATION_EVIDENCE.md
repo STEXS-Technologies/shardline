@@ -3156,3 +3156,15 @@ in 0.093 seconds against optimized CLI SHA-256
 Strict CLI integration-test Clippy passes. This verifies optional destination
 recording failure during a local raw copy; it does not establish a coordinated
 live storage cutover or settle pending deletes. No runtime or version changed.
+
+### Documented ordinary repair under restricted permissions
+
+The optimized released/current permissions comparison now covers both ordinary
+`shardline repair` and its `repair lifecycle` form, alongside fsck, rebuild and
+GC mark. All five forms preserve stdout, stderr and exit status under a 0555
+deployment root, create no private root entries and record five metadata-backed
+histories. Fully read-only SQLite fsck still preserves database/WAL bytes and
+existing histories while emitting the actionable recording warning.
+Diagnostics are `/tmp/shardline-local-permissions.zay6fd`.
+This extends coverage to the command recommended in the operator guide; it does
+not change the runtime or establish broader remote recovery guarantees.
