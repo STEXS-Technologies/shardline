@@ -3019,3 +3019,13 @@ sequence 2 to be absent after report failure; inspection showed its valid
 SupervisorInterrupted record, and the corrected assertion checks that event
 rather than mistaking it for completion. This local test does not simulate
 every server mutation or remote backend. No runtime behavior or version changed.
+
+The test subsequently extends the same matrix to legacy filesystem S3 multipart
+sessions: both frontends, each with report-write and completion-record denial,
+pass in 0.25 seconds. Actual expired part/session files are removed, readiness
+stays ready, unconfirmed evidence remains, and fresh startup records distinct
+work. PostgreSQL-fenced S3 sessions are intentionally outside this local sweep
+and use their durable cleanup path. Source review also confirms that the Hub
+background secret upgrade uses its nonreplaceable work pool and preserves
+lazy per-row upgrade when its optional sweep fails. This extension does not
+claim every Hub or remote-S3 failure phase is covered.
