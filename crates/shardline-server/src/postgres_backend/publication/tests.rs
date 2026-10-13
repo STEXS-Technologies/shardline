@@ -207,6 +207,150 @@ async fn snapshot_publication_does_not_wait_on_a_delete_holding_physical_locks()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_shard_publication_rejects_a_deleted_validated_xorb() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_remote_delete_guard()
+        .await
+        .unwrap();
+    let backend = fixture.postgres();
+    let payload = b"validated native backing bytes";
+    let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(payload);
+    backend.upload_xorb(&hash, xorb.clone()).await.unwrap();
+    let (shard, file_hash) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
+    let mut validated = None;
+    crate::xet_adapter::register_uploaded_shard_bytes_with_member_references(
+        &backend.object_store(),
+        &shard,
+        None,
+        crate::ShardMetadataLimits::default(),
+        |records, mappings, references| {
+            validated = Some((records, mappings, references));
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap();
+    let (records, mappings, references) = validated.unwrap();
+    assert!(!records.is_empty());
+    assert!(!mappings.is_empty());
+    let physical = crate::xet_adapter::xorb_object_key(&hash).unwrap();
+    assert!(
+        backend
+            .object_store()
+            .metadata(&physical)
+            .unwrap()
+            .is_some()
+    );
+    let permit = fixture
+        .index()
+        .begin_remote_delete(&physical)
+        .await
+        .unwrap();
+    let pending = backend
+        .commit_validated_native_shard(&records, &mappings, &references)
+        .await;
+    let deleted = backend.object_store().delete_if_present(&physical).unwrap();
+    assert_eq!(deleted, shardline_storage::DeleteOutcome::Deleted);
+    assert!(fixture.index().finish_remote_delete(&permit).await.unwrap());
+    let publication = backend
+        .commit_validated_native_shard(&records, &mappings, &references)
+        .await;
+    let visible: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_file_records",
+        fixture.schema,
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    backend.upload_xorb(&hash, xorb).await.unwrap();
+    let shard_key = mappings.first().unwrap().shard_object_key().clone();
+    assert!(
+        backend
+            .object_store()
+            .metadata(&shard_key)
+            .unwrap()
+            .is_some()
+    );
+    let shard_permit = fixture
+        .index()
+        .begin_remote_delete(&shard_key)
+        .await
+        .unwrap();
+    assert_eq!(
+        backend
+            .object_store()
+            .delete_if_present(&shard_key)
+            .unwrap(),
+        shardline_storage::DeleteOutcome::Deleted
+    );
+    assert!(
+        fixture
+            .index()
+            .finish_remote_delete(&shard_permit)
+            .await
+            .unwrap()
+    );
+    let missing_shard = backend
+        .commit_validated_native_shard(&records, &mappings, &references)
+        .await;
+    let partial_rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT (SELECT count(*) FROM {}.shardline_file_records) + (SELECT count(*) FROM {}.shardline_dedupe_shards)",
+        fixture.schema, fixture.schema,
+    ))).fetch_one(&fixture.admin).await.unwrap();
+    let retried = backend
+        .upload_shard_stream(
+            RequestBodyReader::from_bytes(shard),
+            None,
+            crate::ShardMetadataLimits::default(),
+        )
+        .await;
+    let downloaded = backend.download_file(&file_hash, None, None).await;
+    fixture.finish().await;
+    assert!(crate::ServerError::from(pending.unwrap_err()).is_remote_delete_pending());
+    assert!(
+        publication.is_err(),
+        "native metadata must not expose deleted backing bytes: {publication:?}"
+    );
+    assert_eq!(visible, 0);
+    assert_eq!(
+        partial_rows, 0,
+        "missing normalized shards must roll back file and mapping rows"
+    );
+    let missing_shard = crate::ServerError::from(missing_shard.unwrap_err());
+    assert!(!missing_shard.is_remote_delete_pending());
+    assert_eq!(
+        missing_shard.status_code(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    let error = crate::ServerError::from(publication.unwrap_err());
+    assert!(!error.is_remote_delete_pending());
+    use axum::response::IntoResponse;
+    let response = error.into_response();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&body)
+            .unwrap()
+            .contains("upload missing backing content again, then retry the shard")
+    );
+    assert!(
+        retried.is_ok(),
+        "a fresh native upload retry must succeed: {retried:?}"
+    );
+    assert_eq!(downloaded.unwrap().as_slice(), payload);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_publication_rejects_a_chunk_deleted_after_staging() {
     let Some(fixture) = PostgresFixture::new().await else {
         return;

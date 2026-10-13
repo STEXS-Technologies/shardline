@@ -13,6 +13,40 @@ untested deployments.
 
 ## Staged upload publication
 
+### Native shard backing content
+
+The write-path audit reproduced the same disappearance window in native shard
+registration. A configured PostgreSQL fixture uploads a real native xorb and
+parses a real shard, retaining the validator's actual records, mappings and
+member references. It verifies the xorb exists, physically deletes it, settles
+its exact marker and attempts publication. Temporarily restoring the previous
+index commit reproduces an incorrect `Ok(())`; the final server publication
+method instead rolls back and returns a retryable error.
+
+Both memory-backed and file-backed server callbacks now use the publication
+module on their existing write connection. An outer transaction retains the
+native reference locks through final bounded presence checks for the physical
+xorbs and normalized shard bodies. Packed member chunk keys are protected by
+the existing index guard but are not incorrectly required to exist as separate
+objects. Before owner setup installs the guard helpers, the previous path
+remains available; the change adds no migration entry, runtime grant, process
+or configuration. The lower-level public index API remains a metadata API and
+cannot certify storage presence for arbitrary library callers.
+
+The regression also checks pending-delete rejection, deletion of the actual
+normalized shard body, rollback of file and dedupe rows, 503 with `Retry-After:
+1`, and guidance to restore backing content before retrying the shard. Restoring
+the xorb and retrying through the normal upload handler succeeds, and a normal
+download returns the original bytes. This uses local CAS with a real database
+and controlled phase interleaving; it is not a remote-S3 fault or performance
+drill. The earlier optimized deployment binaries below do not include this
+additional native publication check.
+
+All five configured publication tests and 21 PostgreSQL delete-guard tests pass.
+All 261 selected server error tests pass. Strict all-feature/all-target Clippy
+passes for the CLI, server and S3 adapter. Public error enums and existing
+unrelated IO error responses are unchanged.
+
 ### Full automatic SQLite history capacity
 
 The explicit release-mode capacity fixture passes with 4,096 retained runs:
