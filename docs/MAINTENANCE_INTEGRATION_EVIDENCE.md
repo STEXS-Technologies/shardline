@@ -1,6 +1,24 @@
 # Maintenance integration: detailed evidence
 
+This branch adds automatic task history to existing startup and maintenance.
+It is **not ready to merge**. The version stays unchanged; a version bump belongs
+in a separate PR.
+
+Operators should start with the [maintenance guide](MAINTENANCE_INTEGRATION_UX.md).
+Reviewers should start with the [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
+This appendix preserves development evidence, fixture limitations and reproduction
+commands. Earlier observations describe their tested revision; later notes record
+subsequent fixes. They are not a substitute for the current checklist or proof of
+untested deployments.
+
 ## Retention ownership cleanup
+
+The optimized all-feature binary built from `fe40b096` passed the complete
+11-drill maintenance deployment matrix after these cleanup changes. The verifier
+confirmed 11 selected tests and 11 passes with no runtime skips; 12 unrelated
+deployment tests were filtered out. The run took 158.216 seconds on this fixture.
+This covers the checks listed in the reproduction command below, not the separate
+reboot, cross-host or scale gates. The binary still reports version 1.11.3.
 
 Retention hold creation and release now retain the same ownership guard used by
 the public metadata barrier. It closes the bound Postgres pool on early errors,
@@ -33,17 +51,6 @@ immediately rejects acquisition and the competitor acquires within the test's
 two-second deadline. This tests local future cancellation, not a network partition.
 The embedded Hub secret sweep uses the same guard for unwind cleanup; cancelling
 its async caller still leaves existing blocking work owned until that work exits.
-
-This branch adds automatic task history to existing startup and maintenance.
-It is **not ready to merge**. The version stays unchanged; a version bump belongs
-in a separate PR.
-
-Operators should start with the [maintenance guide](MAINTENANCE_INTEGRATION_UX.md).
-Reviewers should start with the [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
-This appendix preserves development evidence, fixture limitations and reproduction
-commands. Earlier observations describe their tested revision; later notes record
-subsequent fixes. They are not a substitute for the current checklist or proof of
-untested deployments.
 
 ## Known gaps
 
@@ -517,6 +524,18 @@ All eight remain the completion criteria:
    needing reconciliation without understanding dependency internals.
 
 ## Reproducing the machine tests
+
+The maintenance deployment matrix requires Docker Compose and cargo-nextest:
+
+```bash
+bash scripts/shardline/verify_maintenance_deployments.sh CURRENT RELEASED
+```
+
+It selects 11 drills covering restricted commands, concurrent rebuilds, container
+replacement and shutdown, remote-delete acknowledgement faults, and mixed-version
+rollout and rollback. Each drill owns its disposable Compose project. The verifier
+rejects runtime skips and an unexpected selected test count, and retains logs.
+It does not cover the separate KVM reboot and two-machine checks below.
 
 The storage-copy compatibility check covers new local history through released rollback:
 
