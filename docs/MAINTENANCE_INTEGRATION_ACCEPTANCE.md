@@ -129,8 +129,10 @@ The following still need implementation or stronger evidence before merge:
   A separate legacy object-store fixture retires one completed run with over
   10,000 artifacts across 40 calls, reopening the history store each time.
   It checks the 256-key budget, resumable markers and unchanged unfinished
-  evidence, corrupt history and user payload. This does not cover a large
-  inventory of distinct legacy runs or establish production latency.
+  evidence, corrupt history and user payload. A separate legacy archive fixture
+  paginates all 1,026 distinct histories exactly once, then incrementally retires
+  1,024 finished runs while preserving unfinished and corrupt history and user
+  payload. Neither fixture establishes production latency or broader cost.
   An optimized ordinary CLI fixture verifies exact
   256-key progress over two invocations, released output/status and unchanged
   payload bytes. Metadata inspection

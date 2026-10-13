@@ -2,6 +2,84 @@
 use super::*;
 
 #[test]
+#[ignore = "large legacy history inventory; explicit capacity drill"]
+fn many_legacy_runs_paginate_and_retire_without_losing_unresolved_history() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let store = TaskEvidenceStore::from_objects(object_store_from_config(&config).unwrap());
+    let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
+    for number in 0..1024 {
+        tracker
+            .begin(
+                &format!("legacy-{number:04}"),
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"verified report")
+            .unwrap();
+    }
+    let unfinished = tracker
+        .begin(
+            "unfinished-archive",
+            b"input",
+            MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap();
+    store
+        .publish("manifests/unreadable", b"preserve corrupt history")
+        .unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut after = None;
+    loop {
+        let page = store
+            .inspect_summaries(deployment, after.as_deref(), 64)
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 64);
+        for entry in &page {
+            let id = match entry {
+                status::TaskEvidenceEntry::Verified(run) => run.id.clone(),
+                status::TaskEvidenceEntry::Unreadable { id, .. } => id.clone(),
+            };
+            assert!(
+                seen.insert(id.clone()),
+                "legacy pagination repeated an entry"
+            );
+            after = Some(id);
+        }
+    }
+    assert_eq!(seen.len(), 1026);
+    let payload = root.path().join("chunks/user-payload");
+    std::fs::write(&payload, b"unchanged user data").unwrap();
+    let mut retired = 0_usize;
+    for _ in 0..1024 {
+        let fresh = TaskEvidenceStore::from_objects(store.objects.clone());
+        let finished = fresh
+            .prune_completed_incrementally(deployment, u64::MAX)
+            .unwrap();
+        assert!(finished <= 64);
+        retired = retired.checked_add(finished).unwrap();
+        assert_eq!(
+            fresh.read("manifests/unreadable", 100).unwrap().unwrap(),
+            b"preserve corrupt history"
+        );
+        assert_eq!(std::fs::read(&payload).unwrap(), b"unchanged user data");
+        if retired == 1024 {
+            break;
+        }
+    }
+    assert_eq!(retired, 1024);
+    let remaining = store.inspect_summaries(deployment, None, 64).unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.iter().any(|entry| matches!(entry, status::TaskEvidenceEntry::Verified(run) if run.operation == "unfinished-archive")));
+    drop(unfinished);
+}
+
+#[test]
 #[ignore = "large legacy artifact inventory; explicit capacity drill"]
 fn large_legacy_run_retires_incrementally_without_touching_unresolved_evidence() {
     let root = tempfile::tempdir().unwrap();
