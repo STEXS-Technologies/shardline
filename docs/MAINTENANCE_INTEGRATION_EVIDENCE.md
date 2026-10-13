@@ -3550,3 +3550,38 @@ These inspection checks do not replace the earlier optimized-binary deployment
 drills or close the remaining write-path, compatibility and scale gates.
 Inventory scans can still be O(N); a bounded page does not bound scan duration.
 The version remains 1.11.3.
+
+### History inspection after login replacement and under read-only permissions
+
+The configured replacement-login retention fixture now inspects history through
+`TaskEvidenceStore::for_inspection` before its existing cleanup assertions.
+The original source login has closed its pool; the replacement resolves the
+same actual history scope despite a different legacy deployment fingerprint.
+It sees both completed runs and the unfinished run with recovery guidance.
+Every artifact key and payload compares exactly before and after inspection.
+The original retirement and unresolved-history assertions remain intact.
+The test passes in 1.91 seconds with no runtime skip:
+`/tmp/shardline-batched-deletion.9kz1YT/test.log`.
+
+All four current `history_e2e` cases pass in 9.25 seconds. Two new cases run as
+an unprivileged user with a 0555 root and 0444 metadata files:
+
+- A retained live connection keeps the WAL sidecars present. A second ordinary
+  fsck commits a new history while the main database file remains byte-identical.
+  Read-only inspection sees both completed histories, including the new WAL-only
+  history, and preserves the main database and WAL bytes exactly.
+- A closed WAL-mode deployment has no sidecars and its directory permits no
+  creation. SQLite cannot inspect it in this state. The CLI returns a nonzero
+  exit with an actionable sidecar diagnostic, emits no JSON success page and
+  preserves database bytes and the absence of both sidecars.
+
+The second case initially exposed a generic SQLite read-only error. The command
+now recognizes SQLite's typed `READONLY_CANTINIT` and `READONLY_DIRECTORY` errors
+through the error chain and explains how to inspect the running deployment or
+a consistent backup. It does not switch to immutable/main-file-only reads,
+change permissions or discard WAL. This is a supported error path, not proof
+that sealed WAL databases with missing sidecars can be inspected. SQLite's
+[read-only WAL requirements](https://sqlite.org/wal.html#read_only_databases)
+describe this boundary. Remaining merge gates retain their original scope.
+Strict index/server/CLI library and test Clippy, formatting and diff checks pass.
+The version remains unchanged.

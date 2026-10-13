@@ -34,6 +34,10 @@ and the same configuration. Inspection does not run maintenance, retire history
 or initialize local metadata. A storage failure exits unsuccessfully rather
 than presenting an empty history as success.
 
+Read-only SQLite needs its readable WAL sidecars. When they are unavailable,
+the command explains how to inspect the running deployment or a consistent
+backup. Keep the database and WAL together.
+
 ## Durable Maintenance (Linux)
 
 Normal Linux maintenance commands allocate their own run identities and execute

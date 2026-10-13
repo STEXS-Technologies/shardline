@@ -2,6 +2,19 @@
 use shardline_server::task_tracking::{TaskEvidenceStore, deployment_fingerprint};
 use std::path::Path;
 
+pub(crate) fn failure_guidance(error: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if shardline_index::LocalIndexStoreError::read_only_wal_needs_sidecars(cause) {
+            return Some(
+                "SQLite history requires readable metadata.sqlite3-wal and metadata.sqlite3-shm files when the deployment directory is read-only. Inspect the running deployment with its existing sidecars, or a consistent offline backup. Preserve the database and its WAL together; inspection did not change database contents.",
+            );
+        }
+        current = cause.source();
+    }
+    None
+}
+
 pub(crate) async fn run(
     root: Option<&Path>,
     after: Option<String>,

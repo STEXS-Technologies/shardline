@@ -52,6 +52,12 @@ as `--after RUN_ID` for the next page. It starts no worker, performs no cleanup
 and does not create or migrate local metadata. An empty page does not prove
 maintenance never ran; recording may have failed.
 
+For read-only SQLite deployments, inspection needs the existing readable
+`metadata.sqlite3-wal` and `metadata.sqlite3-shm` files. If they are missing,
+the command explains the problem and exits unsuccessfully. Inspect the running
+deployment with its sidecars, or a consistent backup that preserves the
+database and WAL together.
+
 To check the server now, use `shardline health --server https://cas.example.com`
 with your server address. Saved history and current health answer different
 questions.

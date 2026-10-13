@@ -521,6 +521,51 @@ async fn replacement_login_retires_shared_history_after_source_pool_closes() {
     .await
     .unwrap();
     source_pool.close().await;
+    // The read-only CLI path must see the old account's shared history before
+    // any replacement cleanup, without altering its signed artifacts.
+    let artifact_query = format!(
+        "SELECT artifact_key,payload FROM {}.shardline_task_artifacts_v1 ORDER BY artifact_key",
+        fixture.schema,
+    );
+    let original_artifacts: Vec<(String, Vec<u8>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(artifact_query.clone()))
+            .fetch_all(&fixture.admin)
+            .await
+            .unwrap();
+    let (inspection, inspection_scope) =
+        TaskEvidenceStore::for_inspection(&fixture.config, Some(fixture.index().pool()))
+            .await
+            .unwrap();
+    assert_eq!(inspection_scope, Some(source_scope));
+    tokio::task::spawn_blocking(move || {
+        let page = inspection
+            .inspection_page(deployment, inspection_scope, None, 10)
+            .unwrap();
+        let tasks = page["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task["state"] == "completed")
+                .count(),
+            2
+        );
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task["operation"] == "previous-account-interrupted"
+                    && task["state"] != "completed"
+                    && task["next_step"].is_string())
+        );
+    })
+    .await
+    .unwrap();
+    let inspected_artifacts: Vec<(String, Vec<u8>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(artifact_query))
+            .fetch_all(&fixture.admin)
+            .await
+            .unwrap();
+    assert_eq!(inspected_artifacts, original_artifacts);
     let (replacement, replacement_scope) =
         TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
             .await
