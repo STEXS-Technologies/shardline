@@ -3360,6 +3360,12 @@ preservation behavior, not a production performance bound. Inventory scanning,
 larger archives and deployment-scale cost remain open. Strict server library/test
 Clippy, formatting and diff checks pass, and the AST graph is updated.
 
+The same fixture also passes in the optimized release profile: one passed,
+zero failed and zero ignored in 241.77 seconds. That total includes fixture
+creation, pagination, all cleanup calls and preservation checks; it is not the
+duration of one maintenance command or a cleanup-only measurement. This result
+keeps inventory cost open rather than establishing a production latency bound.
+
 ```sh
 cargo test --locked -p shardline-server --all-features --lib \
   task_tracking::tests::legacy_retention_capacity::many_legacy_runs_paginate_and_retire_without_losing_unresolved_history \
