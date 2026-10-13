@@ -165,11 +165,15 @@ pub async fn run_gc_diagnostics(
         } else {
             connect_postgres_metadata_pool(index_postgres_url, 4)?
         };
+        let _cleanup = maintenance_barrier::WorkPoolCleanup::new(&pool);
         let settlement_pool = if options.sweep && matches!(object_store, ServerObjectStore::S3(_)) {
             Some(connect_postgres_metadata_pool(index_postgres_url, 1)?)
         } else {
             None
         };
+        let _settlement_cleanup = settlement_pool
+            .as_ref()
+            .map(maintenance_barrier::WorkPoolCleanup::new);
         crate::task_tracking::observe_work_pool(&config, &pool).await;
         let result = async {
             let index_store = settlement_pool.as_ref().map_or_else(

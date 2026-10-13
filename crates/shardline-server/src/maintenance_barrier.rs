@@ -14,6 +14,9 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection, qu
 
 use crate::ServerError;
 
+mod work_pool;
+pub(crate) use work_pool::{WorkPoolCleanup, close_work_pool};
+
 /// Stable application-level advisory-lock key for GC versus visible metadata writers.
 const GC_WRITE_BARRIER_KEY: i64 = 0x5348_4152_4447_4301;
 const LOCAL_BARRIER_FILE_NAME: &str = ".gc-write-barrier.lock";

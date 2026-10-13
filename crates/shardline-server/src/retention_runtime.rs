@@ -38,13 +38,7 @@ impl MetadataWriteBarrier {
 impl Drop for MetadataWriteBarrier {
     fn drop(&mut self) {
         if let MetadataWriteBarrierGuard::Postgres(pool) = &self.guard {
-            // SQLx marks the pool closed synchronously; awaiting only finishes
-            // graceful connection cleanup. Even retained clones cannot reconnect.
-            drop(pool.close());
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                let pool = pool.clone();
-                runtime.spawn(async move { pool.close().await });
-            }
+            maintenance_barrier::close_work_pool(pool);
         }
     }
 }

@@ -14,6 +14,18 @@ deliberate panic allow an exclusive maintenance owner to acquire within two
 seconds. Existing contention, cancellation and lost-session tests also pass.
 This is evidence for retention ownership cleanup, not every library write path.
 
+Rebuild, lifecycle repair and GC also retain a shared `WorkPoolCleanup` guard
+from acquisition until operation exit. Early storage errors and cancelled futures
+close their work pools, including retained handles; GC's independent reply
+recorder receives the same cleanup. Normal completion still awaits closure.
+The implementation lives in the conventional `maintenance_barrier::work_pool`
+module. A no-connection regression verifies that retained handles are closed
+and reject acquisition after the operation guard drops. Disposable real-Postgres
+fixtures passed 13 barrier tests, 13 retention tests and 17 rebuild tests.
+The exact GC ownership-loss regression also passed with a configured database;
+its original `gc_runtime::tests` filter selected zero tests and was discarded.
+Strict all-feature, all-target Clippy and formatting checks passed.
+
 This branch adds automatic task history to existing startup and maintenance.
 It is **not ready to merge**. The version stays unchanged; a version bump belongs
 in a separate PR.

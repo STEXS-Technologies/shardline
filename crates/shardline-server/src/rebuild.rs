@@ -55,6 +55,7 @@ pub async fn run_index_rebuild(config: ServerConfig) -> Result<IndexRebuildRepor
     // reconstruction rows have been reconciled. Coordinate with uploads and GC.
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool = maintenance_barrier::postgres_exclusive_work_pool(index_postgres_url).await?;
+        let _cleanup = maintenance_barrier::WorkPoolCleanup::new(&pool);
         crate::task_tracking::observe_work_pool(&config, &pool).await;
         let object_store = object_store_from_config(&config)?;
         let index_store = PostgresIndexStore::new(pool.clone());
