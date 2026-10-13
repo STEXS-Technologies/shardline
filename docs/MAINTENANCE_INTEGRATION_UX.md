@@ -118,6 +118,9 @@ account supports it. Normal maintenance moves verified, finished legacy history
 into metadata in bounded batches, preserving its signed bytes. Interrupted,
 corrupt or unrelated history stays in place. Storage copy keeps its source
 read-only; it does not require new source write permissions.
+Current copies exclude verified legacy history scope bindings, including those
+for unfinished runs, and leave the source evidence unchanged. Unrecognized or
+damaged objects retain their existing copy behavior.
 Copies to S3-only endpoints keep task history in private temporary storage on
 the command's host, without adding objects or permissions to the payload bucket.
 That history is not available through other nodes and can be removed by

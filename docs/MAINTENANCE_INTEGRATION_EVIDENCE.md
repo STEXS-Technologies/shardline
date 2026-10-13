@@ -898,3 +898,23 @@ report remains `running`, returns no report and warns against a duplicate job.
 All 32 task-tracking tests, including metadata and relocation tests, pass with
 the owned released-migration PostgreSQL fixture and no runtime skips. Strict
 server Clippy and workspace formatting pass after this extension.
+
+## Legacy scope bindings during storage copy
+
+Current payload copies now exclude signed scope bindings associated with a
+recognized legacy manifest. Previously those bindings entered the payload copy
+even when their manifests and run artifacts were excluded. Binding verification
+uses the existing manifest and author key; damaged bindings and unrelated
+objects retain their original inventory/copy behavior.
+
+All 25 storage-migration tests pass. The new fixture creates a genuinely signed
+binding for an unfinished run, checks dry-run and real-copy counts, preserves
+all source bytes, and confirms that unrelated and damaged binding bytes still
+copy. The partly retired legacy-history fixture now publishes its retirement
+marker into object storage rather than modern SQLite metadata, matching the
+scenario it claims to test. Strict server Clippy and formatting pass.
+The full-feature CLI was rebuilt and the native released/current copy verifier
+passes, including exact output/inventory comparison, byte-preserving legacy
+relocation, released rollback and execute-only binary fallback.
+
+This does not upgrade old binaries or identify every damaged legacy object.

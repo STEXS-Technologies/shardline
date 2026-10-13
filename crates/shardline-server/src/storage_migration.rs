@@ -185,6 +185,7 @@ fn is_task_evidence(source: &ServerObjectStore, key: &ObjectKey) -> bool {
     let id = if let Some(id) = suffix
         .strip_prefix("manifests/")
         .or_else(|| suffix.strip_prefix("retiring/"))
+        .or_else(|| suffix.strip_prefix("scope-bindings/"))
     {
         id
     } else if let Some(run) = suffix.strip_prefix("runs/") {
@@ -212,9 +213,19 @@ fn is_task_evidence(source: &ServerObjectStore, key: &ObjectKey) -> bool {
     let Ok(identity) = serde_json::from_slice::<TaskRunIdentity>(&bytes) else {
         return false;
     };
-    identity.schema == 1
+    let recognized = identity.schema == 1
         && identity.id == id
-        && identity.scope.definition == identity.definition.fingerprint()
+        && identity.scope.definition == identity.definition.fingerprint();
+    if recognized && suffix.starts_with("scope-bindings/") {
+        // Only a verified association is recognizable control evidence. Keep
+        // arbitrary or damaged bytes under an otherwise recognized run ID.
+        matches!(
+            store.history_scope_binding_match(&identity, identity.deployment),
+            Ok(Some(_))
+        )
+    } else {
+        recognized
+    }
 }
 
 fn validate_source_object_matches_content_addressed_key(
@@ -310,6 +321,103 @@ mod tests {
     };
 
     // ── StorageMigrationEndpoint ──────────────────────────────────────────
+
+    #[test]
+    fn storage_migration_keeps_bound_unfinished_history_out_of_payload_copy() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let source_endpoint = StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf());
+        let objects = endpoint_store(&source_endpoint).unwrap();
+        let tracker = crate::task_tracking::EmbeddedTaskTracker::new(
+            objects.clone(),
+            penelope_core::task::Digest::of(b"copy-source-deployment"),
+        )
+        .with_history_scope(penelope_core::task::Digest::of(b"shared-copy-history"));
+        let unfinished = tracker
+            .begin(
+                "unfinished-copy-fixture",
+                b"input",
+                shardline_reliability::MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap();
+        let binding_prefix =
+            shardline_storage::ObjectPrefix::parse("_shardline_tasks/v1/scope-bindings/").unwrap();
+        assert_eq!(objects.list_prefix(&binding_prefix).unwrap().len(), 1);
+        let payload = ObjectKey::parse("fixture/user-payload").unwrap();
+        let unrelated = ObjectKey::parse("_shardline_tasks/v1/scope-bindings/unrelated").unwrap();
+        for key in [&payload, &unrelated] {
+            let bytes = b"existing arbitrary payload bytes";
+            objects
+                .put_if_absent(
+                    key,
+                    ObjectBody::from_slice(bytes),
+                    &ObjectIntegrity::new(chunk_hash(bytes), u64::try_from(bytes.len()).unwrap()),
+                )
+                .unwrap();
+        }
+        let snapshot = || {
+            objects
+                .list_prefix(&shardline_storage::ObjectPrefix::parse("").unwrap())
+                .unwrap()
+                .into_iter()
+                .map(|metadata| {
+                    let bytes = crate::object_store::read_full_object(
+                        &objects,
+                        metadata.key(),
+                        metadata.length(),
+                    )
+                    .unwrap();
+                    (metadata.key().as_str().to_owned(), bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let original = snapshot();
+        let options = StorageMigrationOptions::new(
+            source_endpoint,
+            StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
+        );
+        let inventory = run_storage_migration(&options.clone().with_dry_run(true)).unwrap();
+        assert_eq!(inventory.scanned_objects, 2);
+        assert_eq!(inventory.inserted_objects, 0);
+        let copied = run_storage_migration(&options).unwrap();
+        assert_eq!(copied.scanned_objects, 2);
+        assert_eq!(copied.inserted_objects, 2);
+        let copied_objects = endpoint_store(&options.destination).unwrap();
+        assert!(copied_objects.contains(&payload).unwrap());
+        assert!(copied_objects.contains(&unrelated).unwrap());
+        assert_eq!(
+            copied_objects.list_prefix(&binding_prefix).unwrap().len(),
+            1
+        );
+        assert_eq!(snapshot(), original);
+        // A matching filename alone must not hide arbitrary legacy bytes.
+        let binding = objects
+            .list_prefix(&binding_prefix)
+            .unwrap()
+            .into_iter()
+            .find(|metadata| metadata.key() != &unrelated)
+            .unwrap();
+        let damaged = b"unrecognized legacy bytes at the same run ID";
+        fs::write(
+            source.path().join("chunks").join(binding.key().as_str()),
+            damaged,
+        )
+        .unwrap();
+        let copied_damaged = run_storage_migration(&options).unwrap();
+        assert_eq!(copied_damaged.scanned_objects, 3);
+        assert_eq!(copied_damaged.inserted_objects, 1);
+        assert_eq!(copied_damaged.already_present_objects, 2);
+        assert_eq!(
+            crate::object_store::read_full_object(
+                &copied_objects,
+                binding.key(),
+                u64::try_from(damaged.len()).unwrap(),
+            )
+            .unwrap(),
+            damaged
+        );
+        drop(unfinished);
+    }
 
     #[test]
     fn storage_migration_endpoint_backend_name_local() {
@@ -515,7 +623,7 @@ mod tests {
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
         let tracker = crate::task_tracking::EmbeddedTaskTracker::new(
-            objects,
+            objects.clone(),
             crate::task_tracking::deployment_fingerprint(&config).unwrap(),
         );
         tracker
@@ -528,7 +636,9 @@ mod tests {
             .finish(true, b"done")
             .unwrap();
         // Partly retired native history must also stay with its deployment.
-        let evidence = crate::task_tracking::TaskEvidenceStore::from_config(&config).unwrap();
+        // Model a legacy retirement marker in the source object inventory,
+        // rather than publishing it into modern SQLite task metadata.
+        let evidence = crate::task_tracking::TaskEvidenceStore::from_objects(objects);
         let id = fs::read_dir(source.path().join("chunks/_shardline_tasks/v1/manifests"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
