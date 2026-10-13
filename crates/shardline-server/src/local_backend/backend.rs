@@ -329,6 +329,10 @@ impl LocalBackend {
                             );
                             None
                         }
+                        None if crate::upload_intent_recovery::missing_request_key_is_inconclusive(intent) => {
+                            tracing::warn!(intent_id = %intent.intent_id(), "native shard request key is absent; normalized storage may use another key, preserving for validated retry");
+                            None
+                        }
                         None => Some(UploadIntentState::Failed),
                     },
                     Err(_) => Some(UploadIntentState::Failed),
@@ -846,6 +850,85 @@ mod tests {
         )
         .await;
         assert!(backend.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normalized_shard_recovery_preserves_retry_after_metadata_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            root.path().to_owned(),
+            "http://localhost:8080".to_owned(),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .await
+        .unwrap();
+        let payload = b"normalized local shard retry";
+        let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(payload);
+        backend.upload_xorb(&hash, xorb).await.unwrap();
+        let (shard, file_hash) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
+        let intent_id = format!("shard-{}", blake3::hash(&shard).to_hex());
+        let database = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        database.execute_batch("CREATE TRIGGER deny_native_metadata BEFORE INSERT ON shardline_file_records BEGIN SELECT RAISE(ABORT, 'fixture denies native publication'); END;").unwrap();
+        assert!(
+            backend
+                .upload_shard_stream(
+                    crate::upload_ingest::RequestBodyReader::from_bytes(shard.clone()),
+                    None,
+                    crate::ShardMetadataLimits::default()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            backend
+                .index_store
+                .intent_by_id(&intent_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        backend
+            .reconcile_stuck_upload_intents_older_than(std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .index_store
+                .intent_by_id(&intent_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        assert!(matches!(
+            backend.read_record(&file_hash, None, None).await,
+            Err(crate::ServerError::NotFound)
+        ));
+        database
+            .execute_batch("DROP TRIGGER deny_native_metadata")
+            .unwrap();
+        backend
+            .upload_shard_stream(
+                crate::upload_ingest::RequestBodyReader::from_bytes(shard),
+                None,
+                crate::ShardMetadataLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .index_store
+                .intent_by_id(&intent_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Visible
+        );
+        assert!(backend.read_record(&file_hash, None, None).await.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

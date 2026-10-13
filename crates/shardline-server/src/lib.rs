@@ -148,6 +148,7 @@ pub use transfer_limiter::TransferLimiter;
 mod gc_tests;
 mod transfer_limiter;
 pub mod upload_ingest;
+mod upload_intent_recovery;
 mod validation;
 
 pub use app::{serve, serve_with_listener};

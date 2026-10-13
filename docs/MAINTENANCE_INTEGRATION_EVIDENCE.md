@@ -3201,3 +3201,29 @@ storage, then updates intent state. It does not reconstruct file publication fro
 an intent's status. This source evidence distinguishes bookkeeping from data
 publication but does not replace the pending ownership-loss/recovery interleaving
 test or claim that every upload lifecycle write is request-session fenced.
+
+### Native upload recovery after ownership or metadata failure
+
+A real ownership-loss regression exposed a recovery defect: a native shard
+intent names the original request hash, while validated storage may use a
+normalized shard key. Startup reconciliation previously treated absence of the
+original key as terminal failure, preventing a valid fresh retry. The original
+PostgreSQL regression fails with `Failed` instead of the expected in-flight
+state in `/tmp/shardline-batched-deletion.IxGtcB/test.log`.
+
+Local and PostgreSQL recovery now preserve an in-flight native shard intent when
+that request key is absent. A shared semantic module identifies this case;
+neither backend reconstructs file metadata or replays the upload from the intent.
+Other missing-object recovery rules remain unchanged. Existing terminally failed
+intents are not rewritten or reopened by this change.
+
+The corrected owned-PostgreSQL test passes in 0.49 seconds:
+`/tmp/shardline-batched-deletion.pfxN04/test.log`. It terminates the real request
+session, runs native upload in its scope, verifies rejected publication and zero
+file/dedupe rows, runs aged-intent reconciliation, and verifies the intent stays
+in flight with no file visibility. A fresh validated upload then succeeds and
+records visibility. The local SQLite regression denies actual file publication
+and verifies the same reconciliation/retry boundary; all 22 local backend tests
+pass in 0.40 seconds, including existing missing-object recovery behavior.
+Strict server library/test Clippy passes. This fixes the named recovery defect,
+not all late upload bookkeeping or every interruption phase.
