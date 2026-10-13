@@ -132,6 +132,10 @@ These are scoped results, not a claim that every deployment is compatible:
   oldest-first cleanup preserve unresolved evidence and user payload bytes.
   The slowest cleanup call was 0.802 seconds in this local fixture; this does
   not establish deployment latency or the cost of larger legacy histories.
+  After SQLite deletion batching, the full 4,096-slot release fixture also
+  passed: inspection took 6.264 seconds and cleanup totaled 36.619 seconds
+  across 65 calls, with a slowest call of 0.690 seconds. Unfinished/corrupt
+  histories and payload bytes remained intact. These are fixture measurements.
 - An explicit optimized PostgreSQL fixture also fills all 4,096 automatic
   history slots, rejects further admission, paginates every ID, preserves
   interrupted/corrupt evidence and user payload, and records fresh work after
