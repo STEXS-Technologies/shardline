@@ -61,6 +61,10 @@ These are scoped results, not a claim that every deployment is compatible:
 - Covered PostgreSQL writes reject lost ownership. Covered writes to an object
   with an unresolved remote delete return a retryable error. Verified saved
   replies can settle the matching delete without sending another user delete.
+  Seven optimized real-Postgres/MinIO fault drills cover lost acknowledgements,
+  delayed deletes, restricted GC accounts, denied receipt writes, and recovery
+  by ordinary repair or a fresh sweep after a database outage. Unrecorded GC
+  outcomes stay unresolved even after their saved delete replies settle.
 - History distinguishes completed, failed and unresolved runs. Signed records
   and reports are verified; unfinished and corrupt evidence is retained.
 - A mark-only GC comparison preserves released output, status and payload bytes

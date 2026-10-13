@@ -114,6 +114,30 @@ impl Drop for ProxyTask {
     }
 }
 
+// Production history inspection runs on blocking threads. Keep the synchronous
+// evidence API off this drill's async runtime workers as well.
+struct MetadataHistory(TaskEvidenceStore);
+
+impl MetadataHistory {
+    fn summaries(
+        &self,
+        deployment: penelope_core::task::Digest,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<shardline_server::task_tracking::TaskRunSummary>, shardline_server::ServerError>
+    {
+        tokio::task::block_in_place(|| self.0.summaries(deployment, after, limit))
+    }
+
+    fn read(
+        &self,
+        key: &str,
+        maximum: u64,
+    ) -> Result<Option<Vec<u8>>, shardline_server::ServerError> {
+        tokio::task::block_in_place(|| self.0.read(key, maximum))
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed() {
     run_remote_gc_fault(false, false, None).await;
@@ -252,7 +276,6 @@ async fn run_remote_gc_fault_with_recovery(
     .with_index_postgres_url(stack.pg_url.clone())
     .unwrap()
     .with_object_storage(ObjectStorageAdapter::S3, Some(s3));
-    let store = TaskEvidenceStore::from_config(&config).unwrap();
     let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
     let index = PostgresIndexStore::new(pool.clone());
     if let Some(released) = released {
@@ -336,6 +359,14 @@ async fn run_remote_gc_fault_with_recovery(
             .unwrap();
     }
     let deployment = deployment_fingerprint(&config).unwrap();
+    let (store, history_scope) = TaskEvidenceStore::from_postgres_pool(&config, &pool)
+        .await
+        .unwrap();
+    assert!(
+        history_scope.is_some(),
+        "owned upgraded fixture must expose metadata history"
+    );
+    let store = MetadataHistory(store);
     let mark = docker_run_owned(
         super::readonly_maintenance_deployment::readonly_cli_arguments(
             &binary,
@@ -585,16 +616,37 @@ async fn run_remote_gc_fault_with_recovery(
             assert!(stopped.status.success());
         }
         proxy.acknowledge.add_permits(1);
+        // A stopped database exercises work-pool acquisition and optional
+        // metadata publication timeouts, not only the remote acknowledgement.
+        // Keep a finite fixture deadline and retain the shorter normal case.
+        let exit_deadline = if recover_after_outage { 90 } else { 25 };
         let exited = tokio::time::timeout(
-            Duration::from_secs(25),
+            Duration::from_secs(exit_deadline),
             docker_run_owned(vec!["wait".to_owned(), container.0.clone()]),
         )
-        .await
-        .unwrap();
+        .await;
+        let exited = match exited {
+            Ok(exited) => exited,
+            Err(error) => {
+                let logs = docker_run_owned(vec!["logs".to_owned(), container.0.clone()]).await;
+                panic!(
+                    "GC did not exit after database outage: {error}; stdout={} stderr={}",
+                    String::from_utf8_lossy(&logs.stdout),
+                    String::from_utf8_lossy(&logs.stderr)
+                );
+            }
+        };
         assert!(exited.status.success());
         assert_ne!(String::from_utf8_lossy(&exited.stdout).trim(), "0");
         assert_eq!(proxy.applied.load(Ordering::Acquire), 1);
         if recover_after_outage {
+            let source_logs = docker_run_owned(vec!["logs".to_owned(), container.0.clone()]).await;
+            assert!(source_logs.status.success());
+            assert!(
+                String::from_utf8_lossy(&source_logs.stderr).contains("unconfirmed"),
+                "the original command must warn that metadata completion was not recorded: {}",
+                String::from_utf8_lossy(&source_logs.stderr)
+            );
             let prefix = shardline_storage::ObjectPrefix::parse(&format!(
                 "_shardline_tasks/v1/delete-replies/{reply_namespace}/replies/",
             ))
@@ -678,8 +730,18 @@ async fn run_remote_gc_fault_with_recovery(
                     .find(|task| task.id == interrupted.id)
                     .unwrap()
                     .state,
-                TaskRunState::Failed,
-                "settling a saved reply cannot turn failed GC into successful history"
+                TaskRunState::RunningOrInterrupted,
+                "database outage prevents recording GC's exit; reply recovery must preserve unresolved history"
+            );
+            assert!(
+                store
+                    .read(
+                        &format!("runs/{}/records/0000000003", interrupted.id),
+                        16384,
+                    )
+                    .unwrap()
+                    .is_none(),
+                "reply recovery must not fabricate a terminal task record"
             );
             return;
         }
