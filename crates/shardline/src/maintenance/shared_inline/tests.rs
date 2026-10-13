@@ -332,6 +332,61 @@ async fn ordinary_commands_finish_before_history_housekeeping_and_preserve_clean
 }
 
 #[test]
+fn saved_report_without_completion_acknowledgement_stays_unresolved() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let operation = MaintenanceOperation::Fsck {
+        root: root.path().to_owned(),
+    };
+    let id = "shared-inline-unacknowledged";
+    let (input, definition, scope) =
+        super::super::inline::prepare(&config, id, &operation, vec![b"fsck".to_vec()]).unwrap();
+    let mut receipt = Receipt::begin(&operation, id, &config, &input, definition, scope).unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fixture_reject_completion BEFORE INSERT ON shardline_task_artifacts_v1
+             WHEN NEW.artifact_key = '_shardline_tasks/v1/runs/shared-inline-unacknowledged/records/0000000003'
+             BEGIN SELECT RAISE(ABORT, 'fixture rejects completion acknowledgement'); END;",
+        )
+        .unwrap();
+    assert!(receipt.finish(operation.kind(), 0).is_err());
+    let reports: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM shardline_task_artifacts_v1
+             WHERE artifact_key GLOB '_shardline_tasks/v1/runs/shared-inline-unacknowledged/artifacts/*'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // The checkpoint and materialized result persisted before acknowledgement failed.
+    assert_eq!(reports, 2);
+    assert!(
+        receipt
+            .store
+            .read(&format!("runs/{id}/records/0000000003"), 65536)
+            .unwrap()
+            .is_none()
+    );
+    drop(receipt);
+    let reopened = TaskEvidenceStore::from_config(&config).unwrap();
+    let deployment = shardline_server::task_tracking::deployment_fingerprint(&config).unwrap();
+    let tasks = reopened.summaries(deployment, None, 10).unwrap();
+    let task = tasks.iter().find(|task| task.id == id).unwrap();
+    assert!(!matches!(
+        task.state,
+        TaskRunState::Completed | TaskRunState::Failed
+    ));
+    assert_eq!(reopened.prune_completed(deployment, u64::MAX).unwrap(), 0);
+    assert!(
+        reopened
+            .read(&format!("manifests/{id}"), 65536)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn shared_completion_write_failure_never_claims_a_finished_task() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -354,7 +409,7 @@ fn shared_completion_write_failure_never_claims_a_finished_task() {
     assert!(
         receipt
             .store
-            .read(&format!("runs/{id}/records/0000000004"), 65536)
+            .read(&format!("runs/{id}/records/0000000003"), 65536)
             .unwrap()
             .is_none()
     );
