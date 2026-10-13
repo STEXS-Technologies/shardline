@@ -64,6 +64,11 @@ For this integration's upgrade from released 1.11.3:
    by ordinary `shardline repair`; missing replies remain blocked. No extra
    tracker service or schedule is required.
 
+Use this checklist for an already-current 1.11.3 deployment. The sections below
+also describe upgrades from earlier releases: apply their schema and format
+restrictions when your starting version lacks the corresponding behavior.
+Keep the destructive GC pause above throughout this integration's rollout.
+
 If server rollback is necessary, pause destructive GC during the rollback and
 keep uncertain deletes for reconciliation. Released servers can report a generic
 error for a protected pending delete. Returning maintenance jobs to an older GC
@@ -158,17 +163,18 @@ old API replicas remain. New replicas persist new sessions in Postgres/object st
 after every API replica is upgraded and legacy sessions are drained, the RWX claim can
 be removed permanently. Do not route one legacy session between old and new replicas.
 
-Suspend destructive GC (`--mark` and/or `--sweep`) for the entire mixed-version
-rollout. The new release coordinates GC against writers with a shared/exclusive
-barrier, but an older server does not participate in that barrier. Dry-run GC remains
-safe. Resume scheduled destructive GC only after every API and transfer replica runs
-the barrier-aware version.
+When upgrading from a version without the shared/exclusive writer barrier,
+suspend destructive GC (`--mark` and/or `--sweep`) for the entire mixed-version
+rollout. Those older servers do not participate in the barrier. Dry-run GC remains
+safe. Resume scheduled destructive GC only after every API and transfer replica
+runs the barrier-aware version. The integration's GC pause above also applies
+when upgrading from 1.11.3, because older GC does not create the new delete markers.
 
-Pause scheduled lifecycle repair and full repair during the rollout as well, and
-upgrade maintenance binaries before resuming these jobs. Older lifecycle repair
-can delete unexpired finite retention holds for objects that have not arrived yet;
-older fsck can reject these valid future-object holds. Resume maintenance only
-when every maintenance job uses the new future-object retention semantics.
+When upgrading from a version without future-object retention semantics, pause
+scheduled lifecycle repair and full repair during rollout, and upgrade maintenance
+binaries before resuming these jobs. Those older repair binaries can delete
+unexpired finite holds for objects that have not arrived yet, and older fsck can
+reject valid future-object holds. Released 1.11.3 already preserves these holds.
 
 ## Procedure
 
