@@ -48,11 +48,15 @@ the schema, session, writer-routing, GC and repair restrictions below.
 For this integration's upgrade from released 1.11.3:
 
 1. Pause scheduled destructive GC and wait for existing GC commands to finish.
-   Keep normal server traffic available. An older GC binary does not create the
+   Normal server traffic can remain available for this integration when the
+   released schema is already current. If other schema migrations are pending,
+   follow their write-maintenance requirements first. An older GC binary does not create the
    new remote-delete markers, so installing the new server cannot protect a
    delete performed by that binary.
 2. Run the usual owner-run `shardline db migrate up` using the upgraded binary
    and the same database/schema configuration as the deployment.
+   Let it finish all pending migrations. A step-limited upgrade that leaves
+   migrations pending does not install the new protection functions.
 3. Roll the server roles using the drain and readiness checks below. Replace
    the binaries or images used by existing maintenance jobs as well.
 4. Check pending deletes and investigate interrupted work before resuming the
