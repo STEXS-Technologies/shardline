@@ -4,6 +4,81 @@ use super::*;
 const PREFIX: &str = "_shardline_tasks/v1/";
 
 #[tokio::test]
+async fn bounded_publication_holds_manifest_and_exact_retry_rows_until_commit() {
+    let Some(pool) = super::super::connect_isolated_postgres().await else {
+        return;
+    };
+    let store = PostgresIndexStore::new(pool);
+    store.initialize_task_history_scope().await.unwrap();
+    let manifest = format!("{PREFIX}manifests/publication-race");
+    let record = format!("{PREFIX}runs/publication-race/records/0000000001");
+    let mut publisher = store.pool().acquire().await.unwrap();
+    assert!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut publisher,
+            &manifest,
+            b"manifest",
+            1
+        )
+        .await
+        .unwrap()
+    );
+    let mut cleaner = store.pool().acquire().await.unwrap();
+    sqlx::query("SET statement_timeout='100ms'")
+        .execute(&mut *cleaner)
+        .await
+        .unwrap();
+    for (key, target) in [(&record, &manifest), (&record, &record)] {
+        let mut transaction = publisher.begin().await.unwrap();
+        assert!(
+            PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+                &mut transaction,
+                key,
+                b"record",
+                1
+            )
+            .await
+            .unwrap()
+        );
+        let error = PostgresIndexStore::delete_task_artifact_on_connection(&mut cleaner, target)
+            .await
+            .expect_err("retirement must wait for publication to commit");
+        let code = if let PostgresMetadataStoreError::Sqlx(error) = error {
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .map(|code| code.into_owned())
+        } else {
+            None
+        };
+        assert_eq!(code.as_deref(), Some("57014"));
+        transaction.commit().await.unwrap();
+    }
+    assert!(store.delete_task_artifact(&manifest).await.unwrap());
+    assert!(
+        !PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut publisher,
+            &format!("{PREFIX}runs/publication-race/records/0000000002"),
+            b"late record",
+            1
+        )
+        .await
+        .unwrap()
+    );
+    assert!(store.delete_task_artifact(&record).await.unwrap());
+    assert!(
+        store
+            .task_artifact_page(PREFIX, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(cleaner);
+    drop(publisher);
+    store.pool().close().await;
+}
+
+#[tokio::test]
 async fn bounded_deletion_preserves_atomicity_outer_transaction_and_timeout() {
     let Some(pool) = super::super::connect_isolated_postgres().await else {
         return;

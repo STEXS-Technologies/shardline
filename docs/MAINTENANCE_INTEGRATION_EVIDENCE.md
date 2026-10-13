@@ -2419,3 +2419,45 @@ Diagnostics: `/tmp/shardline-batched-deletion.I7sTER/test.log`; verifier output:
 This fixture uses PostgreSQL metadata with the existing local object adapter;
 MinIO/native-client and process fixtures provide separate remote-storage evidence.
 It does not establish every backend/frontend/role combination or legacy layout.
+
+## Publication versus history retirement
+
+Found a PostgreSQL automatic-history race during the scale audit: the bounded
+publisher checked manifest existence without retaining its row, so concurrent
+retirement could hide it before the artifact publication committed. Exact retries
+also needed to retain their existing artifact row through verification and
+publication. The SQLite immediate transaction already serializes these writes.
+
+The bounded PostgreSQL publisher now uses row key-share locks for both checks.
+Retirement waits for the existing caller transaction to finish; if retirement
+wins first, a new artifact cannot pass manifest admission. Formats, grants and
+public signatures are unchanged. These are history-storage locks, not authority
+to execute application work or settle remote deletes.
+
+A configured transaction regression failed against the original SQL because
+manifest deletion succeeded before publication committed:
+`/tmp/shardline-batched-deletion.3VSKX4/test.log`. With the fix, the test verifies
+that manifest deletion and exact-retry artifact deletion hit the caller's
+100-ms timeout while publication is open, then verifies successful cleanup and
+rejection of a new artifact after manifest removal. All nine artifact tests
+passed in 0.90 seconds; log: `/tmp/shardline-batched-deletion.0QdrxM/test.log`;
+verifier output: `.codex/validation/ux-publication-retirement-race-final.log`.
+
+All 16 configured server metadata tests passed in 10.50 seconds, and the
+interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
+`/tmp/shardline-batched-deletion.LpKeO7/test.log` and
+`/tmp/shardline-batched-deletion.au3don/test.log`. Strict index library/test
+Clippy, formatting and diff checks passed. Long caller transactions can delay
+evidence cleanup; existing statement timeouts and resumable retirement still
+apply. Explicit legacy imports retain their separate publication contract.
+
+The corrected optimized CLI has SHA-256
+`122afac40a21237a7e19f68f52c95bf576c04c16bcac5fbfa13ac66711ba1ad2`.
+It passes the restricted retention-writer owner-upgrade fixture and the
+released/current OCI/S3 process fixture, including lost owners, failed
+publication, SIGKILL, fresh retries and released rollback. Existing runtime table
+grants and the released ledger remain unchanged; normal servers introduce no
+child processes. Diagnostics: `/tmp/shardline-retention-permissions.xDnFW1` and
+`/tmp/shardline-oci-upgrade.rLl5Qb`; verifier outputs:
+`.codex/validation/ux-publication-retirement-race-permissions.log` and
+`.codex/validation/ux-publication-retirement-race-oci.log`.
