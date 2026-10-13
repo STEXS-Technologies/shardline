@@ -35,6 +35,8 @@ The production benefits are:
   An old process cannot use a replacement connection to finish that publication.
 - Retention holds and native OCI/S3 publications reject writes to an object while
   an earlier remote delete is unresolved. Other objects remain available.
+- Covered file metadata and chunk mappings also reject references to an object
+  with a pending delete. A rejected publication preserves its previous metadata.
 
 These are protections for the tested operations. Other library write paths,
 older GC binaries and references hidden in legacy payloads still have open checks.

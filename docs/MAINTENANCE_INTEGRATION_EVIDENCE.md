@@ -1225,3 +1225,41 @@ reader refactor, with no runtime skips. Native log:
 Clippy, formatting and whitespace checks pass. Fixtures are removed on exit.
 This covers these container startup and shutdown boundaries, not every operation
 during connection drain or every external mutation.
+
+## Current Postgres publication and delete guards
+
+All 21 `postgres::remote_deletes::tests` pass against a newly created PostgreSQL
+16 container. Released 1.11.3 bootstraps its database; the current tests use
+isolated schemas and install the guards under test. `DATABASE_URL` is explicitly
+set to the owned fixture, so the test support's no-database early return is not
+used. Zero tests failed or were ignored; execution took about 7.93 seconds.
+Native log: the fixture referenced by
+`.codex/validation/ux-publication-guard-fixture`, under `test.log`.
+
+These tests cover direct file versions, container/cache/chunk references,
+dedupe inserts and identity updates, reconstruction and stored-object
+registration. Pending deletes reject publication without replacing earlier
+metadata or evidence. Concurrent publication holds its lock until transaction
+completion even before any pending marker exists. A 20,000-chunk file exercises
+the bounded publication-lock strategy. Restricted reference writers need no
+new retention or fence-table privilege.
+
+Settlement tests reject cross-schema admission, preserve an identical key/epoch
+in another schema, retain uncertainty after connection replacement, and prevent
+obsolete completion from clearing a newer attempt. They also cover unique
+concurrent epochs, exhaustion before admission, safe schema quoting, and pending
+inspection without new grants under row policies. A missing required retention
+trigger disables delete admission while preserving ordinary holds.
+
+This establishes the tested direct metadata boundaries, not references hidden
+inside legacy payloads, arbitrary external stores, or callers that bypass the
+bound work session. The fixture's container is removed after the test command.
+Reproduction in a disposable database bootstrapped by the released binary:
+
+```bash
+CARGO_BUILD_JOBS=2 cargo test --locked -p shardline-index --all-features --lib \
+  postgres::remote_deletes::tests -- --nocapture --test-threads=1
+```
+
+Set `DATABASE_URL` to that disposable fixture before running; without it the
+database tests can return early and their summary alone is insufficient proof.
