@@ -21,7 +21,36 @@ fn exists(connection: &Connection) -> Result<bool, LocalIndexStoreError> {
         .is_some())
 }
 
+fn admission_full(
+    connection: &Connection,
+    maximum_runs: u64,
+) -> Result<bool, LocalIndexStoreError> {
+    let limit = i64::try_from(maximum_runs).map_err(std::io::Error::other)?;
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM (SELECT artifact_key FROM shardline_task_artifacts_v1
+         WHERE (artifact_key >= '_shardline_tasks/v1/manifests/' AND artifact_key < '_shardline_tasks/v1/manifests0')
+            OR (artifact_key >= '_shardline_tasks/v1/retiring/' AND artifact_key < '_shardline_tasks/v1/retiring0')
+         LIMIT ?1)", [limit], |row| row.get(0),
+    )?;
+    Ok(count >= limit)
+}
+
 impl LocalIndexStore {
+    /// Observes automatic-history capacity without loading bodies or creating tables.
+    /// This is a bounded snapshot, not a reservation or a deployment-health check.
+    /// # Errors
+    /// Returns database failures or an unsupported integer bound.
+    pub fn task_history_admission_full(
+        &self,
+        maximum_runs: u64,
+    ) -> Result<bool, LocalIndexStoreError> {
+        let connection = self.open_connection()?;
+        if !exists(&connection)? {
+            return Ok(maximum_runs == 0);
+        }
+        admission_full(&connection, maximum_runs)
+    }
+
     /// Checks an exact artifact key without loading its bytes or creating its table.
     ///
     /// # Errors
@@ -124,14 +153,7 @@ impl LocalIndexStore {
                 return Err(std::io::Error::other("invalid automatic task artifact key").into());
             }
             if category == "manifests" {
-                let limit = i64::try_from(maximum_runs).map_err(std::io::Error::other)?;
-                let count: i64 = transaction.query_row(
-                    "SELECT count(*) FROM (SELECT artifact_key FROM shardline_task_artifacts_v1
-                     WHERE (artifact_key >= '_shardline_tasks/v1/manifests/' AND artifact_key < '_shardline_tasks/v1/manifests0')
-                        OR (artifact_key >= '_shardline_tasks/v1/retiring/' AND artifact_key < '_shardline_tasks/v1/retiring0')
-                     LIMIT ?1)", [limit], |row| row.get(0),
-                )?;
-                if count >= limit {
+                if admission_full(&transaction, maximum_runs)? {
                     return Ok(false);
                 }
             } else {
@@ -385,6 +407,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = LocalIndexStore::open(root.path().to_owned());
         let first = "_shardline_tasks/v1/manifests/first";
+        assert!(!store.task_history_admission_full(2).unwrap());
+        assert!(!exists(&store.open_connection().unwrap()).unwrap());
         let second = "_shardline_tasks/v1/manifests/second";
         let third = "_shardline_tasks/v1/manifests/third";
         assert!(
@@ -403,6 +427,7 @@ mod tests {
                 .unwrap()
         );
         assert!(!store.contains_task_artifact(third).unwrap());
+        assert!(store.task_history_admission_full(2).unwrap());
         assert!(
             store
                 .publish_task_artifact_bounded(first, b"first", 2)
@@ -436,6 +461,7 @@ mod tests {
                 .unwrap()
         );
         assert!(store.delete_task_artifact(second).unwrap());
+        assert!(!store.task_history_admission_full(2).unwrap());
         assert!(
             store
                 .publish_task_artifact_bounded(third, b"third", 2)

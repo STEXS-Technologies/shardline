@@ -270,6 +270,19 @@ impl PostgresTaskMetadata {
         })
     }
 
+    pub(super) fn admission_full(&self, maximum_runs: u64) -> Result<bool, ServerError> {
+        self.run(async {
+            let mut connection = self.connection().await?;
+            let result = PostgresIndexStore::task_history_admission_full_on_connection(
+                &mut connection,
+                maximum_runs,
+            )
+            .await
+            .map_err(ServerError::from);
+            self.finish(connection, result).await
+        })
+    }
+
     pub(super) fn read(
         &self,
         key: &str,

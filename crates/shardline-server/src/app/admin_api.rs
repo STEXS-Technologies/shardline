@@ -593,17 +593,22 @@ pub(super) async fn maintenance_tasks(
     let (store, history_scope) =
         crate::task_tracking::TaskEvidenceStore::from_backend(&state.config, &state.backend)
             .await?;
-    let history_notice = (!store.uses_metadata_history()).then_some(
-        "New task history is unavailable. Existing records may still be listed; an empty list does not prove maintenance did not run.",
-    );
     let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
-    let mut tasks = spawn_maintenance_inspection(permit, move || {
-        store.inspect_summaries_with_scope(
+    let (mut tasks, history_notice) = spawn_maintenance_inspection(permit, move || {
+        let history_notice = match store.history_notice() {
+            Ok(notice) => notice,
+            Err(error) => {
+                tracing::warn!(%error, "task history recording availability could not be checked");
+                Some("New task history recording could not be checked. Existing records may still be listed; check maintenance warnings. This notice does not describe server readiness.")
+            }
+        };
+        let tasks = store.inspect_summaries_with_scope(
             deployment,
             history_scope,
             after.as_ref().map(AdminItemKey::as_str),
             limit.saturating_add(1),
-        )
+        )?;
+        Ok::<_, ServerError>((tasks, history_notice))
     })
     .await
     .map_err(|error| ServerError::Io(std::io::Error::other(error)))??;

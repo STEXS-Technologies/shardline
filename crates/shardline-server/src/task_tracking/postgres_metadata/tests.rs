@@ -126,6 +126,11 @@ async fn bounded_metadata_admission_preserves_runs_and_caller_isolation() {
     let first = "_shardline_tasks/v1/manifests/first";
     let second = "_shardline_tasks/v1/manifests/second";
     let third = "_shardline_tasks/v1/manifests/third";
+    assert!(
+        !PostgresIndexStore::task_history_admission_full_on_connection(&mut connection, 2,)
+            .await
+            .unwrap()
+    );
     for (key, body) in [(first, b"first".as_slice()), (second, b"second".as_slice())] {
         assert!(
             PostgresIndexStore::publish_task_artifact_bounded_on_connection(
@@ -157,6 +162,11 @@ async fn bounded_metadata_admission_preserves_runs_and_caller_isolation() {
         )
         .await
         .unwrap()
+    );
+    assert!(
+        PostgresIndexStore::task_history_admission_full_on_connection(&mut connection, 2,)
+            .await
+            .unwrap()
     );
     assert!(
         PostgresIndexStore::publish_task_artifact_bounded_on_connection(
@@ -933,7 +943,13 @@ async fn row_policies_disable_optional_history_without_stopping_startup_work() {
         .await
         .unwrap();
     assert!(scope.is_none());
-    assert!(!unsupported.uses_metadata_history());
+    assert!(
+        unsupported
+            .history_notice()
+            .unwrap()
+            .unwrap()
+            .contains("unavailable")
+    );
 
     let sessions = fixture.config.root_dir().join("tmp/lfs-patch");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -1382,6 +1398,43 @@ async fn normal_router_publishes_and_serves_authenticated_metadata_history() {
     assert_eq!(report["task"]["operation"], "lfs-startup-session-sweep");
     assert_eq!(report["task"]["state"], "completed");
     assert_eq!(report["task"]["report_available"], true);
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO {}.shardline_task_artifacts_v1(artifact_key,payload)
+         SELECT '_shardline_tasks/v1/manifests/zbudget-'||item, convert_to('unresolved evidence','UTF8')
+         FROM generate_series(1,4095) item", fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    let full = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tasks/maintenance?limit=1")
+                .header("Authorization", "Bearer owned-task-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(full.status(), StatusCode::OK);
+    let full: serde_json::Value =
+        serde_json::from_slice(&to_bytes(full.into_body(), 65536).await.unwrap()).unwrap();
+    assert!(
+        full["history_notice"]
+            .as_str()
+            .unwrap()
+            .contains("Task history is full")
+    );
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/status")
+                .header("Authorization", "Bearer owned-task-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
     let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) FROM {}.shardline_task_artifacts_v1",
         fixture.schema
