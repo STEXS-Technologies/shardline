@@ -3877,3 +3877,25 @@ worker. This demonstrates preservation of an already-applied remote effect and
 unfinished intent at the tested acknowledgement boundary. It does not prove
 cancellation of remote storage calls or atomic fencing of subsequent intent
 transactions. Those remaining boundaries stay in the merge audit.
+
+### Connection-bound upload transition primitive
+
+The index now provides `transition_upload_intent_with_event_on_connection`
+in the semantic `postgres::upload_intent_ownership` module. It locks the intent
+row, verifies its current evidence and numeric metadata, validates the proposed
+event's operation and object identity, and commits the state and event in one
+transaction on the supplied connection. It never opens a replacement session.
+Existing pool-based APIs retain their implementation and behavior.
+
+A configured PostgreSQL test rejects an event for an unrelated object without
+changing the intent, commits a valid transition, terminates the original
+connection's backend PID, and verifies that the next transition fails while
+state and saved evidence remain unchanged. It passes in 0.31 seconds with no
+runtime skip (`/tmp/shardline-batched-deletion.7a70IG/test.log`). Strict index
+library/test Clippy, formatting and diff checks pass.
+
+This additive primitive is not yet wired into server upload coordination.
+Request-bound creation, reads and transitions still need composition through
+the original request session before the stronger upload ownership guarantee
+can be claimed. It does not establish object-store presence or exactly-once
+remote effects, and the version remains unchanged.
