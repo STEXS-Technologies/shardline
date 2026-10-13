@@ -4256,3 +4256,55 @@ valid retries, distinct typed scopes, existing unfinished history and mixed-vers
 interpretation. PostgreSQL and released-server evidence for the eventual fix are
 still required. The successful file recovery and optimized deployment drills
 above do not close this native publication case.
+
+## Native repository reuse and migration: fix verified
+
+The preceding failure is resolved. New native uploads use stable private IDs
+derived from request content and exact repository identity, including the default
+namespace. Domain object keys, file records and content hashes are unchanged.
+Default uploads also need the new identity: an older scoped upload can already
+occupy the historical body-only ID. Existing rows and authenticated history are
+never rewritten or silently settled by a fresh request.
+
+The semantic `upload_identity` module supplies the exact repository encoding to
+both file and native upload callers. The historical flat spelling is retained only
+in compatibility fixtures. No new public type, user task ID, configuration,
+process, runtime grant or database column is required. The existing owner-run
+PostgreSQL setup refreshes its compatibility guard; writable SQLite initialization
+adds the native guard automatically alongside the existing file guard.
+
+Both backend fixtures publish the same valid shard twice in each of six distinct
+scopes, including formerly colliding labels and absent versus literal-dash
+revisions. They verify readable bytes in every namespace, distinct histories and
+exactly five events per history after retries. An older unfinished scoped intent
+with the historical body-only ID remains unchanged while default and new scoped
+publication succeed.
+
+Separate actual released-server fixtures cover sixteen new unfinished intents
+per backend: all four checkpoints, default and scoped identities, and present
+versus missing physical request objects. They wait for `/readyz`, require released
+logs to show every intent was visited, and compare complete history and state.
+Current writers can still advance protected rows. This is writer-protocol
+compatibility evidence; the synthetic checkpoint cases do not prove domain
+publication. Domain publication is exercised separately by the valid-shard tests.
+
+Executed checks:
+
+- All 21 configured PostgreSQL publication cases pass in 12.73 seconds, without
+  runtime skips (`/tmp/shardline-batched-deletion.0rW9eJ/test.log`). Existing owner
+  loss, interrupted native publication, file recovery and file rollback cases
+  remain included.
+- All 107 local-backend cases pass in 2.14 seconds
+  (`/tmp/shardline-native-scope-local-regression-final.log`), including the new
+  native scope and released-server tests and existing file rollback coverage.
+- All 189 configured PostgreSQL index cases pass in 42.38 seconds
+  (`/tmp/shardline-batched-deletion.MQBgdc/test.log`).
+- All 316 SQLite index cases pass in 169.41 seconds
+  (`/tmp/shardline-native-scope-sqlite-index.log`).
+- Strict index/server library and test Clippy passes
+  (`/tmp/shardline-native-scope-clippy.log`); formatting and diff checks pass.
+
+The earlier optimized deployment drills test the executable before this native
+identity fix. A new optimized build and its deployment checks remain separate
+verification work. The eight merge gates retain their remaining requirements;
+the version remains 1.11.3.

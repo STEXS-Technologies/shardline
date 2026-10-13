@@ -6,7 +6,10 @@ pub(super) async fn enter(
     intent_id: &str,
     repository: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    if !intent_id.starts_with("file-v2-") && !repository.starts_with("scope-json-v1:") {
+    if !intent_id.starts_with("file-v2-")
+        && !intent_id.starts_with("shard-v2-")
+        && !repository.starts_with("scope-json-v1:")
+    {
         return Ok(None);
     }
     let (previous, _marker): (String, String) = sqlx::query_as(

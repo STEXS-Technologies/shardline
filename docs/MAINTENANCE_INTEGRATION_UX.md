@@ -112,6 +112,8 @@ they do not browse the history of ordinary commands.
 You get saved maintenance outcomes in existing SQLite or upgraded Postgres
 metadata. Nodes sharing the same database, schema and storage can inspect the
 same history. Covered writes reject lost ownership and uncertain earlier deletes.
+Identical native content can be published to different repositories without
+conflicting upload progress. Retries keep the correct repository's history.
 Postgres provider callbacks commit their delivery ID with their changes, so a
 retry of a successful delivery does not repeat those changes.
 

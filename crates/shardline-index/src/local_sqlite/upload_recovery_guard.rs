@@ -1,4 +1,4 @@
-//! Preserve current file evidence when an older connection attempts recovery.
+//! Preserve current upload evidence when an older connection attempts recovery.
 use rusqlite::Connection;
 
 pub(super) fn install(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -16,6 +16,12 @@ pub(super) fn install(connection: &Connection) -> Result<(), rusqlite::Error> {
                WHERE operation_kind='Upload' AND operation_id=OLD.intent_id
                ORDER BY sequence DESC LIMIT 1
            ) LIKE 'scope-json-v1:%')
+         BEGIN SELECT RAISE(IGNORE); END;
+         CREATE TRIGGER IF NOT EXISTS shardline_native_upload_recovery_guard_v2
+         BEFORE UPDATE OF state ON shardline_upload_intents
+         WHEN NEW.state <> OLD.state AND OLD.intent_id LIKE 'shard-v2-%'
+           AND NOT EXISTS (SELECT 1 FROM shardline_upload_writers_v2
+                           WHERE intent_id=OLD.intent_id)
          BEGIN SELECT RAISE(IGNORE); END;",
     )
 }
@@ -25,7 +31,10 @@ pub(super) fn enter(
     intent_id: &str,
     repository: &str,
 ) -> Result<bool, rusqlite::Error> {
-    if !intent_id.starts_with("file-v2-") && !repository.starts_with("scope-json-v1:") {
+    if !intent_id.starts_with("file-v2-")
+        && !intent_id.starts_with("shard-v2-")
+        && !repository.starts_with("scope-json-v1:")
+    {
         return Ok(false);
     }
     // A marker exists only inside this atomic write transaction. Other SQLite

@@ -946,7 +946,9 @@ mod tests {
         let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(payload);
         backend.upload_xorb(&hash, xorb).await.unwrap();
         let (shard, file_hash) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
-        let intent_id = format!("shard-{}", blake3::hash(&shard).to_hex());
+        let (intent_id, _repository) =
+            crate::upload_identity::native_shard(blake3::hash(&shard).to_hex().as_ref(), None)
+                .unwrap();
         let database = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
         database.execute_batch("CREATE TRIGGER deny_native_metadata BEFORE INSERT ON shardline_file_records BEGIN SELECT RAISE(ABORT, 'fixture denies native publication'); END;").unwrap();
         assert!(
