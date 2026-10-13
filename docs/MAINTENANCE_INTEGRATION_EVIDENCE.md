@@ -3029,3 +3029,20 @@ and use their durable cleanup path. Source review also confirms that the Hub
 background secret upgrade uses its nonreplaceable work pool and preserves
 lazy per-row upgrade when its optional sweep fails. This extension does not
 claim every Hub or remote-S3 failure phase is covered.
+
+## Hub secret upgrade survives optional final-history failures
+
+`local_upgrade_preserves_encrypted_secret_when_final_history_recording_fails`
+runs the actual local Hub upgrade with report-artifact denial and completion
+sequence-2 denial. Both cases upgrade the plaintext secret successfully while
+history remains unconfirmed and retained. The encrypted value decrypts to the
+original fixture secret. After removing the recording fault, a fresh sweep
+records a distinct completed run, reports zero further upgrades, and keeps the
+existing ciphertext byte-for-byte. The local regression passes in 0.13 seconds.
+
+A configured disposable PostgreSQL fixture passes both Hub tests in 1.61 seconds,
+including the existing actual-work-schema binding and owner-loss/no-reconnect
+test. Its log is `/tmp/shardline-batched-deletion.OFZ8WW/test.log`; runtime skips
+and panics were rejected. Strict server library/test Clippy passes. These tests
+extend named recording and ownership evidence, not every secret-delivery or
+external-mutation phase. No runtime behavior or version changed.
