@@ -1099,3 +1099,28 @@ Logs: `.codex/validation/ux-actual-metadata-inventory-verified.log`,
 `.codex/validation/ux-optimized-retention-permissions.log`. The current optimized
 binary uses production source `894aaf06`; released comparisons use 1.11.3.
 The retention fixture's owned database container is removed on exit.
+
+## Distinct login schemas and work-session routing
+
+The current library test
+`postgres_logins_can_target_distinct_default_schemas_with_identical_url_options`
+passes against a fresh PostgreSQL 16 database bootstrapped by released 1.11.3.
+`DATABASE_URL` is set to that owned fixture, so this result does not use the
+test's no-database early return. The native log records one executed passing
+test and zero ignored tests.
+
+The fixture verifies distinct default schemas for logins with otherwise matching
+connection options, stable owner-installed scope identities, actual work-session
+binding without changing its backend PID, immutable association after a schema
+change, and no replacement after the work pool closes. Restricted routers read
+the appropriate legacy shared history without publishing new payload task objects.
+Changing the durable backend identity changes its grouping even when endpoint
+names match; removing the owner-installed function preserves startup and legacy
+inspection. This does not cover every work-specific domain schema or library
+write path.
+
+Reproduce with
+`bash scripts/shardline/verify_maintenance_schema_routing.sh RELEASED` from the
+repository root. It creates and removes its own database container and invokes
+the current library test; existing deployment URLs are not used. Set the normal
+Cargo build directory/profile variables if reusing a validation build.
