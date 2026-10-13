@@ -3928,3 +3928,18 @@ passed without runtime skips in 0.34 seconds
 and test Clippy passed. These results supersede the preceding primitive-only
 integration limitation; they do not certify every mutation path, cancel an
 already-active remote call, or establish exactly-once remote effects.
+
+### Ownership-loss retry responses across protocols
+
+A response regression test exposed that the default HTTP ownership-loss error
+included `Retry-After`, while OCI omitted it and S3 classified it as an internal
+failure. `StaleResourceFence` now uses the shared retryable-publication
+classification. HTTP and OCI return 503 with `Retry-After: 1`; S3 returns 503
+`SlowDown` with the same delay. The message instructs clients to retry with a
+fresh request. The OCI error envelope and code remain unchanged.
+
+The new test failed before the classification fix and passes afterward, checking
+the delay, actionable message and protocol-specific response bodies. The error
+test selection passes all 262 cases (including six test-invariant cases), with
+no failed or ignored tests. This verifies response formatting, not actual
+automatic retry behavior in every external client.

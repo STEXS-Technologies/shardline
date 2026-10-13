@@ -260,7 +260,7 @@ pub enum ServerError {
     #[error("request exceeded the server execution deadline")]
     RequestTimedOut,
     /// A writer lost ownership of its distributed resource fence.
-    #[error("resource write fence is no longer current")]
+    #[error("resource write fence is no longer current; retry with a fresh request")]
     StaleResourceFence,
     /// A test interrupted lifecycle repair after one durable mutation.
     #[error("lifecycle repair interrupted at {boundary:?}")]
@@ -287,7 +287,8 @@ pub enum ServerError {
 
 impl ServerError {
     pub(crate) fn is_retryable_publication(&self) -> bool {
-        self.is_remote_delete_pending()
+        matches!(self, Self::StaleResourceFence)
+            || self.is_remote_delete_pending()
             || matches!(self, Self::Index(error) if error.is_retryable_transaction())
             || matches!(self, Self::Io(error) if super::publication::is_content_unavailable(error))
     }
