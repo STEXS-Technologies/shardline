@@ -317,6 +317,157 @@ async fn stored_file_intent_recovery_requires_matching_published_bytes() {
 }
 
 #[tokio::test]
+async fn scoped_file_recovery_distinguishes_colliding_legacy_labels() {
+    use sha2::Digest;
+    use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: scoped recovery identity fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    let scopes = [
+        RepositoryScope::new(RepositoryProvider::GitHub, "team/a", "b", Some("main")).unwrap(),
+        RepositoryScope::new(RepositoryProvider::GitHub, "team", "a/b", Some("main")).unwrap(),
+        RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap(),
+        RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("-")).unwrap(),
+    ];
+    let payloads = [
+        b"first".as_slice(),
+        b"second".as_slice(),
+        b"no revision".as_slice(),
+        b"dash revision".as_slice(),
+    ];
+    assert_eq!(
+        crate::protocol_support::reliability_repository_scope(Some(&scopes[0])),
+        crate::protocol_support::reliability_repository_scope(Some(&scopes[1]))
+    );
+    assert_eq!(
+        crate::protocol_support::reliability_repository_scope(Some(&scopes[2])),
+        crate::protocol_support::reliability_repository_scope(Some(&scopes[3]))
+    );
+    backend
+        .upload_file("scoped-recovery", Bytes::from_static(b"second"), None)
+        .await
+        .unwrap();
+    for (ordinal, (scope, bytes)) in scopes.iter().zip(payloads).enumerate() {
+        backend
+            .upload_file(
+                "scoped-recovery",
+                Bytes::copy_from_slice(bytes),
+                Some(scope),
+            )
+            .await
+            .unwrap();
+        let before = serde_json::to_value(
+            backend
+                .read_record("scoped-recovery", None, Some(scope))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let intent = UploadIntent::new(
+            format!("scoped-recovery-{ordinal}"),
+            "record/scoped-recovery".to_owned(),
+            hex::encode(sha2::Sha256::digest(bytes)),
+            0,
+        );
+        let repository =
+            crate::upload_intent_recovery::file_intent_repository_scope(Some(scope)).unwrap();
+        fixture
+            .index()
+            .create_intent_scoped(&intent, "shardline", &repository)
+            .await
+            .unwrap();
+        for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+            assert!(
+                fixture
+                    .index()
+                    .transition_intent(intent.intent_id(), state)
+                    .await
+                    .unwrap()
+            );
+        }
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {}.shardline_upload_intents SET created_at=now()-interval '1 minute' WHERE intent_id=$1", fixture.schema
+        ))).bind(intent.intent_id()).execute(&fixture.admin).await.unwrap();
+        backend.reconcile_stuck_upload_intents().await.unwrap();
+        assert_eq!(
+            fixture
+                .index()
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Visible
+        );
+        assert_eq!(
+            fixture
+                .index()
+                .reliability_events(intent.intent_id())
+                .await
+                .unwrap()
+                .len(),
+            5
+        );
+        assert_eq!(
+            serde_json::to_value(
+                backend
+                    .read_record("scoped-recovery", None, Some(scope))
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            before
+        );
+    }
+    for (id, repository) in [
+        (
+            "wrong-exact-scope",
+            crate::upload_intent_recovery::file_intent_repository_scope(Some(&scopes[0])).unwrap(),
+        ),
+        ("ambiguous-legacy-scope", "github:team/a/b/main".to_owned()),
+    ] {
+        let intent = UploadIntent::new(
+            id.to_owned(),
+            "record/scoped-recovery".to_owned(),
+            hex::encode(sha2::Sha256::digest(b"second")),
+            0,
+        );
+        fixture
+            .index()
+            .create_intent_scoped(&intent, "shardline", &repository)
+            .await
+            .unwrap();
+        for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+            assert!(fixture.index().transition_intent(id, state).await.unwrap());
+        }
+        let before =
+            serde_json::to_value(fixture.index().reliability_events(id).await.unwrap()).unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {}.shardline_upload_intents SET created_at=now()-interval '1 minute' WHERE intent_id=$1", fixture.schema
+        ))).bind(id).execute(&fixture.admin).await.unwrap();
+        backend.reconcile_stuck_upload_intents().await.unwrap();
+        assert_eq!(
+            fixture
+                .index()
+                .intent_by_id(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Stored
+        );
+        assert_eq!(
+            serde_json::to_value(fixture.index().reliability_events(id).await.unwrap()).unwrap(),
+            before
+        );
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn digest_file_upload_keeps_progress_with_the_original_request_owner() {
     use sha2::Digest;
     use shardline_index::{UploadIntentState, UploadIntentStore};
@@ -434,11 +585,8 @@ async fn digest_file_upload_keeps_progress_with_the_original_request_owner() {
     .unwrap();
     let events = fixture.index().reliability_events(&fresh_id).await.unwrap();
     assert_eq!(events.len(), 5);
-    assert!(
-        events
-            .iter()
-            .all(|event| event.operation.repository == "github:team/assets/main")
-    );
+    assert!(events.iter().all(|event| event.operation.repository
+        == format!("scope-json-v1:{}", serde_json::to_string(&scope).unwrap())));
     assert_eq!(
         fixture
             .index()

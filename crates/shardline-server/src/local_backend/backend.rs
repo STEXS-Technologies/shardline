@@ -275,7 +275,13 @@ impl LocalBackend {
                 let visible_file_record = if let Some(file_id) =
                     intent.object_key().strip_prefix("record/")
                 {
-                    match self.read_record(file_id, None, None).await {
+                    let crate::upload_intent_recovery::FileRecoveryScope::Known(scope) =
+                        crate::upload_intent_recovery::file_recovery_scope(&reliability_events)
+                    else {
+                        tracing::warn!(intent_id = %intent.intent_id(), "legacy file scope cannot be verified; preserving unfinished intent");
+                        continue;
+                    };
+                    match self.read_record(file_id, None, scope.as_ref()).await {
                         Ok(record) => {
                             match crate::upload_intent_recovery::file_record_matches_intent(
                                 intent,
@@ -1149,6 +1155,86 @@ mod tests {
                     .unwrap()
                     .state(),
                 expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_file_recovery_preserves_absent_and_literal_dash_revisions() {
+        use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let root = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            root.path().to_path_buf(),
+            "http://localhost:8080".to_owned(),
+            NonZeroUsize::new(128).unwrap(),
+        )
+        .await
+        .unwrap();
+        for (id, revision, bytes) in [
+            ("absent-revision", None, b"absent".as_slice()),
+            ("literal-dash", Some("-"), b"dash".as_slice()),
+        ] {
+            let scope =
+                RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", revision)
+                    .unwrap();
+            let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes));
+            backend
+                .upload_file_stream(
+                    "scoped-file",
+                    crate::upload_ingest::RequestBodyReader::from_bytes(
+                        axum::body::Bytes::copy_from_slice(bytes),
+                    ),
+                    Some(&scope),
+                    Some(&digest),
+                )
+                .await
+                .unwrap();
+            let intent =
+                UploadIntent::new(id.to_owned(), "record/scoped-file".to_owned(), digest, 0);
+            let repository =
+                crate::upload_intent_recovery::file_intent_repository_scope(Some(&scope)).unwrap();
+            backend
+                .index_store
+                .create_intent_scoped(&intent, "shardline", &repository)
+                .await
+                .unwrap();
+            for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+                assert!(
+                    backend
+                        .index_store
+                        .transition_intent(id, state)
+                        .await
+                        .unwrap()
+                );
+            }
+            backend
+                .reconcile_stuck_upload_intents_older_than(std::time::Duration::ZERO)
+                .await
+                .unwrap();
+            assert_eq!(
+                backend
+                    .index_store
+                    .intent_by_id(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                UploadIntentState::Visible
+            );
+            let events = backend.index_store.reliability_events(id).await.unwrap();
+            assert_eq!(events.len(), 5);
+            assert!(
+                matches!(crate::upload_intent_recovery::file_recovery_scope(&events),
+                crate::upload_intent_recovery::FileRecoveryScope::Known(Some(actual)) if actual == scope)
+            );
+            assert_eq!(
+                backend
+                    .read_record("scoped-file", None, Some(&scope))
+                    .await
+                    .unwrap()
+                    .total_bytes,
+                u64::try_from(bytes.len()).unwrap()
             );
         }
     }

@@ -162,6 +162,8 @@ original response and retry with validated content. A failed checksum needs
 corrected input. A newer file with the same name does not prove that the earlier
 attempt succeeded; Shardline preserves unfinished progress when it cannot
 establish the outcome.
+Recovery checks saved progress together with the file's repository, revision
+and content. An ambiguous older attempt stays unfinished.
 
 ## Check a result
 

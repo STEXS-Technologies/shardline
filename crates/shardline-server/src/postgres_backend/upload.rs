@@ -86,7 +86,8 @@ impl super::PostgresBackend {
         validate_identifier(file_id)?;
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
-        let reliability_repository = reliability_repository_scope(repository_scope);
+        let reliability_repository =
+            crate::upload_intent_recovery::file_intent_repository_scope(repository_scope)?;
 
         let intent = expected_sha256.map(|expected_hash| {
             UploadIntent::new(

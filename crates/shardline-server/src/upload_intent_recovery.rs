@@ -4,7 +4,48 @@ use crate::{ServerError, admission::BoundedPool, object_store::ServerObjectStore
 use futures_util::StreamExt;
 use sha2::Digest;
 use shardline_index::{FileRecord, UploadIntent, UploadIntentState};
+use shardline_protocol::RepositoryScope;
 use shardline_reliability::LifecycleEvent;
+
+const FILE_SCOPE_PREFIX: &str = "scope-json-v1:";
+
+pub(crate) enum FileRecoveryScope {
+    Known(Option<RepositoryScope>),
+    Unresolved,
+}
+
+/// New file evidence preserves exact components, including absent revisions.
+/// Existing opaque repository labels remain untouched.
+pub(crate) fn file_intent_repository_scope(
+    scope: Option<&RepositoryScope>,
+) -> Result<String, ServerError> {
+    scope.map_or_else(
+        || Ok("default".to_owned()),
+        |scope| {
+            Ok(format!(
+                "{FILE_SCOPE_PREFIX}{}",
+                serde_json::to_string(scope)?
+            ))
+        },
+    )
+}
+
+pub(crate) fn file_recovery_scope(events: &[LifecycleEvent]) -> FileRecoveryScope {
+    let Some(event) = events.last() else {
+        return FileRecoveryScope::Unresolved;
+    };
+    if event.operation.repository == "default" {
+        return FileRecoveryScope::Known(None);
+    }
+    event
+        .operation
+        .repository
+        .strip_prefix(FILE_SCOPE_PREFIX)
+        .and_then(|value| serde_json::from_str::<RepositoryScope>(value).ok())
+        .map_or(FileRecoveryScope::Unresolved, |scope| {
+            FileRecoveryScope::Known(Some(scope))
+        })
+}
 
 /// File publication follows Stored. Earlier progress cannot prove its own
 /// publication merely because some other upload made the filename visible.
@@ -24,10 +65,10 @@ pub(crate) async fn file_record_matches_intent(
     objects: ServerObjectStore,
     pool: BoundedPool,
 ) -> Result<bool, ServerError> {
-    if record.repository_scope.is_some()
-        || events
-            .last()
-            .is_none_or(|event| event.operation.repository != "default")
+    let FileRecoveryScope::Known(scope) = file_recovery_scope(events) else {
+        return Ok(false);
+    };
+    if record.repository_scope != scope
         || intent.object_key().strip_prefix("record/") != Some(record.file_id.as_str())
         || (intent.object_length() != 0 && intent.object_length() != record.total_bytes)
         || intent.object_hash().len() != 64
