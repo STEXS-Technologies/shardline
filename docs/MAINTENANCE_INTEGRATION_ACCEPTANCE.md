@@ -205,7 +205,10 @@ The following still need implementation or stronger evidence before merge:
   retention and legacy inspection still walk the inventory.
   Automatic retention now retires at most 256 run-artifact keys per invocation,
   leaving a marker so larger histories continue later. This limits deletion
-  work, not inventory latency or active storage-call duration. Metadata inspection
+  work, not inventory latency or active storage-call duration. An optimized
+  ordinary CLI fixture verifies exact
+  256-key progress over two invocations, released output/status and unchanged
+  payload bytes. Metadata inspection
   stops after its eligible page is settled, but filtering unrelated history can
   still require a longer scan; bounded output does not bound latency.
 - **Remaining deployment layouts.** Work-specific database/schema routing,
