@@ -1155,3 +1155,48 @@ about 4.96 seconds. Log:
 `.codex/validation/ux-larger-history-backlog-verified.log`. Formatting and strict
 all-feature/all-target server Clippy pass. No production retention behavior or
 version was changed.
+
+## Optimized remote-delete acknowledgement and outage drills
+
+All seven `gc_acknowledgement` deployment chaos drills pass against the optimized
+current binary (production source `894aaf06`) and the official released 1.11.3
+binary for the restricted-account comparison. Each nextest process owns an
+isolated PostgreSQL/MinIO/Redis Compose project and an instrumented proxy. The
+final run executes seven tests, with no runtime `SKIPPED:` banner; its 16 skipped
+tests are unrelated tests excluded by the selection filter.
+
+Covered cases are acknowledged settlement, applied deletion with lost
+acknowledgement and no replay, delayed deletion rejecting a later hold after
+ownership takeover, the existing restricted GC account, denied optional reply
+writes, ordinary repair after database outage, and fresh-sweep recovery after
+database outage. Proxy counters verify one user-object mutation in each recovery
+case. The pending block remains until verified evidence settles its exact
+attempt. Repair then permits a hold without promoting the original GC's history
+to a successful run.
+
+The verifier now reads automatic history through a separate existing Postgres
+pool on blocking threads. Its earlier payload-only reader was obsolete. When
+Postgres is down at CLI exit, completion publication is unconfirmed: the command
+warns and exits nonzero; the original run stays `running_or_interrupted` with no
+fabricated terminal record. Recovering the saved reply cannot invent a task
+outcome. The two outage fixtures need time for work-pool and optional metadata
+timeouts, so they retain a finite 90-second fixture deadline; the normal cases
+retain 25 seconds. This is a test deadline, not a production latency guarantee.
+
+Native log: `.codex/validation/ux-optimized-gc-acknowledgement-verified.log`.
+The seven drills finished in about 105 seconds total. Strict Clippy, formatting
+and whitespace checks pass. Owned CLI containers and backend projects are removed
+on exit. These results cover the native GC paths, not every library caller or
+older GC's lack of the new delete-admission markers.
+
+Reproduction: set `CARGO_BIN_EXE_shardline` to the current full-feature binary,
+`SHARDLINE_N_MINUS_ONE_BINARY` to the official 1.11.3 binary, and run:
+
+```bash
+CARGO_BUILD_JOBS=2 cargo nextest run --locked -p shardline-server --all-features \
+  --test deployment_chaos -E 'test(gc_acknowledgement::)' --test-threads 1 \
+  --no-fail-fast --success-output immediate --failure-output immediate
+```
+
+Check for runtime skips as well as the test summary; an unavailable fixture is
+not evidence that the mutation boundaries passed.

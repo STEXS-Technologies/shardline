@@ -69,6 +69,10 @@ through the backlog; your next sweep can also recover them. Missing or invalid
 replies leave the object blocked for investigation. Object absence cannot safely
 clear it.
 
+Clearing a delete block does not mark the earlier GC run completed. If its
+outcome could not be saved during a database outage, inspect the original logs;
+repair does not invent a recorded result for it.
+
 Saving a successful reply adds a receipt write and cleanup request in your
 existing object storage. This can increase GC time. No recovery worker is needed.
 
