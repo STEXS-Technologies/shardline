@@ -129,6 +129,184 @@ fn library_backend_without_runtime_returns_an_error_without_starting_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_scope_retention_accepts_foreign_configuration_without_crossing_scopes() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let scope = scope.unwrap();
+    tokio::task::spawn_blocking(move || {
+        let foreign = Digest::of(b"previous login configuration");
+        let create = |target, association: Option<Digest>, operation: &str| {
+            let source = if association.is_some_and(|associated| associated != scope) {
+                // A metadata adapter correctly refuses publishing another
+                // namespace's binding. Import genuine signed legacy history.
+                TaskEvidenceStore::from_objects(store.objects.clone())
+            } else {
+                store.clone()
+            };
+            let tracker = EmbeddedTaskTracker::from_store(source, target);
+            let tracker = if let Some(scope) = association {
+                tracker.with_history_scope(scope)
+            } else {
+                tracker
+            };
+            tracker
+                .begin(
+                    operation,
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"complete")
+                .unwrap();
+            let id = store
+                .summaries(target, None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|summary| summary.operation == operation)
+                .unwrap()
+                .id;
+            let suffix = format!("manifests/{id}");
+            let bytes = store.read(&suffix, 65536).unwrap();
+            (suffix, bytes)
+        };
+        let accepted = create(foreign, Some(scope), "shared-complete");
+        let unbound = create(foreign, None, "unbound-foreign");
+        let legacy_copy = create(foreign, Some(scope), "legacy-shared-copy");
+        TaskEvidenceStore::from_objects(store.objects.clone())
+            .publish(&legacy_copy.0, legacy_copy.1.as_ref().unwrap())
+            .unwrap();
+        let other_scope = create(
+            deployment,
+            Some(Digest::of(b"another metadata namespace")),
+            "other-scope",
+        );
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+        assert!(store.read(&accepted.0, 65536).unwrap().is_none());
+        assert_eq!(store.read(&unbound.0, 65536).unwrap(), unbound.1);
+        assert_eq!(store.read(&legacy_copy.0, 65536).unwrap(), legacy_copy.1);
+        assert_eq!(store.read(&other_scope.0, 65536).unwrap(), other_scope.1);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_shared_retirement_keeps_exact_manifest_and_atomic_authorization() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let scope = scope.unwrap();
+    let prepare = store.clone();
+    let (identity, exact_manifest) = tokio::task::spawn_blocking(move || {
+        let foreign = Digest::of(b"retired login configuration");
+        let receipt = EmbeddedTaskTracker::from_store(prepare.clone(), foreign)
+            .begin(
+                "shared-retirement",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap();
+        let id = prepare
+            .summaries(foreign, None, 10)
+            .unwrap()
+            .first()
+            .unwrap()
+            .id
+            .clone();
+        let suffix = format!("manifests/{id}");
+        let identity: super::super::TaskRunIdentity =
+            serde_json::from_slice(&prepare.read(&suffix, 65536).unwrap().unwrap()).unwrap();
+        let exact_manifest = serde_json::to_vec_pretty(&identity).unwrap();
+        prepare
+            .delete_artifact(&TaskEvidenceStore::key(&suffix).unwrap())
+            .unwrap();
+        prepare.publish(&suffix, &exact_manifest).unwrap();
+        receipt.bind_history_scope(scope).unwrap();
+        receipt.finish(true, b"complete").unwrap();
+        assert!(prepare.begin_retirement(&identity).unwrap());
+        prepare
+            .delete_artifact(&TaskEvidenceStore::key(&suffix).unwrap())
+            .unwrap();
+        (identity, exact_manifest)
+    })
+    .await
+    .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {}.reject_retirement_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF OLD.artifact_key = '{}retiring/{}' THEN RAISE EXCEPTION 'synthetic retirement deletion failure'; END IF;
+         RETURN OLD; END $$;
+         CREATE TRIGGER reject_retirement_delete BEFORE DELETE ON {}.shardline_task_artifacts_v1
+         FOR EACH ROW EXECUTE FUNCTION {}.reject_retirement_delete()",
+        fixture.schema, super::super::TASK_EVIDENCE_PREFIX, identity.id, fixture.schema, fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    let failed = store.clone();
+    let checked_identity = identity.clone();
+    let checked_manifest = exact_manifest.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(failed.prune_completed(deployment, u64::MAX).is_err());
+        assert_eq!(
+            failed
+                .read(&format!("retiring/{}", checked_identity.id), 65536)
+                .unwrap(),
+            Some(checked_manifest.clone())
+        );
+        assert!(
+            failed
+                .history_scope_binding_match_for_manifest(
+                    &checked_identity,
+                    scope,
+                    &checked_manifest
+                )
+                .unwrap()
+                .unwrap()
+        );
+    })
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER reject_retirement_delete ON {}.shardline_task_artifacts_v1",
+        fixture.schema,
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+        for category in ["retiring", "scope-bindings", "manifests"] {
+            assert!(
+                store
+                    .read(&format!("{category}/{}", identity.id), 65536)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batched_retention_crosses_pages_without_losing_oldest_first_or_unfinished_history() {
     let Some(fixture) = Fixture::new().await else {
         return;
