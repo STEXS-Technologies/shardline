@@ -4571,3 +4571,32 @@ Reports, exact binary hashes and measurements are preserved in
 not a distributed throughput claim or production SLO. The test supplies stronger
 evidence for the public PostgreSQL upload workload; larger inventories, remote
 storage, long operations and remaining merge gates still require review.
+
+### Corrected report-phase fault and current protocol replay
+
+Review found that the ordinary-command report-denial trigger also rejected the
+earlier checkpoint artifact. Its report-denial half therefore established
+admission fallback behavior, not the claimed post-work report failure. The
+completion-record denial half was already distinct. The trigger now rejects
+only a materialized result body beginning `maintenance.success:` while allowing
+the checkpoint. Assertions require all three admission records to persist,
+exactly one materialized artifact after report rejection or two after completion
+record rejection, and no final completion record in either case.
+
+The corrected fixture passes all eight fsck/rebuild/lifecycle-repair/GC-mark
+and report/acknowledgement combinations
+(`/tmp/shardline-report-phase-correction.log`, one test, 40.08 seconds).
+Original success and exit status are preserved, history remains unfinished,
+unfinished evidence survives retention, and unrelated evidence is unchanged.
+This is a test correction, not a production implementation change; it does not
+establish every storage-copy, PostgreSQL or process-interruption phase.
+
+The complete complementary 12-scenario protocol suite now also passes on the
+automatic-public-ownership executable with SHA256
+`51040330bdc95e78f446d145b26ef5134572c1aa130a9312fbf99f3b4504976d`
+(`/tmp/shardline-protocol-faults.zJf1Lo/test.log`, 146.179 seconds). Together with
+the 11-scenario deployment result above, all 23 configured scenarios pass on the
+same executable. Runtime fixture skips are rejected; excluded Nextest filters
+select the complementary half. The version remains 1.11.3.
+Strict CLI Clippy also passes after the test correction
+(`/tmp/shardline-report-phase-clippy.log`).
