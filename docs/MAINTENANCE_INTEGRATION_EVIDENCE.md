@@ -4043,3 +4043,36 @@ unchanged by this additional verification. Source inspection confirms that the
 two normal file-upload liveness checks are outside the chunk loop; their number
 does not grow with file size. This is a query-count property, not a measured
 production latency or throughput guarantee.
+
+### File recovery cannot infer success from a reused filename
+
+The healthy-owner regression was extended to upload a later valid file at the
+same name as a failed checksum attempt, age the unfinished intent, and run real
+reconciliation. It exposed false completion: the old attempt became `Visible`
+(`/tmp/shardline-batched-deletion.WmdkMW/test.log`).
+
+Both backends now distinguish logical `record/` intents from physical object
+keys. File publication follows the durable `Stored` checkpoint, so earlier
+states remain unfinished regardless of a later file's presence. For eligible
+default-scope file attempts, the shared semantic recovery helper streams the
+candidate's bytes, checks length and SHA-256 against the saved identity, and
+only then permits completion. Missing, unrelated or unverifiable bytes preserve
+progress; a logical record key is never tested as if it were a physical CAS key.
+Recovery writes no file metadata and starts no upload automatically.
+
+All seventeen configured publication cases passed in 12.60 seconds with no
+runtime skip (`/tmp/shardline-batched-deletion.uXMCwE/test.log`). A new PostgreSQL
+case verifies successful recovery for matching bytes, unchanged `Stored` state
+and evidence for unrelated bytes, and preservation when metadata is absent.
+The failed-checksum regression now keeps its two original events in `Storing`.
+
+Opaque scoped repository identities are not parsed or guessed. Exact scoped
+recovery and large-file verification cost remain open. Verification reads the
+eligible file's contents; streaming avoids a new whole-file buffer but does not
+bound startup time. Unsupported or unavailable byte verification preserves the
+intent with guidance. Existing signatures, records and public data types are
+unchanged. The local positive-recovery fixture now supplies a real content
+SHA-256 in place of its previous synthetic `sha256` placeholder.
+All 22 local backend cases pass in 0.45 seconds, including matching recovery,
+preservation of a checksum-failed `Storing` attempt and an unrelated `Stored`
+attempt at the same filename.

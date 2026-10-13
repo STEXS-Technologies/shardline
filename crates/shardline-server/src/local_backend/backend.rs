@@ -265,16 +265,40 @@ impl LocalBackend {
                     age_secs = age.as_secs(),
                     "reconciling stuck intent"
                 );
-                let visible_file_record =
-                    if let Some(file_id) = intent.object_key().strip_prefix("record/") {
-                        match self.read_record(file_id, None, None).await {
-                            Ok(_record) => true,
-                            Err(ServerError::NotFound) => false,
-                            Err(error) => return Err(error),
+                let file_intent = intent.object_key().starts_with("record/");
+                if file_intent
+                    && !crate::upload_intent_recovery::file_publication_may_have_completed(intent)
+                {
+                    tracing::warn!(intent_id = %intent.intent_id(), "file upload has no Stored checkpoint; preserving unfinished intent for a fresh validated request");
+                    continue;
+                }
+                let visible_file_record = if let Some(file_id) =
+                    intent.object_key().strip_prefix("record/")
+                {
+                    match self.read_record(file_id, None, None).await {
+                        Ok(record) => {
+                            match crate::upload_intent_recovery::file_record_matches_intent(
+                                intent,
+                                &reliability_events,
+                                record,
+                                self.object_store(),
+                                self.stream_work_pool.clone(),
+                            )
+                            .await
+                            {
+                                Ok(matches) => matches,
+                                Err(error) => {
+                                    tracing::warn!(intent_id = %intent.intent_id(), %error, "file upload verification unavailable; preserving unfinished intent");
+                                    false
+                                }
+                            }
                         }
-                    } else {
-                        false
-                    };
+                        Err(ServerError::NotFound) => false,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    false
+                };
                 if visible_file_record {
                     // The atomic file-record commit is the visibility boundary.
                     // Walk every durable boundary so recovery remains valid even
@@ -307,6 +331,12 @@ impl LocalBackend {
                         }
                     }
                     reconciled = reconciled.saturating_add(1);
+                    continue;
+                }
+                if file_intent {
+                    // This is a logical record key, not a physical CAS object.
+                    // Missing or unrelated latest metadata cannot settle it.
+                    tracing::warn!(intent_id = %intent.intent_id(), "file upload outcome cannot be verified; preserving unfinished intent for a fresh validated request");
                     continue;
                 }
                 let target_state = match ObjectKey::parse(intent.object_key()) {
@@ -1017,7 +1047,7 @@ mod tests {
         let stored_record = UploadIntent::new(
             "stored-record-intent".to_owned(),
             "record/stored-record-reconcile".to_owned(),
-            "sha256".to_owned(),
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"visible record")),
             14,
         );
         backend
@@ -1030,6 +1060,45 @@ mod tests {
                 backend
                     .index_store
                     .transition_intent(stored_record.intent_id(), state)
+                    .await
+                    .unwrap()
+            );
+        }
+
+        let checksum_failed = UploadIntent::new(
+            "failed-checksum-record-intent".to_owned(),
+            "record/stored-record-reconcile".to_owned(),
+            "00".repeat(32),
+            0,
+        );
+        backend
+            .index_store
+            .create_intent(&checksum_failed)
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .index_store
+                .transition_intent(checksum_failed.intent_id(), UploadIntentState::Storing,)
+                .await
+                .unwrap()
+        );
+        let unrelated_stored = UploadIntent::new(
+            "unrelated-stored-record-intent".to_owned(),
+            "record/stored-record-reconcile".to_owned(),
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"unrelated version")),
+            0,
+        );
+        backend
+            .index_store
+            .create_intent(&unrelated_stored)
+            .await
+            .unwrap();
+        for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+            assert!(
+                backend
+                    .index_store
+                    .transition_intent(unrelated_stored.intent_id(), state)
                     .await
                     .unwrap()
             );
@@ -1067,6 +1136,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored_record.state(), UploadIntentState::Visible);
+        for (intent, expected) in [
+            (&checksum_failed, UploadIntentState::Storing),
+            (&unrelated_stored, UploadIntentState::Stored),
+        ] {
+            assert_eq!(
+                backend
+                    .index_store
+                    .intent_by_id(intent.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                expected
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

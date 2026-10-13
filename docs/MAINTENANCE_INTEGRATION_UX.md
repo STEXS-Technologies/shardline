@@ -157,6 +157,12 @@ shard, or retry in a new database transaction. If your application owns that
 transaction, roll it back first. Covered Postgres content-check failures publish
 no new file metadata or dedupe mappings; retries keep your configured isolation.
 
+If server logs say an earlier file upload cannot be verified, inspect its
+original response and retry with validated content. A failed checksum needs
+corrected input. A newer file with the same name does not prove that the earlier
+attempt succeeded; Shardline preserves unfinished progress when it cannot
+establish the outcome.
+
 ## Check a result
 
 For remote inspection over HTTP, use your existing admin read token. This is
