@@ -5,6 +5,16 @@ use std::path::Path;
 pub(crate) fn failure_guidance(error: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
     let mut current = Some(error);
     while let Some(cause) = current {
+        let database_error = cause
+            .downcast_ref::<sqlx::Error>()
+            .or_else(|| cause.downcast_ref::<Box<sqlx::Error>>().map(Box::as_ref));
+        if let Some(sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) | sqlx::Error::Tls(_)) =
+            database_error
+        {
+            return Some(
+                "Check PostgreSQL availability, network access and the database configuration used by this deployment, then retry inspection. Do not rerun maintenance just to recover its history; this inspection did not start maintenance work.",
+            );
+        }
         if shardline_index::LocalIndexStoreError::read_only_wal_needs_sidecars(cause) {
             return Some(
                 "SQLite history requires readable metadata.sqlite3-wal and metadata.sqlite3-shm files when the deployment directory is read-only. Inspect the running deployment with its existing sidecars, or a consistent offline backup. Preserve the database and its WAL together; inspection did not change database contents.",

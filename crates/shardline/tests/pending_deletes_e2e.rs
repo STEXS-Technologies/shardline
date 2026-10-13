@@ -56,6 +56,33 @@ fn pending_delete_cursor_errors_are_actionable_before_database_access() {
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
+#[test]
+fn unavailable_postgres_inspection_gives_recovery_guidance_without_starting_work() {
+    for pending in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = Command::new(binary());
+        command
+            .env_clear()
+            .current_dir(root.path())
+            .env(
+                "SHARDLINE_INDEX_POSTGRES_URL",
+                "postgres://127.0.0.1:1/unavailable",
+            )
+            .args(["history", "--root"])
+            .arg(root.path());
+        if pending {
+            command.arg("--pending-deletes");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Check PostgreSQL availability"), "{stderr}");
+        assert!(stderr.contains("Do not rerun maintenance"), "{stderr}");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_pending_delete_cli_paginates_without_changing_attempts() {
     let Ok(database_url) = std::env::var("DATABASE_URL") else {

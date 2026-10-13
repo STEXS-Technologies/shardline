@@ -93,6 +93,7 @@ they do not browse the history of ordinary commands.
 | What you see | What to do next |
 | --- | --- |
 | Server readiness fails | Check server logs and its storage/database dependencies. Maintenance history does not establish readiness. |
+| History inspection fails with a PostgreSQL connection error | Check database availability, network access and the deployment configuration, then retry inspection. Do not rerun maintenance just to obtain history. |
 | The server is ready, but history has a warning | Check server or command logs for the recording failure. Your work may have run without a saved result; check its effects before running it again. |
 | A run is completed | Its saved result verified as successful. Check `/readyz` for current readiness, or `/api/v1/status` if the admin API is enabled. |
 | A run is failed, interrupted, unresolved or corrupt | Read its `next_step` and original command logs. Inspect partial effects before repeating a mutation; preserve corrupt evidence. |
