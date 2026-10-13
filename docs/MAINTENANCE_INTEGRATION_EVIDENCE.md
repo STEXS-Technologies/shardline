@@ -4211,3 +4211,48 @@ remote-storage latency or all startup work. A verification warning preserves the
 intent; readiness is not certification of every stored file. Whole-file formats
 unsupported by this streaming verifier remain unconfirmed. Broader deployment,
 failure and capacity gates remain open; the version is still 1.11.3.
+
+## Optimized deployment verification after responsive recovery
+
+An optimized CLI containing the responsive recovery and multi-container reader
+changes builds successfully in 3m 06s and reports `shardline 1.11.3`. Its SHA-256
+is `1133a529de2a49bf1faf0dbe580418612332cb7fa5a5f0e2d54c2303a1b04b95`.
+Both deployment verifiers copy and test these exact executable bytes; neither
+uses the earlier optimized CLI that predates file-recovery and rollback fixes.
+
+- `verify_maintenance_deployments.sh` passes all 11 selected drills in 144.611
+  seconds (`/tmp/shardline-maintenance-deployments.YemYge/test.log`). This includes
+  released/current rollout and rollback, uncertain remote deletes, saved replies
+  across database outages, existing restricted roles, concurrent rebuilds and
+  container replacement with graceful shutdown.
+- `verify_maintenance_protocol_faults.sh` passes all 12 selected drills in
+  138.084 seconds (`/tmp/shardline-protocol-faults.GR7Ske/test.log`). This includes
+  database/storage loss during upload, read fallback, network faults, protocol
+  interruption, clock skew and the selected workload burst.
+- `verify_maintenance_local_permissions.sh` passes the five released/current
+  command comparisons and fully read-only SQLite fsck
+  (`/tmp/shardline-local-permissions.mr1Hrd/`). Existing output, status, root
+  permissions and read-only evidence remain intact; recording failure warns
+  without making fsck fail or creating new completion history.
+
+There are no runtime skips in the selected deployment drills. Nextest's skipped
+counts refer to tests outside each complementary filter, not skipped test bodies.
+These results strengthen the named deployment evidence; they do not close every
+phase, library path, deployment layout or capacity requirement in the eight gates.
+
+## Native shard reuse scope audit: failure reproduced
+
+The next audit fixture uses actual valid xorb/shard bytes and uploads the same
+native shard twice in the default namespace, then twice in each of two repository
+namespaces. It also requires the file bytes to be readable in every namespace.
+The current local backend fails at the first repository publication with
+`UploadIntentConflict` (`/tmp/shardline-native-upload-scope-reuse.log`). This is
+a runtime failure, not an observation timeout or skipped fixture.
+
+Both server backends derive native shard intent IDs solely from the request body
+hash. Scoped intent admission verifies the repository against existing history;
+the default upload has already occupied that ID. Resolving this must preserve
+valid retries, distinct typed scopes, existing unfinished history and mixed-version
+interpretation. PostgreSQL and released-server evidence for the eventual fix are
+still required. The successful file recovery and optimized deployment drills
+above do not close this native publication case.

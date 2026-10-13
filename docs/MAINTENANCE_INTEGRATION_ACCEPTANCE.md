@@ -72,6 +72,13 @@ for exact fixtures, historical measurements and their boundaries.
 
 The following still need implementation or stronger evidence before merge:
 
+- **Native shard reuse across repositories.** A current local fixture uploads
+  one native shard successfully in the default namespace, then attempts the
+  same bytes in a repository namespace. That second upload fails with
+  `UploadIntentConflict`: the body-derived intent ID is shared, while its
+  authenticated history is bound to the first repository. This supported
+  publication pattern needs a fix and PostgreSQL/rollback verification before
+  merge. The passing file-intent scope fixtures do not cover native shards.
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.
   Direct Postgres file, dedupe, reconstruction and stored-object reference
