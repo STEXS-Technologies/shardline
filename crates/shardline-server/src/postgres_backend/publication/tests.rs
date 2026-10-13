@@ -5,6 +5,148 @@ use axum::body::Bytes;
 use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
+#[tokio::test]
+async fn digest_file_upload_keeps_progress_with_the_original_request_owner() {
+    use sha2::Digest;
+    use shardline_index::{UploadIntentState, UploadIntentStore};
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: digest file ownership fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    let payload = Bytes::from_static(b"digest file ownership boundary");
+    let digest = hex::encode(sha2::Sha256::digest(&payload));
+    let session = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    session
+        .scope(async {
+            let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                &backend.request_session_identity,
+            )
+            .await
+            .unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **owner.as_mut().unwrap())
+                .await
+                .unwrap();
+            drop(owner);
+            let admin = fixture.admin.clone();
+            let bytes = payload.clone();
+            // Polling begins after intent admission and the Storing transition.
+            let stream = futures_util::stream::once(async move {
+                assert!(
+                    sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                        .bind(pid)
+                        .fetch_one(&admin)
+                        .await
+                        .unwrap()
+                );
+                Ok(bytes)
+            });
+            let error = backend
+                .upload_file_stream(
+                    "lost-digest-file",
+                    RequestBodyReader::from_stream(stream),
+                    None,
+                    Some(&digest),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, crate::ServerError::StaleResourceFence));
+        })
+        .await;
+    session.finish().await;
+    let intent_id: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT intent_id FROM {}.shardline_upload_intents WHERE object_key='record/lost-digest-file'",
+        fixture.schema
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Storing
+    );
+    assert_eq!(
+        fixture
+            .index()
+            .reliability_events(&intent_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(matches!(
+        backend.read_record("lost-digest-file", None, None).await,
+        Err(crate::ServerError::NotFound)
+    ));
+
+    let scope = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub,
+        "team",
+        "assets",
+        Some("main"),
+    )
+    .unwrap();
+    let fresh = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    fresh
+        .scope(backend.upload_file_stream(
+            "fresh-digest-file",
+            RequestBodyReader::from_bytes(payload),
+            Some(&scope),
+            Some(&digest),
+        ))
+        .await
+        .unwrap();
+    fresh.finish().await;
+    let fresh_id: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT intent_id FROM {}.shardline_upload_intents WHERE object_key='record/fresh-digest-file'",
+        fixture.schema
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    let events = fixture.index().reliability_events(&fresh_id).await.unwrap();
+    assert_eq!(events.len(), 5);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.operation.repository == "github:team/assets/main")
+    );
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&fresh_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Visible
+    );
+    assert!(
+        backend
+            .read_record("fresh-digest-file", None, Some(&scope))
+            .await
+            .is_ok()
+    );
+    fixture.finish().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_upload_recovery_preserves_each_durable_boundary() {
     use shardline_cas::{UploadLifecycleBoundary as Boundary, arm_upload_interruption};

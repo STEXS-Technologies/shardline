@@ -3965,3 +3965,31 @@ these are complementary filters, not runtime skips. Together they execute all
 23 cases in the deployment binary, with no selected runtime skip. These are
 current optimized-binary results for the named fixtures, not certification of
 every deployment layout or closure of the remaining merge gates.
+
+### Digest-checked file upload ownership and repository identity
+
+The remaining `upload_file_stream` coordinator now uses the request-aware
+intent adapter. Digest-checked file uploads create their baseline with the
+same repository scope used for subsequent transitions. The additive public
+`CasCoordinator::begin_upload_scoped` entry point exposes the existing scoped
+admission implementation; `begin_upload` retains its default-scope behavior.
+
+A configured PostgreSQL test terminates the original request session when the
+body stream is first polled, after `Storing` was committed. It failed before
+the composition change (`/tmp/shardline-batched-deletion.Udrl6p/test.log`).
+Afterward, the request returns `StaleResourceFence`, keeps exactly the two
+admitted evidence events and the `Storing` state, and publishes no file record.
+A fresh request with a GitHub repository scope reaches `Visible`; all five
+evidence events verify under that same scope, and the record is readable using
+its scope. An initially unscoped read assertion in this new test was corrected
+before the final verification.
+
+All thirteen configured publication cases pass in 12.51 seconds with no runtime
+skip (`/tmp/shardline-batched-deletion.9VBf8X/test.log`). This verifies the named
+digest-file boundary as well as the existing native/raw publication fixtures.
+All sixteen CAS coordinator tests also pass, including scoped identity,
+concurrent duplicate uploads and interruption recovery. Strict CAS/server
+library and test Clippy, formatting and diff checks pass.
+Uploads without a supplied digest do not create these intents; their metadata
+publication ownership remains a separate boundary. Immutable storage work may
+already have run when ownership loss is detected.
