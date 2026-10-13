@@ -75,6 +75,11 @@ retry the upload`, resend it. For covered Postgres uploads, this means staged
 bytes were removed before publication and the file was not made visible. This
 also returns HTTP 503 with `Retry-After: 1`.
 
+A write can also return `database transaction snapshot changed; retry the
+request in a new transaction`. Retry the request. Applications managing their
+own database transaction must roll it back and start a new one before retrying.
+Shardline preserves the transaction's configured isolation level.
+
 ## Check a result
 
 Use your existing admin token:

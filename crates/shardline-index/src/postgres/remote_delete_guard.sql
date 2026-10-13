@@ -1,9 +1,44 @@
 -- Compatibility extension: the released migration history and checksums stay
 -- unchanged. Install atomically with the retention trigger in db migrate up.
+-- One persistent version row makes old snapshots detect marker admission.
+-- Keep it separate from the permit sequence: its initial value must not change
+-- the first permit epoch or reuse an existing permit identity.
+INSERT INTO @SCHEMA@.shardline_resource_fences(domain, resource, epoch)
+VALUES ('maintenance-remote-delete-snapshot', 'global', 1)
+ON CONFLICT(domain, resource) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_remote_delete_snapshot_v1(
+    index_schema TEXT
+) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $snapshot$
+BEGIN
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF current_setting('transaction_isolation') NOT IN ('repeatable read', 'serializable') THEN
+        RETURN;
+    END IF;
+    -- Call before locking physical-key slots. A row version changed since the
+    -- caller's snapshot produces PostgreSQL's standard serialization failure.
+    -- SHARE blocks admissions until this publication transaction ends.
+    PERFORM 1 FROM shardline_resource_fences
+      WHERE domain='maintenance-remote-delete-snapshot' AND resource='global'
+      FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '40001',
+            MESSAGE = 'remote delete coordination is not visible; retry the transaction';
+    END IF;
+END;
+$snapshot$;
+-- Only validated SECURITY DEFINER guards invoke this internal function.
+REVOKE ALL ON FUNCTION @SCHEMA@.shardline_remote_delete_snapshot_v1(TEXT) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_remote_delete_guard_v1(
     index_schema TEXT, object_key TEXT
 ) RETURNS VOID
-LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, pg_temp
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
 SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
 AS $guard$
 DECLARE pending BOOLEAN;
@@ -18,6 +53,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '42501',
             MESSAGE = 'retention metadata access is required for the remote delete guard';
     END IF;
+    PERFORM shardline_remote_delete_snapshot_v1(index_schema);
     -- Retain the original single-key lock for in-flight retention writers.
     -- The bounded slot also arbitrates large reference publications.
     PERFORM pg_advisory_xact_lock(hashtextextended('shardline:remote-delete:' || object_key, 0));
@@ -42,9 +78,15 @@ SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
 AS $begin_delete$
 DECLARE previous_epoch BIGINT; next_epoch BIGINT;
 BEGIN
-    -- The read guard validates the installed schema and the caller's existing
-    -- retention access, takes the object lock, and rejects an earlier marker.
-    PERFORM shardline_remote_delete_guard_v1(index_schema, object_key);
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF NOT has_schema_privilege(session_user, index_schema, 'USAGE')
+       OR NOT has_table_privilege(session_user,
+           format('%I.shardline_retention_holds', index_schema), 'SELECT') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501',
+            MESSAGE = 'retention metadata access is required for the remote delete guard';
+    END IF;
     IF NOT has_table_privilege(session_user,
            format('%I.shardline_quarantine_candidates', index_schema), 'SELECT')
        OR NOT has_table_privilege(session_user,
@@ -52,6 +94,15 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '42501',
             MESSAGE = 'garbage collection metadata access is required for remote delete admission';
     END IF;
+    -- Coordinate snapshots before acquiring any physical-key lock. Publishers
+    -- use the same order, including transactions publishing several objects.
+    UPDATE shardline_resource_fences SET epoch=epoch
+      WHERE domain='maintenance-remote-delete-snapshot' AND resource='global';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000',
+            MESSAGE = 'remote delete protection requires the existing db migrate up command';
+    END IF;
+    PERFORM shardline_remote_delete_guard_v1(index_schema, object_key);
     PERFORM pg_advisory_xact_lock(hashtextextended('shardline:remote-delete-sequence', 0));
     EXECUTE format(
         'SELECT epoch FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=$2 FOR UPDATE',
@@ -133,7 +184,7 @@ $retention$;
 -- or retention-table privileges from an existing mapping writer.
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_dedupe_remote_delete_v1()
 RETURNS TRIGGER
-LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, pg_temp
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
 SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
 AS $dedupe$
 DECLARE pending BOOLEAN; keys TEXT[]; lock_slot INTEGER;
@@ -147,6 +198,7 @@ BEGIN
     IF NEW.chunk_hash ~ '^[0-9a-f]{64}$' THEN
         keys := array_append(keys, left(NEW.chunk_hash, 2) || '/' || NEW.chunk_hash);
     END IF;
+    PERFORM shardline_remote_delete_snapshot_v1(TG_TABLE_SCHEMA);
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
@@ -216,6 +268,7 @@ BEGIN
     -- Bound lock-table usage independently of the number of chunks. Colliding
     -- keys serialize briefly; the pending lookup still checks the exact key.
     -- Acquire slots in a stable order within each publication.
+    PERFORM shardline_remote_delete_snapshot_v1(TG_TABLE_SCHEMA);
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
@@ -263,6 +316,7 @@ BEGIN
         WHERE digest_hex ~ '^[0-9a-f]{64}$'
           AND (scope_namespace='global' OR scope_namespace ~ '^[0-9a-f]{64}$')
     ) physical_references;
+    PERFORM shardline_remote_delete_snapshot_v1(index_schema);
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
@@ -308,6 +362,7 @@ BEGIN
     ELSE
         RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'unsupported OCI publication kind';
     END IF;
+    PERFORM shardline_remote_delete_snapshot_v1(index_schema);
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
@@ -371,6 +426,7 @@ BEGIN
           ON member_key ~ '^[0-9a-f]{2}/[0-9a-f]{64}$'
          AND mapping.chunk_hash = right(member_key, 64)
     ) references_to_check;
+    PERFORM shardline_remote_delete_snapshot_v1(index_schema);
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP

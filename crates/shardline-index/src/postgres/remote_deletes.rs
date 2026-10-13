@@ -203,6 +203,7 @@ impl PostgresIndexStore {
              AND to_regprocedure('shardline_remote_delete_begin_v1(text,text)') IS NOT NULL
              AND to_regprocedure('shardline_remote_delete_finish_v1(text,text,bigint)') IS NOT NULL
              AND to_regprocedure('shardline_reference_keys_remote_delete_v1(text,text[])') IS NOT NULL
+             AND to_regprocedure(format('%I.shardline_remote_delete_snapshot_v1(text)', current_schema())) IS NOT NULL
              AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_retention_holds'::regclass
                         AND tgname='shardline_retention_remote_delete_v1' AND tgenabled='O')
              AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='shardline_dedupe_shards'::regclass
@@ -1205,7 +1206,7 @@ mod tests {
             store.begin_remote_delete(&key).await.unwrap_err(),
             PostgresMetadataStoreError::Unsupported(_)
         ));
-        let count: i64 = query_scalar("SELECT count(*) FROM shardline_resource_fences WHERE domain LIKE 'maintenance-remote-delete%'")
+        let count: i64 = query_scalar("SELECT count(*) FROM shardline_resource_fences WHERE domain LIKE 'maintenance-remote-delete%' AND domain <> 'maintenance-remote-delete-snapshot'")
             .fetch_one(&pool)
             .await
             .unwrap();

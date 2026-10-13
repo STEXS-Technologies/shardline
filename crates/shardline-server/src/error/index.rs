@@ -45,3 +45,16 @@ pub enum IndexError {
     #[error("repository rename target already contains conflicting metadata")]
     ConflictingRenameTargetRecord,
 }
+
+impl IndexError {
+    pub(super) fn is_retryable_transaction(&self) -> bool {
+        if let Self::PostgresMetadata(PostgresMetadataStoreError::Sqlx(error)) = self {
+            return error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref()
+                == Some("40001");
+        }
+        false
+    }
+}

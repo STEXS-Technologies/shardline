@@ -288,6 +288,7 @@ pub enum ServerError {
 impl ServerError {
     pub(crate) fn is_retryable_publication(&self) -> bool {
         self.is_remote_delete_pending()
+            || matches!(self, Self::Index(error) if error.is_retryable_transaction())
             || matches!(self, Self::Io(error) if super::publication::is_content_unavailable(error))
     }
 
@@ -521,6 +522,9 @@ impl IntoResponse for ServerError {
 }
 
 fn index_error_message(error: &IndexError) -> &'static str {
+    if error.is_retryable_transaction() {
+        return "database transaction snapshot changed; retry the request in a new transaction";
+    }
     if let IndexError::PostgresMetadata(error) = error
         && error.is_remote_delete_pending()
     {
