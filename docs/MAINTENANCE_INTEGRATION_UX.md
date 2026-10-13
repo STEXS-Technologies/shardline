@@ -226,10 +226,12 @@ for authentication, pagination and response fields.
 ## Upgrade using the existing workflow
 
 1. Pause destructive GC and let existing GC commands finish.
-2. Run the usual owner-run `shardline db migrate up` with the upgraded binary
-   and your existing database and schema configuration.
+2. For PostgreSQL, run the usual owner-run `shardline db migrate up` with the
+   upgraded binary and your existing database and schema configuration.
    Finish all pending migrations; follow the database migration guide's
    maintenance-window requirements if your schema is behind.
+   SQLite initializes tracking and upgrade protection during normal startup;
+   it needs no separate database command.
 3. Replace server roles using your normal drain and restart procedure. Replace
    the binaries or images used by existing maintenance jobs too.
 4. Run `shardline history --pending-deletes` and investigate interrupted work,
@@ -242,7 +244,7 @@ servers alone cannot protect deletes performed by an old GC binary. See
 [rolling upgrades](ROLLING_UPGRADE.md) for the role order and rollback limits.
 
 Run owner setup before starting upgraded PostgreSQL servers. It also prevents
-older servers from falsely completing new file uploads during rollback or a
+older servers from falsely completing new file and native uploads during rollback or a
 mixed-version restart. Local startup installs that protection automatically.
 
 New local and upgraded server history stays in metadata, outside user payload
