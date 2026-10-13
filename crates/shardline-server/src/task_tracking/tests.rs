@@ -3,6 +3,7 @@ use super::*;
 use shardline_reliability::MaintenanceArtifactKind;
 use std::num::NonZeroUsize;
 
+mod history_pagination;
 mod postgres_capacity;
 mod postgres_retention;
 

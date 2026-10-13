@@ -2194,3 +2194,19 @@ and grants unchanged. Ordinary servers had no child processes at readiness and
 completion. Fixture logs contain no matching Tokio shutdown panic. Diagnostics:
 `/tmp/shardline-oci-upgrade.pjXI8A`; verifier output:
 `.codex/validation/ux-housekeeping-oci-upgrade.log`.
+
+## Administrative history pagination and warnings
+
+Two HTTP regressions use the public local router and existing admin-token
+authentication. One follows every returned cursor with a one-entry page, verifies
+that unreadable manifests remain visible as corrupt entries without trusted
+identity fields, and checks that unsupported history filters return HTTP 400.
+The other simulates interrupted retirement and imports unreadable retirement
+markers: an empty history response still warns that recording is full, while
+the independent readiness endpoint remains ready.
+
+Both tests passed in 0.08 seconds with no ignored tests. Log:
+`.codex/validation/ux-http-history-pagination-tests.log`.
+These fixtures verify the HTTP contract for local metadata; they do not establish
+PostgreSQL pagination or automatic-admission capacity. The capacity fixtures
+above cover the latter separately.
