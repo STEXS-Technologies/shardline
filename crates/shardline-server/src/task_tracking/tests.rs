@@ -3,6 +3,8 @@ use super::*;
 use shardline_reliability::MaintenanceArtifactKind;
 use std::num::NonZeroUsize;
 
+mod postgres_capacity;
+
 fn config(root: &std::path::Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:8080".parse().unwrap(),

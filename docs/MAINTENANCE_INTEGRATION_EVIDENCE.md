@@ -2063,3 +2063,31 @@ diagnostics: `/tmp/shardline-native-xet.6xG98p/test.log`. This extends the curre
 process checks with native client upload, deduplication, reconstruction and
 download through the server's public library API. It does not establish
 PostgreSQL history-capacity performance or arbitrary deployment layouts.
+
+## Full PostgreSQL automatic-history capacity
+
+Run `bash scripts/shardline/verify_maintenance_postgres_history_capacity.sh CURRENT`
+for an explicit optimized shared-history fixture. It creates its own PostgreSQL
+container, bootstraps it through the usual owner command, and uses a private
+schema through the server's existing metadata pool. Missing configuration,
+runtime skips or an unexpected test count fail the verifier.
+
+The fixture created 4,094 real completed runs, one interrupted run and one
+unreadable manifest. New admission failed at 4,096 slots. Full pagination returned
+every ID once. Sixty-five cleanup calls removed exactly the completed runs in
+batches of at most 64, retained both unresolved records, preserved user payload
+bytes and kept task artifacts outside payload inventory. Fresh recording worked
+after cleanup reclaimed slots.
+
+One executed optimized test passed with zero ignored tests in 379.76 seconds.
+Creation took 82.173 seconds; full paginated inspection took 37.073 seconds;
+cleanup calls totaled 260.310 seconds, with a slowest call of 5.961 seconds.
+Log: `/tmp/shardline-postgres-capacity.8CSN3l/test.log`; verifier output:
+`.codex/validation/ux-pg-capacity.log`. Strict test-target Clippy, shell syntax,
+diff checks and the AST graph refresh passed.
+
+These are measurements from a local disposable database, not latency bounds or
+evidence about larger legacy archives. The cleanup cost remains relevant to the
+open performance gate; logical admission limits do not cap physical database
+size. This change adds a test and reproduction script, with no runtime, version
+or deployment-configuration change.
