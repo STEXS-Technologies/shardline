@@ -14,6 +14,17 @@ or configuration for normal startup. Maintenance keeps its original process
 and live output. Your existing timer still starts GC; starting the server does
 not start GC.
 
+| Your workflow | What changes |
+| --- | --- |
+| Start a server | It initializes maintenance tracking automatically in existing metadata. No tracker service to start. |
+| Run fsck, repair or GC | Use the same command and configuration. Tracking stays in that command's process. |
+| Run multiple nodes | Nodes sharing the same Postgres database, schema and storage can inspect shared history. Covered writes use database ownership checks. |
+| Set a maintenance deadline or CPU limit | Explicitly use `shardline maintenance ...`. Only this optional runner starts a child process. |
+
+The child process lets the optional runner stop or limit its own maintenance
+job. Write safety comes from database ownership checks and delete protection,
+not from giving a worker another PID. Normal operation needs no worker runner.
+
 **This branch is still under development and is not ready to merge.**
 The version remains 1.11.3. The remaining upgrade limits are listed below.
 
@@ -30,15 +41,16 @@ available. To inspect history over HTTP, use the existing
 | --- | --- |
 | Server readiness fails | Check server logs and its storage/database dependencies. Maintenance history does not establish readiness. |
 | The server is ready, but history has a warning | Check server or command logs for the recording failure. Your work may have run without a saved result; check its effects before running it again. |
-| A run is completed | That run needs no recovery. Use `/api/v1/status` to check the server now. |
+| A run is completed | Its saved result verified as successful. Use `/api/v1/status` to check the server now. |
 | A run is failed, interrupted, unresolved or corrupt | Read its `next_step` and original command logs. Inspect partial effects before repeating a mutation; preserve corrupt evidence. |
 | A write returns `503` for an unresolved remote delete | Check the original GC command, then run `shardline repair` with the same configuration to verify saved delete replies. Retry the write after reconciliation. |
 | Repair leaves a delete pending | Investigate the original GC and storage logs. Missing replies cannot be replaced by checking that the object is absent. |
 
 ## What users gain
 
-Maintenance history survives a process failure. You can distinguish completed
-work from failed or interrupted work without setting up another service.
+Saved maintenance evidence survives a process failure. When recording succeeds,
+you can inspect the recorded outcome without setting up another service. If
+recording fails, history can be incomplete even though the command ran.
 History does not automatically rerun jobs or prove current cluster health.
 
 Upgraded Postgres deployments share history through their existing database.
@@ -115,7 +127,10 @@ Follow `next_step` and check the original logs before repeating work. Older or
 interrupted runs may have no report; existing CLI diagnostics remain available.
 Read `history_notice` and `inspection_notice` before trusting an empty list.
 
-Verified finished history is eligible for cleanup after 30 days. Each startup or
+## History retention and limits
+
+You do not need to configure a history cleanup job. Verified finished history
+is eligible for cleanup after 30 days. Each startup or
 maintenance invocation can remove up to 64 old runs. Interrupted and corrupt history stays
 for investigation. Save reports separately if you need a permanent audit archive.
 Large or legacy archives can still slow inspection and final command cleanup.
@@ -162,10 +177,6 @@ Compatibility, remaining write paths and deployment-scale checks are still open.
 Read the [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) before deploying
 this branch. Released nodes may return a generic error for a pending delete.
 
-## Optional process isolation
-
-The optional `shardline maintenance ...` runner uses a child process for
-deadlines and CPU limits. Use it only when you need those controls.
-Normal commands do not use it. Database ownership checks provide write safety;
-the extra process provides isolation for those optional controls. A separate
-PID does not guarantee cluster-wide exactly-once execution.
+Shared history and the optional worker do not guarantee cluster-wide
+exactly-once execution. Follow each run's recovery guidance before retrying
+work that may already have changed storage.
