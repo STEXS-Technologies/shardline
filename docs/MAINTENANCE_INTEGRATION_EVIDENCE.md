@@ -3168,3 +3168,19 @@ existing histories while emitting the actionable recording warning.
 Diagnostics are `/tmp/shardline-local-permissions.zay6fd`.
 This extends coverage to the command recommended in the operator guide; it does
 not change the runtime or establish broader remote recovery guarantees.
+
+### OCI library publication authority boundary
+
+The lower-level OCI publication methods now explicitly require a caller-held
+repository fence on the supplied connection. They do not acquire ownership or
+inspect backing object bytes; the compatibility method supplies no payload
+references, and the explicit-reference variant requires the complete set from
+a validated payload. Library callers must retain storage validation and
+reference protection through publication. The server's locked publisher uses
+the original resource guard connection and rejects a missing connection instead
+of replacing it. This documents the existing API boundary rather than extending
+the server guarantee to arbitrary metadata-only callers.
+
+Strict `shardline-index` rustdoc passes with warnings denied. Public signatures,
+runtime behavior and the version are unchanged; the remaining write-path audit
+is not closed by this documentation check.
