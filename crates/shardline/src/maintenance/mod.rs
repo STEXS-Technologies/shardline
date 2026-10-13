@@ -1,4 +1,5 @@
 //! Opt-in maintenance execution. Existing commands and deployment schemas stay intact.
+mod archive_lease;
 mod artifact;
 mod automatic;
 mod capture;

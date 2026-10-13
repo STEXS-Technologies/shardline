@@ -47,6 +47,22 @@ pub(super) fn open_private(path: &Path, max: u64) -> Result<File> {
     Ok(file)
 }
 
+/// Validates an existing directory without recreating scratch removed by a peer.
+pub(super) fn existing_private_directory(path: &Path) -> Result<()> {
+    crate::local_path::ensure_directory_path_components_are_not_symlinked(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err("maintenance state directory must be owned by this user and mode 0700".into());
+    }
+    Ok(())
+}
+
 pub(super) fn read_private(path: &Path, max: u64) -> Result<Vec<u8>> {
     let file = open_private(path, max)?;
     let mut bytes = Vec::new();

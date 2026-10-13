@@ -50,12 +50,11 @@ retry temporary-file cleanup without repeating completed work.
 Ordinary maintenance cleans old history after the requested work and its result
 recording. A large history archive can still delay the command's final exit.
 
-Once 4,096 private tracking workspaces remain, ordinary maintenance warns and
-uses shared metadata history when available. Existing private evidence stays
-untouched, and the requested command still runs. Shared-history growth and the
-completed scratch-cleanup queue remain part of the open storage audit.
-Exports and verified cleanup continue after work, so reaching capacity does not
-prevent completed private history from freeing space.
+Ordinary maintenance admits up to 4,096 retained private workspaces, including completed
+scratch awaiting deletion. At capacity, ordinary maintenance warns and uses
+shared metadata history when available. It preserves retained files and still
+runs the requested command. Verified exports and cleanup continue after work
+to free space. Shared-history growth remains part of the open storage audit.
 
 ## Handle a retryable write
 

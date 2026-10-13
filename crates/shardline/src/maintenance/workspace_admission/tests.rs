@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
+use std::fs::File;
 
 #[test]
 fn full_archive_preserves_existing_workspaces_and_operator_files() {
@@ -62,4 +63,46 @@ fn concurrent_admissions_share_the_existing_directory_lock() {
     let next = state.join(format!("{:064x}", 16));
     assert!(ensure_with_limit(&state, &next, 4).is_err());
     assert!(!next.exists());
+}
+
+#[test]
+fn retired_scratch_consumes_capacity_until_verified_cleanup_succeeds() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let unfinished = state.join(format!("{:064x}", 0));
+    ensure_with_limit(&state, &unfinished, 2).unwrap();
+    std::fs::write(unfinished.join("journal"), b"unfinished evidence").unwrap();
+    let retired = state
+        .join(super::super::cleanup::RETIRED)
+        .join(format!("{:064x}", 1));
+    artifact::private_directory(&retired).unwrap();
+    std::fs::write(retired.join("scratch"), b"confirmed scratch").unwrap();
+    let next = state.join(format!("{:064x}", 2));
+    assert!(ensure_with_limit(&state, &next, 2).is_err());
+    assert!(!next.exists());
+    super::super::cleanup::retry(&state).unwrap();
+    assert!(!retired.exists());
+    ensure_with_limit(&state, &next, 2).unwrap();
+    assert_eq!(
+        std::fs::read(unfinished.join("journal")).unwrap(),
+        b"unfinished evidence"
+    );
+}
+
+#[test]
+fn retired_queue_symlinks_preserve_outside_evidence_and_deny_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let outside = root.path().join("outside");
+    artifact::private_directory(&state).unwrap();
+    artifact::private_directory(&outside).unwrap();
+    std::fs::write(outside.join("evidence"), b"preserve").unwrap();
+    std::os::unix::fs::symlink(&outside, state.join(super::super::cleanup::RETIRED)).unwrap();
+    let next = state.join(format!("{:064x}", 0));
+    assert!(ensure_with_limit(&state, &next, 2).is_err());
+    assert!(!next.exists());
+    assert_eq!(
+        std::fs::read(outside.join("evidence")).unwrap(),
+        b"preserve"
+    );
 }
