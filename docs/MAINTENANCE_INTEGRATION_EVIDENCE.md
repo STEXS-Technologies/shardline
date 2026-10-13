@@ -3324,3 +3324,13 @@ cargo test --locked -p shardline-server --all-features --lib \
   task_tracking::tests::legacy_retention_capacity::large_legacy_run_retires_incrementally_without_touching_unresolved_evidence \
   -- --ignored --exact --nocapture
 ```
+
+### Actionable partial delete-recovery logs
+
+The existing server recovery wrapper now warns when a pass retains evidence
+that could not settle an attempt, directing operators to original GC/storage
+logs and pending-delete inspection. A pass examining 64 replies also explains
+that another repair can check later replies. Existing structured counts remain
+available. These messages do not assert that later replies exist, that all
+pending markers were examined, or that retained evidence authorizes a retry.
+Recovery, command results and exit status are unchanged; this is logging only.
