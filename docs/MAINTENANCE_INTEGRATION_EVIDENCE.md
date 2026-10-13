@@ -322,10 +322,10 @@ untested deployments.
   has no direct artifact-table access, and prior publication/crash guarantees
   and the ordinary one-process startup checks still pass.
   The earlier SQLite prototype also verifies unchanged released fsck output.
-  Reproduce the local prototype with
-  `bash scripts/shardline/verify_maintenance_metadata_inventory.sh RELEASED`,
-  where `RELEASED` is the official 1.11.3 executable. This checks the proposed
-  storage surface only; it does not exercise the production task backend.
+  The verifier has since been replaced with the actual automatic-history check:
+  `bash scripts/shardline/verify_maintenance_metadata_inventory.sh CURRENT RELEASED`,
+  where `CURRENT` is the branch executable and `RELEASED` is the official
+  1.11.3 executable. See the actual metadata inventory results below.
   Shared grouping for these jobs, the optional isolated runner, other entry points and binding every
   server background operation to its work connection remain unfinished.
   The Hub secret sweep now binds from its own non-replaceable work connection,
@@ -1076,3 +1076,26 @@ external delete acknowledgement window, or production deployment health.
 Native log: `.codex/validation/ux-optimized-vm-reboot-verified.log`; disposable
 fixture: `/tmp/shardline-maintenance-vm.eT1PrC`. The guest was stopped and its
 overlay and private SSH key removed after the successful run.
+
+## Actual metadata inventory and restricted accounts
+
+The metadata inventory verifier now tests production automatic history instead
+of inserting a row into a prototype table. It runs current fsck, checks one
+manifest and a completed journal event, and compares released/current output.
+Released fsck and released storage copy then preserve exact source artifact
+keys and payload bytes. Only the synthetic payload is copied; neither source
+nor destination gains task objects in its payload inventory.
+
+The optimized binary also passes the existing local-permissions and
+retention-permissions verifiers. Four ordinary commands (fsck, rebuild, repair,
+GC) preserve released output/status under a 0555 root with an already-writable
+metadata database. The isolated retention-only Postgres account retains its
+existing permissions and both binaries reject unresolved deletes. These are
+the verifier fixtures' permission cases, not every deployment account or RLS
+policy.
+
+Logs: `.codex/validation/ux-actual-metadata-inventory-verified.log`,
+`.codex/validation/ux-optimized-local-permissions.log`, and
+`.codex/validation/ux-optimized-retention-permissions.log`. The current optimized
+binary uses production source `894aaf06`; released comparisons use 1.11.3.
+The retention fixture's owned database container is removed on exit.
