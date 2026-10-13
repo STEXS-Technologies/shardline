@@ -224,6 +224,9 @@ impl TaskEvidenceStore {
     /// Prevents new history from entering payload storage when metadata is unavailable.
     /// Legacy reads and retention remain available. Publication then returns an
     /// error instead of adding control objects to the payload inventory.
+    /// Automatic admission allows at most 4,096 retained histories, counting
+    /// cleanup markers conservatively. New bodies are limited to 64 KiB and
+    /// later artifacts require a live manifest; exact existing retries survive.
     /// Existing constructors retain their legacy publication behavior by default.
     #[must_use]
     pub const fn require_metadata_publication(mut self) -> Self {

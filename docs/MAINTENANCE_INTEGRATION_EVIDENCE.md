@@ -13,6 +13,24 @@ untested deployments.
 
 ## Recording capacity in the admin response
 
+Automatic work-session scope bindings and storage-copy histories use the same
+bounded admission policy. The actual work connection is retained; a legacy
+manifest alone cannot authorize an orphan metadata association after its live
+metadata manifest disappears. Explicit legacy publication remains unrestricted.
+All 15 configured PostgreSQL metadata tests passed in 22.20 seconds, including
+that legacy/live-manifest transition. The actual CLI work-session fixture passed
+in 33.73 seconds across its ordinary tracking routes with one PostgreSQL login
+connection. Four copy/evidence fixtures passed in 5.03 seconds, checking admitted
+and rejected orphan records, metadata-only local/private archives, unrelated
+database configuration, unavailable history and unchanged source bytes. Strict
+all-feature, all-target CLI Clippy passed.
+
+The optimized binary built from `67f482ab` passed all 11 selected deployment
+drills in 163.561 seconds, with no runtime skips and 12 unrelated tests filtered
+out. This covers admission before the later admin notice and scope/copy changes;
+it does not prove those later edits. The deployment verifier now snapshots both
+executables into its own fixture so a concurrent build cannot change drill bytes.
+
 The maintenance collection now reports full automatic history through its
 existing `history_notice` field. A bounded key count reads no artifact bodies
 and reserves no admission slot; publication still performs the atomic check.

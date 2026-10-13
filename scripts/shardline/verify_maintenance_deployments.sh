@@ -12,8 +12,11 @@ cargo nextest --version >/dev/null
 umask 077
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-maintenance-deployments.XXXXXX")
 echo "diagnostics: $fixture"
-export CARGO_BIN_EXE_shardline="$current"
-export SHARDLINE_N_MINUS_ONE_BINARY="$released"
+# Keep every drill on the same bytes even if another build replaces its output.
+cp -- "$current" "$fixture/current-shardline"
+cp -- "$released" "$fixture/released-shardline"
+export CARGO_BIN_EXE_shardline="$fixture/current-shardline"
+export SHARDLINE_N_MINUS_ONE_BINARY="$fixture/released-shardline"
 export CARGO_BUILD_JOBS=2
 cargo nextest run --locked -p shardline-server --all-features --test deployment_chaos \
     -E 'test(readonly_maintenance_deployment::) | test(tracker_replacement::) | test(gc_acknowledgement::) | test(drill_deploy_f_real_mixed_version_rollout_and_rollback)' \

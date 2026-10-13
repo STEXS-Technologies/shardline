@@ -97,12 +97,24 @@ impl TaskEvidenceStore {
         {
             return Err(invalid());
         }
-        shardline_index::PostgresIndexStore::publish_task_artifact_on_connection(
-            connection,
-            binding_key.as_str(),
-            &bytes,
-        )
-        .await?;
+        if self.metadata_only_publication {
+            let published =
+                shardline_index::PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+                    connection,
+                    binding_key.as_str(),
+                    &bytes,
+                    super::admission::AUTOMATIC_HISTORY_CAPACITY,
+                )
+                .await?;
+            super::admission::automatic_publication_result(published)?;
+        } else {
+            shardline_index::PostgresIndexStore::publish_task_artifact_on_connection(
+                connection,
+                binding_key.as_str(),
+                &bytes,
+            )
+            .await?;
+        }
         Ok(true)
     }
 

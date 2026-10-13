@@ -263,6 +263,101 @@ async fn bounded_metadata_admission_preserves_runs_and_caller_isolation() {
     fixture.finish().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_scope_binding_requires_a_live_metadata_manifest() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let store = store.require_metadata_publication();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, identity, key, manifest) = tokio::task::spawn_blocking(move || {
+        EmbeddedTaskTracker::from_store(store.clone(), deployment)
+            .begin(
+                "scope-template",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+        let template = store.summaries(deployment, None, 1).unwrap().remove(0);
+        let mut identity: crate::task_tracking::TaskRunIdentity = serde_json::from_slice(
+            &store
+                .read(&format!("manifests/{}", template.id), 65536)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        identity.public_key = *key.verifying_key().as_bytes();
+        identity.id = hex::encode(identity.public_key);
+        identity.scope.task =
+            penelope_core::task::TaskId::from_digest(Digest::of(identity.id.as_bytes()));
+        let manifest = serde_json::to_vec(&identity).unwrap();
+        store
+            .publish(&format!("manifests/{}", identity.id), &manifest)
+            .unwrap();
+        let legacy = TaskEvidenceStore::from_objects(store.objects.clone());
+        legacy
+            .publish(&format!("manifests/{}", identity.id), &manifest)
+            .unwrap();
+        (store, identity, key, manifest)
+    })
+    .await
+    .unwrap();
+    let mut connection = fixture.index().pool().acquire().await.unwrap();
+    assert!(
+        store
+            .publish_scope_on_work_connection(&identity, &key, scope.unwrap(), &mut connection)
+            .await
+            .unwrap()
+    );
+    let binding = format!("_shardline_tasks/v1/scope-bindings/{}", identity.id);
+    PostgresIndexStore::delete_task_artifact_on_connection(&mut connection, &binding)
+        .await
+        .unwrap();
+    PostgresIndexStore::delete_task_artifact_on_connection(
+        &mut connection,
+        &format!("_shardline_tasks/v1/manifests/{}", identity.id),
+    )
+    .await
+    .unwrap();
+    // Exact legacy bytes cannot authorize a new orphan metadata association.
+    assert!(
+        store
+            .publish_scope_on_work_connection(&identity, &key, scope.unwrap(), &mut connection)
+            .await
+            .is_err()
+    );
+    assert!(
+        PostgresIndexStore::read_task_artifact_on_connection(&mut connection, &binding, 2048)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(connection);
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            store
+                .read(&format!("manifests/{}", identity.id), 65536)
+                .unwrap()
+                .unwrap(),
+            manifest
+        );
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
 #[test]
 fn library_backend_without_runtime_returns_an_error_without_starting_one() {
     use futures_util::FutureExt;
