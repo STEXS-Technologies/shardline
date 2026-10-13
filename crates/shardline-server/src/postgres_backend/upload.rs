@@ -84,6 +84,8 @@ impl super::PostgresBackend {
         expected_sha256: Option<&str>,
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
+        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+            .await?;
         let reliability_repository = reliability_repository_scope(repository_scope);
 
         let intent = expected_sha256.map(|expected_hash| {
@@ -127,6 +129,8 @@ impl super::PostgresBackend {
                 ingestor.ingest_body_chunk(&object_store, &bytes).await?;
             }
 
+            crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+                .await?;
             let (record, response) = ingestor
                 .finish(&object_store, file_id, repository_scope, expected_sha256)
                 .await?;
@@ -185,6 +189,12 @@ impl super::PostgresBackend {
         if coordinator.index().owner_lost() {
             Err(ServerError::StaleResourceFence)
         } else {
+            if result.is_err() {
+                crate::maintenance_barrier::RequestSession::verify_for(
+                    &self.request_session_identity,
+                )
+                .await?;
+            }
             result
         }
     }

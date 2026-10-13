@@ -3993,3 +3993,36 @@ library and test Clippy, formatting and diff checks pass.
 Uploads without a supplied digest do not create these intents; their metadata
 publication ownership remains a separate boundary. Immutable storage work may
 already have run when ownership loss is detected.
+
+### Plain file uploads: ownership loss before and during publication
+
+File uploads without a supplied digest still create no upload intent. They now
+check the original request session before reading the body and after ingestion.
+If publication fails, another check on that same session distinguishes owner
+loss from an error on a still-live session. No replacement connection is opened;
+the publication transaction retains its existing backing-data validation.
+Normal request uploads add two liveness queries, plus a query on failures that
+have not already been classified by the intent adapter. Standalone calls without
+a request session perform no such database query. These checks do not bound
+network latency or cancel an already-active object-store call.
+
+The configured plain-upload regression test failed before the fix with PostgreSQL
+error `57P01` exposed as an index error
+(`/tmp/shardline-batched-deletion.x55zYd/test.log`). The corrected test covers
+owner loss before the first body poll and during body ingestion, verifies that
+an already-lost request consumes no body, checks absent file metadata and zero
+upload intents, and succeeds with a fresh session.
+
+A second test holds a real PostgreSQL table lock and observes the upload's
+publication transaction waiting on its blocker through `pg_blocking_pids`.
+Only then does it terminate the original request session. The upload returns
+`StaleResourceFence`, publishes no record, and a fresh request publishes the
+same content after the blocker is released. This exercises loss after the
+liveness checks, rather than relying on a check immediately before publication.
+
+All fifteen configured publication cases pass in 12.57 seconds with no runtime
+skip (`/tmp/shardline-batched-deletion.emvln5/test.log`). They include both new
+plain-file tests and the existing digest-file, raw-xorb, native-shard and physical
+publication fixtures. These named scenarios do not close the remaining write
+and deployment audit or establish exactly-once remote storage effects.
+Strict server library and test Clippy, formatting and diff checks also pass.

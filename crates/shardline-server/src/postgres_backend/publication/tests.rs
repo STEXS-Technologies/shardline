@@ -6,6 +6,115 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test]
+async fn file_upload_without_digest_returns_retryable_owner_loss_without_intents() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: plain file ownership fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    for lost_before_body in [true, false] {
+        let session = crate::maintenance_barrier::RequestSession::acquire(
+            &backend.gc_barrier_pool,
+            backend.request_session_identity.clone(),
+        )
+        .await
+        .unwrap();
+        let polled = Arc::new(AtomicBool::new(false));
+        session
+            .scope(async {
+                let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                    &backend.request_session_identity,
+                )
+                .await
+                .unwrap();
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut **owner.as_mut().unwrap())
+                    .await
+                    .unwrap();
+                drop(owner);
+                if lost_before_body {
+                    assert!(
+                        sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                            .bind(pid)
+                            .fetch_one(&fixture.admin)
+                            .await
+                            .unwrap()
+                    );
+                }
+                let admin = fixture.admin.clone();
+                let polled_body = polled.clone();
+                let stream = futures_util::stream::once(async move {
+                    polled_body.store(true, Ordering::Relaxed);
+                    if !lost_before_body {
+                        assert!(
+                            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                                .bind(pid)
+                                .fetch_one(&admin)
+                                .await
+                                .unwrap()
+                        );
+                    }
+                    Ok(Bytes::from_static(b"plain ownership boundary"))
+                });
+                let error = backend
+                    .upload_file_stream(
+                        "lost-plain-file",
+                        RequestBodyReader::from_stream(stream),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, crate::ServerError::StaleResourceFence),
+                    "{error:?}"
+                );
+            })
+            .await;
+        session.finish().await;
+        assert_eq!(polled.load(Ordering::Relaxed), !lost_before_body);
+        assert!(matches!(
+            backend.read_record("lost-plain-file", None, None).await,
+            Err(crate::ServerError::NotFound)
+        ));
+    }
+    let intents: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_upload_intents",
+        fixture.schema
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(intents, 0);
+    let fresh = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    fresh
+        .scope(backend.upload_file(
+            "fresh-plain-file",
+            Bytes::from_static(b"plain ownership boundary"),
+            None,
+        ))
+        .await
+        .unwrap();
+    fresh.finish().await;
+    assert!(
+        backend
+            .read_record("fresh-plain-file", None, None)
+            .await
+            .is_ok()
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn digest_file_upload_keeps_progress_with_the_original_request_owner() {
     use sha2::Digest;
     use shardline_index::{UploadIntentState, UploadIntentStore};
@@ -141,6 +250,120 @@ async fn digest_file_upload_keeps_progress_with_the_original_request_owner() {
     assert!(
         backend
             .read_record("fresh-digest-file", None, Some(&scope))
+            .await
+            .is_ok()
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_upload_owner_loss_during_publication_returns_a_fresh_request_error() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: publication ownership fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    let session = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    let request_pid: i32 = session
+        .scope(async {
+            let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                &backend.request_session_identity,
+            )
+            .await
+            .unwrap();
+            sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **owner.as_mut().unwrap())
+                .await
+                .unwrap()
+        })
+        .await;
+    let mut blocker = fixture.admin.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "LOCK TABLE {}.shardline_file_records IN SHARE MODE",
+        fixture.schema
+    )))
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    let upload_session = session.clone();
+    let upload_backend = backend.clone();
+    let upload = tokio::spawn(async move {
+        upload_session
+            .scope(upload_backend.upload_file(
+                "publication-owner-loss",
+                Bytes::from_static(b"publication boundary"),
+                None,
+            ))
+            .await
+    });
+    // Observe a real publication lock wait after both liveness checks succeeded.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(blocker_pid)
+                .bind(request_pid)
+                .fetch_one(&fixture.admin)
+                .await
+                .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("upload must reach its publication transaction");
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+            .bind(request_pid)
+            .fetch_one(&fixture.admin)
+            .await
+            .unwrap()
+    );
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), upload)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::ServerError::StaleResourceFence),
+        "{error:?}"
+    );
+    blocker.rollback().await.unwrap();
+    session.finish().await;
+    assert!(matches!(
+        backend
+            .read_record("publication-owner-loss", None, None)
+            .await,
+        Err(crate::ServerError::NotFound)
+    ));
+    let fresh = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    fresh
+        .scope(backend.upload_file(
+            "publication-owner-loss",
+            Bytes::from_static(b"publication boundary"),
+            None,
+        ))
+        .await
+        .unwrap();
+    fresh.finish().await;
+    assert!(
+        backend
+            .read_record("publication-owner-loss", None, None)
             .await
             .is_ok()
     );

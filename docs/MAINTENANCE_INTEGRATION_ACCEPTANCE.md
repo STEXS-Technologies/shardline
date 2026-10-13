@@ -83,6 +83,9 @@ The following still need implementation or stronger evidence before merge:
   returns HTTP 503 with `Retry-After: 1`; the client must make a fresh request.
   Standalone library calls and startup reconciliation retain their existing
   pool-based APIs and require the caller's applicable ownership checks.
+  Plain file requests without upload intents also check their original session
+  before body ingestion and after ingestion. Publication failures check that
+  same session to return retryable ownership loss without reacquiring it.
   Upload progress is not proof that bytes still exist. Native file publication
   checks backing data in its publication transaction; raw xorbs store immutable
   bytes without publishing file metadata. GC uses file records and dedupe
