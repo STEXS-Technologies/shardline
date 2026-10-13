@@ -77,6 +77,9 @@ pub(super) fn run(
             }
         }
     });
+    if let Some(receipt) = &receipt {
+        super::evidence::retire_finished_history(&receipt.store, receipt.identity.deployment);
+    }
     super::CommandOutput {
         text: String::new(),
         success: exit_code == 0,
@@ -107,19 +110,7 @@ impl Receipt {
         let export_config = super::publication_config(operation, config)?;
         let store = super::evidence::store(operation, &export_config, None)?;
         let deployment = shardline_server::task_tracking::deployment_fingerprint(&export_config)?;
-        if let Err(error) =
-            store.prune_completed(deployment, shardline_protocol::unix_now_seconds_lossy())
-        {
-            tracing::warn!(
-                "maintenance evidence retention unavailable; existing command continues: {error}"
-            );
-        }
         let mut seed = zeroize::Zeroizing::new([0_u8; 32]);
-        if let Err(error) = store.relocate_finished_history(deployment) {
-            tracing::warn!(
-                "legacy task history relocation unavailable; existing command continues: {error}"
-            );
-        }
         getrandom::fill(seed.as_mut()).map_err(|error| error.to_string())?;
         let key = SigningKey::from_bytes(&seed);
         let identity = TaskRunIdentity {

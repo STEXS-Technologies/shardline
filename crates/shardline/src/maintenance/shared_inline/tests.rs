@@ -241,6 +241,96 @@ fn shared_receipts_verify_native_success_failure_and_materialized_tampering() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_commands_finish_before_history_housekeeping_and_preserve_cleanup_failures() {
+    for shared_only in [true, false] {
+        for deny_cleanup in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let configured = config(root.path());
+            let work_config = configured.clone();
+            let output = tokio::task::spawn_blocking(move || {
+                let operation = MaintenanceOperation::IndexRebuild {
+                    root: work_config.root_dir().to_owned(),
+                };
+                let id = "expired-before-work";
+                let (input, definition, scope) = super::super::inline::prepare(
+                    &work_config, id, &operation, vec![b"index-rebuild".to_vec()],
+                ).unwrap();
+                let mut old = Receipt::begin(&operation, id, &work_config, &input, definition, scope).unwrap();
+                old.finish(operation.kind(), 0).unwrap();
+                let connection = rusqlite::Connection::open(work_config.root_dir().join("metadata.sqlite3")).unwrap();
+                let manifest = format!("_shardline_tasks/v1/manifests/{id}");
+                let mut identity = old.identity.clone();
+                identity.created_at = 0;
+                connection.execute(
+                    "UPDATE shardline_task_artifacts_v1 SET payload = ?1 WHERE artifact_key = ?2",
+                    rusqlite::params![serde_json::to_vec(&identity).unwrap(), manifest],
+                ).unwrap();
+                // Cleanup is permitted only after the fresh command's report
+                // is saved. Moving housekeeping before work leaves the old
+                // manifest behind and fails the assertion below.
+                connection.execute_batch(
+                    "CREATE TRIGGER verify_cleanup_order BEFORE DELETE ON shardline_task_artifacts_v1
+                     WHEN OLD.artifact_key = '_shardline_tasks/v1/manifests/expired-before-work'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM shardline_task_artifacts_v1
+                         WHERE artifact_key LIKE '_shardline_tasks/v1/runs/%/artifacts/%'
+                         AND artifact_key NOT LIKE '_shardline_tasks/v1/runs/expired-before-work/%'
+                         AND CAST(payload AS TEXT) LIKE '%\"exit_code\":0%'
+                     ) BEGIN SELECT RAISE(ABORT, 'fresh work has not reported its result'); END;",
+                ).unwrap();
+                if deny_cleanup {
+                    connection.execute_batch(
+                        "CREATE TRIGGER deny_history_cleanup BEFORE DELETE ON shardline_task_artifacts_v1
+                         WHEN OLD.artifact_key = '_shardline_tasks/v1/manifests/expired-before-work'
+                         BEGIN SELECT RAISE(ABORT, 'owned cleanup fault'); END;",
+                    ).unwrap();
+                }
+                let configuration = super::super::configuration::Configuration {
+                    command: crate::CliCommand::IndexRebuild { root: Some(work_config.root_dir().to_owned()) },
+                    config: work_config.clone(), config_path: None, migration: None,
+                };
+                super::super::configuration::scope(configuration, || {
+                    let arguments = vec![OsString::from("shardline"), OsString::from("index-rebuild")];
+                    if shared_only { Ok(run(&operation, arguments, &work_config)) }
+                    else {
+                        let command = crate::CliCommand::IndexRebuild { root: Some(work_config.root_dir().to_owned()) };
+                        let prepared = super::super::automatic::prepare(&command)?.unwrap();
+                        super::super::automatic::run(&prepared, arguments)
+                    }
+                }).unwrap()
+            }).await.unwrap();
+            assert!(output.success);
+            assert_eq!(output.exit_code, Some(0));
+            assert!(output.evidence_published);
+            let store = TaskEvidenceStore::from_config(&configured).unwrap();
+            let deployment =
+                shardline_server::task_tracking::deployment_fingerprint(&configured).unwrap();
+            let history = store.summaries(deployment, None, 10).unwrap();
+            assert_eq!(history.len(), if deny_cleanup { 2 } else { 1 });
+            assert!(
+                history
+                    .iter()
+                    .all(|run| run.state == TaskRunState::Completed)
+            );
+            assert!(
+                history
+                    .iter()
+                    .any(|run| run.id != "expired-before-work"
+                        && run.owner.pid == std::process::id())
+            );
+            if deny_cleanup {
+                let connection =
+                    rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+                connection
+                    .execute_batch("DROP TRIGGER deny_history_cleanup")
+                    .unwrap();
+                assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 2);
+            }
+        }
+    }
+}
+
 #[test]
 fn shared_completion_write_failure_never_claims_a_finished_task() {
     let root = tempfile::tempdir().unwrap();
