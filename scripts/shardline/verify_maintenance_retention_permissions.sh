@@ -57,6 +57,15 @@ BEGIN
 END $$;
 SQL
 
+writer_grants() {
+    docker exec "$container_id" psql -U postgres -d shardline -At -c \
+        "SELECT table_schema, table_name, privilege_type, is_grantable
+         FROM information_schema.table_privileges
+         WHERE grantee = 'legacy_hold_writer'
+         ORDER BY table_schema, table_name, privilege_type, is_grantable"
+}
+writer_grants > "$fixture/writer-grants-before.log"
+
 mkdir "$fixture/root"
 SHARDLINE_INDEX_POSTGRES_URL="$writer_url" "$released_binary" hold set \
     --root "$fixture/root" --object-key retention/permission-regression \
@@ -73,6 +82,11 @@ fi
 # The usual owner-run upgrade installs the guard without changing writer grants
 # or the released migration catalog. Both binaries must still accept that schema.
 "$current_binary" db migrate up --database-url "$owner_url" > "$fixture/upgrade.log" 2>&1
+writer_grants > "$fixture/writer-grants-after.log"
+cmp "$fixture/writer-grants-before.log" "$fixture/writer-grants-after.log"
+test "$(docker exec "$container_id" psql -U postgres -d shardline -At -c \
+    "SELECT has_table_privilege('legacy_hold_writer', 'public.shardline_resource_fences', 'SELECT,INSERT,UPDATE,DELETE'),
+            has_table_privilege('legacy_hold_writer', 'public.shardline_task_artifacts_v1', 'SELECT,INSERT,UPDATE,DELETE')")" = 'f|f'
 "$released_binary" db migrate verify --database-url "$owner_url" > "$fixture/legacy-verify.log" 2>&1
 for binary in "$released_binary" "$current_binary"; do
     SHARDLINE_INDEX_POSTGRES_URL="$writer_url" "$binary" hold set \
