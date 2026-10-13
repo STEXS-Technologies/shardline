@@ -2889,3 +2889,17 @@ The full maintenance CLI suite passes all 19 tests against optimized binary
 (Nextest run `066e0f7c-683c-49d2-af4b-22670e64336f`). This proves the tested local
 incremental upgrade path, not an inventory latency bound or every legacy layout.
 No runtime behavior or version changed.
+
+## Ordinary command result-recording failures
+
+`ordinary_command_preserves_success_when_report_or_acknowledgement_is_denied`
+executes the original index-rebuild handler through shared inline tracking in
+two fresh SQLite fixtures. One rejects report artifacts; the other rejects
+completion sequence 3. Both commands keep success and exit code 0, use live
+output rather than capture, and report no verified evidence publication.
+Reopened history stays unresolved, has no completion record, and cannot be
+pruned as finished. An existing fixture artifact remains byte-identical.
+
+The test passes in 9.83 seconds. This extends the receipt-only recording-fault
+tests to a real command; it does not establish interruption safety for every
+external mutation or every backend. No runtime behavior or version changed.
