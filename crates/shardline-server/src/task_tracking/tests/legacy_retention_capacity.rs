@@ -4,6 +4,7 @@ use super::*;
 #[test]
 #[ignore = "large legacy history inventory; explicit capacity drill"]
 fn many_legacy_runs_paginate_and_retire_without_losing_unresolved_history() {
+    let creation_started = std::time::Instant::now();
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
     let deployment = deployment_fingerprint(&config).unwrap();
@@ -30,6 +31,8 @@ fn many_legacy_runs_paginate_and_retire_without_losing_unresolved_history() {
     store
         .publish("manifests/unreadable", b"preserve corrupt history")
         .unwrap();
+    eprintln!("legacy archive creation: {:?}", creation_started.elapsed());
+    let inspection_started = std::time::Instant::now();
     let mut seen = std::collections::BTreeSet::new();
     let mut after = None;
     loop {
@@ -53,14 +56,24 @@ fn many_legacy_runs_paginate_and_retire_without_losing_unresolved_history() {
         }
     }
     assert_eq!(seen.len(), 1026);
+    eprintln!(
+        "legacy archive pagination: {:?}",
+        inspection_started.elapsed()
+    );
     let payload = root.path().join("chunks/user-payload");
     std::fs::write(&payload, b"unchanged user data").unwrap();
     let mut retired = 0_usize;
+    let cleanup_started = std::time::Instant::now();
+    let mut calls = 0_usize;
+    let mut slowest_call = std::time::Duration::ZERO;
     for _ in 0..1024 {
         let fresh = TaskEvidenceStore::from_objects(store.objects.clone());
+        let call_started = std::time::Instant::now();
         let finished = fresh
             .prune_completed_incrementally(deployment, u64::MAX)
             .unwrap();
+        slowest_call = slowest_call.max(call_started.elapsed());
+        calls = calls.checked_add(1).unwrap();
         assert!(finished <= 64);
         retired = retired.checked_add(finished).unwrap();
         assert_eq!(
@@ -73,6 +86,11 @@ fn many_legacy_runs_paginate_and_retire_without_losing_unresolved_history() {
         }
     }
     assert_eq!(retired, 1024);
+    eprintln!(
+        "legacy archive cleanup: {calls} calls in {:?}; slowest cleanup call {:?}",
+        cleanup_started.elapsed(),
+        slowest_call
+    );
     let remaining = store.inspect_summaries(deployment, None, 64).unwrap();
     assert_eq!(remaining.len(), 2);
     assert!(remaining.iter().any(|entry| matches!(entry, status::TaskEvidenceEntry::Verified(run) if run.operation == "unfinished-archive")));
