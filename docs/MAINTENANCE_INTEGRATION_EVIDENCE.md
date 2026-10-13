@@ -73,6 +73,13 @@ accounts and shared retention, not a cross-host failure or current cluster healt
 
 ## Retention batch reads
 
+The optimized all-feature binary built from `750cecbd` passed all 11 selected
+deployment drills in 157.802 seconds with no runtime skips; 12 unrelated tests
+were filtered out. This revalidates mixed-version rollback, restricted commands,
+concurrent ownership, remote-delete faults, replacement and graceful shutdown
+after the shared-reader and housekeeping-order changes. The binary remains
+version 1.11.3. The separate scan-cost and unresolved-history requirements remain open.
+
 Ordinary CLI housekeeping now runs after fresh work and outcome recording.
 Both private-state and shared-only paths use the same evidence-retirement helper.
 Configuration validation still precedes application mutation. Cleanup, history
