@@ -36,6 +36,36 @@ fn binary() -> std::ffi::OsString {
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_shardline").into())
 }
 
+fn maintenance_identities(
+    root: &Path,
+) -> Result<Vec<shardline_server::task_tracking::TaskRunIdentity>> {
+    let connection = Connection::open_with_flags(
+        root.join("metadata.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut query = connection.prepare("SELECT payload FROM shardline_task_artifacts_v1 WHERE artifact_key GLOB '_shardline_tasks/v1/manifests/*' ORDER BY artifact_key")?;
+    let rows = query.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+    rows.map(|row| Ok(serde_json::from_slice(&row?)?)).collect()
+}
+
+fn assert_private_scratch_cleaned(root: &Path) -> Result<()> {
+    for entry in fs::read_dir(root.join(".shardline-maintenance"))? {
+        let entry = entry?;
+        assert_eq!(
+            entry.file_name(),
+            "retired",
+            "completed scratch must not remain"
+        );
+        assert!(entry.file_type()?.is_dir());
+        assert_eq!(
+            fs::read_dir(entry.path())?.count(),
+            0,
+            "retired scratch must be removed"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn ordinary_maintenance_preserves_existing_writable_files_under_read_only_root() -> Result<()> {
     use shardline_server::task_tracking::{TaskEvidenceStore, TaskRunState};
@@ -204,7 +234,8 @@ fn first_maintenance_initializes_tracking_without_narrowing_deployment_permissio
 }
 
 #[test]
-fn failed_tracking_preparation_is_visible_and_preserves_original_validation_status() -> Result<()> {
+fn invalid_root_preserves_original_validation_status_without_duplicate_tracking_warning()
+-> Result<()> {
     let sandbox = tempfile::tempdir()?;
     let root = sandbox.path().join("not-a-directory");
     fs::write(&root, b"existing deployment diagnostic fixture")?;
@@ -217,10 +248,10 @@ fn failed_tracking_preparation_is_visible_and_preserves_original_validation_stat
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("maintenance tracking could not initialize"));
+    assert!(!stderr.contains("maintenance tracking could not initialize"));
     assert!(
-        stderr.lines().count() >= 2,
-        "retain the original diagnostic after the tracking warning: {stderr}"
+        !stderr.trim().is_empty(),
+        "the original diagnostic must remain visible"
     );
     assert_eq!(fs::read(&root)?, b"existing deployment diagnostic fixture");
     assert!(!sandbox.path().join(".shardline-maintenance").exists());
@@ -241,7 +272,7 @@ fn wait_for(mut check: impl FnMut() -> bool) -> Result<()> {
 #[test]
 fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> Result<()> {
     use penelope_core::task::{TaskProjection, TaskRecord, TaskStatus};
-    use shardline_server::task_tracking::{TaskEvidenceStore, TaskRunIdentity};
+    use shardline_server::task_tracking::TaskEvidenceStore;
     for arguments in [
         vec!["fsck"],
         vec!["index", "rebuild"],
@@ -268,8 +299,7 @@ fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> R
             assert!(!String::from_utf8_lossy(&output.stdout).contains("maintenance.task:"));
             results.push(output);
         }
-        let manifests = fs::read_dir(root.join("chunks/_shardline_tasks/v1/manifests"))?
-            .collect::<std::io::Result<Vec<_>>>()?;
+        let manifests = maintenance_identities(&root)?;
         assert_eq!(
             manifests.len(),
             2,
@@ -282,8 +312,8 @@ fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> R
             std::num::NonZeroUsize::new(4096).ok_or("chunk size")?,
         );
         let store = TaskEvidenceStore::from_config(&config)?;
-        for manifest in manifests {
-            let identity: TaskRunIdentity = serde_json::from_slice(&fs::read(manifest.path())?)?;
+        assert!(!root.join("chunks/_shardline_tasks/v1").exists());
+        for identity in manifests {
             assert_eq!(identity.definition.budget.cpu_ticks, u64::MAX);
             assert_eq!(identity.definition.budget.deadline_tick.get(), u64::MAX);
             let mut projection = TaskProjection::new(identity.scope, identity.definition)?;
@@ -349,11 +379,7 @@ fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> R
                 "original handlers must retain their output"
             );
         }
-        assert_eq!(
-            fs::read_dir(root.join(".shardline-maintenance"))?.count(),
-            0,
-            "completed local scratch should be cleaned"
-        );
+        assert_private_scratch_cleaned(&root)?;
     }
     Ok(())
 }
@@ -371,10 +397,14 @@ fn shared_publication_failure_preserves_existing_command_and_local_supervision()
         }
         let sandbox = tempfile::tempdir()?;
         let root = sandbox.path().join("deployment");
-        fs::create_dir_all(root.join("chunks/_shardline_tasks/v1"))?;
-        fs::write(
-            root.join("chunks/_shardline_tasks/v1/manifests"),
-            b"blocked publication",
+        fs::create_dir_all(&root)?;
+        let config = shardline::load_server_config(Some(&root), None)?;
+        let store = shardline_server::task_tracking::TaskEvidenceStore::from_config(&config)?;
+        store.publish("runs/fixture/blobs/seed", b"publication fixture")?;
+        let metadata = Connection::open(root.join("metadata.sqlite3"))?;
+        metadata.execute_batch(
+            "CREATE TRIGGER deny_task_publication BEFORE INSERT ON shardline_task_artifacts_v1
+             BEGIN SELECT RAISE(ABORT, 'fixture denies shared publication'); END;",
         )?;
         let output = Command::new(binary())
             .env_clear()
@@ -390,6 +420,11 @@ fn shared_publication_failure_preserves_existing_command_and_local_supervision()
         assert!(
             root.join("metadata.sqlite3").exists(),
             "shared audit permissions must not break existing maintenance"
+        );
+        assert_eq!(maintenance_identities(&root)?.len(), 0);
+        assert_eq!(
+            fs::read_dir(root.join(".shardline-maintenance"))?.count(),
+            1
         );
         for entry in fs::read_dir(root.join(".shardline-maintenance"))? {
             let directory = entry?.path();
@@ -418,7 +453,7 @@ fn shared_publication_failure_preserves_existing_command_and_local_supervision()
                 fs::write(path, serde_json::to_vec(&identity)?)?;
             }
         }
-        fs::remove_file(root.join("chunks/_shardline_tasks/v1/manifests"))?;
+        metadata.execute_batch("DROP TRIGGER deny_task_publication")?;
         let subsequent = Command::new(binary())
             .env_clear()
             .current_dir(&root)
@@ -430,14 +465,13 @@ fn shared_publication_failure_preserves_existing_command_and_local_supervision()
             "{}",
             String::from_utf8_lossy(&subsequent.stderr)
         );
+        assert_eq!(maintenance_identities(&root)?.len(), 2);
+        assert_private_scratch_cleaned(&root)?;
         assert_eq!(
-            fs::read_dir(root.join("chunks/_shardline_tasks/v1/manifests"))?.count(),
-            2
+            store.read("runs/fixture/blobs/seed", 65536)?.as_deref(),
+            Some(b"publication fixture".as_slice())
         );
-        assert_eq!(
-            fs::read_dir(root.join(".shardline-maintenance"))?.count(),
-            0
-        );
+        assert!(!root.join("chunks/_shardline_tasks/v1").exists());
     }
     Ok(())
 }
@@ -511,10 +545,7 @@ fn ordinary_commands_preserve_non_utf8_paths() -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(root.join("metadata.sqlite3").exists());
-    assert_eq!(
-        fs::read_dir(root.join("chunks/_shardline_tasks/v1/manifests"))?.count(),
-        1
-    );
+    assert_eq!(maintenance_identities(&root)?.len(), 1);
     Ok(())
 }
 
@@ -784,11 +815,9 @@ fn ordinary_maintenance_uses_the_original_cli_process() -> Result<()> {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let manifests = fs::read_dir(root.path().join("chunks/_shardline_tasks/v1/manifests"))?
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let manifests = maintenance_identities(root.path())?;
     assert_eq!(manifests.len(), 1);
-    let identity: shardline_server::task_tracking::TaskRunIdentity =
-        serde_json::from_slice(&fs::read(manifests.first().ok_or("missing run")?.path())?)?;
+    let identity = manifests.first().ok_or("missing run")?;
     assert_eq!(identity.owner.pid, pid);
     assert_eq!(
         identity.execution,
@@ -850,15 +879,7 @@ fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counte
         bytes
     );
     assert!(!source.path().join("chunks/_shardline_tasks/v1").exists());
-    assert_eq!(
-        fs::read_dir(
-            destination
-                .path()
-                .join("chunks/_shardline_tasks/v1/manifests")
-        )?
-        .count(),
-        1
-    );
+    assert_eq!(maintenance_identities(destination.path())?.len(), 1);
     let repeated = invoke(false)?;
     assert!(
         repeated.status.success(),
