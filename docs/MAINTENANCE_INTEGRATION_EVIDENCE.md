@@ -3899,3 +3899,32 @@ Request-bound creation, reads and transitions still need composition through
 the original request session before the stronger upload ownership guarantee
 can be claimed. It does not establish object-store presence or exactly-once
 remote effects, and the version remains unchanged.
+
+### Request-bound upload intent integration
+
+The raw-xorb and native-shard coordinators now use a private request-aware index
+adapter. With an HTTP request session, intent creation, verified reads and atomic
+state/event transitions use its original PostgreSQL connection. The adapter
+retains a typed owner-loss flag because CAS errors otherwise erase adapter error
+types; the server returns `StaleResourceFence` (HTTP 503, `Retry-After: 1`).
+Standalone calls without a request session retain the pool-based behavior.
+Creation shares the existing implementation, including legacy evidence migration
+and idempotency checks, rather than duplicating those rules.
+
+All 188 configured PostgreSQL index cases passed after the creation refactor
+(`/tmp/shardline-batched-deletion.q64cFl/test.log`, 38.16 seconds). All twelve
+configured publication cases passed with the server composition
+(`/tmp/shardline-batched-deletion.DdnTq8/test.log`, 12.46 seconds). These include
+six native upload interruption boundaries and the real MinIO accepted-PUT
+acknowledgement fault. The interrupted native recovery test now saves `Storing`
+on the live original session before terminating it; it no longer depends on a
+dead request being allowed to create an intent.
+
+A separate adapter test terminates the original PostgreSQL backend PID and
+independently verifies rejected creation, reads and transitions, unchanged
+intent/evidence, and successful advancement with a fresh request session. It
+passed without runtime skips in 0.34 seconds
+(`/tmp/shardline-batched-deletion.JaNIbc/test.log`). Strict index/server library
+and test Clippy passed. These results supersede the preceding primitive-only
+integration limitation; they do not certify every mutation path, cancel an
+already-active remote call, or establish exactly-once remote effects.

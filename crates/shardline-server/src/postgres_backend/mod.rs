@@ -3,6 +3,7 @@ mod publication;
 mod read;
 mod stats;
 mod upload;
+mod upload_intents;
 
 pub use backend::PostgresBackend;
 

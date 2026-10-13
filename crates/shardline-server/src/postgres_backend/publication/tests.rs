@@ -415,6 +415,7 @@ async fn raw_xorb_owner_loss_after_provider_put_preserves_unfinished_intent_and_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_native_upload_owner_cannot_be_recovered_from_intent_bookkeeping() {
+    use shardline_cas::{UploadLifecycleBoundary, arm_upload_interruption};
     use shardline_index::{UploadIntentState, UploadIntentStore};
     let Some(fixture) = PostgresFixture::new().await else {
         return;
@@ -438,6 +439,19 @@ async fn lost_native_upload_owner_cannot_be_recovered_from_intent_bookkeeping() 
     .unwrap();
     session
         .scope(async {
+            let interruption =
+                arm_upload_interruption(intent_id.clone(), UploadLifecycleBoundary::AfterStoring);
+            assert!(
+                backend
+                    .upload_shard_stream(
+                        RequestBodyReader::from_bytes(shard.clone()),
+                        None,
+                        crate::ShardMetadataLimits::default(),
+                    )
+                    .await
+                    .is_err()
+            );
+            drop(interruption);
             let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
                 &backend.request_session_identity,
             )

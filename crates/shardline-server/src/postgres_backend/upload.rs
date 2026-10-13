@@ -221,13 +221,16 @@ impl super::PostgresBackend {
             body_length,
         );
         let coordinator = CasCoordinator::new(
-            self.index_store.clone(),
+            super::upload_intents::RequestUploadIntentStore::new(
+                self.index_store.clone(),
+                self.request_session_identity.clone(),
+            ),
             (),
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
         let request_session_identity = self.request_session_identity.clone();
-        coordinator
+        let result = coordinator
             .with_upload_intent(&intent, move || async move {
                 crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
                     .await?;
@@ -247,7 +250,12 @@ impl super::PostgresBackend {
                     .await?;
                 result
             })
-            .await
+            .await;
+        if coordinator.index().owner_lost() {
+            Err(ServerError::StaleResourceFence)
+        } else {
+            result
+        }
     }
 
     /// Stores a bounded native Xet shard and indexes the contained file reconstructions.
@@ -274,7 +282,10 @@ impl super::PostgresBackend {
         let publication_backend = self.clone();
         let request_session_identity = self.request_session_identity.clone();
         let coordinator = CasCoordinator::new(
-            self.index_store.clone(),
+            super::upload_intents::RequestUploadIntentStore::new(
+                self.index_store.clone(),
+                self.request_session_identity.clone(),
+            ),
             (),
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
@@ -373,7 +384,11 @@ impl super::PostgresBackend {
                 "native shard upload failed after bounded parsing or metadata publication"
             );
         }
-        result
+        if coordinator.index().owner_lost() {
+            Err(ServerError::StaleResourceFence)
+        } else {
+            result
+        }
     }
 }
 

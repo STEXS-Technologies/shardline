@@ -14,6 +14,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
 blake3.workspace = true
@@ -74,7 +75,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 shardline-cas = { workspace = true, features = ["test-fault-injection"] }
-async-trait.workspace = true
 dotenvy.workspace = true
 ed25519-dalek.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
