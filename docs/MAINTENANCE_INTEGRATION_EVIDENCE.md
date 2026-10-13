@@ -3465,3 +3465,11 @@ the runs; they are not a distributed benchmark or production latency guarantee.
 Retention still scans eligible history inventory and active storage calls remain
 untimed. The change preserves evidence formats, deletion budgets and command
 results; no version bump is included.
+
+The rebuilt optimized CLI including prefix pruning still reports
+`shardline 1.11.3`; SHA-256 is
+`0ea17070c878ae0a6def0bbdfb68a2a606eb3abd5fc4f563f94b57623eaf3808`.
+All 20 maintenance CLI scenarios pass with zero skips in 2.105 seconds (Nextest
+`e9bf0275-a02d-42ec-ab5e-15a02b564c56`). The released/current permissions verifier
+passes all five command forms and fully read-only SQLite fsck:
+`/tmp/shardline-local-permissions.eE1lHR`.
