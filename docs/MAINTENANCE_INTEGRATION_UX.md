@@ -97,7 +97,7 @@ they do not browse the history of ordinary commands.
 | The server is ready, but history has a warning | Check server or command logs for the recording failure. Your work may have run without a saved result; check its effects before running it again. |
 | A run is completed | Its saved result verified as successful. Check `/readyz` for current readiness, or `/api/v1/status` if the admin API is enabled. |
 | A run is failed, interrupted, unresolved or corrupt | Read its `next_step` and original command logs. Inspect partial effects before repeating a mutation; preserve corrupt evidence. |
-| A write returns `503` for an unresolved remote delete | Check the original GC command, then run `shardline repair` with the same configuration to verify saved delete replies. Retry the write after reconciliation. |
+| A write returns `503` for an unresolved remote delete | Check whether the original GC is still running. After it stops, run `shardline repair` with the same configuration, then inspect `shardline history --pending-deletes` again. Retry the write after reconciliation. |
 | Repair leaves a delete pending | Check repair logs: a backlog can need several runs. Missing or invalid replies require investigation; checking that the object is absent cannot replace a reply. |
 
 ## What users gain
@@ -128,8 +128,9 @@ write to that object returns HTTP 503 with `Retry-After: 1`:
 object has an unresolved remote delete; retry after reconciliation
 ```
 
-Other objects remain available. Check the original GC command and logs, then
-run ordinary repair with the same database, schema and storage configuration:
+Other objects remain available. Check whether the original GC is still running
+and read its logs. After it stops, run ordinary repair with the same database,
+schema and storage configuration:
 
 ```bash
 shardline repair

@@ -3750,3 +3750,20 @@ bash scripts/shardline/verify_maintenance_inspection.sh \
 
 Use the executable path printed by Cargo, not the source test file. The verifier
 requires Docker and runs only its own disposable container.
+
+### Pending-delete recovery steps in both inspection views
+
+The shared pending-delete guidance now asks operators to check whether the
+original GC is still running, recover saved replies after it stops, and inspect
+`shardline history --pending-deletes` again. It explains that a backlog can need
+several repair runs and preserves the rule that missing or invalid replies stay
+blocked. This changes operator guidance only; no retry, settlement, deletion or
+ownership behavior changes.
+
+All 32 configured admin API cases pass in 0.69 seconds
+(`/tmp/shardline-batched-deletion.AlcsCB/test.log`). All four configured CLI
+cases pass on the development executable in 10.02 seconds
+(`/tmp/shardline-batched-deletion.DP39tS/test.log`), including assertions for
+active-GC guidance, follow-up inspection and a possible backlog. Strict
+server/CLI library and test Clippy, formatting and diff checks pass; the AST
+graph is refreshed. Remaining merge gates remain open.

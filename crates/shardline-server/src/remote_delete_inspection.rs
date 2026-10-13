@@ -45,7 +45,7 @@ pub fn pending_delete_inspection_page(
     let pending_deletes = pending.into_iter().map(|(key, epoch)| serde_json::json!({
         "object_key": key, "attempt": epoch.to_string(), "state": "pending",
         "reason": "delete has not been proved settled",
-        "next_step": "Check the original GC command and logs. Run shardline repair with the same database, schema and storage configuration to recover saved replies. Missing or invalid replies remain blocked; object absence alone cannot clear them.",
+        "next_step": "Check whether the original GC is still running and read its logs. After it stops, run shardline repair with the same configuration to recover saved replies, then inspect shardline history --pending-deletes again. A backlog may need several repair runs. Missing or invalid replies remain blocked; object absence alone cannot clear them.",
     })).collect();
     Ok(PendingDeleteInspectionPage {
         supported,
