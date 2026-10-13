@@ -3840,3 +3840,18 @@ library/test Clippy, formatting and diff checks pass.
 This does not atomically fence separate intent transitions or cancel a storage
 call when ownership is lost during that call. Those phase boundaries remain in
 the merge audit; no cluster-wide exactly-once claim or version bump is made.
+
+### Request ownership lost during raw-xorb body staging
+
+A separate configured test supplies an asynchronous request-body stream. Its
+first poll terminates the original request session's PostgreSQL backend PID,
+so admission has succeeded but staging has not yet finished. The upload rejects
+the stale owner after reading the body, creates no upload intent, and leaves no
+stored xorb. A fresh upload subsequently stores the xorb successfully.
+
+All eleven configured publication cases pass in 3.20 seconds, with no runtime
+skip or panic (`/tmp/shardline-batched-deletion.OijkoK/test.log`). Strict server
+library/test Clippy, formatting and diff checks pass. This verifies the staging
+boundary separately from owner loss before admission; active object-store calls
+and atomic intent-transition ownership remain open. Production code and the
+version are unchanged by this additional test.
