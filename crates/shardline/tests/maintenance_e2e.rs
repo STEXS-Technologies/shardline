@@ -1023,6 +1023,74 @@ fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counte
 }
 
 #[test]
+fn storage_copy_preserves_success_when_destination_history_publication_fails() -> Result<()> {
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+    let source = tempfile::tempdir()?;
+    let destination = tempfile::tempdir()?;
+    let objects = shardline_server::ServerObjectStore::local(source.path().join("chunks"))?;
+    let bytes = b"copy must survive optional history failure";
+    let key = ObjectKey::parse("test/object")?;
+    let hash = shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes());
+    objects.put_if_absent(
+        &key,
+        ObjectBody::Borrowed(bytes),
+        &ObjectIntegrity::new(hash, bytes.len().try_into()?),
+    )?;
+    let config = shardline::load_server_config(Some(destination.path()), None)?;
+    let store = shardline_server::task_tracking::TaskEvidenceStore::from_config(&config)?;
+    store.publish("runs/fixture/blobs/seed", b"existing destination evidence")?;
+    let metadata = Connection::open(destination.path().join("metadata.sqlite3"))?;
+    metadata.execute_batch(
+        "CREATE TRIGGER deny_task_publication BEFORE INSERT ON shardline_task_artifacts_v1
+         BEGIN SELECT RAISE(ABORT, 'fixture denies destination history'); END;",
+    )?;
+    let invoke = || -> Result<std::process::Output> {
+        Ok(Command::new(binary())
+            .env_clear()
+            .current_dir(source.path())
+            .args(["storage", "migrate", "--from", "local", "--from-root"])
+            .arg(source.path())
+            .args(["--to", "local", "--to-root"])
+            .arg(destination.path())
+            .output()?)
+    };
+    let output = invoke()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("scanned_objects: 1"));
+    assert_eq!(fs::read(source.path().join("chunks/test/object"))?, bytes);
+    assert_eq!(
+        fs::read(destination.path().join("chunks/test/object"))?,
+        bytes
+    );
+    assert!(maintenance_identities(destination.path())?.is_empty());
+    assert_eq!(
+        store.read("runs/fixture/blobs/seed", 100)?,
+        Some(b"existing destination evidence".to_vec())
+    );
+    metadata.execute_batch("DROP TRIGGER deny_task_publication")?;
+    let next = invoke()?;
+    assert!(
+        next.status.success(),
+        "{}",
+        String::from_utf8_lossy(&next.stderr)
+    );
+    assert_eq!(
+        fs::read(destination.path().join("chunks/test/object"))?,
+        bytes
+    );
+    assert!(!maintenance_identities(destination.path())?.is_empty());
+    assert_eq!(
+        store.read("runs/fixture/blobs/seed", 100)?,
+        Some(b"existing destination evidence".to_vec())
+    );
+    Ok(())
+}
+
+#[test]
 fn real_workflows_commit_native_checkpoints_and_reuse_completed_history() -> Result<()> {
     for operation in ["fsck", "index-rebuild", "gc", "lifecycle-repair"] {
         let sandbox = tempfile::tempdir()?;
