@@ -3666,3 +3666,19 @@ the other suite's cases; all 23 selected scenarios pass, with no runtime skip.
 The verifiers check the pinned binary hashes after execution. This replaces the
 older optimized build's coverage for these named deployment scenarios, without
 extending their guarantee to untested write paths or deployment layouts.
+
+### PostgreSQL inspection failure guidance
+
+The CLI recognizes typed PostgreSQL connection, TLS and pool-timeout errors,
+including boxed errors from the metadata adapter. It tells operators to check
+database availability, network access and deployment configuration, then retry
+inspection rather than rerunning maintenance for history. Existing error chains
+and failure exit status remain available.
+
+An actual-executable test points both history modes at an unavailable database:
+both fail without JSON, provide the action, and leave their deployment roots
+empty (one test covering both modes, 10.02 seconds). All four history CLI cases
+also pass in 9.11 seconds, including the read-only WAL guidance and byte
+preservation checks. Strict CLI library/test Clippy, formatting and diff checks
+pass. These are development-executable checks; the preceding optimized results
+refer to their explicitly recorded source commit and binary hash.
