@@ -2220,3 +2220,15 @@ and shared-scope retirement. Diagnostics:
 `.codex/validation/ux-pg-http-pagination-tests.log`.
 This extends the real-database HTTP evidence to a second page; exhaustive
 pagination remains covered by the separate capacity fixture.
+
+## Automatic embedded report boundary
+
+A local metadata regression records a 65,536-byte report successfully, then
+rejects a 65,537-byte report for another run. The rejected run records a need for
+reconciliation, has no available report or oversized artifact, and preserves the
+earlier verified completion and application payload. No task objects enter the
+payload inventory. One test passed in 0.07 seconds; log:
+`.codex/validation/ux-report-limits-tests.log`.
+This verifies optional embedded report admission and truthful failure at its
+boundary. It does not establish larger legacy-report cost, remote storage faults
+or physical disk limits. Ordinary command diagnostics retain their own contract.
