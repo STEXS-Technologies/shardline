@@ -166,6 +166,11 @@ reset on restart and are not cluster totals.
 
 ### `GET /api/v1/tasks`
 
+This lists live resumable uploads. For saved server and CLI maintenance outcomes,
+use [`GET /api/v1/tasks/maintenance`](#get-apiv1tasksmaintenance).
+The `scheduler: external` field means your existing timer or CronJob schedules
+maintenance; normal history tracking still runs inside Shardline.
+
 | Field | Type | Scope and meaning |
 | --- | --- | --- |
 | `api_version`, `observed_at_unix_seconds` | common | Common fields. |
