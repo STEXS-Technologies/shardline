@@ -8,6 +8,96 @@ use shardline_reliability::{LifecycleEvent, OperationKind, verify_upload_lifecyc
 use sqlx::{Connection, PgConnection, Row};
 
 impl PostgresIndexStore {
+    /// Creates or verifies an upload intent using the caller's owned connection.
+    /// Existing idempotency and legacy evidence migration rules are preserved.
+    ///
+    /// # Errors
+    /// Returns invalid identity, evidence corruption or database/connection failure.
+    pub async fn create_upload_intent_scoped_on_connection(
+        connection: &mut PgConnection,
+        intent: &crate::UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let length = super::u64_to_i64(intent.object_length())?;
+        let event = shardline_reliability::upload_lifecycle_event(
+            tenant,
+            repository,
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Created,
+        )?;
+        let transaction = connection.begin().await?;
+        super::index_store::create_upload_intent_in_transaction(
+            transaction,
+            intent,
+            tenant,
+            repository,
+            length,
+            event,
+        )
+        .await
+    }
+
+    /// Reads verified upload progress without replacing the caller's connection.
+    /// The row lock keeps the intent and its evidence head consistent during this read.
+    ///
+    /// # Errors
+    /// Returns invalid stored state/evidence or database/connection failure.
+    pub async fn upload_intent_by_id_on_connection(
+        connection: &mut PgConnection,
+        intent_id: &str,
+    ) -> Result<Option<crate::UploadIntent>, PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        let row = sqlx::query("SELECT object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE intent_id=$1 FOR SHARE")
+            .bind(intent_id).fetch_optional(&mut *transaction).await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let text: String = row.try_get("state")?;
+        let state = UploadIntentState::parse(&text)
+            .ok_or(PostgresMetadataStoreError::InvalidUploadIntentState(text))?;
+        let intent = crate::UploadIntent::from_parts(
+            intent_id.to_owned(),
+            row.try_get("object_key")?,
+            row.try_get("object_hash")?,
+            super::i64_to_u64(row.try_get("object_length")?)?,
+            state,
+            std::time::Duration::from_secs(super::i64_to_u64(
+                row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?
+                    .timestamp(),
+            )?),
+            std::time::Duration::from_secs(super::i64_to_u64(
+                row.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")?
+                    .timestamp(),
+            )?),
+        );
+        let head = load_postgres_latest_evidence_event(
+            &mut *transaction,
+            OperationKind::Upload,
+            intent_id,
+        )
+        .await?
+        .ok_or(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
+        ))?;
+        let head: LifecycleEvent = serde_json::from_value(head)?;
+        verify_upload_lifecycle_head(
+            &head,
+            &head.operation.tenant,
+            &head.operation.repository,
+            intent_id,
+            intent.object_key(),
+            intent.object_hash(),
+            state,
+        )?;
+        transaction.commit().await?;
+        Ok(Some(intent))
+    }
+
     /// Commits one upload transition and its evidence on the caller's connection.
     ///
     /// The caller retains responsibility for acquiring request ownership on this
@@ -111,7 +201,38 @@ mod tests {
             "00".repeat(32),
             4,
         );
-        index.create_intent(&intent).await.unwrap();
+        let mut owner = pool.acquire().await.unwrap();
+        owner.close_on_drop();
+        PostgresIndexStore::create_upload_intent_scoped_on_connection(
+            &mut owner,
+            &intent,
+            "shardline",
+            "default",
+        )
+        .await
+        .unwrap();
+        let baseline = index.reliability_events(intent.intent_id()).await.unwrap();
+        PostgresIndexStore::create_upload_intent_scoped_on_connection(
+            &mut owner,
+            &intent,
+            "shardline",
+            "default",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(index.reliability_events(intent.intent_id()).await.unwrap())
+                .unwrap(),
+            serde_json::to_value(baseline).unwrap()
+        );
+        assert_eq!(
+            PostgresIndexStore::upload_intent_by_id_on_connection(&mut owner, intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Created
+        );
         let event = |from, to| {
             shardline_reliability::upload_lifecycle_event(
                 "shardline",
@@ -124,8 +245,6 @@ mod tests {
             )
             .unwrap()
         };
-        let mut owner = pool.acquire().await.unwrap();
-        owner.close_on_drop();
         let unrelated = shardline_reliability::upload_lifecycle_event(
             "shardline",
             "default",

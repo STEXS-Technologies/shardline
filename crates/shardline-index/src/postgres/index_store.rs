@@ -1973,6 +1973,206 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     }
 }
 
+pub(super) async fn create_upload_intent_in_transaction(
+    mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    intent: &UploadIntent,
+    tenant: &str,
+    repository: &str,
+    object_length: i64,
+    created_event: LifecycleEvent,
+) -> Result<(), PostgresMetadataStoreError> {
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(intent.intent_id())
+        .execute(&mut *transaction)
+        .await?;
+    let existing = query(
+        "SELECT intent_id, object_key, object_hash, object_length, state,
+                    created_at, updated_at
+             FROM shardline_upload_intents WHERE intent_id = $1 FOR UPDATE",
+    )
+    .bind(intent.intent_id())
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let result = sqlx::query(
+        "INSERT INTO shardline_upload_intents (
+                intent_id, object_key, object_hash, object_length, state, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, now(), now())
+             ON CONFLICT (intent_id) DO UPDATE SET intent_id = EXCLUDED.intent_id
+             WHERE shardline_upload_intents.object_key = EXCLUDED.object_key
+               AND shardline_upload_intents.object_hash = EXCLUDED.object_hash
+               AND shardline_upload_intents.object_length = EXCLUDED.object_length",
+    )
+    .bind(intent.intent_id())
+    .bind(intent.object_key())
+    .bind(intent.object_hash())
+    .bind(object_length)
+    .bind(intent.state().as_str())
+    .execute(&mut *transaction)
+    .await?;
+    if result.rows_affected() == 0 {
+        transaction.rollback().await?;
+        return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+    }
+    if let Some(existing) = existing {
+        let state_text: String = existing.try_get("state")?;
+        let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+            PostgresMetadataStoreError::InvalidUploadIntentState(state_text.clone())
+        })?;
+        let durable_intent = UploadIntent::from_parts(
+            existing.try_get("intent_id")?,
+            existing.try_get("object_key")?,
+            existing.try_get("object_hash")?,
+            i64_to_u64(existing.try_get("object_length")?)?,
+            state,
+            std::time::Duration::from_secs(i64_to_u64(
+                existing
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?
+                    .timestamp(),
+            )?),
+            std::time::Duration::from_secs(i64_to_u64(
+                existing
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")?
+                    .timestamp(),
+            )?),
+        );
+        let event_rows = query(
+            "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
+                 WHERE operation_kind = 'Upload' AND operation_id = $1
+                 ORDER BY sequence",
+        )
+        .bind(intent.intent_id())
+        .fetch_all(&mut *transaction)
+        .await?;
+        if event_rows.is_empty() {
+            let baseline = baseline_upload_lifecycle_events(
+                tenant,
+                repository,
+                durable_intent.intent_id(),
+                durable_intent.object_key(),
+                durable_intent.object_hash(),
+                durable_intent.state(),
+            )?;
+            for event in &baseline {
+                insert_reliability_event(transaction.as_mut(), event).await?;
+            }
+        } else {
+            let mut events = Vec::with_capacity(event_rows.len());
+            let mut event_json = Vec::with_capacity(event_rows.len());
+            let mut merkle_commits = Vec::with_capacity(event_rows.len());
+            for row in event_rows {
+                let value: serde_json::Value = row.try_get("event_json")?;
+                events.push(serde_json::from_value::<LifecycleEvent>(value.clone())?);
+                event_json.push(value);
+                merkle_commits.push(row.try_get("merkle_commit_json")?);
+            }
+            let merkle_complete = merkle_commits.iter().all(Option::is_some);
+            if merkle_complete {
+                verify_persisted_event_merkle_chain(
+                    OperationKind::Upload,
+                    &event_json,
+                    &merkle_commits,
+                )?;
+            }
+            let (stored_tenant, stored_repository) = upload_lifecycle_identity(&events);
+            if stored_tenant != tenant || stored_repository != repository {
+                if stored_tenant != "shardline" || stored_repository != "default" {
+                    return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+                }
+                // Upload evidence predating repository-scoped identities was
+                // written with the compatibility `default` repository. The
+                // durable intent and its object identity are unchanged, so
+                // migrate only the evidence identity while preserving the
+                // authoritative lifecycle state. Invalid chains still fail
+                // closed instead of being silently repaired.
+                verify_upload_lifecycle_events(
+                    &events,
+                    stored_tenant,
+                    stored_repository,
+                    durable_intent.intent_id(),
+                    durable_intent.object_key(),
+                    durable_intent.object_hash(),
+                    durable_intent.state(),
+                )?;
+                sqlx::query(
+                    "DELETE FROM shardline_reliability_events
+                         WHERE operation_kind = 'Upload' AND operation_id = $1",
+                )
+                .bind(durable_intent.intent_id())
+                .execute(&mut *transaction)
+                .await?;
+                let migrated = baseline_upload_lifecycle_events(
+                    tenant,
+                    repository,
+                    durable_intent.intent_id(),
+                    durable_intent.object_key(),
+                    durable_intent.object_hash(),
+                    durable_intent.state(),
+                )?;
+                for event in &migrated {
+                    insert_reliability_event(transaction.as_mut(), event).await?;
+                }
+            } else {
+                verify_upload_lifecycle_events(
+                    &events,
+                    tenant,
+                    repository,
+                    durable_intent.intent_id(),
+                    durable_intent.object_key(),
+                    durable_intent.object_hash(),
+                    durable_intent.state(),
+                )?;
+                if !merkle_complete {
+                    // Evidence written before the Merkle column existed is
+                    // still authoritative after its typed lifecycle has
+                    // been validated. Reuse the canonical insert boundary
+                    // to fill only missing commitments, then verify the
+                    // complete persisted chain before committing.
+                    for event in &events {
+                        insert_reliability_event(transaction.as_mut(), event).await?;
+                    }
+                    let repaired_rows = query(
+                        "SELECT event_json, merkle_commit_json
+                             FROM shardline_reliability_events
+                             WHERE operation_kind = 'Upload' AND operation_id = $1
+                             ORDER BY sequence",
+                    )
+                    .bind(intent.intent_id())
+                    .fetch_all(&mut *transaction)
+                    .await?;
+                    let mut repaired_events = Vec::with_capacity(repaired_rows.len());
+                    let mut repaired_commits = Vec::with_capacity(repaired_rows.len());
+                    for row in repaired_rows {
+                        let value: serde_json::Value = row.try_get("event_json")?;
+                        repaired_events.push(value.clone());
+                        repaired_commits.push(row.try_get("merkle_commit_json")?);
+                    }
+                    verify_persisted_event_merkle_chain(
+                        OperationKind::Upload,
+                        &repaired_events,
+                        &repaired_commits,
+                    )?;
+                }
+            }
+        }
+    } else {
+        // A previously deleted materialized row may leave legacy evidence
+        // behind. A newly created intent with the same identity starts a
+        // new lifecycle, so discard only that orphaned Upload evidence
+        // before its baseline event.
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'Upload' AND operation_id = $1",
+        )
+        .bind(intent.intent_id())
+        .execute(&mut *transaction)
+        .await?;
+        insert_reliability_event(transaction.as_mut(), &created_event).await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl UploadIntentStore for super::PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
@@ -1998,199 +2198,16 @@ impl UploadIntentStore for super::PostgresIndexStore {
             shardline_reliability::UploadLifecycleState::Created,
             shardline_reliability::UploadLifecycleState::Created,
         )?;
-        let mut transaction = self.pool.begin().await?;
-        query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(intent.intent_id())
-            .execute(&mut *transaction)
-            .await?;
-        let existing = query(
-            "SELECT intent_id, object_key, object_hash, object_length, state,
-                    created_at, updated_at
-             FROM shardline_upload_intents WHERE intent_id = $1 FOR UPDATE",
+        let transaction = self.pool.begin().await?;
+        create_upload_intent_in_transaction(
+            transaction,
+            intent,
+            tenant,
+            repository,
+            object_length,
+            created_event,
         )
-        .bind(intent.intent_id())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let result = sqlx::query(
-            "INSERT INTO shardline_upload_intents (
-                intent_id, object_key, object_hash, object_length, state, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, $5, now(), now())
-             ON CONFLICT (intent_id) DO UPDATE SET intent_id = EXCLUDED.intent_id
-             WHERE shardline_upload_intents.object_key = EXCLUDED.object_key
-               AND shardline_upload_intents.object_hash = EXCLUDED.object_hash
-               AND shardline_upload_intents.object_length = EXCLUDED.object_length",
-        )
-        .bind(intent.intent_id())
-        .bind(intent.object_key())
-        .bind(intent.object_hash())
-        .bind(object_length)
-        .bind(intent.state().as_str())
-        .execute(&mut *transaction)
-        .await?;
-        if result.rows_affected() == 0 {
-            transaction.rollback().await?;
-            return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
-        }
-        if let Some(existing) = existing {
-            let state_text: String = existing.try_get("state")?;
-            let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
-                PostgresMetadataStoreError::InvalidUploadIntentState(state_text.clone())
-            })?;
-            let durable_intent = UploadIntent::from_parts(
-                existing.try_get("intent_id")?,
-                existing.try_get("object_key")?,
-                existing.try_get("object_hash")?,
-                i64_to_u64(existing.try_get("object_length")?)?,
-                state,
-                std::time::Duration::from_secs(i64_to_u64(
-                    existing
-                        .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?
-                        .timestamp(),
-                )?),
-                std::time::Duration::from_secs(i64_to_u64(
-                    existing
-                        .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")?
-                        .timestamp(),
-                )?),
-            );
-            let event_rows = query(
-                "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
-                 WHERE operation_kind = 'Upload' AND operation_id = $1
-                 ORDER BY sequence",
-            )
-            .bind(intent.intent_id())
-            .fetch_all(&mut *transaction)
-            .await?;
-            if event_rows.is_empty() {
-                let baseline = baseline_upload_lifecycle_events(
-                    tenant,
-                    repository,
-                    durable_intent.intent_id(),
-                    durable_intent.object_key(),
-                    durable_intent.object_hash(),
-                    durable_intent.state(),
-                )?;
-                for event in &baseline {
-                    insert_reliability_event(transaction.as_mut(), event).await?;
-                }
-            } else {
-                let mut events = Vec::with_capacity(event_rows.len());
-                let mut event_json = Vec::with_capacity(event_rows.len());
-                let mut merkle_commits = Vec::with_capacity(event_rows.len());
-                for row in event_rows {
-                    let value: serde_json::Value = row.try_get("event_json")?;
-                    events.push(serde_json::from_value::<LifecycleEvent>(value.clone())?);
-                    event_json.push(value);
-                    merkle_commits.push(row.try_get("merkle_commit_json")?);
-                }
-                let merkle_complete = merkle_commits.iter().all(Option::is_some);
-                if merkle_complete {
-                    verify_persisted_event_merkle_chain(
-                        OperationKind::Upload,
-                        &event_json,
-                        &merkle_commits,
-                    )?;
-                }
-                let (stored_tenant, stored_repository) = upload_lifecycle_identity(&events);
-                if stored_tenant != tenant || stored_repository != repository {
-                    if stored_tenant != "shardline" || stored_repository != "default" {
-                        return Err(
-                            crate::UploadIntentConflictError::new(intent.intent_id()).into()
-                        );
-                    }
-                    // Upload evidence predating repository-scoped identities was
-                    // written with the compatibility `default` repository. The
-                    // durable intent and its object identity are unchanged, so
-                    // migrate only the evidence identity while preserving the
-                    // authoritative lifecycle state. Invalid chains still fail
-                    // closed instead of being silently repaired.
-                    verify_upload_lifecycle_events(
-                        &events,
-                        stored_tenant,
-                        stored_repository,
-                        durable_intent.intent_id(),
-                        durable_intent.object_key(),
-                        durable_intent.object_hash(),
-                        durable_intent.state(),
-                    )?;
-                    sqlx::query(
-                        "DELETE FROM shardline_reliability_events
-                         WHERE operation_kind = 'Upload' AND operation_id = $1",
-                    )
-                    .bind(durable_intent.intent_id())
-                    .execute(&mut *transaction)
-                    .await?;
-                    let migrated = baseline_upload_lifecycle_events(
-                        tenant,
-                        repository,
-                        durable_intent.intent_id(),
-                        durable_intent.object_key(),
-                        durable_intent.object_hash(),
-                        durable_intent.state(),
-                    )?;
-                    for event in &migrated {
-                        insert_reliability_event(transaction.as_mut(), event).await?;
-                    }
-                } else {
-                    verify_upload_lifecycle_events(
-                        &events,
-                        tenant,
-                        repository,
-                        durable_intent.intent_id(),
-                        durable_intent.object_key(),
-                        durable_intent.object_hash(),
-                        durable_intent.state(),
-                    )?;
-                    if !merkle_complete {
-                        // Evidence written before the Merkle column existed is
-                        // still authoritative after its typed lifecycle has
-                        // been validated. Reuse the canonical insert boundary
-                        // to fill only missing commitments, then verify the
-                        // complete persisted chain before committing.
-                        for event in &events {
-                            insert_reliability_event(transaction.as_mut(), event).await?;
-                        }
-                        let repaired_rows = query(
-                            "SELECT event_json, merkle_commit_json
-                             FROM shardline_reliability_events
-                             WHERE operation_kind = 'Upload' AND operation_id = $1
-                             ORDER BY sequence",
-                        )
-                        .bind(intent.intent_id())
-                        .fetch_all(&mut *transaction)
-                        .await?;
-                        let mut repaired_events = Vec::with_capacity(repaired_rows.len());
-                        let mut repaired_commits = Vec::with_capacity(repaired_rows.len());
-                        for row in repaired_rows {
-                            let value: serde_json::Value = row.try_get("event_json")?;
-                            repaired_events.push(value.clone());
-                            repaired_commits.push(row.try_get("merkle_commit_json")?);
-                        }
-                        verify_persisted_event_merkle_chain(
-                            OperationKind::Upload,
-                            &repaired_events,
-                            &repaired_commits,
-                        )?;
-                    }
-                }
-            }
-        } else {
-            // A previously deleted materialized row may leave legacy evidence
-            // behind. A newly created intent with the same identity starts a
-            // new lifecycle, so discard only that orphaned Upload evidence
-            // before its baseline event.
-            sqlx::query(
-                "DELETE FROM shardline_reliability_events
-                 WHERE operation_kind = 'Upload' AND operation_id = $1",
-            )
-            .bind(intent.intent_id())
-            .execute(&mut *transaction)
-            .await?;
-            insert_reliability_event(transaction.as_mut(), &created_event).await?;
-        }
-        transaction.commit().await?;
-        Ok(())
+        .await
     }
 
     async fn transition_intent(

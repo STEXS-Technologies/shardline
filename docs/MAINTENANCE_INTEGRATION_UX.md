@@ -98,6 +98,7 @@ they do not browse the history of ordinary commands.
 | A run is completed | Its saved result verified as successful. Check `/readyz` for current readiness, or `/api/v1/status` if the admin API is enabled. |
 | A run is failed, interrupted, unresolved or corrupt | Read its `next_step` and original command logs. Inspect partial effects before repeating a mutation; preserve corrupt evidence. |
 | A write returns `503` for an unresolved remote delete | Check whether the original GC is still running. After it stops, run `shardline repair` with the same configuration, then inspect `shardline history --pending-deletes` again. Retry the write after reconciliation. |
+| An upload returns `503` because its write fence is no longer current | Send a fresh upload request after the retry delay. Shardline cannot resume that request on a replacement database connection. If failures continue, check database connectivity and server logs. |
 | Repair leaves a delete pending | Check repair logs: a backlog can need several runs. Missing or invalid replies require investigation; checking that the object is absent cannot replace a reply. |
 
 ## What users gain

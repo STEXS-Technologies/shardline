@@ -76,44 +76,18 @@ The following still need implementation or stronger evidence before merge:
   This is an existing guarantee boundary, not evidence that the integration
   introduced missing-content publication. It still limits the stronger guarantee
   this branch can promise to library users.
-  Upload lifecycle transitions have a separate ownership boundary:
-  `CasCoordinator` uses the backend index store, whose PostgreSQL transition
-  opens a pool transaction and atomically updates the intent with its event.
-  That transaction is separate from the request-owned connection used for
-  native file publication. GC reachability uses file records and dedupe mappings,
-  not upload intent state. Startup reconciliation checks existing file visibility
-  or storage presence and changes intent state; it does not publish file metadata
-  from the intent. A real native-upload test now terminates the request owner,
-  verifies rejected metadata publication and incomplete intent state, runs
-  reconciliation, then succeeds with a fresh validated upload. It exposed and
-  fixed premature terminal failure when normalization changes the shard key.
-  A separate real-PostgreSQL native upload test now interrupts each of the six
-  coordinator durability boundaries, checks actual file visibility through
-  reconciliation, and succeeds with a fresh validated retry.
-  It now uses the original request-owned session and terminates that session
-  at each boundary. Stale retries fail, including after a visible intent;
-  existing metadata visibility remains unchanged before fresh recovery.
-  Transitions after other mutation phases still need checks before extending
-  the stale-writer guarantee to all upload intent state.
-  Atomic event recording alone does not prove
-  request ownership, and this finding does not show that file publication bypasses
-  its fence.
-  The next ownership audit must distinguish native shards from raw xorbs.
-  `PostgresBackend::upload_shard_stream` performs validated file publication
-  inside the coordinator's work callback. Only after that callback succeeds
-  does the coordinator advance `Stored`, `MetadataCommitted` and `Visible`.
-  Those later intent transitions describe progress; they do not authorize the
-  earlier publication. `upload_xorb_stream` uses the same pool-backed intent
-  coordinator but its callback stores the content-addressed xorb instead of
-  publishing file metadata. The native-publication tests therefore do not prove
-  request-owner fencing for raw-xorb intent transitions. Audit both paths at
-  each mutation boundary before claiming every upload lifecycle is fenced.
-  Raw-xorb requests now verify their original, non-replaceable request session
-  before and after staging and around storage work. A configured test exposed
-  acceptance after an already-lost owner; the corrected path rejects it before
-  intent creation with HTTP 503 and `Retry-After: 1`, and a fresh upload succeeds.
-  These checks detect session loss at those boundaries. They do not atomically
-  fence the separate intent transactions or cancel an active storage request.
+  Raw-xorb and native-shard request uploads now create, read and advance their
+  intents on the original request-owned database connection. A lost connection
+  cannot be replaced to finish that request's bookkeeping. Detected owner loss
+  returns HTTP 503 with `Retry-After: 1`; the client must make a fresh request.
+  Standalone library calls and startup reconciliation retain their existing
+  pool-based APIs and require the caller's applicable ownership checks.
+  Upload progress is not proof that bytes still exist. Native file publication
+  checks backing data in its publication transaction; raw xorbs store immutable
+  bytes without publishing file metadata. GC uses file records and dedupe
+  mappings as reachability authority, and reconciliation never publishes files
+  solely from an intent. Already-active remote storage calls may still finish
+  after connection loss. Broader mutation coverage remains part of this audit.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and
