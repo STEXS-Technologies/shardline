@@ -1950,3 +1950,12 @@ This tests PostgreSQL's predicate recheck after a row-lock wait without relying
 on a sleep to establish overlap. The strengthened fixture passed in 0.31 seconds
 with one executed test and no ignored tests; log:
 `.codex/validation/ux-conditional-overlap-test.log`.
+
+After the conditional-cleanup fix and overlapping-transaction regression, the
+full `postgres::` index library selection passed against a disposable configured
+PostgreSQL database: 185 executed tests, zero failures and zero ignored tests,
+in 37.94 seconds. Log: `.codex/validation/ux-current-index-tests.log`.
+The fixture was bootstrapped using the owner command before isolated test schemas
+were created. This includes record publication, delete protection, receipt
+recovery, artifact permissions and schema-specific index tests; it does not
+replace optimized process-level deployment verification of the new binary.
