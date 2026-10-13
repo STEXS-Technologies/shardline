@@ -874,3 +874,19 @@ still fails. This proves the tested recovery path consumes evidence rather than
 replaying a user delete. Storage in this test is local; it does not establish
 remote-request behavior or safety for uncovered publication paths. Targeted
 strict Clippy and workspace formatting checks also pass.
+
+## Operator guidance in maintenance history
+
+Administrative history entries now include a plain-language `next_step` for
+their recorded state. Completed entries distinguish the successful past run
+from current readiness; uncertain entries require checking logs and effects
+before repeating mutations. Corrupt entries retain their incident reference
+and advise preserving evidence without disclosing an unverified owner.
+
+The 18 task-tracking tests pass with an owned PostgreSQL fixture initialized
+from released 1.11.3 migrations, without runtime skips. HTTP coverage checks
+completed and reconciliation guidance while the server remains ready; corrupt
+evidence coverage checks guidance and omitted identity fields. Strict server
+Clippy across all features and targets, and workspace formatting, pass.
+The field is added only to the administrative view: public library summaries
+and stored signed records keep their existing formats.

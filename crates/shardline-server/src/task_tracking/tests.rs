@@ -259,6 +259,19 @@ fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
     assert!(corrupt.iter().any(|entry| matches!(entry,
         super::status::TaskEvidenceEntry::Unreadable { id, state: TaskRunState::Corrupt, identity_verified: false }
         if id == &foreign_id)));
+    let unreadable = corrupt
+        .iter()
+        .find(|entry| entry.id() == foreign_id)
+        .unwrap();
+    let view = serde_json::to_value(unreadable.operator_view()).unwrap();
+    assert_eq!(view["state"], "corrupt");
+    assert_eq!(view["identity_verified"], false);
+    assert_eq!(view["id"], foreign_id);
+    assert!(view.get("owner").is_none());
+    assert_eq!(
+        view["next_step"],
+        "Preserve the stored evidence and inspect storage and original command logs. Do not rely on this record or retry uncertain mutations from it."
+    );
     assert_eq!(store.summaries(foreign, None, 10).unwrap().len(), 2);
 }
 
@@ -1503,6 +1516,7 @@ async fn normal_router_starts_tracker_and_exposes_authenticated_job_status() {
             .any(|job| job["operation"] == "lfs-startup-session-sweep"
                 && job["state"] == "completed"
                 && job["execution"] == "embedded"
+                && job["next_step"] == "No recovery is needed for this recorded run. Check /api/v1/status separately for current server readiness."
                 && job["owner"]["pid"] == std::process::id())
     );
 }
@@ -1549,6 +1563,10 @@ async fn failed_startup_sweep_exposes_diagnostics_without_failing_readiness() {
         .find(|task| task["operation"] == "lfs-startup-session-sweep")
         .unwrap();
     assert_eq!(task["state"], "needs_reconciliation");
+    assert_eq!(
+        task["next_step"],
+        "Inspect the affected data and original command logs before repeating a mutation. Check the saved report when available."
+    );
     let response = app
         .clone()
         .oneshot(get(&format!(

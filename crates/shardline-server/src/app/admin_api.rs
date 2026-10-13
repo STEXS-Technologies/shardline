@@ -628,7 +628,7 @@ pub(super) async fn maintenance_tasks(
         "supervision": "embedded",
         "history_grouping": if history_scope.is_some() { "shared_metadata" } else { "legacy" },
         "history_notice": history_notice,
-        "tasks": tasks,
+        "tasks": tasks.iter().map(|task| task.operator_view()).collect::<Vec<_>>(),
         "page": page,
     })))
 }

@@ -96,6 +96,9 @@ and logs. These endpoints inspect state; they do not retry or clear a delete.
 A completed result describes that run. Investigate failed or interrupted work
 before repeating mutations; treat corrupt history as untrusted. Older and
 interrupted jobs may have no saved report. CLI diagnostics remain available.
+Each history entry includes `next_step` with plain-language guidance. For a
+completed run it explains that no recovery is needed and points to readiness;
+for an uncertain run it directs you to the owning node, logs or affected data.
 The history endpoint includes `history_notice` when new metadata history is
 unavailable. An empty task list then does not mean maintenance never ran.
 

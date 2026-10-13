@@ -237,6 +237,7 @@ curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
 | `tasks[].id` | Opaque incident reference; keep it when investigating a run. |
 | `tasks[].operation` | Name of the recorded maintenance operation. |
 | `tasks[].state` | What the available evidence establishes; see the table below. |
+| `tasks[].next_step` | Plain-language guidance for this recorded state. It does not authorize retrying an uncertain mutation or certify current health. |
 | `tasks[].execution` | `embedded` for server-owned work, `inline` for ordinary CLI commands, or `isolated` for the explicit advanced runner. |
 | `tasks[].created_at` | Run creation time in Unix seconds, not its completion time. |
 | `tasks[].owner` | Diagnostic process identity. It is not a cluster lease or permission to retry. |
