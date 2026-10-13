@@ -2273,3 +2273,32 @@ behavior, that legacy physical references are completely discoverable, or that
 arbitrary library publishers receive the server's stronger storage guarantees.
 The API documentation now states these boundaries explicitly. Reproduction:
 `git show v1.11.3:crates/shardline-index/src/postgres/record_store.rs`.
+
+## Quiet fallback on restricted local roots
+
+Rerunning the mode-0555 root comparison with the final housekeeping binary
+exposed a stderr mismatch: private-scratch admission warned despite successful
+shared metadata recording. The failed comparison is retained at
+`/tmp/shardline-local-permissions.C9eHZs`; output:
+`.codex/validation/ux-final-local-permissions.log`.
+
+Private-scratch fallback now logs at debug level. Shared recording failures and
+actual cleanup failures still warn. All six automatic-tracking tests passed in
+21.07 seconds, covering unusable private storage, capacity and retained evidence;
+strict CLI library/test Clippy, formatting, diff checks and graph refresh passed.
+Test log: `.codex/validation/ux-quiet-fallback-tests.log`.
+
+The corrected optimized CLI has SHA-256
+`8a9b22310b2c5314d955900c8f9cd5d7200a548b5773bd1bc538f3e9f2b9c2e5`.
+Its restricted-root fixture matches released stdout, stderr and exit status for
+fsck, rebuild, lifecycle repair and GC mark, saves four metadata histories, and
+creates no private root entries or task payload objects. Diagnostics:
+`/tmp/shardline-local-permissions.fvhMkV`; verifier output:
+`.codex/validation/ux-quiet-fallback-local-permissions.log`.
+The cleanup-failure process drill also passed with this binary: the real removal
+fault warns, preserves the command's success and receipt bytes, and a fresh run
+cleans the leftover scratch without replaying the original job. Released rollback
+remains compatible. Diagnostics: `/tmp/shardline-cleanup-failure.CH81A3`;
+verifier output: `.codex/validation/ux-quiet-fallback-cleanup-failure.log`.
+These local fixtures require writable existing SQLite/WAL sidecars; they do not
+prove availability with fully read-only metadata.
