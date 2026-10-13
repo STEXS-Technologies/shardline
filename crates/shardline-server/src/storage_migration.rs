@@ -1,5 +1,8 @@
 use std::{io::Cursor, path::PathBuf};
 
+mod evidence_inventory;
+use evidence_inventory::is_task_evidence;
+
 use serde::Serialize;
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_storage::{
@@ -175,57 +178,6 @@ pub fn run_storage_migration(
     })?;
 
     Ok(report)
-}
-
-fn is_task_evidence(source: &ServerObjectStore, key: &ObjectKey) -> bool {
-    use crate::task_tracking::{TASK_EVIDENCE_PREFIX, TaskEvidenceStore, TaskRunIdentity};
-    let Some(suffix) = key.as_str().strip_prefix(TASK_EVIDENCE_PREFIX) else {
-        return false;
-    };
-    let id = if let Some(id) = suffix
-        .strip_prefix("manifests/")
-        .or_else(|| suffix.strip_prefix("retiring/"))
-        .or_else(|| suffix.strip_prefix("scope-bindings/"))
-    {
-        id
-    } else if let Some(run) = suffix.strip_prefix("runs/") {
-        let Some((id, _rest)) = run.split_once('/') else {
-            return false;
-        };
-        id
-    } else {
-        return false;
-    };
-    if id.is_empty() || id.len() > 128 || id.contains('/') {
-        return false;
-    }
-    // A list-only dry run must not gain a mandatory read permission. If the
-    // identity cannot be recognized, retain the original inventory behavior.
-    let store = TaskEvidenceStore::from_objects(source.clone());
-    let bytes = store
-        .read(&format!("manifests/{id}"), 65536)
-        .ok()
-        .flatten()
-        .or_else(|| store.read(&format!("retiring/{id}"), 65536).ok().flatten());
-    let Some(bytes) = bytes else {
-        return false;
-    };
-    let Ok(identity) = serde_json::from_slice::<TaskRunIdentity>(&bytes) else {
-        return false;
-    };
-    let recognized = identity.schema == 1
-        && identity.id == id
-        && identity.scope.definition == identity.definition.fingerprint();
-    if recognized && suffix.starts_with("scope-bindings/") {
-        // Only a verified association is recognizable control evidence. Keep
-        // arbitrary or damaged bytes under an otherwise recognized run ID.
-        matches!(
-            store.history_scope_binding_match_for_manifest(&identity, identity.deployment, &bytes),
-            Ok(Some(_))
-        )
-    } else {
-        recognized
-    }
 }
 
 fn validate_source_object_matches_content_addressed_key(

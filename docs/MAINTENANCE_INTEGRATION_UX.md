@@ -116,13 +116,13 @@ New local and upgraded server history stays separate from user payload data.
 Ordinary Postgres GC, rebuild and repair also use metadata history when the
 account supports it. Normal maintenance moves verified, finished legacy history
 into metadata in bounded batches, preserving its signed bytes. Interrupted,
-corrupt or unrelated history stays in place. Storage copy keeps its source
-read-only; it does not require new source write permissions.
-Current copies exclude verified legacy history scope bindings, including those
-for unfinished runs, and leave the source evidence unchanged. Unrecognized or
-damaged objects retain their existing copy behavior.
-This also covers cleanup interrupted after moving the manifest into a retirement
-marker, while its verified bytes are still available.
+corrupt or unrelated history stays in place.
+
+Storage copy keeps its source read-only. Recognized task history and verified
+saved delete replies stay at the source instead of becoming payload objects.
+Unrecognized or damaged legacy objects keep their existing copy behavior.
+Before switching storage endpoints, reconcile pending deletes with the original
+database and object storage. Copying does not settle those deletes.
 Copies to S3-only endpoints keep task history in private temporary storage on
 the command's host, without adding objects or permissions to the payload bucket.
 That history is not available through other nodes and can be removed by
