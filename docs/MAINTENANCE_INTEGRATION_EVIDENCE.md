@@ -13,6 +13,11 @@ untested deployments.
 
 ## Shared history retention after configuration changes
 
+Retention now lives in the conventional `task_tracking::retention` module,
+separate from status inspection. The extracted method bodies match the prior
+revision exactly; public methods and storage formats are unchanged. Formatting,
+strict all-feature/all-target server Clippy and the oldest-first regression pass.
+
 Retention previously selected only the legacy configuration fingerprint, even
 when shared inspection accepted a verified database-scope binding. Completed
 history could therefore remain after a database-login change. Retention now
