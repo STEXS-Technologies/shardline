@@ -841,8 +841,12 @@ async fn interrupted_repair_mutations_resume_and_converge() {
     ];
 
     for boundary in BOUNDARIES {
-        let (_root, record_store, index_store, object_store) = make_test_stores();
+        let (root, record_store, index_store, object_store) = make_test_stores();
         let now = 1_000;
+        let payload_key = ObjectKey::parse("test/unrelated-repair-payload").unwrap();
+        seed_object(&object_store, &payload_key);
+        let payload_path = root.path().join("chunks/test/unrelated-repair-payload");
+        let payload_before = std::fs::read(&payload_path).unwrap();
 
         for suffix in ["a", "b"] {
             let hold_key = ObjectKey::parse(&format!("test/interrupted-hold-{suffix}")).unwrap();
@@ -906,6 +910,24 @@ async fn interrupted_repair_mutations_resume_and_converge() {
             "the interruption must preserve exactly the mutations completed before {boundary:?}"
         );
 
+        // Retry from reopened persistent stores, rather than relying on the
+        // interrupted invocation's handles or in-memory state.
+        drop(record_store);
+        drop(index_store);
+        drop(object_store);
+        let index_store = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
+        let record_store = LocalRecordStore::new(root.path().to_path_buf()).unwrap();
+        let object_store = ServerObjectStore::local(root.path().join("chunks")).unwrap();
+        assert_eq!(
+            (
+                index_store.list_retention_holds().unwrap().len(),
+                index_store.list_quarantine_candidates().unwrap().len(),
+                index_store.list_webhook_deliveries().unwrap().len(),
+            ),
+            expected_remaining,
+        );
+        assert_eq!(std::fs::read(&payload_path).unwrap(), payload_before);
+
         let resumed = run_lifecycle_repair_with_stores_at_time(
             &record_store,
             &index_store,
@@ -947,6 +969,7 @@ async fn interrupted_repair_mutations_resume_and_converge() {
         assert_eq!(converged.scanned_retention_holds, 0);
         assert_eq!(converged.scanned_quarantine_candidates, 0);
         assert_eq!(converged.scanned_webhook_deliveries, 0);
+        assert_eq!(std::fs::read(&payload_path).unwrap(), payload_before);
     }
 }
 

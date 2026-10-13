@@ -3365,3 +3365,18 @@ cargo test --locked -p shardline-server --all-features --lib \
   task_tracking::tests::legacy_retention_capacity::many_legacy_runs_paginate_and_retire_without_losing_unresolved_history \
   -- --ignored --exact --nocapture
 ```
+
+### Lifecycle repair recovery from reopened local stores
+
+The existing three-boundary lifecycle repair test now closes its store handles
+after the injected interruption and reopens the persistent local stores before
+retrying. At retention-hold, quarantine-candidate and webhook-delivery mutation
+boundaries, the exact expected partial metadata survives reopening. Fresh repair
+removes only the remaining eligible entries; a further pass has no such work.
+Unrelated payload bytes remain unchanged after interruption and convergence.
+All existing partial-state and mutation-count assertions remain in place.
+
+The focused locked test passes in 0.43 seconds. This covers typed local mutation
+interruptions and persisted retry state, not process termination, PostgreSQL
+ownership loss or maintenance completion recording. Those require their separate
+fixtures; the broader phase-by-phase gate remains open.
