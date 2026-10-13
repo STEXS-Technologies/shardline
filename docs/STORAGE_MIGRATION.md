@@ -8,6 +8,24 @@ state, or cache entries.
 Use it when moving payload bytes to a new local state root, S3-compatible bucket, or
 S3-compatible prefix before switching the server configuration.
 
+For an active deployment, use your existing maintenance window for the final
+copy and cutover:
+
+1. Drain writers and stop destructive GC against the source and destination.
+2. Inspect pending deletes using the source deployment's admin API. Run
+   `shardline repair` with its existing configuration to reconcile saved replies.
+   Investigate any delete that remains pending before switching storage.
+3. Copy payloads and verify them with the destination configuration. Keep the
+   existing metadata available; this command does not move the database.
+4. Switch storage configuration, check readiness and fsck, then resume traffic
+   and the existing GC schedule.
+
+Copying an object does not settle an uncertain deletion. The copy API receives
+storage endpoints, not a metadata database or schema, so it cannot enforce
+the deployment's database ownership or remote-delete markers. Existing-object
+checks make repeated copies safe against identical bytes; they do not make a
+live copy a consistent snapshot of changing storage.
+
 ## Command
 
 Local state root to local state root:
@@ -120,6 +138,14 @@ Writes are idempotent.
 If the destination already has an identical object, the command counts it as already
 present. If the destination has the same key with different bytes, the adapter rejects
 the write and the migration fails closed.
+
+New maintenance history stays in metadata and is outside payload inventory.
+Recognized legacy task evidence and verified saved delete replies are excluded
+from the copy. Unrecognized or damaged bytes under the legacy task namespace
+retain the existing copy behavior; the command does not discard them merely
+because of their filename. Keep the source evidence for investigation. A copy
+does not establish that another deployment owns that history or completed its
+work.
 
 The command reports:
 

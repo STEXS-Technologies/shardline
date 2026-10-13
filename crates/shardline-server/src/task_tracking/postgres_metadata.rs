@@ -52,7 +52,7 @@ impl TaskEvidenceStore {
     ///
     /// PostgreSQL needs an active Tokio runtime. Use the synchronous evidence
     /// methods on a blocking thread while that runtime remains alive. Pass the
-    /// returned scope to [`Self::summaries_with_scope`] and [`Self::embedded_report`].
+    /// returned scope to [`Self::summaries_with_scope`].
     ///
     /// # Examples
     /// ```no_run

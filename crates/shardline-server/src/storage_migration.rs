@@ -125,6 +125,13 @@ impl StorageMigrationReport {
 /// The command migrates object bytes only. Metadata, provider state, lifecycle state, and
 /// reconstruction rows remain in their configured metadata stores.
 ///
+/// These endpoint-only options supply no metadata authority. This function does
+/// not acquire deployment database ownership or reconcile remote-delete markers.
+/// Callers must coordinate writers and GC before a final copy and storage cutover;
+/// idempotent destination writes do not establish a consistent live snapshot.
+/// Recognized legacy task evidence is excluded, while unrecognized legacy bytes
+/// retain their existing copy behavior.
+///
 /// # Errors
 ///
 /// Returns [`ServerError`] when inventory, reads, integrity checks, or destination writes
