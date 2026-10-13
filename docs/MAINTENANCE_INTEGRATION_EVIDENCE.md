@@ -13,6 +13,13 @@ untested deployments.
 
 ## Retention ownership cleanup
 
+The metadata retention chronology regression creates 65 completed runs, with
+creation timestamps deliberately reversed relative to their ordered artifact
+keys. The first cleanup removes the 64 oldest runs and retains the newest; the
+second removes the remaining eligible run. This protects existing oldest-first
+behavior against an incorrect early stop after 64 metadata keys. It does not
+remove the full-inventory scan or establish a deployment-scale latency bound.
+
 The optimized all-feature binary built from `fe40b096` passed the complete
 11-drill maintenance deployment matrix after these cleanup changes. The verifier
 confirmed 11 selected tests and 11 passes with no runtime skips; 12 unrelated
