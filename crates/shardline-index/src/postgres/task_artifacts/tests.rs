@@ -71,6 +71,23 @@ async fn borrowed_session_preserves_target_transaction_and_timeout() {
         vec![(key.clone(), 8)]
     );
     assert!(target.read_task_artifact(&key, 8).await.unwrap().is_none());
+    let bounded = PostgresIndexStore::task_artifact_bounded_page_on_connection(
+        &mut publication_transaction,
+        PREFIX,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        bounded,
+        vec![(
+            key.clone(),
+            PostgresTaskArtifact {
+                length: 8,
+                bytes: Some(b"original".to_vec()),
+            }
+        )]
+    );
     publication_transaction.rollback().await.unwrap();
     assert!(target.read_task_artifact(&key, 8).await.unwrap().is_none());
     PostgresIndexStore::publish_task_artifact_on_connection(&mut connection, &key, b"committed")
@@ -265,6 +282,70 @@ async fn immutable_publication_bounds_and_concurrent_conflicts() {
     );
     assert!(store.delete_task_artifact(&key).await.unwrap());
     assert!(!store.delete_task_artifact(&key).await.unwrap());
+}
+
+#[tokio::test]
+async fn bounded_payload_pages_preserve_literal_prefix_and_oversize_evidence() {
+    let Some(pool) = super::super::connect_isolated_postgres().await else {
+        return;
+    };
+    let store = PostgresIndexStore::new(pool);
+    store.initialize_task_history_scope().await.unwrap();
+    let prefix = format!("{PREFIX}batch%/");
+    for index in 0..65 {
+        store
+            .publish_task_artifact(&format!("{prefix}{index:03}"), b"opaque")
+            .await
+            .unwrap();
+    }
+    store
+        .publish_task_artifact(&format!("{prefix}065"), &vec![7; 65536])
+        .await
+        .unwrap();
+    store
+        .publish_task_artifact(&format!("{prefix}066"), &vec![8; 65537])
+        .await
+        .unwrap();
+    store
+        .publish_task_artifact(&format!("{PREFIX}batchX/keep"), b"keep")
+        .await
+        .unwrap();
+    let mut connection = store.pool().acquire().await.unwrap();
+    let first = PostgresIndexStore::task_artifact_bounded_page_on_connection(
+        &mut connection,
+        &prefix,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.len(), 64);
+    assert!(first.iter().all(|(key, artifact)| key.starts_with(&prefix)
+        && artifact.length == 6
+        && artifact.bytes.as_deref() == Some(b"opaque".as_slice())));
+    let second = PostgresIndexStore::task_artifact_bounded_page_on_connection(
+        &mut connection,
+        &prefix,
+        Some(&first.last().unwrap().0),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.len(), 3);
+    assert_eq!(
+        second[1].1.bytes.as_deref(),
+        Some(vec![7; 65536].as_slice())
+    );
+    assert_eq!(second[2].1.length, 65537);
+    assert!(second[2].1.bytes.is_none());
+    assert!(
+        PostgresIndexStore::task_artifact_bounded_page_on_connection(
+            &mut connection,
+            &prefix,
+            Some(&second.last().unwrap().0),
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
 }
 
 #[tokio::test]

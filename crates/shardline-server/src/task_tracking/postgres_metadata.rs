@@ -283,6 +283,24 @@ impl PostgresTaskMetadata {
         })
     }
 
+    pub(super) fn bounded_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+    ) -> Result<Vec<(String, PostgresTaskArtifact)>, ServerError> {
+        self.run(async {
+            let mut connection = self.connection().await?;
+            let result = PostgresIndexStore::task_artifact_bounded_page_on_connection(
+                &mut connection,
+                prefix,
+                after,
+            )
+            .await
+            .map_err(ServerError::from);
+            self.finish(connection, result).await
+        })
+    }
+
     pub(super) fn delete(&self, key: &str) -> Result<(), ServerError> {
         self.run(async {
             let mut connection = self.connection().await?;
