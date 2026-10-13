@@ -244,7 +244,7 @@ servers alone cannot protect deletes performed by an old GC binary. See
 [rolling upgrades](ROLLING_UPGRADE.md) for the role order and rollback limits.
 
 Run owner setup before starting upgraded PostgreSQL servers. It also prevents
-older servers from falsely completing new file and native uploads during rollback or a
+older servers from falsely completing new file, shard, and xorb uploads during rollback or a
 mixed-version restart. Local startup installs that protection automatically.
 
 New local and upgraded server history stays in metadata, outside user payload

@@ -22,6 +22,12 @@ pub(super) fn install(connection: &Connection) -> Result<(), rusqlite::Error> {
          WHEN NEW.state <> OLD.state AND OLD.intent_id LIKE 'shard-v2-%'
            AND NOT EXISTS (SELECT 1 FROM shardline_upload_writers_v2
                            WHERE intent_id=OLD.intent_id)
+         BEGIN SELECT RAISE(IGNORE); END;
+         CREATE TRIGGER IF NOT EXISTS shardline_xorb_upload_recovery_guard_v2
+         BEFORE UPDATE OF state ON shardline_upload_intents
+         WHEN NEW.state <> OLD.state AND OLD.intent_id LIKE 'xorb-v2-%'
+           AND NOT EXISTS (SELECT 1 FROM shardline_upload_writers_v2
+                           WHERE intent_id=OLD.intent_id)
          BEGIN SELECT RAISE(IGNORE); END;",
     )
 }
@@ -33,6 +39,7 @@ pub(super) fn enter(
 ) -> Result<bool, rusqlite::Error> {
     if !intent_id.starts_with("file-v2-")
         && !intent_id.starts_with("shard-v2-")
+        && !intent_id.starts_with("xorb-v2-")
         && !repository.starts_with("scope-json-v1:")
     {
         return Ok(false);

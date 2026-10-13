@@ -4347,3 +4347,66 @@ before their schema-wide operations. The existing row-policy fixture verifies
 refusal and preservation of ordinary startup work, rather than tenant-scoped
 history. It does not certify arbitrary tenant policies. These findings refine
 the remaining capacity and deployment audit; they do not close all eight gates.
+
+### Canonical xorb retry identity and recovery
+
+A concrete regression fixture reproduced `UploadIntentConflict` when a valid
+footerless xorb was uploaded first and its exact normalized representation was
+retried. The immutable intent recorded the wire length, whereas storage added
+the canonical footer. That also made physical-length recovery evidence wrong
+for an interrupted footerless upload.
+
+Both backends now determine the canonical stored length before admission and
+use the stable private identity `xorb-v2-{root}-{canonical_length}`. Existing
+body-only identities and their signed events remain untouched by the new
+request. Storage keys, logical hashes and public responses remain unchanged.
+Canonical staged files are validated without whole-file buffering; footerless
+file inputs retain the existing 16 MiB compatibility normalization cap. Work
+uses the existing bounded blocking pool, now shared through the semantic
+`admission::blocking` module. PostgreSQL rechecks the original request owner
+after that work and retains its connection for intent writes.
+
+The SQLite upgrade installs an additional additive xorb recovery trigger.
+PostgreSQL owner setup refreshes the existing recovery function to recognize
+the new identity prefix. Current atomic writers supply the existing marker;
+released writers cannot change these histories during rollback. The marker
+remains a compatibility mechanism, not a resource fence or execution lease.
+
+Validation on the final sources:
+
+- 181 selected local-backend, download-stream and admission tests pass
+  (`/tmp/shardline-canonical-xorb-stream-regression.log`). Nextest's other
+  3,249 tests are excluded by the explicit filter, not runtime fixture skips.
+- 23 configured PostgreSQL publication tests pass without fixture skips
+  (`/tmp/shardline-batched-deletion.KR9oBU/test.log`), including original-owner
+  loss and provider acknowledgement interruption.
+- Both backends exercise footerless/canonical retries, preserve legacy history,
+  and reconcile all four unfinished checkpoints against canonical stored bytes.
+  Only `MetadataCommitted` is completed from that recovery evidence; earlier
+  states remain retryable and the subsequent validated upload finishes them.
+- The actual released 1.11.3 startup fixtures now visit 24 protected checkpoints
+  per backend: the previous 16 native shard cases plus eight xorb cases, covering
+  all four unfinished states with physical bytes present or missing. States and
+  complete signed event sequences remain unchanged; current writers can advance
+  them afterward.
+- All 311 adapter unit tests and strict Clippy for server, index and adapter
+  libraries/tests pass. These checks do not prove deployment health or close
+  the remaining acceptance gates.
+- All 189 configured PostgreSQL index tests pass without runtime fixture skips
+  (`/tmp/shardline-batched-deletion.YpYwdv/test.log`); the two SQLite upload-intent
+  identity/evidence boundary tests also pass
+  (`/tmp/shardline-canonical-xorb-index-local.log`).
+
+### Benchmark command compatibility matrix
+
+The optimized executable before this canonical-xorb fix, with SHA256
+`3f839d2c9717fbb696f73fa3f445645e41886f362c52a52e31faec0b704da792`, passes
+`verify_maintenance_benchmark_compatibility.sh` against released 1.11.3
+(`/tmp/shardline-benchmark-compatibility.A5z9Oc/`). Concurrency 1, 32 and 128,
+with three iterations each, preserve scalar JSON schema and all nonperformance
+counters/settings. Released fsck accepts each generated workload; current and
+released ordinary fsck diagnostics agree. After current fsck there is exactly
+one completed receipt and no payload history directory, so the benchmark itself
+does not create maintenance receipts. Timing/RSS files record fixture costs;
+they do not establish an SLO or a performance improvement. This binary pin is
+retained explicitly rather than attributing that run to a later executable.

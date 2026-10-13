@@ -8,6 +8,7 @@ pub(super) async fn enter(
 ) -> Result<Option<String>, sqlx::Error> {
     if !intent_id.starts_with("file-v2-")
         && !intent_id.starts_with("shard-v2-")
+        && !intent_id.starts_with("xorb-v2-")
         && !repository.starts_with("scope-json-v1:")
     {
         return Ok(None);
