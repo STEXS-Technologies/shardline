@@ -102,6 +102,11 @@ These are scoped results, not a claim that every deployment is compatible:
   match. Both binaries' fsck reads the nine current-generated stores with matching
   output; current maintenance records completion separately from payload data.
   This measures the existing workload, not distributed capacity or history scaling.
+- An explicit optimized SQLite fixture fills all 4,096 automatic history slots
+  with real completed, unfinished and unreadable histories. Pagination and
+  oldest-first cleanup preserve unresolved evidence and user payload bytes.
+  The slowest cleanup call was 0.802 seconds in this local fixture; this does
+  not establish deployment latency or the cost of larger legacy histories.
 
 See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
 and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)
@@ -129,7 +134,7 @@ The following still need implementation or stronger evidence before merge:
   limited to 64 KiB. Existing evidence and explicit legacy imports remain
   unrestricted. These are logical admission limits, not physical disk limits;
   whole-operation cost and broader scaling remain open.
-  Metadata fixtures with 132 and 1,026 runs
+  Metadata fixtures with 132, 1,026 and 4,096 runs
   drain completed history in batches while retaining unfinished and corrupt history, but
   retention and legacy inspection still walk the inventory. Metadata inspection
   stops after its eligible page is settled, but filtering unrelated history can
