@@ -54,7 +54,34 @@ async fn bounded_publication_holds_manifest_and_exact_retry_rows_until_commit() 
         assert_eq!(code.as_deref(), Some("57014"));
         transaction.commit().await.unwrap();
     }
-    assert!(store.delete_task_artifact(&manifest).await.unwrap());
+    let mut retirement = cleaner.begin().await.unwrap();
+    assert!(
+        PostgresIndexStore::delete_task_artifact_on_connection(&mut retirement, &manifest)
+            .await
+            .unwrap()
+    );
+    sqlx::query("SET statement_timeout='100ms'")
+        .execute(&mut *publisher)
+        .await
+        .unwrap();
+    let error = PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+        &mut publisher,
+        &format!("{PREFIX}runs/publication-race/records/0000000002"),
+        b"late record",
+        1,
+    )
+    .await
+    .expect_err("publication must wait for retirement to commit");
+    let code = if let PostgresMetadataStoreError::Sqlx(error) = error {
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .map(|code| code.into_owned())
+    } else {
+        None
+    };
+    assert_eq!(code.as_deref(), Some("57014"));
+    retirement.commit().await.unwrap();
     assert!(
         !PostgresIndexStore::publish_task_artifact_bounded_on_connection(
             &mut publisher,

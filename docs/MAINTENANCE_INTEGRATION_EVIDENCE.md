@@ -2443,6 +2443,14 @@ rejection of a new artifact after manifest removal. All nine artifact tests
 passed in 0.90 seconds; log: `/tmp/shardline-batched-deletion.0QdrxM/test.log`;
 verifier output: `.codex/validation/ux-publication-retirement-race-final.log`.
 
+The reverse ordering is also tested with a real open retirement transaction.
+New publication hits its 100-ms timeout while manifest deletion remains
+uncommitted, then refuses admission after retirement commits. All nine artifact
+tests passed in 0.93 seconds with this extended regression; log:
+`/tmp/shardline-batched-deletion.yTVocc/test.log`. Strict index library/test
+Clippy and formatting passed. This extends the transaction-ordering evidence;
+it does not establish a deployment latency bound.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
