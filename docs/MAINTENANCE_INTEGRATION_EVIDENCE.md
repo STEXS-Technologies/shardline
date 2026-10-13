@@ -2952,3 +2952,13 @@ All 19 maintenance CLI tests also pass against these optimized bytes in
 same-PID ordinary work, interruption, configuration binding, legacy relocation,
 read-only roots and optional-worker recovery. These results cover the named
 workflows; broader deployment and scale gates remain open.
+
+The full task-tracking library suite also passes with a configured disposable
+PostgreSQL fixture after the traversal change: 65 passed, zero failed, and two
+explicit full-capacity drills ignored, in 96.21 seconds. The run includes
+purely object-backed and metadata-backed 400-artifact retirement, history
+pagination, corrupt/unfinished preservation, scope routing, database deadlines,
+router startup and cooperative shutdown. The retained log is
+`/tmp/shardline-batched-deletion.QClLW6/test.log`. No runtime skip messages or
+panics were accepted. This run does not replace the separately executed release
+capacity drills or establish production latency.
