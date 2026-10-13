@@ -46,8 +46,25 @@ adapter; formatting and the AST graph update pass. These are PostgreSQL 16
 fixtures bootstrapped with the released 1.11.3 migration command, not a new
 optimized deployment or throughput validation.
 
-These changes are additional to the revision-scoped deployment results below.
-Those optimized binaries do not contain this snapshot protection.
+The optimized all-feature binary built from `ed2d5aff` still reports 1.11.3.
+Its SHA-256 is
+`8af66771e1dc94cde6abc11a28b43a718cdc5b948b45056bf748052f4f6714dd`.
+An immutable copy passed all 11 selected deployment drills in 145.351 seconds,
+including real PostgreSQL/MinIO delete faults, existing restricted CLI accounts,
+concurrent owners, rolling overlap and rollback, container replacement and
+graceful shutdown. No selected drill skipped at runtime; 12 other tests were
+excluded by the selection. The restricted released/current OCI and S3 process
+drill also passed, preserving objects and upload state after database owner
+loss, publication failure and SIGKILL. Existing table grants and the released
+migration ledger remained unchanged, the artifact table remained private,
+and ordinary servers had no children at readiness or completion.
+
+A broader configured PostgreSQL index run passed all 184 selected tests in
+56.68 seconds with no runtime skips. This includes the other PostgreSQL and Hub
+metadata paths matched by `postgres::`; the count is not a claim of 184 separate
+deployment scenarios. The broader merge gates, stronger-isolation cost and
+uncovered legacy writers remain open. Earlier optimized results below describe
+their original revisions and do not include this snapshot protection.
 
 New publication logic lives in `postgres_backend::publication`, with its tests
 in `publication::tests`. Shared PostgreSQL fixtures live in `test_support`.
