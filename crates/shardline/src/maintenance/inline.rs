@@ -92,9 +92,8 @@ fn run_prepared(
     // This entire phase precedes the original handler. Only failure here can
     // choose another observation path; nothing after work may execute it again.
     let admission = (|| -> Result<_> {
-        artifact::private_directory(state)?;
         let directory = state.join(hex::encode(scope.task.digest().0));
-        artifact::private_directory(&directory)?;
+        super::workspace_admission::ensure(state, &directory)?;
         let signing_key = artifact::signer(&directory, true)?;
         let key = signing_key.verifying_key();
         let identity = if operation.read_only() {

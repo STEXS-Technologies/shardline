@@ -181,13 +181,21 @@ fn run_inner(
     let directory = state.join(hex::encode(
         penelope_core::task::Digest::of(id.as_bytes()).0,
     ));
-    let writable = super::artifact::private_directory(&state)
-        .and_then(|()| super::artifact::private_directory(&directory));
+    let writable = super::workspace_admission::ensure(&state, &directory);
     if let Err(error) = writable {
-        // No application work has started. Ignore unusable private observation
-        // state without reading or repairing it, and keep the original handler.
-        tracing::debug!(workspace = %state.display(), "private maintenance tracking unavailable; existing command continues with available metadata history: {error}");
-        return Ok(super::shared_inline::run(operation, arguments, &config));
+        // No application work has started. Keep the original handler and its
+        // domain barriers; only post-work housekeeping inspects retained state.
+        tracing::warn!(workspace = %state.display(), "private maintenance tracking unavailable; existing command continues with available metadata history: {error}");
+        let output = super::shared_inline::run(operation, arguments, &config);
+        // Admission pressure must not starve exports and verified cleanup.
+        // The shared path already retired history; avoid a second retention batch.
+        match super::publication_config(operation, &config) {
+            Ok(export_config) => retry_private_exports(operation, &export_config, &state, false),
+            Err(config_error) => tracing::warn!(
+                "retained private history unavailable; original command result is preserved: {config_error}"
+            ),
+        }
+        return Ok(output);
     }
     // Preserve configuration validation before any application mutation.
     let export_config = super::publication_config(operation, &config)?;
@@ -196,20 +204,7 @@ fn run_inner(
         .map(|argument| argument.as_os_str().as_bytes().to_vec())
         .collect();
     let output = super::inline::run(&state, &id, operation, command, arguments);
-    // Old history and retired scratch must not delay starting fresh work. The
-    // result is already fixed; housekeeping cannot retry or replace that work.
-    if let Err(error) = super::cleanup::retry(&state) {
-        tracing::warn!(workspace = %state.display(), "confirmed scratch cleanup unavailable; original command result is preserved: {error}");
-    }
-    let retry = (|| -> Result<()> {
-        let store = super::evidence::store(operation, &export_config, Some(&state))?;
-        let deployment = shardline_server::task_tracking::deployment_fingerprint(&export_config)?;
-        super::evidence::retire_finished_history(&store, deployment);
-        super::journal::retry_exports(&state, &store, deployment)
-    })();
-    if let Err(error) = retry {
-        tracing::warn!(workspace = %state.display(), "retained evidence could not be inspected or exported; original command result is preserved; no application retry authorized: {error}");
-    }
+    retry_private_exports(operation, &export_config, &state, true);
     if output
         .as_ref()
         .is_ok_and(|result| result.evidence_published)
@@ -224,6 +219,30 @@ fn run_inner(
         }
     }
     output
+}
+
+// Runs only after the original handler. Shared fallback already retires history;
+// both paths must still make progress exporting and cleaning verified private runs.
+fn retry_private_exports(
+    operation: &MaintenanceOperation,
+    export_config: &shardline_server::ServerConfig,
+    state: &std::path::Path,
+    retire_shared: bool,
+) {
+    if let Err(error) = super::cleanup::retry(state) {
+        tracing::warn!(workspace = %state.display(), "confirmed scratch cleanup unavailable; original command result is preserved: {error}");
+    }
+    let retry = (|| -> Result<()> {
+        let store = super::evidence::store(operation, export_config, Some(state))?;
+        let deployment = shardline_server::task_tracking::deployment_fingerprint(export_config)?;
+        if retire_shared {
+            super::evidence::retire_finished_history(&store, deployment);
+        }
+        super::journal::retry_exports(state, &store, deployment)
+    })();
+    if let Err(error) = retry {
+        tracing::warn!(workspace = %state.display(), "retained evidence could not be inspected or exported; original command result is preserved; no application retry authorized: {error}");
+    }
 }
 
 #[cfg(test)]

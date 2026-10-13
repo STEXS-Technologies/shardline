@@ -13,6 +13,31 @@ untested deployments.
 
 ## Shared history retention after configuration changes
 
+Automatic CLI private-workspace admission now has a 4,096-slot limit and stops
+inspection after at most 8,192 archive entries. Admissions serialize on the
+existing directory inode with a nonblocking lock; no persistent lock file,
+process, service or configuration is added. Existing workspaces remain usable,
+and paths and ownership retain their normal checks. Capacity or lock contention
+selects shared tracking before fresh application work instead of creating more
+private workspaces. This does not bound shared metadata or the retired scratch queue.
+
+Three focused tests passed for capacity, unrelated entries and concurrent
+admissions. Actual rebuild-handler fixtures passed with 4,096 retained workspaces,
+preserving every unfinished fixture file and producing shared completion in the
+original PID. A second full-archive fixture includes a verified completed
+predecessor with a modeled dead local PID and aligned private/public identity.
+Post-work export removes that verified workspace and restores admission for the
+next fresh run. Its native records and proofs stay unchanged; this is a modeled
+owner transition in a library test, not an actual process-death drill.
+
+Automatic, corrupt-private-journal and shared receipt regressions passed.
+The database-only test in the local shared suite had no configured database;
+the separate configured CLI test passed against disposable Postgres in 33.22
+seconds, covering rebuild, GC mark and lifecycle repair through both observation
+paths with a one-connection login. Strict all-feature, all-target CLI Clippy and
+formatting passed. Shared fallback now continues private receipt export and
+verified cleanup after work without repeating shared retention or application work.
+
 The optimized all-feature binary built from `8078848c` passed all 11 selected
 maintenance deployment drills in 128.121 seconds, with no runtime skips. Twelve
 unrelated tests were filtered out. This covers restricted commands, concurrent
