@@ -918,3 +918,17 @@ passes, including exact output/inventory comparison, byte-preserving legacy
 relocation, released rollback and execute-only binary fallback.
 
 This does not upgrade old binaries or identify every damaged legacy object.
+
+The copy fixture also finishes its run, retains the exact manifest bytes in a
+retirement marker and removes the live manifest. A subsequent copy still
+excludes its signed scope binding and run artifacts, preserves all remaining
+source bytes, and inserts no additional payload object. Verification uses the
+signed manifest digest and pinned author key; a retirement marker never
+authorizes a retry or a new completion claim. Damaged binding bytes retain the
+original copy behavior even after this interruption.
+
+All 25 migration tests and all 32 task-tracking tests pass for this extension.
+The latter use the owned released-migration PostgreSQL fixture with no runtime
+skips. Strict server Clippy and workspace formatting also pass.
+The rebuilt full-feature CLI also passes the native released/current copy,
+legacy relocation, rollback and execute-only fallback verifier.

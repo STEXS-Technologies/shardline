@@ -189,6 +189,22 @@ impl TaskEvidenceStore {
         let Some(manifest) = self.binding_manifest(identity)? else {
             return Ok(None);
         };
+        self.history_scope_binding_match_for_manifest(identity, scope, &manifest)
+    }
+
+    /// Verifies a binding against exact manifest bytes retained by an internal
+    /// caller, including a retirement marker after the live manifest is gone.
+    pub(crate) fn history_scope_binding_match_for_manifest(
+        &self,
+        identity: &TaskRunIdentity,
+        scope: Digest,
+        manifest: &[u8],
+    ) -> Result<Option<bool>, ServerError> {
+        let stored: TaskRunIdentity =
+            serde_json::from_slice(manifest).map_err(|_error| invalid())?;
+        if serde_json::to_vec(&stored)? != serde_json::to_vec(identity)? {
+            return Err(invalid());
+        }
         let Some(bytes) = self.read(
             &format!("scope-bindings/{}", identity.id),
             MAX_BINDING_BYTES,
@@ -197,7 +213,7 @@ impl TaskEvidenceStore {
             return Ok(None);
         };
         let binding: Binding = serde_json::from_slice(&bytes).map_err(|_error| invalid())?;
-        if binding.schema != 1 || binding.manifest != Digest::of(&manifest) {
+        if binding.schema != 1 || binding.manifest != Digest::of(manifest) {
             return Err(invalid());
         }
         let key = VerifyingKey::from_bytes(&identity.public_key).map_err(|_error| invalid())?;
