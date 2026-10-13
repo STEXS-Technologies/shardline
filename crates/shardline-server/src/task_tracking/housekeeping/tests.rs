@@ -8,6 +8,53 @@ use shardline_storage::ObjectPrefix;
 use std::num::NonZeroUsize;
 
 #[test]
+fn shutdown_allows_an_inflight_sqlite_call_but_stops_subsequent_housekeeping() {
+    let root = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "http://localhost:8080".to_owned(),
+        root.path().to_owned(),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let ordinary = TaskEvidenceStore::from_config(&config).unwrap();
+    ordinary.publish("fixture/seed", b"seed").unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (guard, stopped) = HousekeepingGuard::new();
+    let housekeeping = ordinary.clone().with_housekeeping_stop(stopped);
+    let (started, start) = std::sync::mpsc::channel();
+    let (finished, finish) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        let result = housekeeping.publish("fixture/inflight", b"original");
+        finished.send(result).unwrap();
+        housekeeping.publish("fixture/after-stop", b"must not publish")
+    });
+    start.recv().unwrap();
+    assert!(matches!(
+        finish.recv_timeout(std::time::Duration::from_millis(200)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(guard);
+    connection.execute_batch("ROLLBACK").unwrap();
+    finish
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(worker.join().unwrap(), Err(crate::ServerError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+    );
+    assert_eq!(
+        ordinary.read("fixture/inflight", 16).unwrap().as_deref(),
+        Some(b"original".as_slice())
+    );
+    assert!(ordinary.read("fixture/after-stop", 32).unwrap().is_none());
+    ordinary
+        .publish("fixture/application", b"available")
+        .unwrap();
+}
+
+#[test]
 fn dropping_last_router_guard_stops_only_its_housekeeping_store() {
     let root = tempfile::tempdir().unwrap();
     let config = ServerConfig::new(
