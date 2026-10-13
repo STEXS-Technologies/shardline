@@ -12,6 +12,115 @@ use shardline_index::hub::HubRepoType;
 use shardline_protocol::SecretBytes;
 use std::num::NonZeroUsize;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn local_upgrade_preserves_encrypted_secret_when_final_history_recording_fails() {
+    for denied_suffix in ["artifacts/*", "records/0000000002"] {
+        let root = tempfile::tempdir().unwrap();
+        shardline_index::hub::ensure_hub_tables(root.path()).unwrap();
+        let store = BoxedHubStore::from_store(shardline_index::LocalIndexStore::open(
+            root.path().to_owned(),
+        ));
+        store
+            .create_repo(HubRepoType::Model, "work/local", false)
+            .unwrap();
+        store
+            .create_webhook(
+                "work/local",
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some("original-plaintext"),
+            )
+            .unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://localhost:8080".to_owned(),
+            root.path().to_owned(),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        let deployment = deployment_fingerprint(&config).unwrap();
+        let evidence = TaskEvidenceStore::from_config(&config).unwrap();
+        evidence
+            .publish("runs/fixture/blobs/seed", b"original")
+            .unwrap();
+        let database = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        database
+            .execute_batch(&format!(
+                "CREATE TRIGGER fixture_reject_final BEFORE INSERT ON shardline_task_artifacts_v1
+             WHEN NEW.artifact_key GLOB '_shardline_tasks/v1/runs/*/{denied_suffix}'
+             BEGIN SELECT RAISE(ABORT, 'fixture denies final history'); END;"
+            ))
+            .unwrap();
+        let tracker = EmbeddedTaskTracker::from_store(evidence.clone(), deployment);
+        let cipher = WebhookSecretCipher::new(SecretBytes::new(vec![41; 32])).unwrap();
+        let work_config = config.clone();
+        let work_store = store.clone();
+        let work_tracker = tracker.clone();
+        let work_cipher = cipher.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            run(&work_config, &work_store, &work_cipher, &work_tracker)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            (report.inspected, report.upgraded, report.failures),
+            (1, 1, 0)
+        );
+        let hooks = store.list_webhooks("work/local").unwrap();
+        let encrypted = hooks
+            .first()
+            .unwrap()
+            .secret
+            .as_ref()
+            .unwrap()
+            .expose_secret()
+            .to_owned();
+        assert_ne!(encrypted, "original-plaintext");
+        let decrypted = cipher.decrypt("work/local", &encrypted).unwrap();
+        assert_eq!(decrypted.secret.expose_secret(), "original-plaintext");
+        assert!(!decrypted.needs_upgrade);
+        let history = evidence.summaries(deployment, None, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        let first_id = history.first().unwrap().id.clone();
+        assert!(!matches!(
+            history.first().unwrap().state,
+            TaskRunState::Completed | TaskRunState::Failed
+        ));
+        assert_eq!(evidence.prune_completed(deployment, u64::MAX).unwrap(), 0);
+        database
+            .execute_batch("DROP TRIGGER fixture_reject_final")
+            .unwrap();
+        let work_store = store.clone();
+        let repeated =
+            tokio::task::spawn_blocking(move || run(&config, &work_store, &cipher, &tracker))
+                .await
+                .unwrap();
+        assert_eq!(
+            (repeated.inspected, repeated.upgraded, repeated.failures),
+            (1, 0, 0)
+        );
+        let hooks = store.list_webhooks("work/local").unwrap();
+        assert_eq!(
+            hooks
+                .first()
+                .unwrap()
+                .secret
+                .as_ref()
+                .unwrap()
+                .expose_secret(),
+            encrypted
+        );
+        let history = evidence.summaries(deployment, None, 10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .any(|task| task.id != first_id && task.state == TaskRunState::Completed)
+        );
+        assert!(history.iter().any(|task| task.id == first_id
+            && !matches!(task.state, TaskRunState::Completed | TaskRunState::Failed)));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn actual_hub_session_binds_history_and_owner_loss_does_not_reconnect() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
