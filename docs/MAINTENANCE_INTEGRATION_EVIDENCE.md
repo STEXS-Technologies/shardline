@@ -2027,3 +2027,20 @@ test and the copy/delete owner-loss fixture. Log:
 `.codex/validation/ux-guarded-read-tests.log`. Strict all-target server Clippy
 passed. The already-running optimized deployment job uses the previous binary;
 its results cannot establish this adjustment's process-level behavior.
+
+The pre-adjustment optimized binary passed its 11 selected deployment drills
+in 146.378 seconds, but the separate OCI/S3 drill timed out at the expected
+publication-failure response (script line 246). Logs:
+`/tmp/shardline-maintenance-deployments.YZA4Xk/test.log` and
+`.codex/validation/ux-session-oci-upgrade.log`. That failure is retained as
+evidence; the deployment selection did not cover this guarded-read regression.
+
+After the guarded-read correction, a fresh optimized build from `4aa579c2`
+passed the complete restricted released/current OCI and S3 process drill,
+including publication failure, lost ownership, SIGKILL and retry. Existing
+grants and the released ledger were preserved, and ordinary servers had no child
+processes. Log: `.codex/validation/ux-guarded-oci-upgrade.log`; diagnostics:
+`/tmp/shardline-oci-upgrade.qo1DDX`. Binary SHA-256:
+`d10fb16ac40e733c51bd694037dc4e2abd075ea4f68c1782be2ec638284a2fde`.
+The binary still reports 1.11.3. The corrected binary's 11-drill deployment run
+is separate from the earlier result and must be recorded after it completes.
