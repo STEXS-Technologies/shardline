@@ -133,6 +133,11 @@ The following still need implementation or stronger evidence before merge:
   paginates all 1,026 distinct histories exactly once, then incrementally retires
   1,024 finished runs while preserving unfinished and corrupt history and user
   payload. Neither fixture establishes production latency or broader cost.
+  Local prefix traversal now skips unrelated directories. The optimized
+  1,026-history fixture preserves the same pagination and cleanup assertions,
+  with 24 cleanup calls before and after the change; measured cleanup falls
+  from 186.46 to 5.39 seconds in this local fixture. Eligible history scans,
+  larger inventories and remote deployment cost remain open.
   An optimized ordinary CLI fixture verifies exact
   256-key progress over two invocations, released output/status and unchanged
   payload bytes. Metadata inspection

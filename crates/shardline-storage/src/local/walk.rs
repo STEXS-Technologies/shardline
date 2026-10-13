@@ -36,7 +36,9 @@ where
             .map_err(LocalObjectStoreError::Io)
             .map_err(Into::into)?;
         if file_type.is_dir() {
-            collect_metadata_recursive(root, &path, prefix, visitor)?;
+            if directory_may_match_prefix(root, &path, prefix) {
+                collect_metadata_recursive(root, &path, prefix, visitor)?;
+            }
             continue;
         }
         if !file_type.is_file() {
@@ -77,6 +79,23 @@ where
     }
 
     Ok(())
+}
+
+fn directory_may_match_prefix(root: &Path, directory: &Path, prefix: &str) -> bool {
+    let Some(relative) = directory.strip_prefix(root).ok().and_then(Path::to_str) else {
+        // Preserve existing validation errors for noncanonical stored paths.
+        return true;
+    };
+    #[cfg(windows)]
+    let relative = relative.replace('\\', "/");
+    #[cfg(windows)]
+    let relative = relative.as_str();
+    // Prefixes are lexical, so `wanted` also includes `wanted-other/`.
+    // An ancestor must end at a separator: `want/` cannot contain `wanted/`.
+    relative.starts_with(prefix)
+        || prefix
+            .strip_prefix(relative)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 pub fn read_dir_if_exists(directory: &Path) -> Result<Option<ReadDir>, LocalObjectStoreError> {

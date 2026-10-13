@@ -3431,3 +3431,37 @@ Clippy, formatting and diff checks pass. This is local-future cancellation with
 an observed database lock, not a network-partition or arbitrary shutdown bound.
 Runtime logic and version are unchanged; the guard's documentation now states
 the borrowed-connection boundary explicitly.
+
+### Scoped local inventory traversal
+
+Local prefix listing previously descended into every directory before filtering
+keys. The walker now skips directories that cannot contain a lexical prefix
+match. Partial prefixes still include similarly named directories; nested
+prefixes include their ancestors. Full inventories still visit all directories,
+and existing symlink checks remain in place. A regression first reproduced a
+scoped scan failing on an unreadable unrelated directory; the fixed scan skips
+that directory while the full inventory still reports its permission error.
+
+All 471 storage library tests pass in 16.71 seconds. Configured history tests
+pass with 66 passed and six explicit capacity drills ignored in 95.16 seconds:
+`/tmp/shardline-batched-deletion.2U1pDY/test.log`. Strict storage/server
+library/test Clippy, formatting, diff checks and the AST graph update pass.
+The library test count does not certify live remote-storage integration.
+
+The unchanged 1,026-history legacy fixture passes before and after pruning in
+the optimized profile, with the same preservation assertions and 24 cleanup
+calls. Instrumentation separates fixture setup from pagination and cleanup:
+
+| Phase | Before pruning | After pruning |
+| --- | --- | --- |
+| Create history | 0.851 seconds | 0.855 seconds |
+| Paginate all histories | 54.587 seconds | 0.754 seconds |
+| Cleanup across 24 calls | 186.460 seconds | 5.391 seconds |
+| Slowest cleanup call | 16.249 seconds | 0.362 seconds |
+
+Whole-test durations are 241.90 and 7.00 seconds, respectively. These are local
+fixture measurements, with other validation/build work overlapping parts of
+the runs; they are not a distributed benchmark or production latency guarantee.
+Retention still scans eligible history inventory and active storage calls remain
+untimed. The change preserves evidence formats, deletion budgets and command
+results; no version bump is included.
