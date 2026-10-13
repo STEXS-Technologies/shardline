@@ -941,6 +941,64 @@ async fn readiness_failure_is_visible_without_admin_api_while_health_remains_liv
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_router_clones_keep_housekeeping_alive_until_the_last_router_drops() {
+    use crate::task_tracking::{TaskEvidenceStore, housekeeping::HousekeepingGuard};
+    use std::sync::atomic::Ordering;
+
+    let root = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "http://localhost:8080".to_owned(),
+        root.path().to_owned(),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let (guard, stopped) = HousekeepingGuard::new();
+    let app = super::router_with_housekeeping_guard(config.clone(), guard, stopped.clone())
+        .await
+        .unwrap();
+    let ordinary = TaskEvidenceStore::from_config(&config).unwrap();
+    let housekeeping = ordinary.clone().with_housekeeping_stop(stopped.clone());
+    let surviving = app.clone();
+    drop(app);
+    assert!(!stopped.load(Ordering::Relaxed));
+    let response = surviving
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!stopped.load(Ordering::Relaxed));
+    housekeeping
+        .publish("fixture/router-alive", b"saved")
+        .unwrap();
+    drop(surviving);
+    assert!(stopped.load(Ordering::Relaxed));
+    assert!(
+        housekeeping
+            .publish("fixture/router-dropped", b"must not save")
+            .is_err()
+    );
+    assert!(
+        ordinary
+            .read("fixture/router-dropped", 32)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        ordinary.read("fixture/router-alive", 16).unwrap().unwrap(),
+        b"saved"
+    );
+    ordinary
+        .publish("fixture/application", b"available")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stats_endpoint_returns_200() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
 
