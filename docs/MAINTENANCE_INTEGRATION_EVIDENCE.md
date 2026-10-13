@@ -2768,3 +2768,24 @@ histories each contain 140 extra artifacts. One incremental call retires exactly
 the remaining two. No run artifacts or retirement markers remain. This checks
 that the budget is shared across histories and that a partially retired run does
 not lose later finished runs.
+
+## Current optimized CLI interruption boundaries
+
+Nextest run `79f16f97-4089-461f-8d25-567698eeccd1` passes three selected
+`maintenance_e2e` process tests in 0.628 seconds with optimized CLI SHA-256
+`30d3403fe1f1e48df826baa407d7d01a16de12b6ac79a135b4d3994637a24d87`.
+The 15 exclusions are selection exclusions, not runtime skips. The tested cases
+are `interrupted_mutation_is_fenced_and_remains_unknown`,
+`killed_gc_after_domain_mutation_or_report_never_claims_completion_or_replays`
+and `killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed`.
+
+The optional-controller test holds the existing local mutation barrier, observes
+a claimed and acknowledged worker, rejects competing invocation, kills the
+controller and verifies fencing plus a clear unknown-effects recovery error.
+The ordinary GC fixture kills after a real quarantine mutation, including the
+case where its report is materialized but completion is blocked. Recovery keeps
+the interrupted outcome unconfirmed and fresh scans preserve the original
+payload. These are actual process interruption checks, not receipt-only fault
+fixtures. They do not prove every interruption point, remote-call cancellation
+or cluster-wide exactly-once execution. The guide now states that stopping a
+worker cannot undo a remote request already received by storage.
