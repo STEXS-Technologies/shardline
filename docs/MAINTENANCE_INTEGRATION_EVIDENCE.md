@@ -39,6 +39,16 @@ This fixes retention grouping for verified shared metadata. It does not bound
 full-scan latency or total unresolved-history growth, and does not extend
 cross-configuration cleanup to legacy object-backed history.
 
+A further real-account transition test passed against disposable Postgres 16.
+The source login has schema usage and SELECT/INSERT/DELETE on the existing
+reliability table, with no direct artifact-table grant. It writes two completed
+runs and one interrupted run, then its pool closes. A different login resolves
+the same history scope despite its different configuration fingerprint, removes
+the two completed runs, and retains the interrupted run. The fixture removes
+its temporary role and database container. The exact selected test passed in
+1.25 seconds; formatting and strict server Clippy passed. This checks database
+accounts and shared retention, not a cross-host failure or current cluster health.
+
 ## Retention batch reads
 
 After both batching changes, the optimized all-feature binary built from
