@@ -2379,3 +2379,26 @@ without the explicit isolated runner's command-stream capture. Automatic history
 artifact limits therefore do not truncate the command's output or exports. The
 operator guide now states that distinction. This mark-only synthetic inventory
 fixture does not establish reclamation safety or production latency.
+
+## Fresh ordinary GC discovery after completion
+
+Extended the optimized large-diagnostic process fixture beyond receipt counting.
+After the released/current comparison and first current completion, it adds a new
+synthetic orphan and runs the same ordinary GC mark command again. Both exports
+then contain 4,097 marked entries, the history has two completed runs, and all
+payload hashes remain unchanged. The fixture passed with the corrected optimized
+CLI. Diagnostics: `/tmp/shardline-large-diagnostics.S9LzVt`; verifier output:
+`.codex/validation/ux-fresh-gc-diagnostics.log`.
+
+Four current CLI configuration tests also passed in 0.02 seconds. They verify
+parallel configuration isolation, restoration after error/unwind, retained
+admitted commands despite configuration-file replacement, and pinned migration
+endpoints. The unwind test intentionally catches its own panic; that diagnostic
+is expected and is not a background teardown panic. Log:
+`.codex/validation/ux-gate-command-configuration.log`.
+
+Source review confirms the normal automatic path allocates a new identity and
+calls the original handler; completed history is not an execution cache. This
+establishes fresh discovery for the tested mark-only inventory. Concurrent
+ownership retains the separate named deployment evidence above; synthetic orphan
+marking does not establish safe reclamation or every legacy reachability layout.
