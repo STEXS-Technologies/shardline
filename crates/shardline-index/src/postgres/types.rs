@@ -95,6 +95,15 @@ impl PostgresRecordLocator {
 }
 
 /// Postgres-compatible implementation of the record-store contract.
+///
+/// This adapter stores metadata; it has no object-store handle and cannot
+/// verify backing content. Creating it from a pool does not acquire operation
+/// ownership. In particular, the generic [`crate::RecordMutation`] methods use
+/// that pool and do not retain a separately held caller connection.
+/// Storage-backed callers must keep their operation's ownership and reference
+/// protection through validation and publication. Use the connection-bound
+/// file, S3 or native publication methods when an existing session owns the
+/// operation. Supplying a connection alone does not establish ownership.
 #[derive(Debug, Clone)]
 pub struct PostgresRecordStore {
     pub(super) pool: PgPool,
