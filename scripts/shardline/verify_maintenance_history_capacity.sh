@@ -12,6 +12,7 @@ export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
 cargo test --locked --release -p shardline-server --all-features --lib \
     task_tracking::tests::full_automatic_metadata_capacity_preserves_inspection_and_cleanup \
     -- --ignored --exact --nocapture > "$fixture/test.log" 2>&1
+if rg -ni 'skipping:|SKIPPED:|panicked at' "$fixture/test.log"; then exit 1; fi
 rg -F '4096-run metadata fixture: full paginated inspection' "$fixture/test.log"
 rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/test.log"
 echo 'PASS: full automatic history capacity preserves pagination, oldest-first retirement, unfinished/corrupt evidence and user payload bytes'
