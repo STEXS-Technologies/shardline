@@ -71,6 +71,10 @@ The existing local benchmark comparison covers concurrency 1, 32 and 128 with
 matching report schema and non-performance counters. A 4,096-entry GC mark-only
 comparison preserves diagnostics larger than 1 MiB. Neither establishes
 distributed performance or safe reclamation for every legacy layout.
+The configured PostgreSQL/local-storage benchmark also preserves workload
+counters and settings at concurrency 1, 32 and 128 after automatic public upload
+ownership. Embedded cancellation releases the GC barrier in its configured
+fixture. These results do not establish remote-storage cost or a production SLO.
 
 See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
 and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)
