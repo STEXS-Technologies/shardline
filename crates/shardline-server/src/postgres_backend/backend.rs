@@ -290,6 +290,10 @@ impl PostgresBackend {
                             );
                             None
                         }
+                        None if crate::upload_intent_recovery::missing_request_key_is_inconclusive(intent) => {
+                            tracing::warn!(intent_id = %intent.intent_id(), "native shard request key is absent; normalized storage may use another key, preserving for validated retry");
+                            None
+                        }
                         None => Some(UploadIntentState::Failed),
                     },
                     Err(_) => Some(UploadIntentState::Failed),

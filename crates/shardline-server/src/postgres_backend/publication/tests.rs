@@ -6,6 +6,116 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_native_upload_owner_cannot_be_recovered_from_intent_bookkeeping() {
+    use shardline_index::{UploadIntentState, UploadIntentStore};
+    let Some(fixture) = PostgresFixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_remote_delete_guard()
+        .await
+        .unwrap();
+    let backend = fixture.postgres();
+    let payload = b"native ownership recovery boundary";
+    let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(payload);
+    backend.upload_xorb(&hash, xorb).await.unwrap();
+    let (shard, file_hash) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
+    let intent_id = format!("shard-{}", blake3::hash(&shard).to_hex());
+    let session = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    session
+        .scope(async {
+            let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                &backend.request_session_identity,
+            )
+            .await
+            .unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **owner.as_mut().unwrap())
+                .await
+                .unwrap();
+            drop(owner);
+            assert!(
+                sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                    .bind(pid)
+                    .fetch_one(&fixture.admin)
+                    .await
+                    .unwrap()
+            );
+            let result = backend
+                .upload_shard_stream(
+                    RequestBodyReader::from_bytes(shard.clone()),
+                    None,
+                    crate::ShardMetadataLimits::default(),
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "lost owner must not publish native metadata"
+            );
+        })
+        .await;
+    session.finish().await;
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Storing
+    );
+    let metadata_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT (SELECT count(*) FROM {}.shardline_file_records) + (SELECT count(*) FROM {}.shardline_dedupe_shards)", fixture.schema, fixture.schema
+    ))).fetch_one(&fixture.admin).await.unwrap();
+    assert_eq!(metadata_count, 0);
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {}.shardline_upload_intents SET created_at = now() - interval '1 minute' WHERE intent_id = $1", fixture.schema
+    ))).bind(&intent_id).execute(&fixture.admin).await.unwrap();
+    backend.reconcile_stuck_upload_intents().await.unwrap();
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Storing
+    );
+    assert!(matches!(
+        backend.read_record(&file_hash, None, None).await,
+        Err(crate::ServerError::NotFound)
+    ));
+    backend
+        .upload_shard_stream(
+            RequestBodyReader::from_bytes(shard),
+            None,
+            crate::ShardMetadataLimits::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Visible
+    );
+    assert!(backend.read_record(&file_hash, None, None).await.is_ok());
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guarded_record_reads_do_not_reenter_the_request_connection() {
     let Some(fixture) = PostgresFixture::new().await else {
         return;
