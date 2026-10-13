@@ -1301,3 +1301,20 @@ Strict test-target Clippy passes. These are the tested default-schema native
 deployment paths; they do not close every narrow-account, legacy-reference,
 work-specific schema or production-scale gap. Production binary source remains
 `894aaf06`, the released comparator is official 1.11.3, and version stays unchanged.
+
+## Captured-output inspection boundary
+
+The existing signed-outcome test now includes actual stdout and stderr chunks,
+each 4 MiB. At exactly 8 MiB combined, inspection reads and verifies both SHA-256
+digests and reports full output verification. A wrong stdout digest fails
+verification. The earlier greater-than-8-MiB cases still exercise the bounded
+inspection path for exit codes 0, 1 and 2, rejecting contradictory outcome
+headers before returning an unverified-stream indication.
+
+The targeted current library test passes in about 0.40 seconds, with one
+executed test and no ignored tests. Log:
+`.codex/validation/ux-output-inspection-boundary.log`. The admin API guide now
+names the exact threshold and distinguishes optional isolated-runner captures
+from ordinary live CLI output and diagnostic exports. The report endpoint's
+separate 64 KiB read bound was already documented. This adds boundary evidence
+and documentation; no runtime threshold, command behavior or version changes.

@@ -854,6 +854,33 @@ mod tests {
                 Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData
             ));
         }
+        // At the exact inspection boundary, both streams must be read and
+        // verified. The bounded shortcut applies only above the combined cap.
+        use sha2::{Digest as _, Sha256};
+        let stream = vec![b'x'; 4 * 1024 * 1024];
+        let stream_digest = Digest(Sha256::digest(&stream).into());
+        for name in ["stdout", "stderr"] {
+            store
+                .publish(&format!("runs/{id}/streams/{name}/0000000000"), &stream)
+                .unwrap();
+        }
+        let mut manifest = serde_json::json!({
+            "schema": 1,
+            "exit_code": 0,
+            "stdout": {"digest": stream_digest, "bytes": stream.len()},
+            "stderr": {"digest": stream_digest, "bytes": stream.len()},
+        });
+        let report = format!("maintenance.success: true\n{manifest}");
+        assert_eq!(
+            store.verify_streams(&identity, report.as_bytes()).unwrap(),
+            (true, true)
+        );
+        manifest["stdout"]["digest"] = serde_json::to_value(Digest::of(b"wrong digest")).unwrap();
+        let corrupted = format!("maintenance.success: true\n{manifest}");
+        assert!(matches!(
+            store.verify_streams(&identity, corrupted.as_bytes()),
+            Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData
+        ));
         drop(receipt);
     }
 }
