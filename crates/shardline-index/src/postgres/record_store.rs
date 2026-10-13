@@ -119,6 +119,12 @@ impl super::PostgresRecordStore {
     }
     /// Inserts or replaces an immutable version record.
     ///
+    /// This writes metadata through the store's pool. It does not check backing
+    /// bytes, preserve a caller-owned connection or publish the latest-file
+    /// alias. Storage-backed callers must retain their operation's protection
+    /// while validating content. Use `commit_file_version_metadata_on_connection`
+    /// when an existing ownership session must publish a version and latest alias.
+    ///
     /// # Errors
     ///
     /// Returns [`PostgresMetadataStoreError`] when the row cannot be written.
