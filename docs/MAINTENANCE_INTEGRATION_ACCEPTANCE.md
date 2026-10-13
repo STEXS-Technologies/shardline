@@ -90,6 +90,9 @@ The following still need implementation or stronger evidence before merge:
   A separate real-PostgreSQL native upload test now interrupts each of the six
   coordinator durability boundaries, checks actual file visibility through
   reconciliation, and succeeds with a fresh validated retry.
+  It now uses the original request-owned session and terminates that session
+  at each boundary. Stale retries fail, including after a visible intent;
+  existing metadata visibility remains unchanged before fresh recovery.
   Transitions after other mutation phases still need checks before extending
   the stale-writer guarantee to all upload intent state.
   Atomic event recording alone does not prove

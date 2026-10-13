@@ -3491,3 +3491,21 @@ scenarios; all 23 have passing results, with no selected runtime skips or panics
 This covers the named startup, ownership, interruption, remote-delete, backend
 loss and rollout/rollback faults after prefix pruning. It does not certify every
 deployment or close the broader compatibility, phase and cost gates.
+
+### Request ownership loss at all native upload durability boundaries
+
+The existing six-boundary native upload recovery test now performs its initial
+upload inside a request-owned PostgreSQL session. After the typed interruption,
+it checks the expected intent state and actual metadata visibility, terminates
+that original database session, and retries in the same request context.
+Every stale retry fails, including the already-visible intent case; existing
+metadata visibility remains unchanged. Reconciliation and a fresh validated
+upload then succeed with the original assertions intact.
+
+The configured publication suite passes all nine tests in 3.27 seconds without
+runtime skips: `/tmp/shardline-batched-deletion.7jXffA/test.log`.
+Strict server library/test Clippy, formatting and diff checks pass.
+This strengthens the covered native publication boundary. Upload intent/event
+transitions still use their separate index transaction; the test does not claim
+that every progress update is fenced by the request session or certify current
+storage health from a visible intent. Runtime code and version are unchanged.
