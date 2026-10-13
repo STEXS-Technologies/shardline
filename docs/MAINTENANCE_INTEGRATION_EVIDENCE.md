@@ -3767,3 +3767,18 @@ cases pass on the development executable in 10.02 seconds
 active-GC guidance, follow-up inspection and a possible backlog. Strict
 server/CLI library and test Clippy, formatting and diff checks pass; the AST
 graph is refreshed. Remaining merge gates remain open.
+
+### Embedded router lifetime and housekeeping
+
+A local library test constructs the actual server router with its housekeeping
+guard, retains a clone and drops the original. The clone serves `/readyz` with
+200 and keeps housekeeping enabled. Dropping the last router sets the stop
+flag; subsequent housekeeping publication is rejected without creating the
+artifact. Previously saved evidence remains readable and ordinary application
+publication still succeeds.
+
+`app::e2e_tests::embedded_router_clones_keep_housekeeping_alive_until_the_last_router_drops`
+passes in 0.02 seconds. This verifies the router's actual guard ownership rather
+than only constructing guards directly. It does not prove cancellation of
+active storage I/O or every embedded deployment layout, and production behavior
+is unchanged. Strict server library/test Clippy, formatting and diff checks pass.
