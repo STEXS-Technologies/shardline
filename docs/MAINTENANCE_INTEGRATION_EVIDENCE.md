@@ -2979,3 +2979,26 @@ The `PostgresRecordStore` type documentation now states the contract for generic
 trait methods as well as the named publication APIs. This source audit does not
 extend physical-content guarantees to arbitrary library callers or hidden
 legacy references. No signature, runtime behavior or version changed.
+
+## Deployment drills after retention traversal changes
+
+Optimized binary
+`32f9b631dbea3d80b5999a28a42bf0dff18468ac3b9ae3d79b6328f214f2473e`
+passes the complete 23-test deployment set across two complementary runs:
+
+- 11 maintenance/deployment drills pass in 143.531 seconds. The log is
+  `/tmp/shardline-maintenance-deployments.rVnFbk/test.log`. These cover startup,
+  restricted commands, shared ownership, replacement, remote-delete faults,
+  and released/current rollout and rollback.
+- The other 12 protocol/backend-fault drills pass in 135.770 seconds. The log
+  is `/tmp/shardline-protocol-faults.xRmNxO/test.log`. These cover backend loss,
+  network partition and packet faults, verifier clock skew, workload burst,
+  and LFS/OCI/S3 recovery. The clock fixture uses library SHA-256
+  `ad7333813b54202579a4960b3635b67691f4810e9847a11607ef31b3445a8c8f`.
+
+Each verifier rejects runtime skip messages and background-task panics and
+requires its exact selected count. Nextest exclusions are the complementary
+tests, not missing results: all 23 pass with the same optimized binary bytes.
+These are disposable deployment fixtures, not proof of current production
+health, exactly-once effects, or every deployment layout. The version remains
+1.11.3; the broader acceptance gates remain open.
