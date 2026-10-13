@@ -2276,6 +2276,12 @@ impl UploadIntentStore for super::PostgresIndexStore {
         }
         event.validate_for_transition(intent_id, current.state(), new_state)?;
         let mut transaction = self.pool.begin().await?;
+        let previous = super::upload_recovery_guard::enter(
+            &mut transaction,
+            intent_id,
+            &event.operation.repository,
+        )
+        .await?;
         let rows = sqlx::query(
             "UPDATE shardline_upload_intents SET state = $1, updated_at = now()
              WHERE intent_id = $2 AND state = $3",
@@ -2290,6 +2296,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
             return Ok(false);
         }
         insert_reliability_event(transaction.as_mut(), event).await?;
+        super::upload_recovery_guard::leave(&mut transaction, previous.as_deref()).await?;
         transaction.commit().await?;
         Ok(true)
     }

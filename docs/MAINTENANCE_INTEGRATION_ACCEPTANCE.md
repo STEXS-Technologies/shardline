@@ -1,11 +1,13 @@
 # Maintenance integration: merge checklist
 
 **Not ready to merge.** The normal process model is implemented, but the full
-rollback audit has found a concrete defect: readiness-based testing of released
-1.11.3 turns a new scoped Created file intent into Visible when an unrelated
-default-scope file shares its name. The earlier listener-based pass stopped the
-server too early and does not establish rollback safety. This defect must be
-fixed and verified across the affected stores and upload states before merge.
+rollback audit remains open. Readiness-based testing found that released 1.11.3
+could falsely complete a new scoped file intent from a same-name default file.
+The compatibility guard now preserves all four unfinished states in both scoped
+and default namespaces during actual released-server startup on PostgreSQL and
+SQLite. Legacy control records still recover, and current recovery remains
+functional. The earlier listener-based pass is superseded: it stopped too early.
+Remaining deployment combinations and large-file startup cost still need review.
 
 The full compatibility and failure audit is still open. The version remains 1.11.3;
 the version bump belongs in a separate PR.

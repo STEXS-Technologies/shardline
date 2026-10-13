@@ -169,14 +169,25 @@ impl PostgresIndexStore {
             &hash,
             next,
         )?;
-        sqlx::query(
+        let previous = super::upload_recovery_guard::enter(
+            &mut transaction,
+            intent_id,
+            &head.operation.repository,
+        )
+        .await?;
+        let rows = sqlx::query(
             "UPDATE shardline_upload_intents SET state=$1, updated_at=now() WHERE intent_id=$2",
         )
         .bind(next.as_str())
         .bind(intent_id)
         .execute(&mut *transaction)
         .await?;
+        if rows.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
         insert_reliability_event(&mut transaction, event).await?;
+        super::upload_recovery_guard::leave(&mut transaction, previous.as_deref()).await?;
         transaction.commit().await?;
         Ok(true)
     }
@@ -187,6 +198,92 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::{UploadIntent, UploadIntentStore};
+
+    #[tokio::test]
+    async fn upload_writer_marker_does_not_escape_a_nested_transaction() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            eprintln!("SKIPPED: nested upload writer marker requires PostgreSQL");
+            return;
+        };
+        let index = PostgresIndexStore::new(pool.clone());
+        let intent = UploadIntent::new(
+            "file-v2-nested-marker".to_owned(),
+            "record/nested-marker".to_owned(),
+            "00".repeat(32),
+            0,
+        );
+        index.create_intent(&intent).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let mut outer = connection.begin().await.unwrap();
+        sqlx::query("SELECT set_config('shardline.upload_intent_writer_v2', 'outer-marker', true)")
+            .execute(&mut *outer)
+            .await
+            .unwrap();
+        let event = shardline_reliability::upload_lifecycle_event(
+            "shardline",
+            "default",
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            UploadIntentState::Created,
+            UploadIntentState::Storing,
+        )
+        .unwrap();
+        assert!(
+            PostgresIndexStore::transition_upload_intent_with_event_on_connection(
+                &mut outer,
+                intent.intent_id(),
+                UploadIntentState::Storing,
+                &event
+            )
+            .await
+            .unwrap()
+        );
+        let restored_marker: String =
+            sqlx::query_scalar("SELECT current_setting('shardline.upload_intent_writer_v2', true)")
+                .fetch_one(&mut *outer)
+                .await
+                .unwrap();
+        assert_eq!(restored_marker, "outer-marker");
+        outer.rollback().await.unwrap();
+        let rolled_back_marker: String = sqlx::query_scalar(
+            "SELECT COALESCE(current_setting('shardline.upload_intent_writer_v2', true), '')",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(rolled_back_marker, "");
+        let updated =
+            sqlx::query("UPDATE shardline_upload_intents SET state='Storing' WHERE intent_id=$1")
+                .bind(intent.intent_id())
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!(updated.rows_affected(), 0);
+        assert_eq!(
+            index
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Created
+        );
+        assert_eq!(
+            index
+                .reliability_events(intent.intent_id())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            index
+                .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+                .await
+                .unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn caller_connection_loss_cannot_commit_an_upload_transition() {

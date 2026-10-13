@@ -11,6 +11,7 @@ mod task_history_scope;
 mod tree_store;
 mod types;
 mod upload_intent_ownership;
+mod upload_recovery_guard;
 
 pub(crate) use index_store::{
     insert_reliability_event, load_postgres_latest_evidence_event,

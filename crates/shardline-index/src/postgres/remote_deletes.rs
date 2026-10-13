@@ -134,6 +134,7 @@ impl PostgresIndexStore {
     /// preserves the migration catalog and existing writer grants. The functions
     /// validate existing permissions and their installed schema with fixed
     /// search paths; the trigger also protects older retention writers.
+    /// New file-intent recovery is guarded against older filename-only recovery.
     /// Installation commits atomically. Runtime writer roles need no DDL rights.
     ///
     /// # Errors
@@ -158,9 +159,10 @@ impl PostgresIndexStore {
         // Expand only tokens from the original template. A schema name may
         // itself contain either token; never expand inserted catalog text.
         let template = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             include_str!("remote_delete_guard.sql"),
-            include_str!("remote_delete_receipts.sql")
+            include_str!("remote_delete_receipts.sql"),
+            include_str!("upload_recovery_guard.sql")
         );
         let sql = template
             .split("@SCHEMA@")
@@ -1164,6 +1166,7 @@ mod tests {
             "shardline_oci_tags",
             "shardline_oci_object_tombstones",
             "shardline_reliability_events",
+            "shardline_upload_intents",
         ] {
             query(sqlx::AssertSqlSafe(format!(
                 "CREATE TABLE {identifier}.{table} (LIKE {table} INCLUDING ALL)"
@@ -1188,6 +1191,30 @@ mod tests {
         let key = ObjectKey::parse("remote-delete/schema-escaping").unwrap();
         let permit = store.begin_remote_delete(&key).await.unwrap();
         assert!(store.finish_remote_delete(&permit).await.unwrap());
+        let intent = crate::UploadIntent::new(
+            "file-v2-schema-escaping".to_owned(),
+            "record/schema-escaping".to_owned(),
+            "00".repeat(32),
+            0,
+        );
+        crate::UploadIntentStore::create_intent(&store, &intent)
+            .await
+            .unwrap();
+        let rows = query("UPDATE shardline_upload_intents SET state='Storing' WHERE intent_id=$1")
+            .bind(intent.intent_id())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.rows_affected(), 0);
+        assert!(
+            crate::UploadIntentStore::transition_intent(
+                &store,
+                intent.intent_id(),
+                crate::UploadIntentState::Storing
+            )
+            .await
+            .unwrap()
+        );
     }
 
     #[tokio::test]
