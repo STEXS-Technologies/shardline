@@ -2853,3 +2853,22 @@ Strict CLI library/test Clippy, formatting and diff checks pass. These changes
 repair verification against the current storage contract; no runtime behavior
 or version changed. They do not close the remaining deployment-layout and
 external-mutation audits.
+
+## S3 publication API authority boundary
+
+The source audit traces server prepared-S3 publication through
+`PostgresBackend::publish_prepared_s3_on_connection`: it opens an outer
+transaction, publishes version/latest/listing metadata on that connection,
+checks newly staged backing content under reference protection when publication
+succeeds, then commits. File and native server publication have corresponding
+connection-bound wrappers. The raw index APIs receive metadata and a connection,
+not an object store; retaining a connection alone does not prove ownership or
+backing-content presence.
+
+`PostgresRecordStore::publish_s3_object_on_connection` now documents that the
+caller supplies ownership/reference protection and storage validation. Its
+optional resumable completion fence checks that session's completion claim; it
+does not replace the other checks. The existing file-version and native APIs
+already state their equivalent boundary. This is an API-contract clarification,
+not a new claim that every lower-level library caller is storage-protected.
+No signature, runtime behavior or version changed.

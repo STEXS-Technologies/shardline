@@ -182,7 +182,13 @@ impl super::PostgresRecordStore {
     }
 
     /// Atomically publishes an S3 record version, its latest alias, and the
-    /// listing row through a lock-owning Postgres connection.
+    /// listing row through the caller's Postgres connection.
+    ///
+    /// This method publishes metadata only. It does not acquire the caller's
+    /// operation ownership or inspect object storage. The caller must retain
+    /// its ownership/reference protection and validate backing content through
+    /// the commit. A supplied completion fence additionally checks the resumable
+    /// session; it does not replace those storage and ownership checks.
     ///
     /// # Errors
     ///
