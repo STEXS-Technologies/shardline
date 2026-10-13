@@ -40,7 +40,7 @@ pub(super) fn run(
         Err(error) => {
             // Preserve the existing administrative command's availability. No
             // completion is claimed when shared observation cannot initialize.
-            tracing::warn!(run = %id, "maintenance tracking unavailable; running the existing command under its domain barriers; no verified task outcome will be available: {error}");
+            tracing::warn!(run = %id, "maintenance tracking unavailable; the command will still run, but its result will not be confirmed in history. Check command output and logs before retrying: {error}");
             None
         }
     };
@@ -72,7 +72,7 @@ pub(super) fn run(
             Err(error) => {
                 // The original operation already ran exactly once here. Never
                 // repeat it to recover a missing acknowledgement or receipt.
-                tracing::warn!(run = %id, "maintenance completed with exit {exit_code}, but shared completion is unconfirmed; inspect effects before retrying: {error}");
+                tracing::warn!(run = %id, "maintenance finished with exit {exit_code}, but its result was not confirmed in history. Check command logs and affected data before retrying: {error}");
                 false
             }
         }
