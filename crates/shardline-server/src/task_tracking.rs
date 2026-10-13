@@ -10,6 +10,8 @@ pub(crate) mod embedded;
 pub use embedded::EmbeddedTaskTracker;
 mod owner;
 pub use owner::TaskOwner;
+mod admission;
+use admission::{AUTOMATIC_HISTORY_CAPACITY, automatic_publication_result};
 mod evidence_reader;
 mod history_observation;
 mod history_scope_binding;
@@ -244,7 +246,16 @@ impl TaskEvidenceStore {
                 if self.read(suffix, u64::try_from(bytes.len())?)?.as_deref() != Some(bytes) {
                     return Err(ServerError::InvalidContentHash);
                 }
-                return Ok(());
+                if !self.metadata_only_publication || !suffix.starts_with("manifests/") {
+                    return Ok(());
+                }
+            }
+            if self.metadata_only_publication {
+                return automatic_publication_result(metadata.publish_bounded(
+                    key.as_str(),
+                    bytes,
+                    AUTOMATIC_HISTORY_CAPACITY,
+                )?);
             }
             return metadata.publish(key.as_str(), bytes);
         }
@@ -258,7 +269,16 @@ impl TaskEvidenceStore {
                         "task evidence publication conflict",
                     )));
                 }
-                return Ok(());
+                if !self.metadata_only_publication || !suffix.starts_with("manifests/") {
+                    return Ok(());
+                }
+            }
+            if self.metadata_only_publication {
+                return automatic_publication_result(metadata.publish_task_artifact_bounded(
+                    key.as_str(),
+                    bytes,
+                    AUTOMATIC_HISTORY_CAPACITY,
+                )?);
             }
             metadata.publish_task_artifact(key.as_str(), bytes)?;
             return Ok(());

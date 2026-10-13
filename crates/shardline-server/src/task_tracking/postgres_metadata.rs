@@ -250,6 +250,26 @@ impl PostgresTaskMetadata {
         })
     }
 
+    pub(super) fn publish_bounded(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        maximum_runs: u64,
+    ) -> Result<bool, ServerError> {
+        self.run(async {
+            let mut connection = self.connection().await?;
+            let result = PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+                &mut connection,
+                key,
+                bytes,
+                maximum_runs,
+            )
+            .await
+            .map_err(ServerError::from);
+            self.finish(connection, result).await
+        })
+    }
+
     pub(super) fn read(
         &self,
         key: &str,

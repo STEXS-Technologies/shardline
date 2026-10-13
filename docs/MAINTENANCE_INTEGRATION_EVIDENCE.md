@@ -11,6 +11,34 @@ commands. Earlier observations describe their tested revision; later notes recor
 subsequent fixes. They are not a substitute for the current checklist or proof of
 untested deployments.
 
+## Automatic metadata admission
+
+Automatic metadata publication now admits at most 4,096 retained histories per
+SQLite database or PostgreSQL schema. Retiring markers conservatively consume
+admission capacity. SQLite serializes admission in its immediate transaction;
+PostgreSQL serializes it with a schema-scoped transaction advisory lock and
+requires READ COMMITTED without changing caller isolation. Identical existing
+publications and later artifacts for admitted runs remain available at capacity.
+New artifacts require their manifest and are limited to 64 KiB. The original
+unrestricted primitives remain available for explicit legacy imports.
+
+Seven SQLite artifact tests passed, including competing publishers for one slot,
+exact retries, conflicts, orphan rejection, body limits and legacy publication.
+All 14 configured PostgreSQL metadata tests passed in 23.12 seconds, including
+concurrent final-slot admission and rejection inside a caller-owned repeatable-read
+transaction without changing its isolation. Five automatic-maintenance tests
+passed in 38.60 seconds. The new actual rebuild-handler fixture filled metadata
+with 4,096 unresolved manifests and made private tracking unavailable: the
+command succeeded, retained every historical byte, added no orphan records and
+did not claim verified completion. Shared cleanup now runs after application
+work even when receipt admission failed, preventing that failure from starving
+verified retention. Admission policy uses the conventional `task_tracking::admission`
+module; no `#[path]` attributes occur under `crates/`.
+
+These checks cover automatic logical admission, not physical database disk
+usage, all explicit library callers, all legacy binaries or total inspection
+cost. The integration remains subject to the full acceptance checklist.
+
 ## Private tracking admission
 
 The optimized all-feature binary built from `86c807e1` passed all 11 selected

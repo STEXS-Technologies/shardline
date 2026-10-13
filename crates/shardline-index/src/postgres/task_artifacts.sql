@@ -78,6 +78,56 @@ BEGIN
 END;
 $publish$;
 
+-- Automatic publication has an admission budget. The original primitive remains
+-- available for immutable legacy imports; no runtime table grant is added.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_task_artifact_publish_bounded_v1(
+    index_schema TEXT, artifact TEXT, body BYTEA, maximum_runs BIGINT
+) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+AS $bounded_publish$
+DECLARE identical BOOLEAN; category TEXT; run_id TEXT; retained BIGINT;
+BEGIN
+    PERFORM shardline_task_artifact_access_v1(index_schema, 'publish');
+    IF maximum_runs IS NULL OR maximum_runs < 0 OR artifact IS NULL OR body IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='invalid automatic task evidence publication';
+    END IF;
+    -- A pre-existing caller snapshot cannot safely count concurrent admissions.
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION USING ERRCODE='SLD04', MESSAGE='automatic history admission requires read committed isolation';
+    END IF;
+    PERFORM pg_advisory_xact_lock(1397508169, (SELECT (oid::BIGINT-2147483648)::INT FROM pg_namespace WHERE nspname=index_schema));
+    EXECUTE format('SELECT payload=$2 FROM %I.shardline_task_artifacts_v1 WHERE artifact_key=$1', index_schema)
+        INTO identical USING artifact,body;
+    IF identical IS NOT NULL THEN
+        PERFORM shardline_task_artifact_publish_v1(index_schema,artifact,body);
+        RETURN TRUE;
+    END IF;
+    IF octet_length(body)>65536 THEN RETURN FALSE; END IF;
+    IF left(artifact,20)<>'_shardline_tasks/v1/' THEN
+        RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='invalid automatic task evidence key';
+    END IF;
+    category := split_part(substr(artifact,21),'/',1);
+    run_id := split_part(substr(artifact,21),'/',2);
+    IF category NOT IN ('manifests','retiring','scope-bindings','runs') OR run_id !~ '^[A-Za-z0-9_-]{1,128}$'
+       OR (category<>'runs' AND substr(artifact,21)<>category||'/'||run_id) THEN
+        RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='invalid automatic task evidence key';
+    END IF;
+    IF category='manifests' THEN
+        EXECUTE format('SELECT count(*) FROM (SELECT artifact_key FROM %I.shardline_task_artifacts_v1
+            WHERE (artifact_key >= ''_shardline_tasks/v1/manifests/'' AND artifact_key < ''_shardline_tasks/v1/manifests0'')
+               OR (artifact_key >= ''_shardline_tasks/v1/retiring/'' AND artifact_key < ''_shardline_tasks/v1/retiring0'')
+            LIMIT $1) bounded', index_schema) INTO retained USING maximum_runs;
+        IF retained>=maximum_runs THEN RETURN FALSE; END IF;
+    ELSE
+        EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I.shardline_task_artifacts_v1 WHERE artifact_key=$1)',index_schema)
+            INTO identical USING '_shardline_tasks/v1/manifests/'||run_id;
+        IF NOT identical THEN RETURN FALSE; END IF;
+    END IF;
+    PERFORM shardline_task_artifact_publish_v1(index_schema,artifact,body);
+    RETURN TRUE;
+END;
+$bounded_publish$;
+
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_task_artifact_read_v1(
     index_schema TEXT, artifact TEXT, maximum_bytes BIGINT
 ) RETURNS TABLE(byte_length BIGINT, body BYTEA) LANGUAGE plpgsql SECURITY DEFINER
@@ -145,6 +195,7 @@ $delete$;
 
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_access_v1(TEXT,TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_publish_v1(TEXT,TEXT,BYTEA) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_publish_bounded_v1(TEXT,TEXT,BYTEA,BIGINT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_read_v1(TEXT,TEXT,BIGINT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_page_v1(TEXT,TEXT,TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_delete_v1(TEXT,TEXT) TO PUBLIC;

@@ -79,6 +79,22 @@ pub(super) fn run(
     });
     if let Some(receipt) = &receipt {
         super::evidence::retire_finished_history(&receipt.store, receipt.identity.deployment);
+    } else if !operation.read_only() {
+        // Admission failure must not starve verified retention at capacity.
+        // Housekeeping follows application work and cannot alter its result.
+        let housekeeping = (|| -> Result<()> {
+            let export_config = super::publication_config(operation, config)?;
+            let store = super::evidence::store(operation, &export_config, None)?;
+            let deployment =
+                shardline_server::task_tracking::deployment_fingerprint(&export_config)?;
+            super::evidence::retire_finished_history(&store, deployment);
+            Ok(())
+        })();
+        if let Err(error) = housekeeping {
+            tracing::warn!(
+                "maintenance history housekeeping unavailable; original command result is preserved: {error}"
+            );
+        }
     }
     super::CommandOutput {
         text: String::new(),

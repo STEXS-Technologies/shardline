@@ -8,6 +8,58 @@ use shardline_server::{
 use std::num::NonZeroUsize;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn full_shared_history_preserves_command_status_without_orphan_records() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join(".shardline-maintenance"), b"operator file").unwrap();
+    let metadata = shardline_index::LocalIndexStore::new(root.path().to_owned()).unwrap();
+    for id in 0..4096 {
+        metadata
+            .publish_task_artifact(
+                &format!("_shardline_tasks/v1/manifests/{id:064x}"),
+                b"unresolved historical bytes",
+            )
+            .unwrap();
+    }
+    let work_root = root.path().to_owned();
+    let output = tokio::task::spawn_blocking(move || {
+        let command = CliCommand::IndexRebuild {
+            root: Some(work_root),
+        };
+        let prepared = prepare(&command).unwrap().unwrap();
+        run(
+            &prepared,
+            vec![OsString::from("shardline"), OsString::from("index-rebuild")],
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(output.success);
+    assert_eq!(output.exit_code, Some(0));
+    assert!(!output.evidence_published);
+    assert_eq!(
+        std::fs::read(root.path().join(".shardline-maintenance")).unwrap(),
+        b"operator file"
+    );
+    let mut retained = 0;
+    metadata
+        .visit_task_artifacts::<shardline_index::LocalIndexStoreError, _>(
+            "_shardline_tasks/v1/",
+            |key, _length| {
+                assert!(key.starts_with("_shardline_tasks/v1/manifests/"));
+                assert_eq!(
+                    metadata.read_task_artifact(key, 128)?.unwrap(),
+                    b"unresolved historical bytes"
+                );
+                retained += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(retained, 4096);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn full_private_archive_runs_fresh_work_with_shared_history_and_preserves_evidence() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join(".shardline-maintenance");
