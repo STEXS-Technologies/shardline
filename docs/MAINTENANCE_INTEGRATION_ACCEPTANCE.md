@@ -109,7 +109,10 @@ The following still need implementation or stronger evidence before merge:
   growth are not fully established. Automatic private-workspace admission is
   limited to 4,096 slots, preserving evidence and falling back to shared history;
   active private workspaces and retired scratch now share that limit. Shared
-  metadata remains outside it; whole-operation cost and broader scaling remain open.
+  metadata has its own 4,096-run automatic-admission budget, with new artifacts
+  limited to 64 KiB. Existing evidence and explicit legacy imports remain
+  unrestricted. These are logical admission limits, not physical disk limits;
+  whole-operation cost and broader scaling remain open.
   Metadata fixtures with 132 and 1,026 runs
   drain completed history in batches while retaining unfinished and corrupt history, but
   retention and legacy inspection still walk the inventory. Metadata inspection

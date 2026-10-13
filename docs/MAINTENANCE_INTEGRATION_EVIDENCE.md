@@ -11,6 +11,24 @@ commands. Earlier observations describe their tested revision; later notes recor
 subsequent fixes. They are not a substitute for the current checklist or proof of
 untested deployments.
 
+## Recording capacity in the admin response
+
+The maintenance collection now reports full automatic history through its
+existing `history_notice` field. A bounded key count reads no artifact bodies
+and reserves no admission slot; publication still performs the atomic check.
+Capacity inspection uses the actual metadata target and existing read grants.
+Failures return a recording-availability notice without replacing an otherwise
+valid history response or implying that the server is unready.
+
+All 14 configured PostgreSQL metadata tests passed in 22.64 seconds. The actual
+authenticated router fixture filled history to 4,096 manifests, observed the
+full-history notice, and kept `/api/v1/status` successful. Legacy, RLS, routing,
+retention and concurrent-admission regressions also passed. Seven SQLite artifact
+tests passed, including absent-table inspection without DDL and full/free capacity
+observations. Strict all-feature, all-target CLI Clippy passed. The operator
+guide now leads with unchanged commands and explains warnings, results, retryable
+writes and the upgrade workflow without dependency internals.
+
 ## Automatic metadata admission
 
 Automatic metadata publication now admits at most 4,096 retained histories per

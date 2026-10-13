@@ -27,47 +27,25 @@ Upgraded Postgres deployments share history through their existing database.
 Another node using the same database, schema and storage can inspect it.
 Local deployments save history in their existing SQLite metadata.
 
-The production benefits are:
-
-- Postgres provider callbacks save the delivery ID and repository changes
-  together, so retrying a successful delivery does not repeat those changes.
-- Native OCI and S3 uploads reject publication after losing database ownership.
-  An old process cannot use a replacement connection to finish that publication.
-- Retention holds and native OCI/S3 publications reject writes to an object while
-  an earlier remote delete is unresolved. Other objects remain available.
-- Covered file metadata and chunk mappings also reject references to an object
-  with a pending delete. A rejected publication preserves its previous metadata.
-
-These are protections for the tested operations. Other library write paths,
-older GC binaries and references hidden in legacy payloads still have open checks.
+In production, covered uploads and metadata writes reject a stale database
+owner. They also protect an object while an earlier remote delete is unresolved.
+Postgres provider callbacks record delivery IDs together with their changes,
+so retrying a successful delivery does not repeat those changes. See the
+[acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) for coverage and limits.
 
 If optional history cannot be saved, CLI tracking warns on stderr and preserves
 the command's output and exit status. Server warnings use your existing logging
 setup. Shardline never repeats work to repair history or claims verified
-completion from a missing receipt. Later maintenance can
-retry temporary-file cleanup without repeating completed work.
+completion from a missing receipt.
 
-Ordinary maintenance cleans old history after the requested work and its result
-recording. A large history archive can still delay the command's final exit.
-
-Ordinary maintenance admits up to 4,096 retained private workspaces, including completed
-scratch awaiting deletion. At capacity, ordinary maintenance warns and uses
-shared metadata history when available. It preserves retained files and still
-runs the requested command. Verified exports and cleanup continue after work
-to free space.
-
-Automatic metadata history also admits up to 4,096 retained runs per SQLite
-database or Postgres schema. Cleanup markers conservatively count toward that
-capacity. When full, Shardline keeps existing evidence and runs your command;
-it warns that a new verified history entry could not be recorded. Already
-admitted runs can still record their outcome. Verified cleanup continues after
-work, even if recording the new run was refused. No manual history deletion is
-required. New automatic artifacts are limited to 64 KiB; existing evidence and
-explicit legacy imports keep their original publication behavior.
-
-These limits bound automatic admission, not database disk usage or history
-created by older binaries. Total inspection cost and remaining storage cases
-are still part of the open acceptance audit.
+Automatic history has a 4,096-run budget per metadata database or schema and a
+separate 4,096-workspace budget for private scratch, including cleanup awaiting
+deletion. When full, Shardline preserves existing evidence and still runs your
+command; it warns if the new run cannot be recorded. Already admitted runs can
+finish recording. Cleanup runs after work, including when recording failed.
+Unfinished and corrupt evidence is retained. New automatic artifacts are limited
+to 64 KiB; older evidence and explicit legacy imports remain unchanged. These
+limits do not bound physical database disk use or old binaries' history.
 
 ## Handle a retryable write
 
@@ -78,28 +56,19 @@ write to that object returns HTTP 503 with `Retry-After: 1`:
 object has an unresolved remote delete; retry after reconciliation
 ```
 
-Other objects remain available. The retry interval does not promise recovery
-in one second, and repeating the write does not clear the block.
-
-Check the original GC process and logs. If GC saved a successful delete reply,
+Other objects remain available. Check the original GC process and logs, then
 run ordinary repair with the same database and storage configuration:
 
 ```bash
 shardline repair
 ```
 
-Repair verifies saved replies without sending another user-object delete or
-resuming the failed process. Each invocation checks up to 64 replies and advances
-through the backlog; your next sweep can also recover them. Missing or invalid
-replies leave the object blocked for investigation. Object absence cannot safely
-clear it.
-
-Clearing a delete block does not mark the earlier GC run completed. If its
-outcome could not be saved during a database outage, inspect the original logs;
-repair does not invent a recorded result for it.
-
-Saving a successful reply adds a receipt write and cleanup request in your
-existing object storage. This can increase GC time. No recovery worker is needed.
+Repair verifies up to 64 saved successful delete replies per run, without
+sending another user-object delete. Your next sweep can also recover them.
+Missing or invalid replies leave the object blocked for investigation; absence
+alone cannot clear it. Repair does not mark an interrupted GC run completed.
+`Retry-After: 1` suggests when to retry, not when recovery will finish.
+Saving replies adds receipt I/O to GC, using the existing storage and process.
 
 ## Check a result
 
@@ -119,27 +88,25 @@ A completed result describes that run. Investigate failed or interrupted work
 before repeating mutations; treat corrupt history as untrusted. Older and
 interrupted jobs may have no saved report. CLI diagnostics remain available.
 Each history entry includes `next_step` guidance. `history_notice` and
-`inspection_notice` explain when inspection is unavailable. An empty list then
+`inspection_notice` explain when inspection is unavailable. `history_notice`
+also warns when retained history is full or recording availability could not be
+checked. That warning does not change server readiness. An empty list then
 does not prove that no work ran or no deletes are pending.
 
-History is not a permanent audit archive. Startup and ordinary maintenance can
-remove verified finished runs created more than 30 days ago, up to 64 per invocation.
-Interrupted and corrupt evidence is retained for investigation and can keep
-growing; monitor metadata storage. An old run disappearing is not evidence
-that it never ran. Save reports separately if you need longer retention.
-An upgraded Postgres node can clean up verified shared metadata history after
-a database login change. Legacy object-based history keeps its original
-configuration restriction.
+Verified finished history expires after 30 days; each startup or maintenance
+invocation can remove up to 64 old runs. Interrupted and corrupt history stays
+for investigation. Save reports separately if you need a permanent audit archive.
+Large or legacy archives can still slow inspection and final command cleanup.
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.
 
 ## Upgrade using the existing workflow
 
-The usual owner-run `shardline db migrate up` installs the optional metadata
-and protection functions, including when no migration entries are pending.
-Installation waits for current writes and maintenance. Runtime accounts need no
-new fence-table grant. See the [database migration guide](DATABASE_MIGRATIONS.md).
+Use the usual owner-run `shardline db migrate up`, then restart upgraded nodes.
+It installs the optional history and protection functions even when no migration
+entries are pending. Runtime accounts need no new grants. See
+[rolling upgrades](ROLLING_UPGRADE.md) for the deployment order and older-GC limits.
 
 New local and upgraded server history stays in metadata, outside user payload
 inventory. Before the owner upgrade, unavailable metadata history causes a
@@ -147,24 +114,15 @@ warning rather than new task objects in payload storage. Existing legacy
 history remains readable. Maintenance moves verified finished legacy history
 in bounded batches; interrupted, corrupt or unrelated history stays in place.
 
-Storage copy keeps its source read-only. Recognized task history and verified
-saved delete replies stay at the source instead of becoming payload objects.
-Unrecognized or damaged legacy objects keep their existing copy behavior.
-Before switching storage endpoints, reconcile pending deletes with the original
-database and object storage. Copying does not settle those deletes.
-Copies to S3-only endpoints keep task history in private temporary storage on
-the command's host, without adding objects or permissions to the payload bucket.
-That history is not available through other nodes and can be removed by
-temporary-directory cleanup. A copy to local storage keeps history in its
-destination's SQLite metadata.
-Different work databases or schemas, some legacy history
-and narrowly privileged accounts still need compatibility work. Older GC,
-remaining write paths, missing delete replies and deployment-scale behavior also
-have open checks. Large histories can make inspection and cleanup slow;
-performance at deployment scale is still under review.
-Released 1.11.3 servers may return a generic error for a pending
-delete. See [the acceptance evidence and remaining gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md)
-before planning a rolling upgrade or rollback.
+Storage copy keeps its source read-only and excludes recognized task history
+from payload inventory. Reconcile pending deletes before switching storage;
+copying does not settle them. S3-only copy history is temporary and host-local;
+local-destination history uses its SQLite metadata. Damaged or unrecognized
+legacy objects retain their existing copy behavior.
+
+Compatibility, remaining write paths and deployment-scale checks are still open.
+Read the [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) before deploying
+this branch. Released nodes may return a generic error for a pending delete.
 
 ## Optional process isolation
 

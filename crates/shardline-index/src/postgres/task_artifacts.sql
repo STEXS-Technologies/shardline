@@ -80,12 +80,31 @@ $publish$;
 
 -- Automatic publication has an admission budget. The original primitive remains
 -- available for immutable legacy imports; no runtime table grant is added.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_task_history_admission_full_v1(
+    index_schema TEXT, maximum_runs BIGINT
+) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+AS $admission_full$
+DECLARE retained BIGINT;
+BEGIN
+    PERFORM shardline_task_artifact_access_v1(index_schema, 'read');
+    IF maximum_runs IS NULL OR maximum_runs < 0 THEN
+        RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='invalid automatic history capacity';
+    END IF;
+    EXECUTE format('SELECT count(*) FROM (SELECT artifact_key FROM %I.shardline_task_artifacts_v1
+        WHERE (artifact_key >= ''_shardline_tasks/v1/manifests/'' AND artifact_key < ''_shardline_tasks/v1/manifests0'')
+           OR (artifact_key >= ''_shardline_tasks/v1/retiring/'' AND artifact_key < ''_shardline_tasks/v1/retiring0'')
+        LIMIT $1) bounded', index_schema) INTO retained USING maximum_runs;
+    RETURN retained>=maximum_runs;
+END;
+$admission_full$;
+
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_task_artifact_publish_bounded_v1(
     index_schema TEXT, artifact TEXT, body BYTEA, maximum_runs BIGINT
 ) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER
 SET search_path TO pg_catalog, @SCHEMA@, pg_temp
 AS $bounded_publish$
-DECLARE identical BOOLEAN; category TEXT; run_id TEXT; retained BIGINT;
+DECLARE identical BOOLEAN; category TEXT; run_id TEXT;
 BEGIN
     PERFORM shardline_task_artifact_access_v1(index_schema, 'publish');
     IF maximum_runs IS NULL OR maximum_runs < 0 OR artifact IS NULL OR body IS NULL THEN
@@ -113,11 +132,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='invalid automatic task evidence key';
     END IF;
     IF category='manifests' THEN
-        EXECUTE format('SELECT count(*) FROM (SELECT artifact_key FROM %I.shardline_task_artifacts_v1
-            WHERE (artifact_key >= ''_shardline_tasks/v1/manifests/'' AND artifact_key < ''_shardline_tasks/v1/manifests0'')
-               OR (artifact_key >= ''_shardline_tasks/v1/retiring/'' AND artifact_key < ''_shardline_tasks/v1/retiring0'')
-            LIMIT $1) bounded', index_schema) INTO retained USING maximum_runs;
-        IF retained>=maximum_runs THEN RETURN FALSE; END IF;
+        IF shardline_task_history_admission_full_v1(index_schema,maximum_runs) THEN RETURN FALSE; END IF;
     ELSE
         EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I.shardline_task_artifacts_v1 WHERE artifact_key=$1)',index_schema)
             INTO identical USING '_shardline_tasks/v1/manifests/'||run_id;
@@ -196,6 +211,7 @@ $delete$;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_access_v1(TEXT,TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_publish_v1(TEXT,TEXT,BYTEA) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_publish_bounded_v1(TEXT,TEXT,BYTEA,BIGINT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_history_admission_full_v1(TEXT,BIGINT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_read_v1(TEXT,TEXT,BIGINT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_page_v1(TEXT,TEXT,TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_task_artifact_delete_v1(TEXT,TEXT) TO PUBLIC;

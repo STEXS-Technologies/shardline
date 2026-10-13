@@ -166,6 +166,32 @@ impl PostgresIndexStore {
         Ok(published)
     }
 
+    /// Observes automatic-history capacity on the caller's actual connection.
+    /// Counts only bounded keys, never artifact bodies. This snapshot grants no
+    /// reservation and does not establish deployment health.
+    /// # Errors
+    /// Returns installation, authorization or database errors.
+    pub async fn task_history_admission_full_on_connection(
+        connection: &mut PgConnection,
+        maximum_runs: u64,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let maximum_runs = i64::try_from(maximum_runs).map_err(|_error| {
+            PostgresMetadataStoreError::IntegerOutOfRange(maximum_runs.to_string())
+        })?;
+        let (mut transaction, schema, timeout) =
+            Self::task_artifact_transaction(connection).await?;
+        let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
+        let full = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT {quoted}.shardline_task_history_admission_full_v1($1,$2)"
+        )))
+        .bind(&schema)
+        .bind(maximum_runs)
+        .fetch_one(&mut *transaction)
+        .await?;
+        Self::finish_task_artifact_transaction(transaction, &timeout).await?;
+        Ok(full)
+    }
+
     /// Reads opaque bytes within the supplied bound on one metadata snapshot.
     /// Absence differs from an oversized body; both avoid unbounded allocation.
     /// Requires existing reliability-read permissions. RLS schemas are rejected.
