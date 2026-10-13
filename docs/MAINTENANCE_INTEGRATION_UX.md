@@ -24,7 +24,8 @@ not start GC.
 The child process lets the optional runner stop or limit its own maintenance
 job. Write safety comes from database ownership checks and delete protection,
 not from giving a worker another PID. Normal operation needs no worker runner.
-If the optional runner stops unexpectedly, inspect its recorded outcome and
+On Linux, the optional runner stops its child when the controller exits or dies.
+If the runner stops unexpectedly, inspect its recorded outcome and
 storage effects before retrying. Stopping a worker cannot undo a remote request
 that storage has already received.
 

@@ -163,6 +163,7 @@ pub(super) fn run_inner(
         return Err("task ID already binds a different request or deployment; use a new ID".into());
     }
     let mut runtime = ProcessTaskRuntime::open(&path, &executable, scope, definition)?;
+    runtime.stop_with_controller();
     if automatic {
         runtime.capture_output();
     }

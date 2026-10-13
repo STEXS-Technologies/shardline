@@ -119,6 +119,9 @@ Tasks have a 30-minute original deadline, 15-minute execution timeouts,
 Restarting a controller does not reset these limits. A reboot expires unfinished
 work; changed requests, targets or executable definitions cannot be substituted.
 
+The optional runner binds its worker to the controller's lifetime: on Linux,
+controller exit or death stops the child. Requests already received by remote
+storage may still finish, so interrupted mutations require inspection.
 Recovery fences surviving workers before deciding what happened. A signed,
 materialized final report can establish completion. Fsck can retry a full scan;
 other interrupted workflows without a verified result stop with unknown effects.

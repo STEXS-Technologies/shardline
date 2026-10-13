@@ -49,11 +49,12 @@ pub struct ProcessTaskRuntime {
     _controller: File,
     children: BTreeMap<TaskGeneration, Child>,
     capture_output: bool,
+    stop_with_controller: bool,
 }
 
 impl Drop for ProcessTaskRuntime {
     fn drop(&mut self) {
-        if self.capture_output {
+        if self.capture_output || self.stop_with_controller {
             let generations: Vec<_> = self.children.keys().copied().collect();
             for generation in generations {
                 if let Err(error) = self.fence(self.scope, generation) {
@@ -65,6 +66,14 @@ impl Drop for ProcessTaskRuntime {
 }
 
 impl ProcessTaskRuntime {
+    /// Stops owned workers when this runtime is dropped or its controller dies.
+    /// Uses the worker's Linux parent-death signal without capturing its output.
+    /// Already issued external effects still require application reconciliation.
+    /// Enable before starting work. The default retains reconstructable workers.
+    pub const fn stop_with_controller(&mut self) {
+        self.stop_with_controller = true;
+    }
+
     /// Captures worker output in private generation-specific files beside the journal.
     /// The caller verifies and streams these files after accepting the signed result.
     pub const fn capture_output(&mut self) {
@@ -214,6 +223,7 @@ impl ProcessTaskRuntime {
             _controller: controller,
             children: BTreeMap::new(),
             capture_output: false,
+            stop_with_controller: false,
         })
     }
 
@@ -291,7 +301,8 @@ impl TaskRuntime for ProcessTaskRuntime {
             definition: self.definition,
             deadline: request.execution_deadline,
             input_schema: request.input_schema,
-            controller_pid: self.capture_output.then(std::process::id),
+            controller_pid: (self.capture_output || self.stop_with_controller)
+                .then(std::process::id),
         };
         let encoded =
             serde_json::to_vec(&authorization).map_err(|_error| TaskPortError::Corrupt)?;

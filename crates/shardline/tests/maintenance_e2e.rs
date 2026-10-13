@@ -977,11 +977,34 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
         Connection::open_with_flags(journal(&state), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok().and_then(|connection|
             connection.query_row("SELECT EXISTS(SELECT 1 FROM penelope_runtime_v1 WHERE pid IS NOT NULL AND acknowledged IS NOT NULL)", [], |row| row.get::<_, bool>(0)).ok()).unwrap_or(false)
     })?;
+    let worker_pid: u32 =
+        Connection::open_with_flags(journal(&state), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+            .query_row("SELECT pid FROM penelope_runtime_v1", [], |row| row.get(0))?;
     let concurrent = command(&state, &root, "index-rebuild").output()?;
     assert!(!concurrent.status.success());
     controller.kill()?;
     let _status = controller.wait()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let worker_stopped = loop {
+        let stopped = match fs::read_to_string(format!("/proc/{worker_pid}/stat")) {
+            Ok(stat) => {
+                stat.rsplit_once(')')
+                    .and_then(|(_, fields)| fields.split_whitespace().next())
+                    == Some("Z")
+            }
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+        if stopped || Instant::now() >= deadline {
+            break stopped;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    // Recovery cleans up a surviving fixture child even if this assertion fails.
     let recovery = command(&state, &root, "index-rebuild").output()?;
+    assert!(
+        worker_stopped,
+        "optional worker survived controller termination"
+    );
     assert!(!recovery.status.success());
     assert!(
         String::from_utf8_lossy(&recovery.stderr).contains("effects remain unknown"),
