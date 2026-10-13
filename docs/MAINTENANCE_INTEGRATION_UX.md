@@ -122,6 +122,9 @@ Use the usual owner-run `shardline db migrate up`, then restart upgraded nodes.
 It installs the optional history and protection functions even when no migration
 entries are pending. Runtime accounts need no new grants. See
 [rolling upgrades](ROLLING_UPGRADE.md) for the deployment order and older-GC limits.
+Pause destructive GC during the rollout and replace its binary before resuming
+your existing schedule. Upgrading servers alone cannot protect deletes performed
+by an old GC binary.
 
 New local and upgraded server history stays in metadata, outside user payload
 inventory. Before the owner upgrade, unavailable metadata history causes a

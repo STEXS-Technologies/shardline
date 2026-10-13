@@ -6,8 +6,10 @@ controlled write maintenance window before that rollout.
 
 Shardline processes are stateless in the request path. The durable boundaries are the
 object-store adapter and the index and record adapters, which are external to the
-process. That makes a live upgrade safe as long as each process is drained, restarted
-on the new version, and confirmed ready before the next process moves.
+process. A live upgrade also requires compatible schemas and write behavior
+between the overlapping versions. Drain each process, restart it on the new
+version, and confirm readiness before replacing the next process; readiness
+alone does not establish mixed-version compatibility.
 
 On Unix, both SIGTERM (the usual container stop signal) and SIGINT start the
 server's graceful connection drain. By default the server waits for active
@@ -42,6 +44,28 @@ can reject an affected write while an earlier remote delete remains unresolved;
 see [maintenance without another service](MAINTENANCE_INTEGRATION_UX.md) for the
 retryable error and recovery steps. Earlier-version upgrades must still follow
 the schema, session, writer-routing, GC and repair restrictions below.
+
+For this integration's upgrade from released 1.11.3:
+
+1. Pause scheduled destructive GC and wait for existing GC commands to finish.
+   Keep normal server traffic available. An older GC binary does not create the
+   new remote-delete markers, so installing the new server cannot protect a
+   delete performed by that binary.
+2. Run the usual owner-run `shardline db migrate up` using the upgraded binary
+   and the same database/schema configuration as the deployment.
+3. Roll the server roles using the drain and readiness checks below. Replace
+   the binaries or images used by existing maintenance jobs as well.
+4. Check pending deletes and investigate interrupted work before resuming the
+   existing destructive GC schedule. Saved successful replies can be recovered
+   by ordinary `shardline repair`; missing replies remain blocked. No extra
+   tracker service or schedule is required.
+
+If server rollback is necessary, pause destructive GC during the rollback and
+keep uncertain deletes for reconciliation. Released servers can report a generic
+error for a protected pending delete. Returning maintenance jobs to an older GC
+binary also returns to its older safety behavior; it does not retain the new
+delete guarantees. This dependency integration adds no migration-ledger entries
+requiring `db migrate down`; do not remove protection state to bypass an error.
 
 The optional Linux `shardline maintenance` runner supplies process isolation for
 deadlines and CPU limits. Its existing jobs keep their original state directory,
