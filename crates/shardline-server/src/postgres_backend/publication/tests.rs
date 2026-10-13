@@ -6,6 +6,115 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_upload_recovery_preserves_each_durable_boundary() {
+    use shardline_cas::{UploadLifecycleBoundary as Boundary, arm_upload_interruption};
+    use shardline_index::{UploadIntentState, UploadIntentStore};
+    for boundary in [
+        Boundary::AfterIntentCreated,
+        Boundary::AfterStoring,
+        Boundary::AfterObjectWork,
+        Boundary::AfterStored,
+        Boundary::AfterMetadataCommitted,
+        Boundary::AfterVisible,
+    ] {
+        let Some(fixture) = PostgresFixture::new().await else {
+            return;
+        };
+        fixture
+            .index()
+            .initialize_remote_delete_guard()
+            .await
+            .unwrap();
+        let backend = fixture.postgres();
+        let payload = format!("native recovery boundary {boundary:?}");
+        let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(payload.as_bytes());
+        backend.upload_xorb(&hash, xorb).await.unwrap();
+        let (shard, file_hash) =
+            crate::test_fixtures::single_file_shard(&[(payload.as_bytes(), &hash)]);
+        let intent_id = format!("shard-{}", blake3::hash(&shard).to_hex());
+        let fault = arm_upload_interruption(intent_id.clone(), boundary);
+        assert!(
+            backend
+                .upload_shard_stream(
+                    RequestBodyReader::from_bytes(shard.clone()),
+                    None,
+                    crate::ShardMetadataLimits::default()
+                )
+                .await
+                .is_err()
+        );
+        drop(fault);
+        let expected = match boundary {
+            Boundary::AfterIntentCreated => UploadIntentState::Created,
+            Boundary::AfterStoring | Boundary::AfterObjectWork => UploadIntentState::Storing,
+            Boundary::AfterStored => UploadIntentState::Stored,
+            Boundary::AfterMetadataCommitted => UploadIntentState::MetadataCommitted,
+            Boundary::AfterVisible => UploadIntentState::Visible,
+        };
+        assert_eq!(
+            fixture
+                .index()
+                .intent_by_id(&intent_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            expected
+        );
+        let published = !matches!(
+            boundary,
+            Boundary::AfterIntentCreated | Boundary::AfterStoring
+        );
+        assert_eq!(
+            backend.read_record(&file_hash, None, None).await.is_ok(),
+            published
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {}.shardline_upload_intents SET created_at = now() - interval '1 minute' WHERE intent_id = $1", fixture.schema)))
+            .bind(&intent_id).execute(&fixture.admin).await.unwrap();
+        backend.reconcile_stuck_upload_intents().await.unwrap();
+        let recovered = fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state();
+        assert_ne!(
+            recovered,
+            UploadIntentState::Failed,
+            "normalization must not poison retry at {boundary:?}"
+        );
+        if !published {
+            assert_ne!(recovered, UploadIntentState::Visible);
+        }
+        assert_eq!(
+            backend.read_record(&file_hash, None, None).await.is_ok(),
+            published
+        );
+        backend
+            .upload_shard_stream(
+                RequestBodyReader::from_bytes(shard),
+                None,
+                crate::ShardMetadataLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .index()
+                .intent_by_id(&intent_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Visible
+        );
+        assert!(backend.read_record(&file_hash, None, None).await.is_ok());
+        fixture.finish().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_native_upload_owner_cannot_be_recovered_from_intent_bookkeeping() {
     use shardline_index::{UploadIntentState, UploadIntentStore};
     let Some(fixture) = PostgresFixture::new().await else {
