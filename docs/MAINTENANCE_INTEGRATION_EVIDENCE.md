@@ -1124,3 +1124,34 @@ Reproduce with
 repository root. It creates and removes its own database container and invokes
 the current library test; existing deployment URLs are not used. Set the normal
 Cargo build directory/profile variables if reusing a validation build.
+
+## Larger local history backlog
+
+The metadata backlog fixture now covers both 130 and 1,024 finished runs, plus
+one unfinished run and one unreadable manifest in each store. It checks complete
+pagination without repeated IDs, page boundaries after a cursor's record is
+deleted, oldest-first cleanup in batches of at most 64, exact preservation of
+unreadable evidence and user payload bytes, and absence of leftover retirement
+markers or task payload objects. An invalid later key still cannot hide earlier
+eligible history.
+
+The first unoptimized run passed both fixtures. The 1,026-run store took about
+15.23 seconds for full paginated inspection and 62.12 seconds across 17 retention
+calls; the 132-run store took about 1.87 and 4.68 seconds respectively. These
+local unoptimized measurements show the cost of inspecting and repeatedly
+scanning this backlog; they do not establish a production latency bound or
+optimized performance. Log: `.codex/validation/ux-larger-history-backlog.log`.
+
+The operator and admin API guides now state the existing retention policy:
+verified finished runs created more than 30 days ago can be cleaned up at
+startup or ordinary maintenance, at most 64 per invocation. Age is measured
+from run creation, not completion. Interrupted and corrupt evidence remains
+available and can accumulate; history is not a permanent audit archive.
+
+The final rerun after checked arithmetic was added to the shared fixture also
+passes both tests: 1,026-run inspection about 14.93 seconds and 17 cleanup calls
+about 60.64 seconds; 132-run inspection about 1.87 seconds and four cleanup calls
+about 4.96 seconds. Log:
+`.codex/validation/ux-larger-history-backlog-verified.log`. Formatting and strict
+all-feature/all-target server Clippy pass. No production retention behavior or
+version was changed.

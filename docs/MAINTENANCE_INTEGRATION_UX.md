@@ -93,6 +93,12 @@ Each history entry includes `next_step` guidance. `history_notice` and
 `inspection_notice` explain when inspection is unavailable. An empty list then
 does not prove that no work ran or no deletes are pending.
 
+History is not a permanent audit archive. Startup and ordinary maintenance can
+remove verified finished runs created more than 30 days ago, up to 64 per invocation.
+Interrupted and corrupt evidence is retained for investigation and can keep
+growing; monitor metadata storage. An old run disappearing is not evidence
+that it never ran. Save reports separately if you need longer retention.
+
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.
 

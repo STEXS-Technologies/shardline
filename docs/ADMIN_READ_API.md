@@ -263,6 +263,12 @@ A failed optional startup job does not by itself mean the server is unhealthy;
 check readiness separately. Tracking warnings in command logs can explain why
 an expected outcome is missing.
 
+Verified finished runs created more than 30 days ago are eligible for automatic cleanup
+at startup and during ordinary maintenance, at most 64 per invocation. History
+is not a permanent audit archive. Unfinished and corrupt evidence is retained
+and can continue to grow; save needed reports separately and monitor metadata
+storage. A missing old run does not prove that no work occurred.
+
 A damaged manifest occupies its own pagination slot instead of hiding healthy
 jobs. Preserve its incident reference and investigate the stored evidence.
 Storage access failures still fail the request; they are not reported as an
