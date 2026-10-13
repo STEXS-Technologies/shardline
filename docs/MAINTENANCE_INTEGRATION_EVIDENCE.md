@@ -2402,3 +2402,20 @@ calls the original handler; completed history is not an execution cache. This
 establishes fresh discovery for the tested mark-only inventory. Concurrent
 ownership retains the separate named deployment evidence above; synthetic orphan
 marking does not establish safe reclamation or every legacy reachability layout.
+
+## PostgreSQL startup across all server roles
+
+A new configured PostgreSQL public-router fixture covers All, API and Transfer
+roles. Before each startup it creates a newly expired LFS session; each role
+removes that session, reports readiness and exposes shared metadata history with
+embedded execution and the current PID. History accumulates three distinct
+completed runs and preserves earlier IDs across role changes. No task payload
+objects are created.
+
+All 16 configured PostgreSQL metadata tests passed in 10.33 seconds, including
+this named fixture, row-policy failures, scope routing and retirement recovery.
+Diagnostics: `/tmp/shardline-batched-deletion.I7sTER/test.log`; verifier output:
+`.codex/validation/ux-postgres-all-role-history.log`.
+This fixture uses PostgreSQL metadata with the existing local object adapter;
+MinIO/native-client and process fixtures provide separate remote-storage evidence.
+It does not establish every backend/frontend/role combination or legacy layout.

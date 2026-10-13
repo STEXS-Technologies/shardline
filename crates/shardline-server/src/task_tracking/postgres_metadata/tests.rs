@@ -1311,6 +1311,101 @@ async fn changed_metadata_identity_never_redirects_evidence_or_falls_back_to_pay
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_postgres_router_role_records_fresh_same_process_startup_history() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let mut previous = std::collections::BTreeSet::new();
+    for (index, role) in [
+        crate::ServerRole::All,
+        crate::ServerRole::Api,
+        crate::ServerRole::Transfer,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let config = fixture
+            .config
+            .clone()
+            .with_server_frontends([crate::ServerFrontend::Lfs])
+            .unwrap()
+            .with_server_role(role)
+            .with_admin_read_token(b"role-history-admin".to_vec())
+            .unwrap();
+        let sessions = config.root_dir().join("tmp/lfs-patch");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let oid = format!("{:064x}", index + 1);
+        let data = sessions.join(&oid);
+        let touched = sessions.join(format!("{oid}.meta"));
+        std::fs::write(&data, b"new expired session for this role").unwrap();
+        std::fs::write(&touched, b"0").unwrap();
+        let app = crate::app::router(config).await.unwrap();
+        assert!(!data.exists());
+        assert!(!touched.exists());
+        for path in ["/api/v1/status", "/api/v1/tasks/maintenance"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("Authorization", "Bearer role-history-admin")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            if path == "/api/v1/status" {
+                assert_eq!(body["server_role"], role.as_str());
+                assert_eq!(body["state"], "ready");
+            } else {
+                assert_eq!(body["supervision"], "embedded");
+                assert_eq!(body["history_grouping"], "shared_metadata");
+                assert!(body["history_notice"].is_null());
+                let tasks = body["tasks"].as_array().unwrap();
+                assert_eq!(tasks.len(), index + 1);
+                let ids: std::collections::BTreeSet<_> = tasks
+                    .iter()
+                    .map(|task| {
+                        assert_eq!(task["operation"], "lfs-startup-session-sweep");
+                        assert_eq!(task["state"], "completed");
+                        assert_eq!(task["execution"], "embedded");
+                        assert_eq!(task["owner"]["pid"], std::process::id());
+                        task["id"].as_str().unwrap().to_owned()
+                    })
+                    .collect();
+                assert!(previous.is_subset(&ids));
+                assert_eq!(ids.len(), index + 1);
+                previous = ids;
+            }
+        }
+        drop(app);
+    }
+    assert!(
+        fixture
+            .backend
+            .object_store()
+            .list_prefix(&ObjectPrefix::parse("_shardline_tasks/v1/").unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn normal_router_publishes_and_serves_authenticated_metadata_history() {
     use axum::{
         body::{Body, to_bytes},
