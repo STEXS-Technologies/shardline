@@ -166,6 +166,11 @@ The following still need implementation or stronger evidence before merge:
   server uses the connection-bound variant with those keys and checks backing
   bytes in its publication transaction. Database reference protection alone
   does not prove storage presence for library callers.
+  The metadata-only API also exists in released 1.11.3: its native commit writes
+  records and mappings in a database transaction without an object-store input.
+  This is an existing guarantee boundary, not evidence that the integration
+  introduced missing-content publication. It still limits the stronger guarantee
+  this branch can promise to library users.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and

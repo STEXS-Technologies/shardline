@@ -2256,3 +2256,20 @@ Both verifiers now reject skip and background panic messages and retain their
 exact expected test-count checks. Shell syntax and diff checks passed.
 These results cover the selected fault scenarios and do not close the broader
 library, legacy-reference or scale gaps in the acceptance checklist.
+
+## Released library publication boundary
+
+Compared the repository's `v1.11.3` source with current
+`crates/shardline-index/src/postgres/record_store.rs`. The released
+`commit_native_shard_metadata` begins a database transaction, writes version
+records, dedupe mappings and latest aliases, and commits. It receives no object
+store and performs no backing-content inspection. The current compatibility
+method retains its signature and adds the explicit-reference implementation;
+the server separately validates backing storage on its ownership connection.
+
+This comparison establishes that metadata-only library publication predates
+the integration. It does not prove that every current caller retains released
+behavior, that legacy physical references are completely discoverable, or that
+arbitrary library publishers receive the server's stronger storage guarantees.
+The API documentation now states these boundaries explicitly. Reproduction:
+`git show v1.11.3:crates/shardline-index/src/postgres/record_store.rs`.
