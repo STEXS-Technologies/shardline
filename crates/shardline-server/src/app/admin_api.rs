@@ -1809,7 +1809,7 @@ mod tests {
         assert_eq!(body["pending_deletes"][0]["state"], "pending");
         assert_eq!(
             body["pending_deletes"][0]["next_step"],
-            "Check the original GC command and logs. Run shardline repair with the same database, schema and storage configuration to recover saved replies. Missing or invalid replies remain blocked; object absence alone cannot clear them."
+            "Check whether the original GC is still running and read its logs. After it stops, run shardline repair with the same configuration to recover saved replies, then inspect shardline history --pending-deletes again. A backlog may need several repair runs. Missing or invalid replies remain blocked; object absence alone cannot clear them."
         );
         let cursor = body["page"]["next_cursor"].as_str().unwrap();
         assert!(cursor.len() < 1024);

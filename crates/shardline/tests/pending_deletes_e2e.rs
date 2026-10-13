@@ -179,6 +179,10 @@ async fn configured_pending_delete_cli_paginates_without_changing_attempts() {
                 .unwrap()
                 .contains("shardline repair")
         );
+        let guidance = attempt["next_step"].as_str().unwrap();
+        assert!(guidance.contains("GC is still running"));
+        assert!(guidance.contains("shardline history --pending-deletes"));
+        assert!(guidance.contains("backlog may need several repair runs"));
         found.push(attempt["object_key"].as_str().unwrap().to_owned());
         after = page["next_after"].as_str().map(str::to_owned);
         if after.is_none() {
