@@ -15,6 +15,8 @@ use admission::{AUTOMATIC_HISTORY_CAPACITY, automatic_publication_result};
 mod evidence_reader;
 mod history_observation;
 mod history_scope_binding;
+mod inventory;
+use inventory::{InventoryError, ScanPurpose};
 pub(crate) mod housekeeping;
 mod postgres_metadata;
 mod relocation;
@@ -397,6 +399,30 @@ impl TaskEvidenceStore {
         &self,
         prefix: &ObjectPrefix,
         after: Option<&str>,
+        visit: F,
+    ) -> Result<(), ServerError>
+    where
+        F: FnMut(&ObjectMetadata) -> Result<ControlFlow<()>, ServerError>,
+    {
+        self.visit_prefix_for(prefix, after, ScanPurpose::Pagination, visit)
+    }
+
+    fn visit_retirement_prefix_until<F>(
+        &self,
+        prefix: &ObjectPrefix,
+        mut visit: F,
+    ) -> Result<(), ServerError>
+    where
+        F: FnMut(&ObjectMetadata) -> Result<ControlFlow<()>, ServerError>,
+    {
+        self.visit_prefix_for(prefix, None, ScanPurpose::Retirement, &mut visit)
+    }
+
+    fn visit_prefix_for<F>(
+        &self,
+        prefix: &ObjectPrefix,
+        after: Option<&str>,
+        purpose: ScanPurpose,
         mut visit: F,
     ) -> Result<(), ServerError>
     where
@@ -420,23 +446,32 @@ impl TaskEvidenceStore {
                         ObjectKey::parse(&key).map_err(|_error| ServerError::InvalidPath)?;
                     after = Some(key);
                     if visit(&ObjectMetadata::new(object_key, length, None))?.is_break() {
+                        if purpose == ScanPurpose::Retirement {
+                            return Ok(());
+                        }
                         break 'pages;
                     }
                 }
             }
         }
         if let Some(metadata) = &self.local_metadata {
+            let mut stopped = false;
             metadata.visit_task_artifacts_until::<ServerError, _>(
                 prefix.as_str(),
                 after,
                 |key, length| {
                     self.check_housekeeping()?;
                     let key = ObjectKey::parse(key).map_err(|_error| ServerError::InvalidPath)?;
-                    visit(&ObjectMetadata::new(key, length, None))
+                    let result = visit(&ObjectMetadata::new(key, length, None))?;
+                    stopped = result.is_break();
+                    Ok(result)
                 },
             )?;
+            if stopped && purpose == ScanPurpose::Retirement {
+                return Ok(());
+            }
         }
-        self.objects.visit_prefix(prefix, |object| {
+        let result = self.objects.visit_prefix(prefix, |object| {
             self.check_housekeeping()?;
             if after.is_some_and(|after| object.key().as_str() <= after) {
                 return Ok(());
@@ -448,13 +483,22 @@ impl TaskEvidenceStore {
             }
             if let Some(metadata) = &self.local_metadata {
                 // Do not allocate evidence while suppressing duplicate inventory.
-                if metadata.contains_task_artifact(object.key().as_str())? {
+                if metadata
+                    .contains_task_artifact(object.key().as_str())
+                    .map_err(ServerError::from)?
+                {
                     return Ok(());
                 }
             }
-            visit(&object).map(|_| ())
-        })?;
-        Ok(())
+            if visit(&object)?.is_break() && purpose == ScanPurpose::Retirement {
+                return Err(InventoryError::Stopped);
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) | Err(InventoryError::Stopped) => Ok(()),
+            Err(InventoryError::Storage(error)) => Err(error),
+        }
     }
 
     fn delete_artifact(&self, key: &ObjectKey) -> Result<(), ServerError> {

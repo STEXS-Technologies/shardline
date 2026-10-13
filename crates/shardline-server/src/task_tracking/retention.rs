@@ -260,7 +260,7 @@ impl TaskEvidenceStore {
                 Ok::<(), ServerError>(())
             };
             let mut keys = Vec::with_capacity(64);
-            self.visit_prefix_until(&run_prefix, None, |metadata| {
+            self.visit_retirement_prefix_until(&run_prefix, |metadata| {
                 if *artifacts_remaining == 0 {
                     deferred = true;
                     return Ok(std::ops::ControlFlow::Break(()));
@@ -278,7 +278,7 @@ impl TaskEvidenceStore {
             })?;
             delete_metadata_batch(&keys)?;
         } else {
-            self.visit_prefix_until(&run_prefix, None, |metadata| {
+            self.visit_retirement_prefix_until(&run_prefix, |metadata| {
                 if *artifacts_remaining == 0 {
                     deferred = true;
                     return Ok(std::ops::ControlFlow::Break(()));

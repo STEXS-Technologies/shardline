@@ -206,13 +206,11 @@ The following still need implementation or stronger evidence before merge:
   Automatic retention now retires at most 256 run-artifact keys per invocation,
   leaving a marker so larger histories continue later. This limits deletion
   work, not inventory latency or active storage-call duration.
-  Source review identifies a specific remaining cost: the shared
-  `visit_prefix_until` visitor honors early stopping for ordered metadata but
-  deliberately continues unordered legacy inventory for history-page selection.
-  Retention uses the same visitor, so after its deletion budget is exhausted it
-  still scans legacy entries and checks duplicate metadata. Retention needs a
-  separate stop-on-budget traversal; history pagination must keep its complete
-  legacy scan to preserve page ordering.
+  Retention now stops both metadata and legacy traversal when its artifact
+  budget is reached. History pagination keeps its full unordered legacy scan
+  to preserve page ordering. This removes work after a retention budget break;
+  selecting eligible histories and reaching that break can still require
+  inventory scans, so it does not establish a whole-operation latency bound.
   An optimized ordinary CLI fixture verifies exact
   256-key progress over two invocations, released output/status and unchanged
   payload bytes. Metadata inspection
