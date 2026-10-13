@@ -4626,3 +4626,29 @@ This establishes the shared metadata receipt's admission/report/acknowledgement
 behavior. It does not replace interruption tests around actual external effects,
 storage-copy phases, controller death or ownerless domain writes. Those remain
 separate requirements in the merge gates.
+
+### Storage copy after destination mutation with result-recording faults
+
+The new ordinary-CLI fixture copies an actual payload, then injects destination
+history failure at either report materialization or final completion record.
+Both cases retain the successful copy status and output, byte-exact destination
+payload, three admitted records and unrelated evidence. The final completion
+record is absent and shared inspection reports `needs_reconciliation`, with
+guidance to inspect affected data and original command logs. Retention preserves
+the unfinished run.
+
+After removing the recording fault, the test adds a new source object and runs
+the read-only `history` command at the destination. The new object remains
+uncopied, demonstrating that inspection does not replay the prior copy merely
+because its receipt is incomplete. These checks use the pinned optimized binary
+with SHA256 `51040330bdc95e78f446d145b26ef5134572c1aa130a9312fbf99f3b4504976d`.
+The focused Nextest scenario passes both cases
+(`/tmp/shardline-storage-copy-postwork-final.log`, 0.176 seconds). Strict CLI
+integration-test Clippy passes
+(`/tmp/shardline-storage-copy-postwork-final-clippy.log`). Test helpers use normal
+Rust modules under `maintenance_support`, without path attributes.
+
+This supplements the existing admission-failure copy fixture. It establishes
+local destination-metadata faults after actual copy effects, not killed-copy
+processes, every remote-provider phase or live-snapshot consistency. The operator
+guide now gives the specific action for a successful copy with missing history.

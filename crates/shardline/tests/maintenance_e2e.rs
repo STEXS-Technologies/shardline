@@ -12,6 +12,7 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+mod maintenance_support;
 
 fn command(state: &Path, root: &Path, operation: &str) -> Command {
     let mut command = Command::new(binary());
