@@ -2011,3 +2011,19 @@ tests passed in 0.40 seconds, with zero ignored tests. Logs:
 `.codex/validation/ux-delete-owner-index-tests.log`. Strict all-target index/server
 Clippy and the AST graph refresh passed. Optimized deployment validation still
 needs to include these session-routing changes.
+
+## Guarded reads avoid ownership-mutex re-entry
+
+The initial session-routing change applied to ordinary record reads as well as
+copy/delete. Review found that a protocol resource guard can already hold the
+request connection's mutex when it performs a read. Ordinary reads now retain
+their existing record-pool path; only the copy/delete preliminary reads use the
+ownership-aware helper. Locator validation is shared by both paths.
+
+A real PostgreSQL regression holds the actual request resource guard and reads
+through the separate record pool, with one connection per pool and a two-second
+deadline. All seven publication tests passed in 0.94 seconds, including that
+test and the copy/delete owner-loss fixture. Log:
+`.codex/validation/ux-guarded-read-tests.log`. Strict all-target server Clippy
+passed. The already-running optimized deployment job uses the previous binary;
+its results cannot establish this adjustment's process-level behavior.
