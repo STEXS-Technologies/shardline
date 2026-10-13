@@ -32,14 +32,20 @@ async fn native_upload_recovery_preserves_each_durable_boundary() {
         let (shard, file_hash) =
             crate::test_fixtures::single_file_shard(&[(payload.as_bytes(), &hash)]);
         let intent_id = format!("shard-{}", blake3::hash(&shard).to_hex());
+        let session = crate::maintenance_barrier::RequestSession::acquire(
+            &backend.gc_barrier_pool,
+            backend.request_session_identity.clone(),
+        )
+        .await
+        .unwrap();
         let fault = arm_upload_interruption(intent_id.clone(), boundary);
         assert!(
-            backend
-                .upload_shard_stream(
+            session
+                .scope(backend.upload_shard_stream(
                     RequestBodyReader::from_bytes(shard.clone()),
                     None,
                     crate::ShardMetadataLimits::default()
-                )
+                ))
                 .await
                 .is_err()
         );
@@ -65,6 +71,43 @@ async fn native_upload_recovery_preserves_each_durable_boundary() {
             boundary,
             Boundary::AfterIntentCreated | Boundary::AfterStoring
         );
+        assert_eq!(
+            backend.read_record(&file_hash, None, None).await.is_ok(),
+            published
+        );
+        session
+            .scope(async {
+                let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                    &backend.request_session_identity,
+                )
+                .await
+                .unwrap();
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut **owner.as_mut().unwrap())
+                    .await
+                    .unwrap();
+                drop(owner);
+                assert!(
+                    sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                        .bind(pid)
+                        .fetch_one(&fixture.admin)
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    backend
+                        .upload_shard_stream(
+                            RequestBodyReader::from_bytes(shard.clone()),
+                            None,
+                            crate::ShardMetadataLimits::default()
+                        )
+                        .await
+                        .is_err(),
+                    "stale retry must revalidate ownership at {boundary:?}"
+                );
+            })
+            .await;
+        session.finish().await;
         assert_eq!(
             backend.read_record(&file_hash, None, None).await.is_ok(),
             published
