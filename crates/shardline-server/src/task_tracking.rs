@@ -12,6 +12,7 @@ mod owner;
 pub use owner::TaskOwner;
 mod history_observation;
 mod history_scope_binding;
+mod manifest_reader;
 mod postgres_metadata;
 mod relocation;
 mod retention;

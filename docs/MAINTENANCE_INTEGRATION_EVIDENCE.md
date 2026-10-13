@@ -73,6 +73,21 @@ accounts and shared retention, not a cross-host failure or current cluster healt
 
 ## Retention batch reads
 
+History inspection now shares retention's bounded manifest reader through the
+conventional `task_tracking::manifest_reader` module. Both metadata backends
+load at most 64 bodies of at most 64 KiB per page. Legacy-only and unordered
+keys retain ordinary reads; conflicting copies and oversized identities retain
+their existing error handling. Public interfaces and evidence formats are unchanged.
+
+The focused reader regression passed across page boundaries, a deleted cursor,
+an oversized body, a conflicting copy, backwards legacy enumeration and a nested
+key. All 11 server metadata tests passed with disposable Postgres configured.
+The 21 existing local task-tracking tests also passed, including both backlog
+fixtures; their database-only checks had no configured database and are not
+additional Postgres evidence. Formatting and strict all-feature, all-target
+server Clippy passed. This reduces repeated manifest reads during inspection;
+it does not bound the complete inventory scan or unresolved-history growth.
+
 After both batching changes, the optimized all-feature binary built from
 `ca627d23` passed all 11 selected maintenance deployment drills with no runtime
 skips. The verifier ran the complete selected matrix in 128.677 seconds; 12
