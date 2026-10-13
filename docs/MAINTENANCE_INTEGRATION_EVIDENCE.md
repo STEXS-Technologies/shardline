@@ -2872,3 +2872,20 @@ does not replace the other checks. The existing file-version and native APIs
 already state their equivalent boundary. This is an API-contract clarification,
 not a new claim that every lower-level library caller is storage-protected.
 No signature, runtime behavior or version changed.
+
+## Ordinary-command legacy history relocation
+
+`ordinary_commands_relocate_finished_legacy_history_incrementally` seeds a
+completed run through the optimized CLI, places its exact records in the legacy
+object layout, and adds 80 evidence artifacts plus an unrecognized manifest.
+Two ordinary `index rebuild` invocations move the completed history into SQLite.
+The first moves exactly 64 run artifacts and leaves the legacy manifest; the
+second completes relocation, moving that manifest last. All 80 artifact bodies,
+user payload bytes and the unrecognized manifest remain intact, and private
+scratch is cleaned.
+
+The full maintenance CLI suite passes all 19 tests against optimized binary
+`aee2f7cba208a6e669bae90b24cacd9f4c7a494dc853e973b3e677cad86691c2`
+(Nextest run `066e0f7c-683c-49d2-af4b-22670e64336f`). This proves the tested local
+incremental upgrade path, not an inventory latency bound or every legacy layout.
+No runtime behavior or version changed.

@@ -827,6 +827,132 @@ fn ordinary_maintenance_uses_the_original_cli_process() -> Result<()> {
 }
 
 #[test]
+fn ordinary_commands_relocate_finished_legacy_history_incrementally() -> Result<()> {
+    use shardline_server::task_tracking::{TaskEvidenceStore, deployment_fingerprint};
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+    let root = tempfile::tempdir()?;
+    let config = shardline::load_server_config(Some(root.path()), None)?;
+    let deployment = deployment_fingerprint(&config)?;
+    let objects = shardline_server::object_store_from_config(&config)?;
+    let seed = Command::new(binary())
+        .env_clear()
+        .current_dir(root.path())
+        .args(["index", "rebuild", "--root"])
+        .arg(root.path())
+        .output()?;
+    assert!(seed.status.success());
+    let legacy = TaskEvidenceStore::from_config(&config)?;
+    let id = legacy
+        .summaries(deployment, None, 10)?
+        .into_iter()
+        .next()
+        .ok_or("missing legacy run")?
+        .id;
+    let publish_legacy = |suffix: &str, bytes: &[u8]| -> Result<()> {
+        let key = ObjectKey::parse(&format!("_shardline_tasks/v1/{suffix}"))?;
+        let hash = shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes());
+        objects.put_if_absent(
+            &key,
+            ObjectBody::Borrowed(bytes),
+            &ObjectIntegrity::new(hash, bytes.len().try_into()?),
+        )?;
+        Ok(())
+    };
+    let database = Connection::open(root.path().join("metadata.sqlite3"))?;
+    {
+        let mut statement =
+            database.prepare("SELECT artifact_key, payload FROM shardline_task_artifacts_v1")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (key, bytes) = row?;
+            publish_legacy(
+                key.strip_prefix("_shardline_tasks/v1/")
+                    .ok_or("unexpected history key")?,
+                &bytes,
+            )?;
+        }
+    }
+    database.execute("DELETE FROM shardline_task_artifacts_v1", [])?;
+    drop(database);
+    for number in 0..80 {
+        publish_legacy(
+            &format!("runs/{id}/extra/{number:04}"),
+            b"original legacy evidence",
+        )?;
+    }
+    publish_legacy(
+        "manifests/unrecognized-fixture",
+        b"preserve unrecognized evidence",
+    )?;
+    let connection = || {
+        Connection::open_with_flags(
+            root.path().join("metadata.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+    };
+    let payload = root.path().join("chunks/user-payload");
+    fs::write(&payload, b"preserved payload bytes")?;
+    let prefix =
+        shardline_storage::ObjectPrefix::parse(&format!("_shardline_tasks/v1/runs/{id}/"))?;
+    let before = objects.list_prefix(&prefix)?.len();
+    for invocation in 0..2 {
+        let output = Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(root.path())
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("scanned_version_records: 0"));
+        assert_eq!(fs::read(&payload)?, b"preserved payload bytes");
+        assert_eq!(
+            legacy
+                .read("manifests/unrecognized-fixture", 65536)?
+                .as_deref(),
+            Some(b"preserve unrecognized evidence".as_slice())
+        );
+        let remaining = objects.list_prefix(&prefix)?.len();
+        let published: u32 = connection()?.query_row(
+            "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key=?1",
+            [format!("_shardline_tasks/v1/manifests/{id}")],
+            |row| row.get(0),
+        )?;
+        if invocation == 0 {
+            assert_eq!(remaining, before - 64);
+            assert_eq!(published, 0, "the legacy manifest must move last");
+            assert!(legacy.read(&format!("manifests/{id}"), 65536)?.is_some());
+        } else {
+            assert_eq!(remaining, 0);
+            assert_eq!(published, 1);
+            assert!(
+                objects
+                    .list_prefix(&shardline_storage::ObjectPrefix::parse(&format!(
+                        "_shardline_tasks/v1/manifests/{id}"
+                    ))?)?
+                    .is_empty()
+            );
+        }
+    }
+    let store = TaskEvidenceStore::from_config(&config)?;
+    for number in 0..80 {
+        assert_eq!(
+            store
+                .read(&format!("runs/{id}/extra/{number:04}"), 65536)?
+                .as_deref(),
+            Some(b"original legacy evidence".as_slice())
+        );
+    }
+    assert_private_scratch_cleaned(root.path())?;
+    Ok(())
+}
+
+#[test]
 fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counters() -> Result<()> {
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
     let source = tempfile::tempdir()?;
