@@ -129,6 +129,103 @@ fn library_backend_without_runtime_returns_an_error_without_starting_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_record_reader_preserves_pages_conflicts_and_record_limits() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        super::super::tests::verify_bounded_record_reader(&store);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_inspection_and_report_use_bounded_record_pages() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let seed = store.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        EmbeddedTaskTracker::from_store(seed.clone(), deployment)
+            .begin(
+                "paged completed history",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"verified report")
+            .unwrap();
+        seed.summaries(deployment, None, 10)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .id
+    })
+    .await
+    .unwrap();
+    let record_prefix = format!("{}runs/{id}/records/", super::super::TASK_EVIDENCE_PREFIX);
+    let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_task_artifacts_v1 WHERE left(artifact_key,char_length($1))=$1", fixture.schema,
+    ))).bind(&record_prefix).fetch_one(&fixture.admin).await.unwrap();
+    assert!(count > 0 && count <= 64);
+    // Observe actual metadata read-function calls, without changing its result.
+    // Per-record reads use 16 KiB; bounded page reads use 64 KiB and the caller
+    // independently enforces the original 16 KiB record limit before decoding.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE {}.record_read_calls(maximum_bytes bigint);
+         ALTER FUNCTION {}.shardline_task_artifact_read_v1(text,text,bigint) RENAME TO original_artifact_read;
+         CREATE FUNCTION {}.shardline_task_artifact_read_v1(index_schema text,artifact text,maximum_bytes bigint)
+         RETURNS TABLE(byte_length bigint,body bytea) LANGUAGE plpgsql AS $$
+         BEGIN IF left(artifact,char_length('{record_prefix}'))='{record_prefix}' THEN
+             INSERT INTO {}.record_read_calls VALUES(maximum_bytes); END IF;
+         RETURN QUERY SELECT * FROM {}.original_artifact_read(index_schema,artifact,maximum_bytes); END $$",
+        fixture.schema, fixture.schema, fixture.schema, fixture.schema, fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    tokio::task::spawn_blocking(move || {
+        let summaries = store.summaries(deployment, None, 10).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries.first().unwrap().state, TaskRunState::Completed);
+        let report = store
+            .embedded_report(deployment, None, &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report["report"], "verified report");
+        assert_eq!(report["state"], "completed");
+    })
+    .await
+    .unwrap();
+    let calls: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT maximum_bytes FROM {}.record_read_calls",
+        fixture.schema,
+    )))
+    .fetch_all(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(calls.len(), usize::try_from(count * 2).unwrap());
+    assert!(calls.iter().all(|maximum| *maximum == 65536));
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retention_defers_scope_reads_for_runs_outside_the_oldest_batch() {
     let Some(fixture) = Fixture::new().await else {
         return;

@@ -1,4 +1,4 @@
-//! Bounded metadata reads shared by history inspection and retention.
+//! Bounded metadata reads for manifests and native history records.
 
 use super::TaskEvidenceStore;
 use crate::ServerError;
@@ -7,14 +7,14 @@ use std::collections::BTreeMap;
 
 /// One metadata page, never more than 64 bodies of at most 64 KiB each.
 /// Legacy inventory can be unordered; keys outside the page use ordinary reads.
-pub(super) struct ManifestReader<'store> {
+pub(super) struct EvidencePageReader<'store> {
     store: &'store TaskEvidenceStore,
     prefix: &'store ObjectPrefix,
     cursor: Option<String>,
     payloads: BTreeMap<String, Option<Vec<u8>>>,
 }
 
-impl<'store> ManifestReader<'store> {
+impl<'store> EvidencePageReader<'store> {
     pub(super) fn new(
         store: &'store TaskEvidenceStore,
         prefix: &'store ObjectPrefix,
@@ -33,10 +33,19 @@ impl<'store> ManifestReader<'store> {
         enumerated_key: &str,
         suffix: &str,
     ) -> Result<Option<Vec<u8>>, ServerError> {
+        self.read_bounded(enumerated_key, suffix, 65536)
+    }
+
+    pub(super) fn read_bounded(
+        &mut self,
+        enumerated_key: &str,
+        suffix: &str,
+        maximum: u64,
+    ) -> Result<Option<Vec<u8>>, ServerError> {
         // A malformed nested inventory key must retain the normal canonical
         // lookup behavior rather than supplying a different identity's bytes.
         if enumerated_key != TaskEvidenceStore::key(suffix)?.as_str() {
-            return self.store.read(suffix, 65536);
+            return self.store.read(suffix, maximum);
         }
         if self.store.postgres_metadata.is_some() || self.store.local_metadata.is_some() {
             if !self.payloads.contains_key(enumerated_key)
@@ -62,9 +71,14 @@ impl<'store> ManifestReader<'store> {
             }
             if let Some(payload) = self.payloads.remove(enumerated_key) {
                 let bytes = payload.ok_or(ServerError::RequestBodyTooLarge)?;
+                if u64::try_from(bytes.len()).map_err(|_error| ServerError::RequestBodyTooLarge)?
+                    > maximum
+                {
+                    return Err(ServerError::RequestBodyTooLarge);
+                }
                 if self
                     .store
-                    .read_objects(suffix, 65536)?
+                    .read_objects(suffix, maximum)?
                     .is_some_and(|legacy| legacy != bytes)
                 {
                     return Err(ServerError::InvalidContentHash);
@@ -72,6 +86,6 @@ impl<'store> ManifestReader<'store> {
                 return Ok(Some(bytes));
             }
         }
-        self.store.read(suffix, 65536)
+        self.store.read(suffix, maximum)
     }
 }

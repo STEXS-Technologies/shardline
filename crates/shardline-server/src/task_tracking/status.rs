@@ -190,7 +190,7 @@ impl TaskEvidenceStore {
         let mut identities: BTreeMap<String, Option<TaskRunIdentity>> = BTreeMap::new();
         let after_key = after.map(|id| format!("{}{id}", prefix.as_str()));
         let mut reader =
-            super::manifest_reader::ManifestReader::new(self, &prefix, after_key.as_deref());
+            super::evidence_reader::EvidencePageReader::new(self, &prefix, after_key.as_deref());
         self.visit_prefix_until(&prefix, after_key.as_deref(), |metadata| {
             let id = metadata
                 .key()
@@ -383,30 +383,33 @@ impl TaskEvidenceStore {
         let mut projection = TaskProjection::new(identity.scope, identity.definition)
             .map_err(|_error| invalid("invalid task contract"))?;
         let prefix = format!("runs/{}/records/", identity.id);
+        let record_prefix =
+            ObjectPrefix::parse(&format!("{}{prefix}", super::TASK_EVIDENCE_PREFIX))?;
         let mut sequences = BTreeSet::new();
-        self.visit_prefix(
-            &ObjectPrefix::parse(&format!("{}{prefix}", super::TASK_EVIDENCE_PREFIX))?,
-            |metadata| {
-                let sequence = metadata
-                    .key()
-                    .as_str()
-                    .rsplit('/')
-                    .next()
-                    .and_then(|value| value.parse::<u32>().ok())
-                    .ok_or_else(|| invalid("invalid task record key"))?;
-                if sequence >= identity.definition.budget.max_history_records {
-                    return Err(invalid("task history quota violated"));
-                }
-                sequences.insert(sequence);
-                Ok::<(), ServerError>(())
-            },
-        )?;
+        self.visit_prefix(&record_prefix, |metadata| {
+            let sequence = metadata
+                .key()
+                .as_str()
+                .rsplit('/')
+                .next()
+                .and_then(|value| value.parse::<u32>().ok())
+                .ok_or_else(|| invalid("invalid task record key"))?;
+            if sequence >= identity.definition.budget.max_history_records {
+                return Err(invalid("task history quota violated"));
+            }
+            sequences.insert(sequence);
+            Ok::<(), ServerError>(())
+        })?;
+        let mut reader =
+            super::evidence_reader::EvidencePageReader::new(self, &record_prefix, None);
         for sequence in sequences {
             if sequence != projection.next_sequence().get() {
                 return Err(invalid("task history contains a gap"));
             }
-            let bytes = self
-                .read(&format!("{prefix}{sequence:010}"), 16384)?
+            let suffix = format!("{prefix}{sequence:010}");
+            let record_key = Self::key(&suffix)?;
+            let bytes = reader
+                .read_bounded(record_key.as_str(), &suffix, 16384)?
                 .ok_or_else(|| invalid("missing task record"))?;
             let record: TaskRecord =
                 serde_json::from_slice(&bytes).map_err(|_error| invalid("invalid task record"))?;

@@ -152,7 +152,7 @@ fn local_metadata_conflicts_and_duplicate_legacy_evidence_remain_visible() {
 }
 
 #[test]
-fn manifest_reader_crosses_pages_and_preserves_legacy_checks() {
+fn evidence_reader_crosses_pages_and_preserves_legacy_checks() {
     let root = tempfile::tempdir().unwrap();
     let store = TaskEvidenceStore::from_config(&config(root.path())).unwrap();
     let legacy = TaskEvidenceStore::from_objects(store.objects.clone());
@@ -170,7 +170,7 @@ fn manifest_reader_crosses_pages_and_preserves_legacy_checks() {
     let prefix = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}manifests/")).unwrap();
     let deleted_cursor = TaskEvidenceStore::key("manifests/031").unwrap();
     store.delete_artifact(&deleted_cursor).unwrap();
-    let mut reader = super::manifest_reader::ManifestReader::new(&store, &prefix, None);
+    let mut reader = super::evidence_reader::EvidencePageReader::new(&store, &prefix, None);
     for number in 0..67 {
         let suffix = format!("manifests/{number:03}");
         let key = TaskEvidenceStore::key(&suffix).unwrap();
@@ -217,8 +217,11 @@ fn manifest_reader_crosses_pages_and_preserves_legacy_checks() {
             .as_deref(),
         Some(b"manifests/000".as_slice())
     );
-    let mut resumed =
-        super::manifest_reader::ManifestReader::new(&store, &prefix, Some(deleted_cursor.as_str()));
+    let mut resumed = super::evidence_reader::EvidencePageReader::new(
+        &store,
+        &prefix,
+        Some(deleted_cursor.as_str()),
+    );
     let key = TaskEvidenceStore::key("manifests/032").unwrap();
     assert_eq!(
         resumed
@@ -226,6 +229,101 @@ fn manifest_reader_crosses_pages_and_preserves_legacy_checks() {
             .unwrap()
             .as_deref(),
         Some(b"manifests/032".as_slice())
+    );
+}
+
+pub(super) fn verify_bounded_record_reader(store: &TaskEvidenceStore) {
+    let prefix =
+        ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}runs/reader/records/")).unwrap();
+    for sequence in 0..67 {
+        let suffix = format!("runs/reader/records/{sequence:010}");
+        store.publish(&suffix, suffix.as_bytes()).unwrap();
+    }
+    for (sequence, length) in [(67, 16384), (68, 16385), (69, 65537)] {
+        store
+            .publish(
+                &format!("runs/reader/records/{sequence:010}"),
+                &vec![7; length],
+            )
+            .unwrap();
+    }
+    let conflicting = "runs/reader/records/0000000064";
+    TaskEvidenceStore::from_objects(store.objects.clone())
+        .publish(conflicting, b"conflicting legacy record")
+        .unwrap();
+    let mut reader = super::evidence_reader::EvidencePageReader::new(store, &prefix, None);
+    for sequence in 0..70 {
+        let suffix = format!("runs/reader/records/{sequence:010}");
+        let key = TaskEvidenceStore::key(&suffix).unwrap();
+        let read = reader.read_bounded(key.as_str(), &suffix, 16384);
+        match sequence {
+            64 => assert!(matches!(read, Err(ServerError::InvalidContentHash))),
+            67 => assert_eq!(read.unwrap().unwrap(), vec![7; 16384]),
+            68 | 69 => assert!(matches!(read, Err(ServerError::RequestBodyTooLarge))),
+            _ => assert_eq!(read.unwrap().as_deref(), Some(suffix.as_bytes())),
+        }
+    }
+}
+
+#[test]
+fn bounded_record_reader_preserves_pages_conflicts_and_record_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let store = TaskEvidenceStore::from_config(&config(root.path())).unwrap();
+    verify_bounded_record_reader(&store);
+}
+
+#[test]
+fn batched_native_records_keep_oversized_and_gapped_history_corrupt_and_retained() {
+    let root = tempfile::tempdir().unwrap();
+    let configured = config(root.path());
+    let deployment = deployment_fingerprint(&configured).unwrap();
+    let store = TaskEvidenceStore::from_config(&configured).unwrap();
+    let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
+    for operation in ["valid", "oversized", "gapped"] {
+        tracker
+            .begin(
+                operation,
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+    }
+    let runs = store.summaries(deployment, None, 10).unwrap();
+    let oversized = runs
+        .iter()
+        .find(|run| run.operation == "oversized")
+        .unwrap();
+    let gapped = runs.iter().find(|run| run.operation == "gapped").unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    assert_eq!(connection.execute(
+        "UPDATE shardline_task_artifacts_v1 SET payload = zeroblob(16385) WHERE artifact_key = ?1",
+        [format!("{TASK_EVIDENCE_PREFIX}runs/{}/records/0000000001", oversized.id)],
+    ).unwrap(), 1);
+    store
+        .delete_artifact(
+            &TaskEvidenceStore::key(&format!("runs/{}/records/0000000001", gapped.id)).unwrap(),
+        )
+        .unwrap();
+    let states = store.summaries(deployment, None, 10).unwrap();
+    for run in states {
+        assert_eq!(
+            run.state,
+            if run.operation == "valid" {
+                TaskRunState::Completed
+            } else {
+                TaskRunState::Corrupt
+            }
+        );
+    }
+    assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+    let retained = store.summaries(deployment, None, 10).unwrap();
+    assert_eq!(retained.len(), 2);
+    assert!(
+        retained
+            .iter()
+            .all(|run| run.state == TaskRunState::Corrupt)
     );
 }
 
