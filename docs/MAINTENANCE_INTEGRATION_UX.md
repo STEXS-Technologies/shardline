@@ -87,6 +87,8 @@ and logs. These endpoints inspect state; they do not retry or clear a delete.
 A completed result describes that run. Investigate failed or interrupted work
 before repeating mutations; treat corrupt history as untrusted. Older and
 interrupted jobs may have no saved report. CLI diagnostics remain available.
+An alive process does not prove its recorded job is still running: a result may
+have failed to save. Check the original command and logs before repeating work.
 Each history entry includes `next_step` guidance. `history_notice` and
 `inspection_notice` explain when inspection is unavailable. `history_notice`
 also warns when retained history is full or recording availability could not be

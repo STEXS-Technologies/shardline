@@ -13,6 +13,16 @@ untested deployments.
 
 ## Recording capacity in the admin response
 
+The authenticated full-history router fixture now also starts a fresh router
+with expired LFS staging files. Normal startup removes those files even though
+new history admission is refused. An exact before/after snapshot of all artifact
+keys and bytes is unchanged: startup neither fabricates completion nor leaves
+orphan evidence at capacity. All 15 configured PostgreSQL metadata tests passed
+in 22.10 seconds; the actual CLI work-connection fixture passed in 34.18 seconds.
+Strict all-feature, all-target CLI Clippy passed. Operator guidance now explains
+that an alive recorded process cannot prove an embedded job is still running;
+its outcome may have failed to save. Stored states and evidence formats are unchanged.
+
 The optimized all-feature binary built from `3b1a0359` passed all 11 selected
 deployment drills in 144.440 seconds with no runtime skips; 12 unrelated tests
 were filtered out. This revalidates restricted commands, concurrent owners,
