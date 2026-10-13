@@ -115,6 +115,48 @@ fn shardline_accepts_native_xet_upload_and_download_flows_with_s3_when_configure
 }
 
 #[test]
+#[ignore = "requires disposable PostgreSQL and MinIO; run verify_maintenance_native_xet.sh"]
+fn shardline_accepts_native_xet_flows_with_postgres_and_s3() -> Result<(), TestError> {
+    let services = DockerLocalStack::builder()
+        .with_postgres()
+        .with_minio()
+        .start()?
+        .ok_or("Docker is required for the PostgreSQL/MinIO native client check")?;
+    let database_url = services
+        .postgres_url()
+        .ok_or("missing owned PostgreSQL fixture")?;
+    let raw = services
+        .s3_raw_config(Some(&services.unique_s3_key_prefix("native-postgres-xet")))
+        .ok_or("missing owned MinIO fixture")?;
+    let s3_config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
+    let runtime = threadpool().ok_or("native client runtime unavailable")?;
+    runtime.bridge_sync(async move {
+        let _services = services;
+        shardline_server::run_database_migration(&shardline_server::DatabaseMigrationOptions::new(
+            database_url.clone(),
+            shardline_server::DatabaseMigrationCommand::Up { steps: None },
+        )).await?;
+        let pool = sqlx::PgPool::connect(&database_url).await?;
+        let protected: bool = sqlx::query_scalar(
+            "SELECT to_regprocedure('shardline_reference_keys_remote_delete_v1(text,text[])') IS NOT NULL",
+        ).fetch_one(&pool).await?;
+        pool.close().await;
+        if !protected {
+            return Err(ServerE2eInvariantError::new("owner upgrade did not install native publication protection").into());
+        }
+        exercise_native_xet_flow(Some(s3_config), Some(database_url)).await
+    })?
+}
+
+#[test]
 fn shardline_accepts_authenticated_native_xet_repository_scoped_flows() {
     let runtime = threadpool();
     assert!(runtime.is_some());
