@@ -1,19 +1,35 @@
 //! Retire only scratch whose full history has already been confirmed elsewhere.
-use super::{Result, artifact, outbox};
+use super::{Result, archive_lease::ArchiveLease, artifact, outbox};
 use std::{
     fs::{self, File},
     io::ErrorKind,
     path::Path,
 };
 
-const RETIRED: &str = "retired";
+pub(super) const RETIRED: &str = "retired";
 
 /// Call only after verified completion and successful history publication.
 /// Rename before recursive deletion, so a partial deletion cannot turn a
 /// confirmed job into an unrecognizable unfinished journal.
 pub(super) fn completed(directory: &Path) -> Result<()> {
-    artifact::private_directory(directory)?;
     let state = directory.parent().ok_or("missing maintenance state root")?;
+    let lease = ArchiveLease::try_open(state)?.ok_or("private archive retirement is busy")?;
+    completed_with_lease(directory, &lease)
+}
+
+/// The caller must have verified completion and successful history publication.
+pub(super) fn completed_with_lease(directory: &Path, lease: &ArchiveLease) -> Result<()> {
+    let state = directory.parent().ok_or("missing maintenance state root")?;
+    lease.require_root(state)?;
+    if let Err(error) = artifact::existing_private_directory(directory) {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == ErrorKind::NotFound)
+        {
+            return Ok(());
+        }
+        return Err(error);
+    }
     let name = directory
         .file_name()
         .and_then(|name| name.to_str())
@@ -45,8 +61,15 @@ pub(super) fn retry(state: &Path) -> Result<()> {
     };
     for directory in &batch.jobs {
         batch.advance(directory)?;
-        if let Err(error) = artifact::private_directory(directory).and_then(|()| remove(directory))
+        if let Err(error) =
+            artifact::existing_private_directory(directory).and_then(|()| remove(directory))
         {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == ErrorKind::NotFound)
+            {
+                continue;
+            }
             tracing::warn!(workspace = %directory.display(), "confirmed scratch cleanup remains unavailable; no application retry is authorized: {error}");
         }
     }

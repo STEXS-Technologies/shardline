@@ -222,3 +222,49 @@ async fn full_archive_still_exports_completed_history_and_restores_admission() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn full_retired_queue_with_cleanup_faults_keeps_fresh_work_available() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join(".shardline-maintenance");
+    let retired = state.join(super::super::cleanup::RETIRED);
+    super::super::artifact::private_directory(&retired).unwrap();
+    let outside = root.path().join("outside-evidence");
+    std::fs::write(&outside, b"operator evidence").unwrap();
+    // Invalid queued symlinks consume capacity and make cleanup fail safely,
+    // including when the test runs as root. They must never be followed.
+    for id in 0..4096 {
+        std::os::unix::fs::symlink(&outside, retired.join(format!("{id:064x}"))).unwrap();
+    }
+    let command = CliCommand::IndexRebuild {
+        root: Some(root.path().to_owned()),
+    };
+    let output = tokio::task::spawn_blocking(move || {
+        let prepared = prepare(&command).unwrap().unwrap();
+        run(
+            &prepared,
+            vec![OsString::from("shardline"), OsString::from("index-rebuild")],
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(output.success && output.evidence_published);
+    assert_eq!(output.exit_code, Some(0));
+    for id in 0..4096 {
+        assert!(
+            std::fs::symlink_metadata(retired.join(format!("{id:064x}")))
+                .unwrap()
+                .is_symlink()
+        );
+    }
+    assert_eq!(std::fs::read(&outside).unwrap(), b"operator evidence");
+    let configured = crate::config::load_server_config(Some(root.path()), None).unwrap();
+    let history = TaskEvidenceStore::from_config(&configured)
+        .unwrap()
+        .summaries(deployment_fingerprint(&configured).unwrap(), None, 10)
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.first().unwrap().state, TaskRunState::Completed);
+    assert_eq!(history.first().unwrap().owner.pid, std::process::id());
+}

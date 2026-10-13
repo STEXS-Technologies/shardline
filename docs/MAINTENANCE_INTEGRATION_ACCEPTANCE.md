@@ -108,7 +108,8 @@ The following still need implementation or stronger evidence before merge:
   larger reports, broad deployment performance and total unresolved-history
   growth are not fully established. Automatic private-workspace admission is
   limited to 4,096 slots, preserving evidence and falling back to shared history;
-  shared metadata and retired scratch storage remain outside that admission limit.
+  active private workspaces and retired scratch now share that limit. Shared
+  metadata remains outside it; whole-operation cost and broader scaling remain open.
   Metadata fixtures with 132 and 1,026 runs
   drain completed history in batches while retaining unfinished and corrupt history, but
   retention and legacy inspection still walk the inventory. Metadata inspection

@@ -13,6 +13,24 @@ untested deployments.
 
 ## Private tracking admission
 
+The 4,096-slot automatic-admission budget now includes retired scratch waiting
+for deletion. Admission and retirement share a nonblocking archive-directory
+lease, and verified export reuses its existing lease for retirement. Root identity
+and ownership are checked; a replaced archive or foreign root cannot borrow the
+old lease. Existing scratch validation never recreates directories removed by
+another cleaner. The combined inspection budget remains 8,192 entries, with no
+new file, process, service or configuration. Shared metadata remains outside this limit.
+
+Five admission tests and five cleanup tests passed, covering queued capacity,
+symlinks, lock contention, export-lease reuse, root replacement and missing
+scratch. Both journal-export regressions and all three existing automatic tests
+passed, including full-archive recovery. A further actual rebuild-handler fixture
+passed with 4,096 queued symlinks that make cleanup fail safely even as root:
+shared history records completion in the original PID, every queued link remains
+intact and the outside operator file is unchanged. Strict all-feature, all-target
+CLI Clippy and formatting passed. These are library/handler and filesystem tests;
+they do not establish a distributed storage budget or deployment performance.
+
 The optimized all-feature binary built from `e2e6f877` passed all 11 selected
 deployment drills in 172.010 seconds with no runtime skips; 12 unrelated tests
 were filtered out. This revalidates restricted commands, concurrent ownership,
@@ -25,7 +43,8 @@ existing directory inode with a nonblocking lock; no persistent lock file,
 process, service or configuration is added. Existing workspaces remain usable,
 and paths and ownership retain their normal checks. Capacity or lock contention
 selects shared tracking before fresh application work instead of creating more
-private workspaces. This does not bound shared metadata or the retired scratch queue.
+private workspaces. That initial limit excluded retired scratch; the later combined
+budget above includes it. Shared metadata remains outside the admission limit.
 
 Three focused tests passed for capacity, unrelated entries and concurrent
 admissions. Actual rebuild-handler fixtures passed with 4,096 retained workspaces,

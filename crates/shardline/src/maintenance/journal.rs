@@ -237,7 +237,7 @@ pub(super) fn retry_exports(
         }
         drop(journal);
         if completed {
-            super::cleanup::completed(directory)?;
+            batch.retire_verified(directory)?;
         }
     }
     batch.finish()?;

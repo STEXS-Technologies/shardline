@@ -1,10 +1,8 @@
 //! Bounded, fair scanning of retained evidence. The cursor never authorizes work.
-use super::{Result, artifact};
+use super::{Result, archive_lease::ArchiveLease, artifact};
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions, TryLockError},
     io::ErrorKind,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -13,7 +11,7 @@ const CURSOR: &str = ".export-cursor";
 
 pub(super) struct Batch {
     // Lock the existing directory inode, without an extra persistent lock file.
-    _lease: File,
+    lease: ArchiveLease,
     pub jobs: Vec<PathBuf>,
     cursor: PathBuf,
     total: usize,
@@ -21,21 +19,10 @@ pub(super) struct Batch {
 
 impl Batch {
     pub fn open(state: &Path) -> Result<Option<Self>> {
-        artifact::private_directory(state)?;
-        let lease = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(state)?;
-        match lease.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                tracing::debug!(
-                    "another invocation owns evidence export; existing command continues"
-                );
-                return Ok(None);
-            }
-            Err(TryLockError::Error(error)) => return Err(error.into()),
-        }
+        let Some(lease) = ArchiveLease::try_open(state)? else {
+            tracing::debug!("another invocation owns evidence export; existing command continues");
+            return Ok(None);
+        };
         let cursor = state.join(CURSOR);
         let after = match artifact::read_private(&cursor, 64) {
             Ok(bytes) => String::from_utf8(bytes).ok().filter(|name| task_name(name)),
@@ -69,7 +56,7 @@ impl Batch {
         // directory enumeration uses bounded memory regardless of backlog size.
         let selected = if next.is_empty() { first } else { next };
         Ok(Some(Self {
-            _lease: lease,
+            lease,
             jobs: selected.into_values().collect(),
             cursor,
             total,
@@ -77,6 +64,11 @@ impl Batch {
     }
 
     pub fn advance(&self, directory: &Path) -> Result<()> {
+        let root = self.cursor.parent().ok_or("missing private archive root")?;
+        self.lease.require_root(root)?;
+        if directory.parent() != Some(root) {
+            return Err("retained task directory is outside its archive".into());
+        }
         let name = directory
             .file_name()
             .and_then(|name| name.to_str())
@@ -88,7 +80,14 @@ impl Batch {
         Ok(())
     }
 
+    /// Retires only scratch already verified and exported by the caller.
+    pub fn retire_verified(&self, directory: &Path) -> Result<()> {
+        super::cleanup::completed_with_lease(directory, &self.lease)
+    }
+
     pub fn finish(&self) -> Result<()> {
+        self.lease
+            .require_root(self.cursor.parent().ok_or("missing private archive root")?)?;
         if self.total <= BATCH_SIZE {
             match std::fs::remove_file(&self.cursor) {
                 Ok(()) => {}
