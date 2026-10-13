@@ -6,6 +6,7 @@ use shardline_reliability::MaintenanceArtifactKind;
 use shardline_storage::{ObjectPrefix, ObjectStore};
 
 mod deadline;
+mod inspection;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bounded_metadata_admission_preserves_runs_and_caller_isolation() {

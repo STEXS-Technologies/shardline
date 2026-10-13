@@ -27,6 +27,42 @@ impl fmt::Debug for PostgresTaskMetadata {
 }
 
 impl TaskEvidenceStore {
+    /// Opens existing history without local initialization or application work.
+    /// PostgreSQL inspection uses a caller-owned pool and resolves its real scope.
+    /// Keep its runtime alive and run synchronous reads on a blocking thread.
+    ///
+    /// # Errors
+    /// Returns configuration, storage or metadata resolution failures.
+    pub async fn for_inspection(
+        config: &ServerConfig,
+        pool: Option<&PgPool>,
+    ) -> Result<(Self, Option<Digest>), ServerError> {
+        let objects = match config.object_storage_adapter() {
+            crate::ObjectStorageAdapter::Local => crate::ServerObjectStore::Local(
+                shardline_storage::LocalObjectStore::open(config.root_dir().join("chunks")),
+            ),
+            crate::ObjectStorageAdapter::S3 => crate::object_store_from_config(config)?,
+        };
+        let mut store = Self::from_objects(objects);
+        if config.index_postgres_url().is_some() {
+            let pool = pool.ok_or_else(|| {
+                ServerError::Io(std::io::Error::other(
+                    "history inspection requires the configured PostgreSQL pool",
+                ))
+            })?;
+            store.with_postgres_pool(config, pool, true).await
+        } else {
+            if config.object_storage_adapter() == crate::ObjectStorageAdapter::Local
+                && config.root_dir().join("metadata.sqlite3").try_exists()?
+            {
+                store.local_metadata = Some(shardline_index::LocalIndexStore::open_read_only(
+                    config.root_dir().to_owned(),
+                ));
+            }
+            Ok((store, None))
+        }
+    }
+
     /// Keeps the verified target while separating final evidence from the work
     /// session. The lazy pool opens no connection until the work pool is closed.
     pub(super) fn detach_work_history(&mut self) -> Result<(), ServerError> {

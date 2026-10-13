@@ -2879,7 +2879,7 @@ fn ensure_parent_directory_path_components_are_not_symlinked(
     ensure_directory_path_components_are_not_symlinked_with(parent, invalid_path_error)
 }
 
-fn ensure_directory_path_components_are_not_symlinked(
+pub(crate) fn ensure_directory_path_components_are_not_symlinked(
     path: &Path,
 ) -> Result<(), LocalIndexStoreError> {
     ensure_directory_path_components_are_not_symlinked_with(path, invalid_metadata_path_error)

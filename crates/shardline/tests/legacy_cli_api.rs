@@ -62,3 +62,18 @@ fn managed_commands_are_rejected_before_loading_legacy_callers_env_file()
     assert!(error.to_string().contains("shardline::run"));
     Ok(())
 }
+#[test]
+fn history_is_rejected_before_loading_legacy_callers_env_file()
+-> Result<(), Box<dyn std::error::Error>> {
+    let error = shardline::CliCommand::parse([
+        "shardline",
+        "--env-file",
+        "/nonexistent/shardline-history.env",
+        "history",
+    ])
+    .err()
+    .ok_or("legacy parsing unexpectedly admitted history dispatch")?;
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    assert!(error.to_string().contains("shardline::run"));
+    Ok(())
+}

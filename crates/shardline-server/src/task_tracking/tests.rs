@@ -5,6 +5,7 @@ use std::num::NonZeroUsize;
 
 mod history_pagination;
 mod incremental_capacity;
+mod inspection;
 mod legacy_retention_capacity;
 mod local_retention;
 mod postgres_capacity;

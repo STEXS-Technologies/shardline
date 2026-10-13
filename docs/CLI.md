@@ -20,6 +20,20 @@ shardline gc schedule install --help
 shardline bench --help
 ```
 
+## Inspect maintenance history
+
+Run `shardline history` with your existing configuration to inspect saved
+maintenance outcomes without enabling the admin API or starting a worker.
+Use `--root PATH` for a local root override. Output is JSON with `tasks`,
+`history_notice` and `next_after`. Read each task's `next_step`; saved history
+does not establish current server readiness or authorize retries.
+
+The page size defaults to 20 (`--limit 1` through `--limit 100`). Continue with
+`shardline history --after RUN_ID`, using the preceding page's `next_after`
+and the same configuration. Inspection does not run maintenance, retire history
+or initialize local metadata. A storage failure exits unsuccessfully rather
+than presenting an empty history as success.
+
 ## Durable Maintenance (Linux)
 
 Normal Linux maintenance commands allocate their own run identities and execute

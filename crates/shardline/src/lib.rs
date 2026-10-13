@@ -48,6 +48,7 @@ pub mod entry;
 mod fsck;
 mod gc;
 mod gc_schedule;
+mod history_inspection;
 mod hold;
 mod hub_repair;
 mod lfs_repair;

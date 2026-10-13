@@ -39,9 +39,25 @@ these routes return `404`; tracking still runs and command/server logs remain
 available. To inspect history over HTTP, use the existing
 [admin token configuration](ADMIN_READ_API.md#enable-and-authenticate).
 
-There is currently no CLI command for browsing shared automatic history.
-Use logs when the admin API is disabled. Do not rerun maintenance just to
-inspect its previous result: ordinary commands start fresh work. The optional
+You can inspect saved history without enabling the admin API:
+
+```bash
+shardline history
+```
+
+Use the same configuration as the original command or server. The command
+prints a JSON page with verified states, recovery guidance and recording
+warnings. Use `--limit 20` to set the page size and pass its `next_after` value
+as `--after RUN_ID` for the next page. It starts no worker, performs no cleanup
+and does not create or migrate local metadata. An empty page does not prove
+maintenance never ran; recording may have failed.
+
+To check the server now, use `shardline health --server https://cas.example.com`
+with your server address. Saved history and current health answer different
+questions.
+
+Do not rerun maintenance just to inspect its previous result: ordinary
+commands start fresh work. The optional
 `shardline maintenance ...` runner's task IDs refer to its own pinned tasks;
 they do not browse the history of ordinary commands.
 

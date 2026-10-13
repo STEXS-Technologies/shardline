@@ -3509,3 +3509,44 @@ This strengthens the covered native publication boundary. Upload intent/event
 transitions still use their separate index transaction; the test does not claim
 that every progress update is fenced by the request session or certify current
 storage health from a visible intent. Runtime code and version are unchanged.
+
+### Inspect automatic history without enabling the admin API
+
+`shardline history` uses existing configuration, with optional `--root`,
+`--limit` (1–100) and `--after`. It lists verified states, damaged evidence,
+recovery guidance and recording notices. It does not instantiate a server
+backend, run startup sweeps, retry work or retire history. Pagination uses the
+same verified scope filtering and ordered inspection as the admin surface.
+Local inspection opens SQLite read-only without creation or migrations and
+opens the object adapter without creating its directory. PostgreSQL inspection
+resolves the actual configured session scope through a single evidence pool.
+The public exhaustive `CliCommand` enum retains its released variants; binary
+dispatch handles the new command.
+
+Current development-build checks pass:
+
+- Two server inspection fixtures cover paginated completed, unfinished and
+  corrupt records, recovery guidance, invalid bounds and a missing root that
+  remains absent (0.19 seconds).
+- One local index fixture verifies rejected writes through the read-only
+  connection and no creation of a missing root (0.01 seconds).
+- A configured PostgreSQL fixture resolves the actual scope and compares every
+  saved artifact key and payload before and after inspection (0.65 seconds):
+  `/tmp/shardline-batched-deletion.g5g9S8/test.log`, with no runtime skip.
+- Both `history_e2e` cases pass (4.72 seconds). Ordinary fsck history is readable
+  without an admin token or runner configuration; repeated inspection preserves
+  every artifact key and payload. Invalid page bounds fail. A damaged SQLite
+  file produces a nonzero exit and no JSON success page, retains its exact
+  bytes and creates neither chunks nor private maintenance storage.
+- All three legacy CLI API checks and both generated-artifact checks pass.
+  An existing exhaustive downstream match still compiles; legacy parsing
+  rejects history before loading its requested environment file.
+- All 20 existing maintenance CLI scenarios pass against the current
+  development binary, with zero failures or ignored tests (91.89 seconds).
+- Strict index/server/CLI library and test Clippy, formatting and diff checks
+  pass.
+
+These inspection checks do not replace the earlier optimized-binary deployment
+drills or close the remaining write-path, compatibility and scale gates.
+Inventory scans can still be O(N); a bounded page does not bound scan duration.
+The version remains 1.11.3.
