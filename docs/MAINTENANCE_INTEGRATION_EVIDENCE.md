@@ -2547,6 +2547,36 @@ fresh evidence store completes retirement without creating another job.
 passed in 0.35 seconds. Strict server library/test Clippy, formatting and graph
 update passed. The test lives in a normal `local_retention` module.
 
+The current PostgreSQL release-mode 4,096-slot capacity drill passed after the
+publication/retirement locking fix: one executed test, zero failures and zero
+ignored tests, in 329.61 seconds. Creation took 80.217 seconds, complete
+inspection 35.631 seconds and 65 cleanup calls totaled 213.506 seconds, with a
+slowest call of 4.384 seconds. Log:
+`/tmp/shardline-postgres-capacity.QLcz16/test.log`. Admission, pagination,
+unresolved/corrupt evidence, payload preservation and fresh work after cleanup
+passed; no runtime skip or panic was logged. CLI compilation overlapped part of
+this run, so these fixture timings are not a controlled performance comparison.
+
+## Preserve ordinary configuration failures
+
+A released/current comparison found that malformed TOML produced the original
+error twice: automatic preparation added a tracking warning before the original
+handler reported the configuration error. Baseline fixture:
+`/tmp/shardline-invalid-config.aQxaG6`. Preparation failures now log at debug
+level and defer to the original handler. They have not started application work
+and are distinct from genuine history-recording failures, which still warn.
+
+The corrected optimized CLI passed all 16 failure comparisons: malformed TOML,
+missing config, missing environment file and a regular file used as the root,
+each with fsck, index rebuild, lifecycle repair and GC mark. Stdout, stderr and
+exit status exactly matched released 1.11.3; no absent root was created and the
+existing root file retained its bytes. Fixture:
+`/tmp/shardline-invalid-config.aR07sX`. Reproduce with
+`scripts/shardline/verify_maintenance_invalid_configuration.sh CURRENT RELEASED`.
+Binary SHA-256:
+`d3744a4af7d7da87c4c012591a0389cb1626290fab2051fa525de79c6818f26a`.
+Strict CLI library/test Clippy, formatting, shell syntax and graph update passed.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and

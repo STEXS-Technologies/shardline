@@ -61,8 +61,11 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
                 );
             }
             Ok(None) => {}
-            Err(error) => eprintln!(
-                "warning: maintenance tracking could not initialize; the existing command will report its result without a verified task outcome: {error}"
+            // Preparation checks the same configuration and root as the
+            // original handler. Invalid input has not started work and is not
+            // a recording failure; let that handler report its error once.
+            Err(error) => tracing::debug!(
+                "automatic maintenance preparation deferred to the existing command: {error}"
             ),
         }
     }
