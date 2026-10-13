@@ -194,6 +194,27 @@ async fn batched_retention_crosses_pages_without_losing_oldest_first_or_unfinish
             .id;
         let unfinished_suffix = format!("manifests/{unfinished_id}");
         let original = store.read(&unfinished_suffix, 65536).unwrap();
+        tracker
+            .begin(
+                "conflicting",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+        let conflicting_id = store
+            .summaries(deployment, None, 100)
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.operation == "conflicting")
+            .unwrap()
+            .id;
+        let conflicting_suffix = format!("manifests/{conflicting_id}");
+        let metadata_original = store.read(&conflicting_suffix, 65536).unwrap();
+        TaskEvidenceStore::from_objects(store.objects.clone())
+            .publish(&conflicting_suffix, b"conflicting legacy identity")
+            .unwrap();
         store
             .publish("manifests/unreadable", b"invalid identity")
             .unwrap();
@@ -209,6 +230,33 @@ async fn batched_retention_crosses_pages_without_losing_oldest_first_or_unfinish
         }
         assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
         assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 0);
+        assert!(matches!(
+            store.read(&conflicting_suffix, 65536),
+            Err(ServerError::InvalidContentHash)
+        ));
+        assert_eq!(
+            store
+                .read_objects(&conflicting_suffix, 65536)
+                .unwrap()
+                .as_deref(),
+            Some(b"conflicting legacy identity".as_slice())
+        );
+        assert_eq!(
+            store
+                .postgres_metadata
+                .as_ref()
+                .unwrap()
+                .read(
+                    TaskEvidenceStore::key(&conflicting_suffix)
+                        .unwrap()
+                        .as_str(),
+                    65536
+                )
+                .unwrap()
+                .unwrap()
+                .bytes,
+            metadata_original
+        );
         assert_eq!(store.read(&unfinished_suffix, 65536).unwrap(), original);
         assert_eq!(
             store
