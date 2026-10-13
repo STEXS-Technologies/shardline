@@ -11,7 +11,13 @@ commands. Earlier observations describe their tested revision; later notes recor
 subsequent fixes. They are not a substitute for the current checklist or proof of
 untested deployments.
 
-## Shared history retention after configuration changes
+## Private tracking admission
+
+The optimized all-feature binary built from `e2e6f877` passed all 11 selected
+deployment drills in 172.010 seconds with no runtime skips; 12 unrelated tests
+were filtered out. This revalidates restricted commands, concurrent ownership,
+mixed-version rollback, remote-delete faults, replacement and shutdown after
+private admission and fallback-cleanup changes. The binary remains version 1.11.3.
 
 Automatic CLI private-workspace admission now has a 4,096-slot limit and stops
 inspection after at most 8,192 archive entries. Admissions serialize on the
@@ -37,6 +43,8 @@ seconds, covering rebuild, GC mark and lifecycle repair through both observation
 paths with a one-connection login. Strict all-feature, all-target CLI Clippy and
 formatting passed. Shared fallback now continues private receipt export and
 verified cleanup after work without repeating shared retention or application work.
+
+## Shared history retention after configuration changes
 
 The optimized all-feature binary built from `8078848c` passed all 11 selected
 maintenance deployment drills in 128.121 seconds, with no runtime skips. Twelve
