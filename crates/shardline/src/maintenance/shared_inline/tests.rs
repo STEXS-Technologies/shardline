@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod postgres_phases;
 use super::*;
 use shardline_server::{ServerConfig, task_tracking::TaskRunState};
 use std::{num::NonZeroUsize, path::Path};
