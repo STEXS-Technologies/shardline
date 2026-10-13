@@ -17,16 +17,15 @@ not start GC.
 **This branch is still under development and is not ready to merge.**
 The version remains 1.11.3. The remaining upgrade limits are listed below.
 
-## What this helps with in production
+## What users gain
 
-You can inspect recorded maintenance results after a node disappears. History
-distinguishes completed work from failed or interrupted work. It does not
-automatically rerun a job.
+Maintenance history survives a process failure. You can distinguish completed
+work from failed or interrupted work without setting up another service.
+History does not automatically rerun jobs or prove current cluster health.
 
-In upgraded Postgres/S3 deployments, server history lives in the existing
-Postgres database and can be read by another node using that same database,
-schema and object storage. It reuses the existing connection pool. Local
-deployments without Postgres save new history in their existing metadata database.
+Upgraded Postgres deployments share history through their existing database.
+Another node using the same database, schema and storage can inspect it.
+Local deployments save history in their existing SQLite metadata.
 
 The production benefits are:
 
@@ -40,19 +39,12 @@ The production benefits are:
 These are protections for the tested operations. Other library write paths,
 older GC binaries and references hidden in legacy payloads still have open checks.
 
-If optional tracking cannot save history, Shardline warns and preserves the
-command's existing behavior. There is then no verified history result to rely on.
-Automatic tracking does not add history objects to your payload storage when
-metadata history is unavailable, including before the database owner upgrade.
-Existing legacy history remains readable.
-Tracking warnings go to stderr. A missing or rejected receipt does not change
-the command's stdout or exit status and never causes its work to run again.
-If removing temporary task files fails after history is confirmed, later
-maintenance retries that cleanup without repeating the completed work.
-Recorded history does not prove that the cluster is healthy now or guarantee
-cluster-wide exactly-once execution.
+If optional history cannot be saved, Shardline warns on stderr and preserves
+the command's output and exit status. It never repeats work to repair history
+or claims verified completion from a missing receipt. Later maintenance can
+retry temporary-file cleanup without repeating completed work.
 
-## Why a write might return a retryable error
+## Handle a retryable write
 
 If an earlier remote delete has an uncertain outcome, a later hold or covered
 write to that object returns HTTP 503 with `Retry-After: 1`:
@@ -64,22 +56,23 @@ object has an unresolved remote delete; retry after reconciliation
 Other objects remain available. The retry interval does not promise recovery
 in one second, and repeating the write does not clear the block.
 
-If GC saved the successful delete reply, your next sweep or ordinary repair
-can verify it and clear the matching pending delete:
+Check the original GC process and logs. If GC saved a successful delete reply,
+run ordinary repair with the same database and storage configuration:
 
 ```bash
 shardline repair
 ```
 
-Recovery does not send another user-object delete or resume the failed process.
-Each invocation checks up to 64 saved replies and advances through the backlog.
-If the reply is missing or invalid, the object stays blocked for investigation.
-An object being absent is insufficient evidence to clear the block.
+Repair verifies saved replies without sending another user-object delete or
+resuming the failed process. Each invocation checks up to 64 replies and advances
+through the backlog; your next sweep can also recover them. Missing or invalid
+replies leave the object blocked for investigation. Object absence cannot safely
+clear it.
 
 Saving a successful reply adds a receipt write and cleanup request in your
 existing object storage. This can increase GC time. No recovery worker is needed.
 
-## Where to look when something fails
+## Check a result
 
 Use your existing admin token:
 
@@ -96,29 +89,25 @@ and logs. These endpoints inspect state; they do not retry or clear a delete.
 A completed result describes that run. Investigate failed or interrupted work
 before repeating mutations; treat corrupt history as untrusted. Older and
 interrupted jobs may have no saved report. CLI diagnostics remain available.
-Each history entry includes `next_step` with plain-language guidance. For a
-completed run it explains that no recovery is needed and points to readiness;
-for an uncertain run it directs you to the owning node, logs or affected data.
-The history endpoint includes `history_notice` when new metadata history is
-unavailable. An empty task list then does not mean maintenance never ran.
-Likewise, `inspection_notice` explains when pending-delete inspection is
-unavailable; an empty response then does not prove that all deletes settled.
+Each history entry includes `next_step` guidance. `history_notice` and
+`inspection_notice` explain when inspection is unavailable. An empty list then
+does not prove that no work ran or no deletes are pending.
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.
 
-## Upgrade and compatibility limits
+## Upgrade using the existing workflow
 
 The usual owner-run `shardline db migrate up` installs the optional metadata
 and protection functions, including when no migration entries are pending.
 Installation waits for current writes and maintenance. Runtime accounts need no
 new fence-table grant. See the [database migration guide](DATABASE_MIGRATIONS.md).
 
-New local and upgraded server history stays separate from user payload data.
-Ordinary Postgres GC, rebuild and repair also use metadata history when the
-account supports it. Normal maintenance moves verified, finished legacy history
-into metadata in bounded batches, preserving its signed bytes. Interrupted,
-corrupt or unrelated history stays in place.
+New local and upgraded server history stays in metadata, outside user payload
+inventory. Before the owner upgrade, unavailable metadata history causes a
+warning rather than new task objects in payload storage. Existing legacy
+history remains readable. Maintenance moves verified finished legacy history
+in bounded batches; interrupted, corrupt or unrelated history stays in place.
 
 Storage copy keeps its source read-only. Recognized task history and verified
 saved delete replies stay at the source instead of becoming payload objects.
@@ -139,9 +128,10 @@ Released 1.11.3 servers may return a generic error for a pending
 delete. See [the acceptance evidence and remaining gates](MAINTENANCE_INTEGRATION_ACCEPTANCE.md)
 before planning a rolling upgrade or rollback.
 
-## When to use a separate worker
+## Optional process isolation
 
 The optional `shardline maintenance ...` runner uses a child process for
 deadlines and CPU limits. Use it only when you need those controls.
 Normal commands do not use it. Database ownership checks provide write safety;
-the extra process provides isolation for those optional controls.
+the extra process provides isolation for those optional controls. A separate
+PID does not guarantee cluster-wide exactly-once execution.
