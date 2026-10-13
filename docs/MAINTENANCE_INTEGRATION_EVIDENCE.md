@@ -3682,3 +3682,19 @@ also pass in 9.11 seconds, including the read-only WAL guidance and byte
 preservation checks. Strict CLI library/test Clippy, formatting and diff checks
 pass. These are development-executable checks; the preceding optimized results
 refer to their explicitly recorded source commit and binary hash.
+
+### CLI inspection with row-scoped PostgreSQL metadata
+
+The configured pending-delete CLI fixture now enables row-level security on
+its owned retention table while three delete attempts remain pending. The
+actual executable returns `supported: false`, an inconclusive inspection
+notice, no rows and no continuation cursor. It does not present unavailable
+inspection as verified absence. Disabling row-level security restores all
+three attempts; every marker row remains byte-for-byte equivalent to its
+pre-inspection JSON representation, and the local root remains empty.
+
+The configured four-case CLI suite passes with no runtime skip in 10.02 seconds:
+`/tmp/shardline-batched-deletion.JsK7no/test.log`. Strict CLI library/test Clippy,
+formatting and diff checks pass. This adds actual-command evidence to the
+existing database-level inspection checks; it does not establish support for
+every restricted-account or schema layout.
