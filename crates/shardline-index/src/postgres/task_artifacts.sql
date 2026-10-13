@@ -115,7 +115,9 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE='SLD04', MESSAGE='automatic history admission requires read committed isolation';
     END IF;
     PERFORM pg_advisory_xact_lock(1397508169, (SELECT (oid::BIGINT-2147483648)::INT FROM pg_namespace WHERE nspname=index_schema));
-    EXECUTE format('SELECT payload=$2 FROM %I.shardline_task_artifacts_v1 WHERE artifact_key=$1', index_schema)
+    -- Keep an exact retry's row alive until this transaction ends. Retirement
+    -- must not delete it between verification and the idempotent publication.
+    EXECUTE format('SELECT payload=$2 FROM %I.shardline_task_artifacts_v1 WHERE artifact_key=$1 FOR KEY SHARE', index_schema)
         INTO identical USING artifact,body;
     IF identical IS NOT NULL THEN
         PERFORM shardline_task_artifact_publish_v1(index_schema,artifact,body);
@@ -134,7 +136,9 @@ BEGIN
     IF category='manifests' THEN
         IF shardline_task_history_admission_full_v1(index_schema,maximum_runs) THEN RETURN FALSE; END IF;
     ELSE
-        EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I.shardline_task_artifacts_v1 WHERE artifact_key=$1)',index_schema)
+        -- Admission remains attached to its manifest through publication.
+        -- A concurrent retirement either waits or wins before this row check.
+        EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I.shardline_task_artifacts_v1 WHERE artifact_key=$1 FOR KEY SHARE)',index_schema)
             INTO identical USING '_shardline_tasks/v1/manifests/'||run_id;
         IF NOT identical THEN RETURN FALSE; END IF;
     END IF;

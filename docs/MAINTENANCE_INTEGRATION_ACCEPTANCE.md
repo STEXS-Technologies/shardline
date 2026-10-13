@@ -146,6 +146,11 @@ These are scoped results, not a claim that every deployment is compatible:
   full inspection took 33.903 seconds, total cleanup 210.186 seconds and the
   slowest cleanup call 4.180 seconds. Separate configured fixtures cover
   second-batch failure and recovery, caller rollback and existing role permissions.
+  Bounded PostgreSQL publication also retains its manifest and exact-retry row
+  until transaction completion, preventing retirement from winning between
+  admission and publication. A real transaction regression reproduces the former
+  race and verifies the fix; configured history, retirement and optimized
+  owner-upgrade/rollback fixtures pass with the corrected implementation.
 
 See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
 and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)
