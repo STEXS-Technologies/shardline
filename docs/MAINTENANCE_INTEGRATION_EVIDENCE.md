@@ -2055,3 +2055,11 @@ concurrent rebuild ownership, interrupted tracking, graceful replacement and
 remote-delete recovery. Both process checks used the corrected `4aa579c2` binary
 and official released 1.11.3. The remaining merge gates still require evidence
 beyond these selected fixtures.
+
+The current source also passes the real native-client PostgreSQL/MinIO verifier
+after the guarded-read adjustment: one executed test, no ignored tests or runtime
+skips, in 5.40 seconds. Log: `.codex/validation/ux-guarded-native-xet.log`;
+diagnostics: `/tmp/shardline-native-xet.6xG98p/test.log`. This extends the current
+process checks with native client upload, deduplication, reconstruction and
+download through the server's public library API. It does not establish
+PostgreSQL history-capacity performance or arbitrary deployment layouts.
