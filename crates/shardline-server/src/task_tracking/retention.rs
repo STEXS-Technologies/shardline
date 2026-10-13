@@ -55,7 +55,7 @@ impl TaskEvidenceStore {
     ) -> Result<BTreeMap<(u64, String), TaskRunIdentity>, ServerError> {
         let prefix = ObjectPrefix::parse(&format!("{}{category}/", super::TASK_EVIDENCE_PREFIX))?;
         let mut candidates: BTreeMap<(u64, String), TaskRunIdentity> = BTreeMap::new();
-        let mut reader = super::manifest_reader::ManifestReader::new(self, &prefix, None);
+        let mut reader = super::evidence_reader::EvidencePageReader::new(self, &prefix, None);
         self.visit_prefix(&prefix, |metadata| {
             let id = metadata
                 .key()

@@ -73,6 +73,25 @@ accounts and shared retention, not a cross-host failure or current cluster healt
 
 ## Retention batch reads
 
+Native history verification now batches record bodies through the conventional
+`task_tracking::evidence_reader` module, shared with manifest inspection and
+retention. It still validates every sequence, semantic transition, signature,
+proof and materialized result. The reader enforces the original 16 KiB record
+limit before decoding, including bodies prefetched by a 64 KiB metadata reader.
+Each metadata page remains bounded to 64 bodies. Public interfaces, evidence
+formats and legacy lookup behavior are unchanged.
+
+The local task-tracking suite passed all 24 selected tests, including page
+boundaries, exact-limit and oversized records, legacy conflicts and both backlog
+fixtures. Its database-only routing check had no configured database. Separately,
+all 13 metadata tests passed against disposable Postgres in 21.63 seconds. An
+instrumented database read function confirms completed-history inspection and
+report retrieval use bounded record pages; reports and verified completion remain
+correct. A native SQLite regression confirms oversized and gapped histories stay
+corrupt and survive retention while valid finished history retires. Formatting
+and strict all-feature, all-target server Clippy passed. This reduces individual
+record reads; it does not bound total inventory cost or unresolved-history growth.
+
 The optimized all-feature binary built from `750cecbd` passed all 11 selected
 deployment drills in 157.802 seconds with no runtime skips; 12 unrelated tests
 were filtered out. This revalidates mixed-version rollback, restricted commands,
@@ -99,7 +118,7 @@ rebuild, GC mark and lifecycle repair through both paths with a login limited to
 one connection. Formatting and strict all-feature, all-target CLI Clippy passed.
 
 History inspection now shares retention's bounded manifest reader through the
-conventional `task_tracking::manifest_reader` module. Both metadata backends
+conventional `task_tracking::evidence_reader` module. Both metadata backends
 load at most 64 bodies of at most 64 KiB per page. Legacy-only and unordered
 keys retain ordinary reads; conflicting copies and oversized identities retain
 their existing error handling. Public interfaces and evidence formats are unchanged.
