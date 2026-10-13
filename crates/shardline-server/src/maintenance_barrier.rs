@@ -36,6 +36,26 @@ pub(crate) struct RequestSession {
 }
 
 impl RequestSession {
+    /// Public embedded uploads establish ownership automatically. Nested calls
+    /// retain the existing owner, including its lost-connection state.
+    pub(crate) async fn scope_if_needed<T>(
+        pool: &PgPool,
+        backend: &Arc<()>,
+        future: impl std::future::Future<Output = Result<T, ServerError>>,
+    ) -> Result<T, ServerError> {
+        let already_owned = REQUEST_SESSION
+            .try_with(|session| Arc::ptr_eq(backend, &session.backend))
+            .unwrap_or(false);
+        if already_owned {
+            Self::verify_for(backend).await?;
+            return future.await;
+        }
+        let session = Self::acquire(pool, backend.clone()).await?;
+        let result = session.scope(future).await;
+        session.finish().await;
+        result
+    }
+
     /// Rejects a lost request session without acquiring a replacement connection.
     pub(crate) async fn verify_for(backend: &Arc<()>) -> Result<(), ServerError> {
         if let Some(mut owner) = Self::connection_for(backend).await {

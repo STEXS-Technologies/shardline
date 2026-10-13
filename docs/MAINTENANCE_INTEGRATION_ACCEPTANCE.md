@@ -101,8 +101,11 @@ The following still need implementation or stronger evidence before merge:
   connection. A lost connection
   cannot be replaced to finish that request's bookkeeping. Detected owner loss
   returns HTTP 503 with `Retry-After: 1`; the client must make a fresh request.
-  Standalone library calls and startup reconciliation retain their existing
-  pool-based APIs and require the caller's applicable ownership checks.
+  Public `PostgresBackend::upload_file` and `upload_xorb` calls now establish
+  their request-owned session automatically. Nested calls reuse the existing
+  session and reject its loss rather than acquiring a replacement. Lower-level
+  metadata APIs and startup reconciliation retain their existing pool-based
+  APIs and require the caller's applicable ownership checks.
   Plain file requests without upload intents also check their original session
   before body ingestion and after ingestion. Publication failures check that
   same session to return retryable ownership loss without reacquiring it.
