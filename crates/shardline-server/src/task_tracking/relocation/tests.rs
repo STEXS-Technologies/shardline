@@ -77,6 +77,36 @@ impl Fixture {
 }
 
 #[test]
+fn shutdown_stops_relocation_before_skipping_oversized_legacy_artifacts() {
+    let fixture = Fixture::new();
+    let id = fixture.complete("finished");
+    let original = fixture.snapshot();
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let housekeeping = fixture.store.clone().with_housekeeping_stop(stopped);
+    let artifact = ObjectMetadata::new(
+        TaskEvidenceStore::key(&format!("runs/{id}/artifacts/oversized")).unwrap(),
+        4 * 1024 * 1024 + 1,
+        None,
+    );
+    let mut budget = Budget::default();
+    assert!(matches!(
+        housekeeping.relocate_artifact(&artifact, &mut budget),
+        Err(VisitError::Storage(ServerError::Io(error)))
+            if error.kind() == std::io::ErrorKind::Interrupted
+    ));
+    assert_eq!(budget.moved, 0);
+    assert_eq!(budget.bytes, 0);
+    assert_eq!(fixture.snapshot(), original);
+    assert!(
+        fixture
+            .store
+            .relocate_finished_history(fixture.deployment)
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
 fn finished_history_moves_exact_bytes_while_unfinished_and_arbitrary_objects_stay() {
     let fixture = Fixture::new();
     let id = fixture.complete("finished");

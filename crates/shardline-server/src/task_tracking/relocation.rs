@@ -119,6 +119,7 @@ impl TaskEvidenceStore {
                 Ok::<_, VisitError>(())
             })?;
             let binding = Self::key(&format!("scope-bindings/{id}"))?;
+            self.check_housekeeping()?;
             if let Some(binding) = self.objects.metadata(&binding)? {
                 retained |= !self.relocate_artifact(&binding, &mut budget)?;
             }
@@ -161,6 +162,7 @@ impl TaskEvidenceStore {
         artifact: &ObjectMetadata,
         budget: &mut Budget,
     ) -> Result<bool, VisitError> {
+        self.check_housekeeping()?;
         if artifact.length() > 4 * 1024 * 1024 {
             tracing::warn!(
                 key = artifact.key().as_str(),
@@ -203,6 +205,7 @@ impl TaskEvidenceStore {
         {
             return Err(ServerError::InvalidContentHash.into());
         }
+        self.check_housekeeping()?;
         self.objects.delete_if_present(artifact.key())?;
         budget.moved = budget.moved.saturating_add(1);
         budget.bytes = budget.bytes.saturating_add(artifact.length());
