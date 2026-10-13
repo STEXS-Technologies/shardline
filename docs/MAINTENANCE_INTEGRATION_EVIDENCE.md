@@ -3638,3 +3638,31 @@ three legacy CLI API cases pass. Strict server/CLI library and test Clippy,
 formatting and diff checks pass; the AST graph is refreshed. Upgrade guidance
 now supplies this inspection command. The version is unchanged, and the broader
 compatibility, write-path and scale gates remain open.
+
+### Optimized CLI validation including both inspection modes
+
+The optimized executable built from `b0e6e634` reports version 1.11.3 and has
+SHA-256 `92b570163e03ecbd9f07b3385b7992a05f0ebb5fa25aaba526fd400a6b689a23`.
+With this executable selected through `CARGO_BIN_EXE_shardline`, all 20
+maintenance cases and all four history cases pass (24 passed, zero skipped,
+2.281 seconds; Nextest run `646d7567-e963-46b5-b77f-11ded2ddb445`).
+The configured pending-delete CLI suite also passes all three cases, with no
+runtime skip, in 0.41 seconds:
+`/tmp/shardline-batched-deletion.34Y7VY/test.log`.
+
+The released/current restricted-root comparison passes all five command forms
+and the fully read-only SQLite fsck check with the same optimized executable:
+`/tmp/shardline-local-permissions.HQRC0v`. Output, exit status, existing evidence
+and permissions are preserved; optional recording failure warns without
+claiming completion. These checks extend the optimized evidence to the new
+inspection commands, but do not close the remaining merge gates.
+
+Both deployment verifiers also pass using pinned copies of that same executable:
+11 maintenance, replacement and rolling-upgrade scenarios in 145.530 seconds
+(`/tmp/shardline-maintenance-deployments.j4AdmM/test.log`) and 12 complementary
+protocol fault scenarios in 145.358 seconds
+(`/tmp/shardline-protocol-faults.upeDPt/test.log`). Each run intentionally excludes
+the other suite's cases; all 23 selected scenarios pass, with no runtime skip.
+The verifiers check the pinned binary hashes after execution. This replaces the
+older optimized build's coverage for these named deployment scenarios, without
+extending their guarantee to untested write paths or deployment layouts.
