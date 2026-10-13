@@ -2044,3 +2044,14 @@ processes. Log: `.codex/validation/ux-guarded-oci-upgrade.log`; diagnostics:
 `d10fb16ac40e733c51bd694037dc4e2abd075ea4f68c1782be2ec638284a2fde`.
 The binary still reports 1.11.3. The corrected binary's 11-drill deployment run
 is separate from the earlier result and must be recorded after it completes.
+
+That corrected binary's deployment run has now completed successfully: all 11
+selected drills passed in 146.169 seconds with no runtime skips. Twelve tests
+outside the explicit selection were excluded. Log:
+`/tmp/shardline-maintenance-deployments.7MnPHQ/test.log`; wrapper log:
+`.codex/validation/ux-guarded-deployments.log`. This extends the optimized
+OCI/S3 result above with mixed-version rollout and rollback, read-only commands,
+concurrent rebuild ownership, interrupted tracking, graceful replacement and
+remote-delete recovery. Both process checks used the corrected `4aa579c2` binary
+and official released 1.11.3. The remaining merge gates still require evidence
+beyond these selected fixtures.
