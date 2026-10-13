@@ -2665,3 +2665,19 @@ runtime behavior changed. Formatting, strict deployment-test Clippy, Bash
 syntax, diff checks and the AST graph update passed. Broader merge gates remain
 open; these fault results do not establish universal exactly-once execution or
 the health of an existing deployment.
+
+## Ordinary shared-history completion acknowledgement
+
+The SQLite-backed ordinary receipt path now has a direct regression for a saved
+report whose completion acknowledgement cannot be written. Admission and the
+checkpoint succeed; an insert trigger rejects the actual completion record
+(sequence 3), after the result body and its signed proof have been saved.
+Finishing returns an error. A fresh store does not classify the run as completed
+or failed, and completed-history cleanup leaves its manifest intact. The test
+passes in 4.91 seconds. This exercises evidence recording without invoking or
+repeating application work.
+
+The preceding report-write failure regression now checks the actual completion
+sequence rather than nonexistent sequence 4; it passes in 4.84 seconds. These
+checks cover two distinct recording failures. They do not prove interruption
+safety for every external mutation or close the phase-by-phase merge gate.
