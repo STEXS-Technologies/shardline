@@ -332,6 +332,64 @@ async fn ordinary_commands_finish_before_history_housekeeping_and_preserve_clean
 }
 
 #[test]
+fn interrupted_admission_preserves_unfinished_history_at_each_record_boundary() {
+    for sequence in 0..=2 {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let operation = MaintenanceOperation::Fsck {
+            root: root.path().to_owned(),
+        };
+        let id = "shared-inline-admission";
+        let store = TaskEvidenceStore::from_config(&config).unwrap();
+        // Initialize the optional table before installing the write fault.
+        store
+            .publish("runs/fixture/blobs/seed", b"fixture")
+            .unwrap();
+        let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        connection
+            .execute_batch(&format!(
+            "CREATE TRIGGER fixture_reject_admission BEFORE INSERT ON shardline_task_artifacts_v1
+             WHEN NEW.artifact_key = '_shardline_tasks/v1/runs/{id}/records/{sequence:010}'
+             BEGIN SELECT RAISE(ABORT, 'fixture interrupts admission'); END;"
+        ))
+            .unwrap();
+        let (input, definition, scope) =
+            super::super::inline::prepare(&config, id, &operation, vec![b"fsck".to_vec()]).unwrap();
+        assert!(Receipt::begin(&operation, id, &config, &input, definition, scope).is_err());
+        drop(store);
+        let reopened = TaskEvidenceStore::from_config(&config).unwrap();
+        let deployment = shardline_server::task_tracking::deployment_fingerprint(&config).unwrap();
+        let tasks = reopened.summaries(deployment, None, 10).unwrap();
+        let task = tasks.iter().find(|task| task.id == id).unwrap();
+        assert!(!matches!(
+            task.state,
+            TaskRunState::Completed | TaskRunState::Failed
+        ));
+        assert!(
+            reopened
+                .read(&format!("runs/{id}/records/{sequence:010}"), 65536)
+                .unwrap()
+                .is_none()
+        );
+        for preceding in 0..sequence {
+            assert!(
+                reopened
+                    .read(&format!("runs/{id}/records/{preceding:010}"), 65536)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(reopened.prune_completed(deployment, u64::MAX).unwrap(), 0);
+        assert!(
+            reopened
+                .read(&format!("manifests/{id}"), 65536)
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[test]
 fn saved_report_without_completion_acknowledgement_stays_unresolved() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());

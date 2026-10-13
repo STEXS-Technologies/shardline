@@ -2681,3 +2681,24 @@ The preceding report-write failure regression now checks the actual completion
 sequence rather than nonexistent sequence 4; it passes in 4.84 seconds. These
 checks cover two distinct recording failures. They do not prove interruption
 safety for every external mutation or close the phase-by-phase merge gate.
+
+The admission regression also passes in 14.65 seconds. It rejects each of the
+intent, started and checkpoint record inserts in a fresh SQLite fixture.
+After reopening, each run remains unfinished, preceding records remain readable,
+the rejected record is absent and completed-history retention preserves the
+manifest. This proves the shared receipt's evidence behavior at these three
+record boundaries. It does not execute the application command or establish
+the domain effects of commands that proceed after optional admission fails.
+
+For this ordinary shared receipt path, the current phase evidence is:
+
+| Phase | Verified evidence | Remaining limit |
+| --- | --- | --- |
+| Intent and start | Rejected sequence 0 or 1 stays unfinished after reopening. | SQLite receipt fixture; operation fallback is covered separately by command comparisons. |
+| Checkpoint | Rejected sequence 2 preserves earlier records without completion. | Does not simulate every interrupted backend write. |
+| External mutation | Existing deployment drills exercise backend loss, lost delete replies and upload interruptions. | Full domain and library write-path audit remains open. |
+| Report publication | Rejected materialized report leaves no completion record. | Named ordinary receipt fixture. |
+| Completion acknowledgement | Saved report plus rejected sequence 3 remains unresolved and retained. | Does not authorize replaying work or infer success from a report alone. |
+
+Strict CLI library/test Clippy, formatting and diff checks pass. No runtime code
+or version changed.
