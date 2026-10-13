@@ -220,6 +220,13 @@ impl PostgresIndexStore {
     }
     /// Publishes an OCI object through the session that owns its repository fence.
     ///
+    /// The caller must acquire and retain that fence; supplying a connection
+    /// does not acquire ownership. This compatibility method supplies no payload
+    /// references and does not inspect backing object bytes. For manifests,
+    /// validate the payload and use
+    /// [`Self::publish_oci_object_with_references_on_connection`] with its full
+    /// reference set while retaining the original fence and storage protection.
+    ///
     /// # Errors
     ///
     /// Returns [`PostgresMetadataStoreError`] when the transaction cannot be committed.
@@ -235,6 +242,13 @@ impl PostgresIndexStore {
 
     /// Publishes an OCI object and checks validated payload references in the
     /// same transaction. The original publication API remains available.
+    ///
+    /// The caller must retain the repository fence on this connection and
+    /// provide the complete reference set from a validated payload. These checks
+    /// coordinate metadata with pending deletes; they do not read object storage
+    /// or establish backing-byte presence. Keep storage validation and reference
+    /// protection in the same owned operation. This method never acquires a
+    /// replacement connection when the supplied connection fails.
     ///
     /// # Errors
     ///
