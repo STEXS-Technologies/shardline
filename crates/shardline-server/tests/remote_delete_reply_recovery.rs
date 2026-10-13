@@ -140,6 +140,19 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
     write(&objects, &object, known_payload);
     write(&objects, &unknown, unknown_payload);
     let receipt_key = save(&objects, &receipt);
+    // Export only public signed fixture evidence when a native S3 verifier
+    // explicitly requests it. Preserve the exact bytes used by its hashed key.
+    if let Ok(path) = std::env::var("SHARDLINE_TEST_DELETE_REPLY_EXPORT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({
+                "key": receipt_key.as_str(),
+                "payload": String::from_utf8(serde_json::to_vec(&receipt).unwrap()).unwrap(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
     // End the source session before recovery; no private key or source process
     // is needed to settle the persisted observation.
     work_pool.close().await;

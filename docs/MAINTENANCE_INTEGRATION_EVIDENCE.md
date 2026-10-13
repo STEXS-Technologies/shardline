@@ -956,3 +956,18 @@ rollback and execute-only fallback verifier. Unsigned scan
 cursors and other unrecognized objects retain legacy copy behavior; this does
 not identify every control object or upgrade older binaries. Operators must
 reconcile pending deletes against the original storage before switching targets.
+
+The native S3 verifier now accepts an optional public signed-reply fixture as
+its third argument. Generate it with the existing PostgreSQL recovery test by
+setting `SHARDLINE_TEST_DELETE_REPLY_EXPORT` to an owned output path; this is
+test tooling, not a product setting, and exports no private signing key.
+
+Against an owned MinIO bucket, the rebuilt current CLI excludes the reply from
+both a real copy and dry-run inventory using a source account with List/Get
+permissions and no write permission. Payload bytes and the original saved
+reply remain unchanged. A separate List-only account needs no new Get grant:
+its dry run succeeds and matches released stdout and stderr, retaining the
+old inventory count when evidence cannot be read. Baseline payload copying,
+private metadata tracking, restricted temporary storage and released rollback
+also pass. The PostgreSQL fixture runs without skipping; targeted strict
+Clippy, shell syntax and formatting checks pass.

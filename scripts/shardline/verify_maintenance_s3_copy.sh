@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Owned MinIO fixture: normal copies need only payload permissions, including rollback.
-# Usage: bash scripts/shardline/verify_maintenance_s3_copy.sh CURRENT RELEASED
+# Usage: bash scripts/shardline/verify_maintenance_s3_copy.sh CURRENT RELEASED [SIGNED_REPLY_FIXTURE]
 set -euo pipefail
-test "$#" = 2 || { echo 'usage: verify_maintenance_s3_copy.sh CURRENT RELEASED' >&2; exit 2; }
+test "$#" = 2 || test "$#" = 3 || { echo 'usage: verify_maintenance_s3_copy.sh CURRENT RELEASED [SIGNED_REPLY_FIXTURE]' >&2; exit 2; }
+reply_fixture=${3:-}
+if test -n "$reply_fixture"; then
+    reply_fixture=$(realpath "$reply_fixture")
+    test -f "$reply_fixture"
+    command -v jq >/dev/null
+fi
 current=$(realpath "$1")
 released=$(realpath "$2")
 test -x "$current" && test -x "$released"
@@ -53,6 +59,8 @@ mc admin policy attach fixture payload-only --user copy-user >> "$fixture/setup.
 chmod 0444 "$fixture/source/chunks/fixture/payload"
 chmod 0555 "$fixture/source" "$fixture/source/chunks" "$fixture/source/chunks/fixture"
 copy_temp="$fixture/task-state"
+source_user=copy-user
+source_password=owned_copy_user_password
 copy_objects() {
     local binary=$1 report=$2
     shift 2
@@ -62,8 +70,8 @@ copy_objects() {
         SHARDLINE_MIGRATE_FROM_S3_REGION=us-east-1 SHARDLINE_MIGRATE_TO_S3_REGION=us-east-1 \
         SHARDLINE_MIGRATE_FROM_S3_ENDPOINT="$endpoint" SHARDLINE_MIGRATE_TO_S3_ENDPOINT="$endpoint" \
         SHARDLINE_MIGRATE_FROM_S3_ALLOW_HTTP=true SHARDLINE_MIGRATE_TO_S3_ALLOW_HTTP=true \
-        SHARDLINE_MIGRATE_FROM_S3_ACCESS_KEY_ID=copy-user SHARDLINE_MIGRATE_TO_S3_ACCESS_KEY_ID=copy-user \
-        SHARDLINE_MIGRATE_FROM_S3_SECRET_ACCESS_KEY=owned_copy_user_password \
+        SHARDLINE_MIGRATE_FROM_S3_ACCESS_KEY_ID="$source_user" SHARDLINE_MIGRATE_TO_S3_ACCESS_KEY_ID=copy-user \
+        SHARDLINE_MIGRATE_FROM_S3_SECRET_ACCESS_KEY="$source_password" \
         SHARDLINE_MIGRATE_TO_S3_SECRET_ACCESS_KEY=owned_copy_user_password \
         "$binary" --config "$fixture/local.toml" storage migrate "$@" > "$report" 2> "$report.stderr" &
     copy_pid=$!
@@ -99,3 +107,48 @@ mc ls --recursive fixture/copy-target > "$fixture/inventory.log"
 test "$(wc -l < "$fixture/inventory.log")" = 1
 rg -q 'fixture/payload$' "$fixture/inventory.log"
 echo "PASS: restricted S3 copies preserve payload inventory and released rollback; history stays in the original process's private metadata; diagnostics: $fixture"
+if test -n "$reply_fixture"; then
+    # Public evidence comes from the owned PostgreSQL integration fixture. This
+    # tests recognition and copy only, not admission or remote-delete settlement.
+    cp "$reply_fixture" "$fixture/signed-reply.json"
+    reply_key=$(jq -er '.key | select(startswith("_shardline_tasks/v1/delete-replies/"))' "$fixture/signed-reply.json")
+    jq -ejr '.payload' "$fixture/signed-reply.json" > "$fixture/signed-reply.payload"
+    mc cp /fixture/signed-reply.payload "fixture/copy-target/$reply_key" >> "$fixture/setup.log"
+    cat > "$fixture/source-policy.json" <<'POLICY'
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::copy-target"]},{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::copy-target/*"]}]}
+POLICY
+    mc admin user add fixture source-reader owned_source_reader_password >> "$fixture/setup.log"
+    mc admin policy create fixture source-read-only /fixture/source-policy.json >> "$fixture/setup.log"
+    mc admin policy attach fixture source-read-only --user source-reader >> "$fixture/setup.log"
+    source_user=source-reader
+    source_password=owned_source_reader_password
+    copy_temp="$fixture/task-state"
+    mkdir -p "$fixture/reply-copy/chunks"
+    copy_objects "$current" "$fixture/reply-copy.log" --from s3 --to local --to-root "$fixture/reply-copy"
+    copy_objects "$current" "$fixture/reply-inventory.log" --from s3 --to local --to-root "$fixture/reply-copy" --dry-run
+    rg -q '^scanned_objects: 1$' "$fixture/reply-copy.log"
+    rg -q '^scanned_objects: 1$' "$fixture/reply-inventory.log"
+    cmp "$fixture/source/chunks/fixture/payload" "$fixture/reply-copy/chunks/fixture/payload"
+    test ! -e "$fixture/reply-copy/chunks/_shardline_tasks"
+    mc cat "fixture/copy-target/$reply_key" > "$fixture/reply-after.payload"
+    cmp "$fixture/signed-reply.payload" "$fixture/reply-after.payload"
+    mc ls --recursive fixture/copy-target > "$fixture/reply-inventory-after.log"
+    test "$(wc -l < "$fixture/reply-inventory-after.log")" = 2
+    echo "PASS: native S3 copy and dry run exclude the verified reply with a read-only source account and preserve source evidence bytes"
+    # Inventory-only users must not gain a new mandatory object-read grant.
+    cat > "$fixture/inventory-policy.json" <<'POLICY'
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::copy-target"]}]}
+POLICY
+    mc admin user add fixture inventory-reader owned_inventory_reader_password >> "$fixture/setup.log"
+    mc admin policy create fixture inventory-only /fixture/inventory-policy.json >> "$fixture/setup.log"
+    mc admin policy attach fixture inventory-only --user inventory-reader >> "$fixture/setup.log"
+    source_user=inventory-reader
+    source_password=owned_inventory_reader_password
+    mkdir -p "$fixture/list-current/chunks" "$fixture/list-released/chunks"
+    copy_objects "$current" "$fixture/list-current.log" --from s3 --to local --to-root "$fixture/list-current" --dry-run
+    copy_objects "$released" "$fixture/list-released.log" --from s3 --to local --to-root "$fixture/list-released" --dry-run
+    rg -q '^scanned_objects: 2$' "$fixture/list-current.log"
+    cmp "$fixture/list-current.log" "$fixture/list-released.log"
+    cmp "$fixture/list-current.log.stderr" "$fixture/list-released.log.stderr"
+    echo "PASS: list-only S3 dry run retains released output without an object-read grant"
+fi
