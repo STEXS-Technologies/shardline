@@ -971,3 +971,18 @@ old inventory count when evidence cannot be read. Baseline payload copying,
 private metadata tracking, restricted temporary storage and released rollback
 also pass. The PostgreSQL fixture runs without skipping; targeted strict
 Clippy, shell syntax and formatting checks pass.
+
+## Unavailable pending-delete inspection
+
+The pending-delete endpoint now includes `inspection_notice` when its backend
+or account cannot inspect markers. Existing fields remain unchanged. The local
+unsupported response gives explicit guidance rather than leaving its empty
+array to interpretation. Supported inspection returns a null notice.
+
+The PostgreSQL HTTP fixture enables row-level security while two pending
+attempts exist. Inspection returns unsupported with the notice and no object
+entries; both markers remain intact. Disabling the policy restores the existing
+settlement path. All 32 admin API tests pass with the owned fixture bootstrapped
+from released 1.11.3 migrations, without skips. Strict server Clippy and
+formatting pass. This preserves the access boundary and makes no health or
+retry-authorization claim.
