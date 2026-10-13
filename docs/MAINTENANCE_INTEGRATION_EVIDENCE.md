@@ -2335,3 +2335,31 @@ passed for both scripts. The capacity fixture was not rerun for this log-check
 change; its recorded scale measurements above remain the relevant evidence.
 The native fixture builds the current library source, rather than executing the
 optimized CLI. It does not prove every legacy layout or deployment health.
+
+## Startup and operator gate audit
+
+Reviewed normal router initialization, the public embedding fixture, operator
+state guidance, administrative routes and the simplified operator guide against
+gates 1 and 8. The current public-library startup fixture passed in 0.24 seconds:
+all three roles run fresh sweeps twice, retain distinct completed history with the
+current PID, preserve the embedding application's logger, and introduce no private
+tracking directory or task payload objects. Log:
+`.codex/validation/ux-gate-startup-embedding.log`.
+
+Seven selected current-source HTTP tests passed in 0.709 seconds. They verify all
+role status routes, degraded readiness, failed startup diagnostics, corrupt
+manifests, full-history warnings, cursor behavior and explicitly unsupported local
+pending-delete inspection. No runtime skips or panic messages were observed;
+3,366 unrelated tests were excluded by the selection expression. Log:
+`.codex/validation/ux-gate-operator-status.log`.
+
+A configured real-PostgreSQL pending-delete HTTP fixture passed in 0.19 seconds.
+It checks long-key pagination, no-store responses, recovery guidance and unchanged
+markers, including unavailable inspection under a restrictive row policy.
+Diagnostics: `/tmp/shardline-batched-deletion.S6Ue6p/test.log`; verifier output:
+`.codex/validation/ux-gate-pending-delete-http.log`.
+
+Together with the configured PostgreSQL history and process drills above, these
+checks establish the normal startup mechanism and operator response contract.
+Remaining deployment-layout coverage keeps gate 1 open; verified operator
+distinctions do not close the separate mutation safety or scale requirements.
