@@ -5,6 +5,46 @@ use crate::test_support::postgres_fixture::PostgresFixture;
 use std::time::Duration;
 
 #[tokio::test]
+async fn cancelled_embedded_upload_scope_releases_gc_ownership() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: public upload ownership requires DATABASE_URL");
+        return;
+    };
+    let pool = fixture.postgres().gc_barrier_pool.clone();
+    let identity = fixture.postgres().request_session_identity.clone();
+    let (admitted, admission) = tokio::sync::oneshot::channel();
+    let upload = tokio::spawn(async move {
+        crate::maintenance_barrier::RequestSession::scope_if_needed(&pool, &identity, async {
+            admitted.send(()).unwrap();
+            std::future::pending::<Result<(), crate::ServerError>>().await
+        })
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), admission)
+        .await
+        .unwrap()
+        .unwrap();
+    {
+        let exclusive = crate::maintenance_barrier::acquire_postgres_exclusive(&fixture.admin);
+        tokio::pin!(exclusive);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut exclusive)
+                .await
+                .is_err(),
+            "active embedded work must exclude GC"
+        );
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+        let replacement = tokio::time::timeout(Duration::from_secs(10), exclusive)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(replacement);
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn public_uploads_reject_lost_existing_owner_without_replacement() {
     let Some(fixture) = PostgresFixture::new().await else {
         eprintln!("SKIPPED: public upload ownership requires DATABASE_URL");

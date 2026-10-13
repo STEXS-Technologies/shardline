@@ -4526,3 +4526,48 @@ wrapper for runtime skips; it is not the complete suite result.
 This strengthens the public upload boundary. Lower-level metadata-only methods
 still require caller ownership and physical-reference validation. Broader cost,
 deployment and mutation-phase gates remain open.
+
+### Embedded cancellation and configured PostgreSQL workload cost
+
+The cancellation fixture holds an automatically established embedded session,
+verifies that exclusive GC waits, cancels the owning task, then verifies that
+GC acquires ownership. The complete configured publication suite passes all 26
+tests, including this fixture and actual released recovery, without runtime
+skips (`/tmp/shardline-batched-deletion.tD6x7B/test.log`, 12.65 seconds). Strict
+server Clippy passes (`/tmp/shardline-library-cancellation-clippy.log`). Initial
+test linking failed with a bus error and then an explicit output-quota error;
+moving the owned incremental build cache off quota-limited `/tmp` allowed the
+tests to run. Those linker failures provide no application-behavior evidence.
+
+The optimized executable with automatic public upload ownership reports 1.11.3
+and has SHA256
+`51040330bdc95e78f446d145b26ef5134572c1aa130a9312fbf99f3b4504976d`.
+All 11 selected deployment scenarios pass on it
+(`/tmp/shardline-maintenance-deployments.5gRi5F/test.log`, 143.502 seconds).
+This includes mixed-version rollback, saved-reply recovery, competing rebuilds
+and tracker replacement. The previous 12-scenario protocol result belongs to
+the earlier executable, as recorded above.
+
+`scripts/shardline/verify_maintenance_postgres_benchmark.sh` compares that
+executable with actual released 1.11.3 using one owned PostgreSQL 16 container,
+fresh databases per version/concurrency, local payload storage and the existing
+configured full benchmark. Each run uses three iterations, a 1 MiB base,
+64 KiB mutation and 64 KiB chunks. Concurrency 1, 32 and 128 all preserve every
+non-performance report counter and setting after private paths are removed.
+Backend assertions require PostgreSQL metadata and local object storage.
+The setup installs released migrations first and performs normal owner setup
+for the current binary. Initial fixture attempts failed during database setup
+and JSON parsing of startup logs; the corrected fixture uses TCP readiness and
+the same error-level logging setting for both binaries.
+
+| Concurrency | Released wall / peak RSS | Current wall / peak RSS |
+| --- | --- | --- |
+| 1 | 0.11 s / 33,884 KiB | 0.16 s / 34,836 KiB |
+| 32 | 0.49 s / 397,552 KiB | 0.43 s / 102,648 KiB |
+| 128 | 1.17 s / 731,704 KiB | 1.27 s / 293,596 KiB |
+
+Reports, exact binary hashes and measurements are preserved in
+`/tmp/shardline-postgres-benchmark.igzYKe`. These are single fixture measurements,
+not a distributed throughput claim or production SLO. The test supplies stronger
+evidence for the public PostgreSQL upload workload; larger inventories, remote
+storage, long operations and remaining merge gates still require review.
