@@ -51,9 +51,24 @@ impl super::PostgresBackend {
         }
         let mut record = self.read_record(source_file_id, None, None).await?;
         record.file_id = destination_file_id.to_owned();
-        self.record_store
-            .commit_file_version_metadata(&record)
-            .await?;
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &self.request_session_identity,
+        )
+        .await
+        {
+            self.record_store
+                .commit_file_version_metadata_on_connection(
+                    connection
+                        .as_mut()
+                        .ok_or_else(|| PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                    &record,
+                )
+                .await?;
+        } else {
+            self.record_store
+                .commit_file_version_metadata(&record)
+                .await?;
+        }
         Ok(true)
     }
 
@@ -476,9 +491,24 @@ impl super::PostgresBackend {
         } else {
             self.record_store.latest_record_locator(&probe)
         };
-        let bytes = RecordTraversal::read_record_bytes(&self.record_store, &locator)
+        let bytes = if let Some(mut connection) =
+            crate::maintenance_barrier::RequestSession::connection_for(
+                &self.request_session_identity,
+            )
             .await
-            .map_err(map_record_store_error)?;
+        {
+            self.record_store
+                .read_record_bytes_on_connection(
+                    connection
+                        .as_mut()
+                        .ok_or_else(|| PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                    &locator,
+                )
+                .await
+        } else {
+            RecordTraversal::read_record_bytes(&self.record_store, &locator).await
+        }
+        .map_err(map_record_store_error)?;
         parse_stored_file_record_bytes(&bytes)
     }
 

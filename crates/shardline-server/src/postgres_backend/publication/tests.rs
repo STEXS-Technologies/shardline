@@ -6,6 +6,73 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_reference_copy_cannot_replace_a_lost_request_owner() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        return;
+    };
+    let backend = fixture.postgres();
+    backend
+        .upload_file("copy-source", Bytes::from_static(b"copy ownership"), None)
+        .await
+        .unwrap();
+    let session = crate::maintenance_barrier::RequestSession::acquire(
+        backend.index_store.pool(),
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    session
+        .scope(async {
+            assert!(
+                backend
+                    .copy_file_reference("copy-source", "copy-owned")
+                    .await
+                    .unwrap()
+            );
+            let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                &backend.request_session_identity,
+            )
+            .await
+            .unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **owner.as_mut().unwrap())
+                .await
+                .unwrap();
+            drop(owner);
+            let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .fetch_one(&fixture.admin)
+                .await
+                .unwrap();
+            assert!(terminated);
+            assert!(
+                backend
+                    .copy_file_reference("copy-source", "copy-owner-lost")
+                    .await
+                    .is_err()
+            );
+        })
+        .await;
+    session.finish().await;
+    assert!(matches!(
+        backend.read_record("copy-owner-lost", None, None).await,
+        Err(crate::ServerError::NotFound)
+    ));
+    assert!(
+        backend
+            .copy_file_reference("copy-source", "copy-fresh")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backend
+            .copy_file_reference("copy-source", "copy-fresh")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_old_transaction_snapshot_cannot_hide_a_pending_delete() {
     for (protocol, isolation) in ["REPEATABLE READ", "SERIALIZABLE", "REPEATABLE READ"]
         .into_iter()
