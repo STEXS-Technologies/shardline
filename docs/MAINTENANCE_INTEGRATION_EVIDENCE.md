@@ -3139,3 +3139,20 @@ improvement. The original compatibility fixture retains its exact 65-call
 assertion; this automatic fixture separately checks that the artifact budget
 splits cleanup across more calls. Broader cost, legacy archives and the
 remaining acceptance gates stay open.
+
+### Storage-copy destination history failure
+
+The actual optimized CLI storage-copy fixture passes when an owned destination
+SQLite trigger denies shared history publication. The copy succeeds, reports
+one scanned object and preserves both source and destination payload bytes.
+No shared completion is published while recording is denied, and existing
+destination evidence bytes survive. After removing the fault, an explicitly
+invoked fresh copy succeeds and shared history becomes available without
+altering copied bytes or earlier evidence.
+
+The final focused Nextest run `ba27729d-be9f-45d2-aba0-6444a434c0c6` passes
+in 0.093 seconds against optimized CLI SHA-256
+`bfb13098f724e0c01dd11db436a85804d6d59225f2fd4b3e12ec35246adf5a90`.
+Strict CLI integration-test Clippy passes. This verifies optional destination
+recording failure during a local raw copy; it does not establish a coordinated
+live storage cutover or settle pending deletes. No runtime or version changed.
