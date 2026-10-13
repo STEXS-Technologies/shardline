@@ -75,6 +75,15 @@ These are scoped results, not a claim that every deployment is compatible:
   covering direct file, dedupe, reconstruction and stored-object references,
   rejected-publication rollback, restricted accounts, cross-schema settlement,
   stale attempts and publication/deletion races.
+- Postgres file-reference copy and deletion keep an existing request ownership
+  connection, including with a one-connection pool. A real database fixture
+  verifies successful copy and both delete modes, no publication after owner
+  termination, preservation of the source, and fresh retry. Expected-hash
+  cleanup also preserves a concurrent winner after waiting on its row lock.
+  Ordinary guarded reads retain their read pool to avoid ownership-mutex
+  re-entry. All seven publication fixtures pass; the corrected optimized binary
+  passes the 11 selected deployment drills and restricted OCI/S3 process drill.
+  These results cover the named paths, not every lower-level library caller.
 - Newly staged Postgres uploads check their backing bytes inside the publication
   transaction. A configured database fixture deletes an actual staged xorb,
   settles its marker, and verifies rollback of file and S3 metadata, a retryable
