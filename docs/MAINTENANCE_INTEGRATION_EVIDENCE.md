@@ -13,6 +13,15 @@ untested deployments.
 
 ## Retention batch reads
 
+After both batching changes, the optimized all-feature binary built from
+`ca627d23` passed all 11 selected maintenance deployment drills with no runtime
+skips. The verifier ran the complete selected matrix in 128.677 seconds; 12
+unrelated deployment tests were filtered out. This revalidates restricted
+commands, mixed-version rollback, concurrent ownership, remote-delete faults,
+container replacement and graceful shutdown on the current implementation.
+The binary remains version 1.11.3. These results do not close the separate scale,
+remaining write-path, reboot or cross-host audit requirements.
+
 SQLite retention now uses bounded payload pages as well. The additive local
 reader returns at most 64 bodies of at most 64 KiB, preserves literal prefixes
 and deleted cursors, and leaves a missing optional table uncreated. It uses the
