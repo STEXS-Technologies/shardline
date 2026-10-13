@@ -2577,6 +2577,17 @@ Binary SHA-256:
 `d3744a4af7d7da87c4c012591a0389cb1626290fab2051fa525de79c6818f26a`.
 Strict CLI library/test Clippy, formatting, shell syntax and graph update passed.
 
+The same optimized binary also passed the extended unprivileged local-permission
+fixture: `/tmp/shardline-local-permissions.X4ZIry`. Four ordinary commands still
+match released stdout/stderr/status under a 0555 root with writable metadata.
+The fixture then makes the database, WAL and SHM files read-only and verifies
+that a new metadata write is denied. Ordinary fsck still matches released
+stdout and successful exit status; stderr clearly warns that optional tracking
+is unavailable and no verified outcome will be saved. Database/WAL hashes and
+all four existing histories remain unchanged, with no private workspace or
+task payload objects. SHM coordination bytes are excluded from the durable-byte
+comparison. This tests read-only fsck, not mutation commands on a read-only store.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and

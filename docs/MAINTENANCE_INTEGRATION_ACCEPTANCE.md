@@ -64,6 +64,9 @@ These are scoped results, not a claim that every deployment is compatible:
   output and source evidence bytes through a released payload-only copy.
   Optimized local maintenance passes under a 0555 root with existing writable
   metadata, and a retention-only Postgres account preserves its existing grants.
+  With SQLite database/WAL/SHM files also read-only, ordinary fsck preserves
+  released stdout and exit status while warning that optional history cannot
+  record the run. Durable database/WAL bytes and existing history stay unchanged.
 - Covered PostgreSQL writes reject lost ownership. Covered writes to an object
   with an unresolved remote delete return a retryable error. Verified saved
   replies can settle the matching delete without sending another user delete.
