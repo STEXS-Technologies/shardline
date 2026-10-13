@@ -129,6 +129,90 @@ fn library_backend_without_runtime_returns_an_error_without_starting_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_defers_scope_reads_for_runs_outside_the_oldest_batch() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let seed = store.clone();
+    let newest = tokio::task::spawn_blocking(move || {
+        let tracker = EmbeddedTaskTracker::from_store(seed.clone(), deployment);
+        for _ in 0..65 {
+            tracker
+                .begin(
+                    "completed",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"complete")
+                .unwrap();
+        }
+        let mut ids: Vec<_> = seed
+            .summaries(deployment, None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect();
+        ids.sort();
+        for (position, id) in ids.iter().enumerate() {
+            let suffix = format!("manifests/{id}");
+            let mut identity: super::super::TaskRunIdentity =
+                serde_json::from_slice(&seed.read(&suffix, 65536).unwrap().unwrap()).unwrap();
+            identity.created_at = u64::try_from(position).unwrap();
+            seed.delete_artifact(&TaskEvidenceStore::key(&suffix).unwrap())
+                .unwrap();
+            seed.publish(&suffix, &serde_json::to_vec(&identity).unwrap())
+                .unwrap();
+        }
+        ids.last().unwrap().clone()
+    })
+    .await
+    .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER FUNCTION {}.shardline_task_artifact_read_v1(text,text,bigint) RENAME TO original_artifact_read;
+         CREATE FUNCTION {}.shardline_task_artifact_read_v1(index_schema text,artifact text,maximum_bytes bigint)
+         RETURNS TABLE(byte_length bigint,body bytea) LANGUAGE plpgsql AS $$
+         BEGIN IF artifact='{}scope-bindings/{newest}' THEN RAISE EXCEPTION 'synthetic deferred scope read failure'; END IF;
+         RETURN QUERY SELECT * FROM {}.original_artifact_read(index_schema,artifact,maximum_bytes); END $$",
+        fixture.schema, fixture.schema, super::super::TASK_EVIDENCE_PREFIX, fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    let checked = store.clone();
+    let checked_id = newest.clone();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(checked.prune_completed(deployment, u64::MAX).unwrap(), 64);
+        assert!(checked.prune_completed(deployment, u64::MAX).is_err());
+        assert!(
+            checked
+                .read(&format!("manifests/{checked_id}"), 65536)
+                .unwrap()
+                .is_some()
+        );
+    })
+    .await
+    .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP FUNCTION {}.shardline_task_artifact_read_v1(text,text,bigint);
+         ALTER FUNCTION {}.original_artifact_read(text,text,bigint) RENAME TO shardline_task_artifact_read_v1",
+        fixture.schema, fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replacement_login_retires_shared_history_after_source_pool_closes() {
     let Some(fixture) = Fixture::new().await else {
         return;

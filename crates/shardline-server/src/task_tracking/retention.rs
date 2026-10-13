@@ -129,9 +129,6 @@ impl TaskEvidenceStore {
                 && identity.definition.budget.max_history_records <= 4096
                 && identity.created_at.saturating_add(30 * 24 * 60 * 60) < now
             {
-                if !self.retention_scope_matches(&identity, &bytes, deployment)? {
-                    return Ok(());
-                }
                 // Only identities older than the newest selected candidate can
                 // enter this bounded page. Avoid verifying an entire finished
                 // backlog after the page is full. Earlier unfinished runs still
@@ -144,6 +141,9 @@ impl TaskEvidenceStore {
                                 > (*created_at, selected_id.as_str())
                         })
                 {
+                    return Ok(());
+                }
+                if !self.retention_scope_matches(&identity, &bytes, deployment)? {
                     return Ok(());
                 }
                 // Retained corrupt/unfinished runs must not monopolize the
