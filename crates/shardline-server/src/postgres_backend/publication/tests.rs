@@ -6,6 +6,61 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guarded_record_reads_do_not_reenter_the_request_connection() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        return;
+    };
+    let mut backend = fixture.postgres().clone();
+    backend
+        .upload_file("guarded-read", Bytes::from_static(b"guarded bytes"), None)
+        .await
+        .unwrap();
+    // Production has a separate record-read pool. Keep one connection per pool
+    // to expose mutex re-entry without requiring a second ownership connection.
+    let read_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            backend
+                .record_store
+                .pool()
+                .connect_options()
+                .as_ref()
+                .clone(),
+        )
+        .await
+        .unwrap();
+    backend.record_store = shardline_index::PostgresRecordStore::new(read_pool.clone());
+    let session = crate::maintenance_barrier::RequestSession::acquire(
+        backend.index_store.pool(),
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    session
+        .scope(async {
+            let guard = crate::maintenance_barrier::acquire_postgres_request_resources(
+                backend.index_store.pool(),
+                &backend.request_session_identity,
+                &[ResourceLockKey::s3_object("guarded-scope", "guarded-read")],
+            )
+            .await
+            .unwrap();
+            let record = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                backend.read_record("guarded-read", None, None),
+            )
+            .await
+            .expect("record reads must not re-enter the held request mutex")
+            .unwrap();
+            assert_eq!(record.total_bytes, 13);
+            drop(guard);
+        })
+        .await;
+    session.finish().await;
+    read_pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_reference_copy_cannot_replace_a_lost_request_owner() {
     let Some(fixture) = PostgresFixture::new().await else {
         return;
@@ -13,6 +68,10 @@ async fn file_reference_copy_cannot_replace_a_lost_request_owner() {
     let backend = fixture.postgres();
     backend
         .upload_file("copy-source", Bytes::from_static(b"copy ownership"), None)
+        .await
+        .unwrap();
+    let source = backend
+        .read_record("copy-source", None, None)
         .await
         .unwrap();
     let session = crate::maintenance_barrier::RequestSession::acquire(
@@ -29,10 +88,6 @@ async fn file_reference_copy_cannot_replace_a_lost_request_owner() {
                     .await
                     .unwrap()
             );
-            let source = backend
-                .read_record("copy-source", None, None)
-                .await
-                .unwrap();
             assert!(
                 backend
                     .delete_file_reference_if_latest("copy-owned", &source.content_hash)

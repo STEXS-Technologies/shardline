@@ -44,12 +44,17 @@ impl super::PostgresBackend {
         source_file_id: &str,
         destination_file_id: &str,
     ) -> Result<bool, ServerError> {
-        match self.read_record(destination_file_id, None, None).await {
+        match self
+            .read_record_for_request(destination_file_id, None, None)
+            .await
+        {
             Ok(_record) => return Ok(false),
             Err(ServerError::NotFound) => {}
             Err(error) => return Err(error),
         }
-        let mut record = self.read_record(source_file_id, None, None).await?;
+        let mut record = self
+            .read_record_for_request(source_file_id, None, None)
+            .await?;
         record.file_id = destination_file_id.to_owned();
         if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
             &self.request_session_identity,
@@ -73,7 +78,7 @@ impl super::PostgresBackend {
     }
 
     pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
-        let record = match self.read_record(file_id, None, None).await {
+        let record = match self.read_record_for_request(file_id, None, None).await {
             Ok(record) => record,
             Err(ServerError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
@@ -116,7 +121,7 @@ impl super::PostgresBackend {
         // This read is only a fast path. The transaction repeats the hash
         // condition in the DELETE so a publisher winning after this read keeps
         // its latest alias. A failed condition also retains the losing version.
-        let record = match self.read_record(file_id, None, None).await {
+        let record = match self.read_record_for_request(file_id, None, None).await {
             Ok(record) => record,
             Err(ServerError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
@@ -500,12 +505,12 @@ impl super::PostgresBackend {
         repository_references_hash_in_scope(&self.record_store, hash_hex, repository_scope).await
     }
 
-    pub(super) async fn read_record(
+    fn file_record_locator(
         &self,
         file_id: &str,
         content_hash: Option<&str>,
         repository_scope: Option<&RepositoryScope>,
-    ) -> Result<FileRecord, ServerError> {
+    ) -> Result<shardline_index::PostgresRecordLocator, ServerError> {
         validate_identifier(file_id)?;
         let probe = FileRecord {
             file_id: file_id.to_owned(),
@@ -516,12 +521,36 @@ impl super::PostgresBackend {
             repository_scope: repository_scope.cloned(),
             chunks: Vec::new(),
         };
-        let locator = if let Some(content_hash) = content_hash {
+        Ok(if let Some(content_hash) = content_hash {
             validate_content_hash(content_hash)?;
             self.record_store.version_record_locator(&probe)
         } else {
             self.record_store.latest_record_locator(&probe)
-        };
+        })
+    }
+
+    pub(super) async fn read_record(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<FileRecord, ServerError> {
+        let locator = self.file_record_locator(file_id, content_hash, repository_scope)?;
+        let bytes = RecordTraversal::read_record_bytes(&self.record_store, &locator)
+            .await
+            .map_err(map_record_store_error)?;
+        parse_stored_file_record_bytes(&bytes)
+    }
+
+    // Copy/delete do not hold a ResourceWriteGuard while reading. Ordinary
+    // protocol reads may hold one and must not re-enter its session mutex.
+    async fn read_record_for_request(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<FileRecord, ServerError> {
+        let locator = self.file_record_locator(file_id, content_hash, repository_scope)?;
         let bytes = if let Some(mut connection) =
             crate::maintenance_barrier::RequestSession::connection_for(
                 &self.request_session_identity,
