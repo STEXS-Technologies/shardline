@@ -187,6 +187,44 @@ async fn configured_pending_delete_cli_paginates_without_changing_attempts() {
         assert!(found.len() < keys.len());
     }
     assert_eq!(found, keys);
+    // Row-scoped metadata cannot establish deployment-wide absence of deletes.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.shardline_retention_holds ENABLE ROW LEVEL SECURITY"
+    )))
+    .execute(&admin)
+    .await
+    .unwrap();
+    let output = Command::new(binary())
+        .env_clear()
+        .current_dir(root.path())
+        .env("SHARDLINE_INDEX_POSTGRES_URL", url.as_str())
+        .args(["history", "--pending-deletes", "--root"])
+        .arg(root.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let page: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page["supported"], false);
+    assert!(
+        page["inspection_notice"]
+            .as_str()
+            .unwrap()
+            .contains("does not prove")
+    );
+    assert_eq!(page["pending_deletes"], serde_json::json!([]));
+    assert!(page["next_after"].is_null());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.shardline_retention_holds DISABLE ROW LEVEL SECURITY"
+    )))
+    .execute(&admin)
+    .await
+    .unwrap();
+    let restored = index.pending_remote_deletes(0, 100).await.unwrap().unwrap();
+    assert_eq!(restored.len(), keys.len());
+    assert_eq!(
+        restored.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+        keys.iter().collect::<Vec<_>>()
+    );
     let unchanged: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
         .fetch_all(&admin)
         .await
