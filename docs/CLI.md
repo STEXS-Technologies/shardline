@@ -46,6 +46,54 @@ Unavailable inspection is inconclusive; a pending attempt may still be running.
 The command performs no storage requests, retries or settlement. Recovery
 guidance points to the original GC logs and ordinary `shardline repair`.
 
+Keep the same configuration, root and inspection mode while paging. History
+and pending deletes use different cursors; do not exchange them. Read-only
+SQLite inspection needs readable `metadata.sqlite3-wal` and
+`metadata.sqlite3-shm` files alongside its database. If these are missing,
+inspect the running deployment or a consistent backup preserving its WAL.
+
+## Reconcile pending remote deletes
+
+Check whether the original GC is still running and read its logs. After it
+stops, use the same database, schema and storage configuration:
+
+```bash
+shardline repair
+shardline history --pending-deletes
+```
+
+Repair checks up to 64 saved replies per run, including invalid evidence,
+without sending another user-object delete. A later sweep can also recover
+saved replies. For a backlog, repeat repair; saved scan progress reaches replies
+beyond retained invalid evidence. Logs report `processed saved remote delete
+replies`: `settled` counts cleared attempts and `retained` counts evidence that
+cannot settle them. Processing 64 replies can leave more to check.
+
+Missing or invalid replies remain blocked for investigation. Object absence
+alone cannot replace a valid reply. Repair does not mark an interrupted GC run
+completed. A write's `Retry-After: 1` is a retry delay, not a recovery deadline.
+
+## Maintenance history limits
+
+Verified finished shared history becomes eligible for cleanup after 30 days.
+Unfinished and corrupt evidence is retained; save reports separately for a
+permanent archive.
+
+| Automatic limit | Effect |
+| --- | --- |
+| 64 old runs and 256 run-artifact keys per cleanup invocation | Larger histories continue cleanup on later invocations. |
+| 4,096 runs per metadata database or schema | When full, work continues with a recording warning. |
+| 4,096 private workspaces, including those awaiting deletion | Separate from the shared-history limit. |
+| 64 KiB per new automatic artifact | Limits saved history, not live output or diagnostic exports. |
+
+These are logical admission limits, not physical disk quotas or inspection-time
+bounds. Existing and imported history is preserved. Large archives can slow
+inspection and command exit: ordinary commands clean history after their work,
+while server startup does not wait for cleanup. Shutdown stops cleanup between
+storage calls; an active call may finish. Later startup resumes partial cleanup.
+See the [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md#known-gaps)
+for the remaining capacity audit.
+
 ## Durable Maintenance (Linux)
 
 Normal Linux maintenance commands allocate their own run identities and execute
