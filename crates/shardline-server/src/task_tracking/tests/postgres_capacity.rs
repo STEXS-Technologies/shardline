@@ -5,6 +5,16 @@ use crate::test_support::postgres_fixture::PostgresFixture;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires configured disposable PostgreSQL; run in release mode"]
 async fn full_postgres_history_capacity_preserves_unresolved_evidence() {
+    verify_full_capacity(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires configured disposable PostgreSQL; run in release mode"]
+async fn full_incremental_postgres_history_capacity_preserves_unresolved_evidence() {
+    verify_full_capacity(true).await;
+}
+
+async fn verify_full_capacity(incremental: bool) {
     let fixture = PostgresFixture::new()
         .await
         .expect("DATABASE_URL must name an owned fixture");
@@ -60,15 +70,36 @@ async fn full_postgres_history_capacity_preserves_unresolved_evidence() {
         let mut slowest = std::time::Duration::ZERO;
         loop {
             let batch_started = std::time::Instant::now();
-            let count = store.prune_completed(deployment, now).unwrap();
+            let before = incremental.then(|| run_artifact_count(&store));
+            let count = if incremental {
+                store.prune_completed_incrementally(deployment, now).unwrap()
+            } else {
+                store.prune_completed(deployment, now).unwrap()
+            };
+            if let Some(before) = before {
+                let after = run_artifact_count(&store);
+                assert!(before >= after);
+                assert!(before.checked_sub(after).unwrap() <= 256, "automatic cleanup exceeded its artifact budget");
+            }
             slowest = slowest.max(batch_started.elapsed());
             assert!(count <= 64);
             retired = retired.checked_add(count).unwrap();
             calls = calls.checked_add(1).unwrap();
+            assert!(calls <= 4096, "cleanup must make progress");
             if count == 0 { break; }
         }
         assert_eq!(retired, 4094);
-        assert_eq!(calls, 65);
+        if incremental {
+            assert!(calls > 65, "the artifact budget must split full-capacity cleanup");
+        } else {
+            assert_eq!(calls, 65);
+        }
+        let mut retiring = 0_usize;
+        store.visit_prefix(&ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}retiring/")).unwrap(), |_| {
+            retiring = retiring.checked_add(1).unwrap();
+            Ok(())
+        }).unwrap();
+        assert_eq!(retiring, 0, "all retirement markers must be settled");
         let cleanup = started.elapsed();
         let remaining = store.inspect_summaries_with_scope(deployment, Some(scope), None, 100).unwrap();
         assert_eq!(remaining.len(), 2);
@@ -89,4 +120,18 @@ async fn full_postgres_history_capacity_preserves_unresolved_evidence() {
         drop(unfinished);
     }).await.unwrap();
     fixture.finish().await;
+}
+
+fn run_artifact_count(store: &TaskEvidenceStore) -> usize {
+    let mut count = 0_usize;
+    store
+        .visit_prefix(
+            &ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}runs/")).unwrap(),
+            |_| {
+                count = count.checked_add(1).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+    count
 }

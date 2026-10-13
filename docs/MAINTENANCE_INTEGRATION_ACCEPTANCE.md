@@ -209,9 +209,10 @@ The following still need implementation or stronger evidence before merge:
   A separate optimized SQLite fixture now exercises this automatic API at all
   4,096 occupied slots: 97 cleanup calls retire 4,094 verified completed runs,
   with per-call artifact limits, unresolved histories, payload preservation
-  and fresh admission checked. Full-capacity PostgreSQL automatic cleanup is
-  still awaiting its result; earlier PostgreSQL capacity evidence uses the
-  compatibility cleanup API.
+  and fresh admission checked. The corresponding optimized PostgreSQL automatic
+  cleanup fixture also passes at all 4,096 slots, retiring 4,094 completed runs
+  in 97 calls with the same preservation and per-call budget checks. Earlier
+  compatibility cleanup fixtures remain separate.
   Retention now stops both metadata and legacy traversal when its artifact
   budget is reached. History pagination keeps its full unordered legacy scan
   to preserve page ordering. This removes work after a retention budget break;

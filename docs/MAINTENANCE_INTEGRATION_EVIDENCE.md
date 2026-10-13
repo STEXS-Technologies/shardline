@@ -3118,3 +3118,24 @@ before/after artifact inventories. Diagnostics are
 The PostgreSQL drill ran concurrently, so these are correctness observations,
 not controlled performance measurements. Larger archives, physical disk growth
 and the broader acceptance gates remain open.
+
+### Full-capacity automatic incremental PostgreSQL cleanup
+
+The exact optimized PostgreSQL incremental-capacity test passes: one test,
+zero failures, zero ignored, 457.02 seconds. The owned PostgreSQL fixture fills
+all 4,096 automatic history slots, rejects further admission, paginates every
+distinct history, then calls `prune_completed_incrementally` until cleanup
+settles. Each invocation removes at most 256 run-artifact keys and retires at
+most 64 histories. All 4,094 verified completed runs retire in 97 calls;
+no retirement markers remain. Unfinished and corrupt histories, corrupt bytes
+and user payload are preserved; new recording succeeds after cleanup.
+
+Diagnostics are `/tmp/shardline-postgres-capacity.hk1D0W/test.log`.
+Creation takes 84.715 seconds, inspection 35.452 seconds and measured cleanup
+336.591 seconds, including before/after artifact inventories. The slowest
+measured iteration takes 5.674 seconds. These observations include concurrent
+build/test activity and do not establish a latency bound or a performance
+improvement. The original compatibility fixture retains its exact 65-call
+assertion; this automatic fixture separately checks that the artifact budget
+splits cleanup across more calls. Broader cost, legacy archives and the
+remaining acceptance gates stay open.
