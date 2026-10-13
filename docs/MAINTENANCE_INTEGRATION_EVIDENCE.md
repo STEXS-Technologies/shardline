@@ -2903,3 +2903,18 @@ pruned as finished. An existing fixture artifact remains byte-identical.
 The test passes in 9.83 seconds. This extends the receipt-only recording-fault
 tests to a real command; it does not establish interruption safety for every
 external mutation or every backend. No runtime behavior or version changed.
+
+## In-flight local history call during shutdown
+
+`shutdown_allows_an_inflight_sqlite_call_but_stops_subsequent_housekeeping`
+holds SQLite's write lock while a housekeeping publication is pending, drops
+the router-lifetime guard, then releases the lock. The pending write completes
+with its original bytes. The next housekeeping publication returns Interrupted
+and writes nothing; the ordinary application store remains writable.
+All four housekeeping tests pass in 0.26 seconds.
+
+This verifies cooperative stopping around a real blocked metadata write.
+It does not cancel that write or establish a runtime-drop deadline. SQLite
+connections retain their existing 30-second busy timeout; arbitrary filesystem
+or remote storage delays remain outside this fixture. No runtime behavior or
+version changed.
