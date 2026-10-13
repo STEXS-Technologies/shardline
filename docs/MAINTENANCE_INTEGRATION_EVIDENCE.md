@@ -3380,3 +3380,30 @@ The focused locked test passes in 0.43 seconds. This covers typed local mutation
 interruptions and persisted retry state, not process termination, PostgreSQL
 ownership loss or maintenance completion recording. Those require their separate
 fixtures; the broader phase-by-phase gate remains open.
+
+### Lifecycle repair recovery in fresh PostgreSQL sessions
+
+The configured PostgreSQL fixture checks all three lifecycle metadata mutation
+boundaries in an isolated schema. After each injected interruption it closes
+the original pool and opens a new session. The exact expected retention-hold,
+quarantine-candidate and webhook-delivery counts survive. Fresh repair removes
+only the remaining eligible rows, a further pass finds none, and unrelated
+payload bytes remain unchanged.
+
+The exact locked test passes with one passed, zero failed and zero ignored in
+0.91 seconds, without runtime skips: diagnostics are
+`/tmp/shardline-batched-deletion.McZ5OR/test.log`. The earlier fixture setup
+omitted schema-specific delete protection and correctly failed with a schema
+mismatch; the passing run initializes that protection before seeding mutations.
+The fixture uses a disposable PostgreSQL instance and removes its own schema
+and container. It does not establish request-owner loss, process-kill recovery,
+remote storage outcomes or maintenance completion recording; separate tests
+remain necessary for those boundaries. Runtime code and version are unchanged.
+
+With an owned, migrated PostgreSQL fixture configured through `DATABASE_URL`:
+
+```sh
+cargo test --locked -p shardline-server --all-features --lib \
+  lifecycle_repair::postgres_recovery::mutation_interruptions_survive_new_postgres_sessions \
+  -- --exact --nocapture
+```
