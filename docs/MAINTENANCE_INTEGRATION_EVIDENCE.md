@@ -13,6 +13,14 @@ untested deployments.
 
 ## Shared history retention after configuration changes
 
+The optimized all-feature binary built from `8078848c` passed all 11 selected
+maintenance deployment drills in 128.121 seconds, with no runtime skips. Twelve
+unrelated tests were filtered out. This covers restricted commands, concurrent
+ownership, mixed-version rollback, remote-delete recovery, container replacement
+and graceful shutdown after the shared-retention and atomic-finalization changes.
+The binary still reports version 1.11.3. These results do not close the remaining
+scale, unresolved-history growth or uncovered write-path requirements.
+
 When its candidate batch is full, retention now excludes newer identities
 before reading their scope bindings. Selected runs still require verified scope
 authorization. A real-Postgres 65-run fixture injects a scope-read failure for
