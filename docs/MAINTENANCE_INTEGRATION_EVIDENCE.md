@@ -28,6 +28,14 @@ both crates. These results establish bounded payload reads and unchanged cleanup
 selection; they do not establish a production performance target or remove the
 full inventory scan.
 
+Additional conflict regressions passed for both bounded readers. The SQLite
+fixture preserves exact metadata and legacy identity bytes when they disagree.
+The real-Postgres multi-page fixture now also includes a completed run with a
+conflicting legacy identity: normal completed history drains, while both versions
+of the disputed identity remain unchanged. These checks verify that batching
+does not bypass the existing legacy-conflict rule. The Postgres run passed in
+10.32 seconds; formatting and strict server Clippy passed as well.
+
 Postgres retention now fetches bounded manifest payloads in pages instead of
 reading each manifest separately. A page contains at most 64 bodies of at most
 64 KiB each. Oversized records retain their length without transferring their

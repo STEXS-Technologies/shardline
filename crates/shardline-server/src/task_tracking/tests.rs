@@ -838,6 +838,55 @@ fn metadata_retention_uses_creation_time_instead_of_key_order() {
     assert!(store.summaries(deployment, None, 100).unwrap().is_empty());
 }
 
+#[test]
+fn batched_local_retention_preserves_conflicting_legacy_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let store = TaskEvidenceStore::from_config(&config)
+        .unwrap()
+        .require_metadata_publication();
+    EmbeddedTaskTracker::from_store(store.clone(), deployment)
+        .begin(
+            "finished",
+            b"input",
+            MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap()
+        .finish(true, b"complete")
+        .unwrap();
+    let id = store
+        .summaries(deployment, None, 10)
+        .unwrap()
+        .first()
+        .unwrap()
+        .id
+        .clone();
+    let suffix = format!("manifests/{id}");
+    let original = store.read(&suffix, 65536).unwrap();
+    TaskEvidenceStore::from_objects(store.objects.clone())
+        .publish(&suffix, b"conflicting legacy identity")
+        .unwrap();
+    assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 0);
+    assert!(matches!(
+        store.read(&suffix, 65536),
+        Err(ServerError::InvalidContentHash)
+    ));
+    assert_eq!(
+        store.read_objects(&suffix, 65536).unwrap().as_deref(),
+        Some(b"conflicting legacy identity".as_slice())
+    );
+    assert_eq!(
+        store
+            .local_metadata
+            .as_ref()
+            .unwrap()
+            .read_task_artifact(TaskEvidenceStore::key(&suffix).unwrap().as_str(), 65536)
+            .unwrap(),
+        original
+    );
+}
+
 fn verify_metadata_backlog(finished_count: usize) {
     let total_count = finished_count.checked_add(2).unwrap();
     let root = tempfile::tempdir().unwrap();
