@@ -15,6 +15,7 @@ use admission::{AUTOMATIC_HISTORY_CAPACITY, automatic_publication_result};
 mod evidence_reader;
 mod history_observation;
 mod history_scope_binding;
+pub(crate) mod housekeeping;
 mod postgres_metadata;
 mod relocation;
 mod retention;
@@ -186,6 +187,7 @@ pub struct TaskEvidenceStore {
     local_metadata: Option<shardline_index::LocalIndexStore>,
     postgres_metadata: Option<postgres_metadata::PostgresTaskMetadata>,
     metadata_only_publication: bool,
+    housekeeping_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl TaskEvidenceStore {
@@ -195,6 +197,7 @@ impl TaskEvidenceStore {
             local_metadata: None,
             postgres_metadata: None,
             metadata_only_publication: false,
+            housekeeping_stop: None,
         }
     }
     /// Reuses existing metadata for local payload storage without PostgreSQL.
@@ -215,6 +218,7 @@ impl TaskEvidenceStore {
             objects,
             postgres_metadata: None,
             metadata_only_publication: false,
+            housekeeping_stop: None,
             local_metadata: (config.index_postgres_url().is_none()
                 && config.object_storage_adapter() == crate::ObjectStorageAdapter::Local)
                 .then(|| shardline_index::LocalIndexStore::open(config.root_dir().to_owned())),
@@ -238,6 +242,7 @@ impl TaskEvidenceStore {
     /// # Errors
     /// Returns invalid keys, unavailable storage or a conflicting publication.
     pub fn publish(&self, suffix: &str, bytes: &[u8]) -> Result<(), ServerError> {
+        self.check_housekeeping()?;
         let key = Self::key(suffix)?;
         if let Some(metadata) = &self.postgres_metadata {
             if self.objects.metadata(&key)?.is_some() {
@@ -307,6 +312,7 @@ impl TaskEvidenceStore {
     /// # Errors
     /// Returns unavailable storage or evidence larger than the requested bound.
     pub fn read(&self, suffix: &str, maximum: u64) -> Result<Option<Vec<u8>>, ServerError> {
+        self.check_housekeeping()?;
         if let Some(metadata) = &self.postgres_metadata
             && let Some(artifact) = metadata.read(Self::key(suffix)?.as_str(), maximum)?
         {
@@ -340,6 +346,7 @@ impl TaskEvidenceStore {
     }
 
     fn read_objects(&self, suffix: &str, maximum: u64) -> Result<Option<Vec<u8>>, ServerError> {
+        self.check_housekeeping()?;
         let key = Self::key(suffix)?;
         let Some(metadata) = self.objects.metadata(&key)? else {
             return Ok(None);
@@ -395,14 +402,17 @@ impl TaskEvidenceStore {
     where
         F: FnMut(&ObjectMetadata) -> Result<ControlFlow<()>, ServerError>,
     {
+        self.check_housekeeping()?;
         if let Some(metadata) = &self.postgres_metadata {
             let mut after = after.map(str::to_owned);
             'pages: loop {
+                self.check_housekeeping()?;
                 let page = metadata.page(prefix.as_str(), after.as_deref())?;
                 if page.is_empty() {
                     break;
                 }
                 for (key, length) in page {
+                    self.check_housekeeping()?;
                     if !key.starts_with(prefix.as_str()) {
                         break 'pages;
                     }
@@ -420,12 +430,14 @@ impl TaskEvidenceStore {
                 prefix.as_str(),
                 after,
                 |key, length| {
+                    self.check_housekeeping()?;
                     let key = ObjectKey::parse(key).map_err(|_error| ServerError::InvalidPath)?;
                     visit(&ObjectMetadata::new(key, length, None))
                 },
             )?;
         }
         self.objects.visit_prefix(prefix, |object| {
+            self.check_housekeeping()?;
             if after.is_some_and(|after| object.key().as_str() <= after) {
                 return Ok(());
             }
@@ -446,6 +458,7 @@ impl TaskEvidenceStore {
     }
 
     fn delete_artifact(&self, key: &ObjectKey) -> Result<(), ServerError> {
+        self.check_housekeeping()?;
         // Remove the legacy copy first so a partially completed cleanup cannot
         // reveal it again after the metadata copy disappears.
         self.objects.delete_if_present(key)?;

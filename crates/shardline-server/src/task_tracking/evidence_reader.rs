@@ -42,6 +42,7 @@ impl<'store> EvidencePageReader<'store> {
         suffix: &str,
         maximum: u64,
     ) -> Result<Option<Vec<u8>>, ServerError> {
+        self.store.check_housekeeping()?;
         // A malformed nested inventory key must retain the normal canonical
         // lookup behavior rather than supplying a different identity's bytes.
         if enumerated_key != TaskEvidenceStore::key(suffix)?.as_str() {

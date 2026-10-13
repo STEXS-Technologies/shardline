@@ -19,6 +19,7 @@ impl TaskEvidenceStore {
     /// # Errors
     /// Returns storage failures; callers must preserve serving/maintenance availability.
     pub fn prune_completed(&self, deployment: Digest, now: u64) -> Result<usize, ServerError> {
+        self.check_housekeeping()?;
         // A retirement marker authorizes only evidence cleanup. It is committed
         // after native completion verification, before hiding the manifest.
         // Keep it until all deletes succeed so interrupted cleanup is resumable.
@@ -207,6 +208,7 @@ impl TaskEvidenceStore {
         ))?;
         if let Some(postgres) = &self.postgres_metadata {
             let delete_metadata_batch = |keys: &[String]| {
+                self.check_housekeeping()?;
                 postgres.delete_batch(keys)?;
                 if let Some(local) = &self.local_metadata {
                     for key in keys {
@@ -236,6 +238,7 @@ impl TaskEvidenceStore {
         }
         if let Some(postgres) = &self.postgres_metadata {
             // Keep the signed binding until the marker disappears atomically;
+            self.check_housekeeping()?;
             // a replacement login can still authorize interrupted cleanup.
             postgres.finish_retirement(&identity.id)?;
             for category in ["scope-bindings", "retiring"] {
