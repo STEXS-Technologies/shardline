@@ -73,6 +73,13 @@ accounts and shared retention, not a cross-host failure or current cluster healt
 
 ## Retention batch reads
 
+The optimized all-feature binary built from `5e62ac6b` passed all 11 selected
+deployment drills in 136.788 seconds, with no runtime skips; 12 unrelated tests
+were filtered out. This revalidates rollback, restricted commands, concurrent
+ownership, remote-delete faults, replacement and shutdown after native-record
+batching. The binary remains version 1.11.3. Total inventory cost and retained
+unresolved-history growth are still open requirements.
+
 Native history verification now batches record bodies through the conventional
 `task_tracking::evidence_reader` module, shared with manifest inspection and
 retention. It still validates every sequence, semantic transition, signature,
