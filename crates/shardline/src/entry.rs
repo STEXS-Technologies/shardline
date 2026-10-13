@@ -70,6 +70,27 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
         }
     }
     let command = match command {
+        Ok(crate::command::ParsedCommand::History(history_args)) => {
+            return match crate::history_inspection::run(
+                history_args.root.as_deref(),
+                history_args.after,
+                usize::from(history_args.limit),
+            )
+            .await
+            {
+                Ok(page) => match to_string_pretty(&page) {
+                    Ok(text) => stdout_text(format_args!("{text}\n")),
+                    Err(error) => error_chain_status(&error, ExitCode::FAILURE),
+                },
+                Err(error) => {
+                    let _ignored = writeln!(
+                        io::stderr().lock(),
+                        "Maintenance history could not be inspected; this does not establish whether work ran or the server is ready."
+                    );
+                    error_chain_status(error.as_ref(), ExitCode::FAILURE)
+                }
+            };
+        }
         #[cfg(target_os = "linux")]
         Ok(crate::command::ParsedCommand::Maintenance {
             state_dir,

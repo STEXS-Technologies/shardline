@@ -129,6 +129,50 @@ struct VerifiedTaskState {
 }
 
 impl TaskEvidenceStore {
+    /// Inspects a page of history without executing, retrying or retiring work.
+    /// Includes recovery guidance and damaged records, matching admin inspection.
+    /// `next_after` is an opaque run ID for the next call with the same scope.
+    /// Run on a blocking thread; the inventory scan can be O(N).
+    ///
+    /// # Errors
+    /// Returns invalid bounds or storage failures.
+    pub fn inspection_page(
+        &self,
+        deployment: Digest,
+        history_scope: Option<Digest>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<serde_json::Value, ServerError> {
+        if limit == 0 || limit > 100 {
+            return Err(ServerError::InvalidPath);
+        }
+        let history_notice = match self.history_notice() {
+            Ok(notice) => notice,
+            Err(error) => {
+                tracing::warn!(%error, "task history recording availability could not be checked");
+                Some(
+                    "New task history recording could not be checked. Existing records may still be listed; check maintenance warnings. This notice does not describe server readiness.",
+                )
+            }
+        };
+        let mut tasks = self.inspect_summaries_with_scope(
+            deployment,
+            history_scope,
+            after,
+            limit.saturating_add(1),
+        )?;
+        let has_more = tasks.len() > limit;
+        tasks.truncate(limit);
+        let next_after = has_more
+            .then(|| tasks.last().map(|task| task.id().to_owned()))
+            .flatten();
+        Ok(serde_json::json!({
+            "tasks": tasks.iter().map(TaskEvidenceEntry::operator_view).collect::<Vec<_>>(),
+            "next_after": next_after,
+            "history_notice": history_notice,
+        }))
+    }
+
     /// Lists a bounded page of verified summaries. The store inventory walk is
     /// streaming but may be O(N); hosts must admission-gate this synchronous call.
     /// # Errors

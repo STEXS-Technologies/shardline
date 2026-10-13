@@ -26,6 +26,7 @@ use super::error::CliParseError;
 
 pub(crate) enum ParsedCommand {
     Existing(CliCommand),
+    History(super::definition::HistoryArgs),
     #[cfg(target_os = "linux")]
     Maintenance {
         state_dir: PathBuf,
@@ -54,11 +55,17 @@ impl CliCommand {
     {
         match parse_command(args, false)? {
             ParsedCommand::Existing(command) => Ok(command),
-            #[cfg(target_os = "linux")]
-            _ => Err(CliParseError::validation(
+            ParsedCommand::History(_) => Err(CliParseError::validation(
                 ErrorKind::InvalidSubcommand,
-                "managed maintenance commands must be dispatched through shardline::run",
+                "history inspection must be dispatched through shardline::run",
             )),
+            #[cfg(target_os = "linux")]
+            ParsedCommand::Maintenance { .. } | ParsedCommand::MaintenanceWorker { .. } => {
+                Err(CliParseError::validation(
+                    ErrorKind::InvalidSubcommand,
+                    "managed maintenance commands must be dispatched through shardline::run",
+                ))
+            }
         }
     }
 
@@ -99,6 +106,10 @@ where
     // Embedded callers can recover from a failed parse without inheriting
     // its dotenv variables or selected configuration path.
     let command = match definition {
+        CliDefinition {
+            command: CliDefinitionCommand::History(history_args),
+            ..
+        } if managed => ParsedCommand::History(history_args),
         #[cfg(target_os = "linux")]
         CliDefinition {
             command: CliDefinitionCommand::Maintenance(maintenance_args),
@@ -191,6 +202,10 @@ impl TryFrom<CliDefinition> for CliCommand {
 
     fn try_from(value: CliDefinition) -> Result<Self, Self::Error> {
         match value.command {
+            CliDefinitionCommand::History(_) => Err(CliParseError::validation(
+                ErrorKind::InvalidSubcommand,
+                "history inspection must be dispatched through shardline::run",
+            )),
             #[cfg(target_os = "linux")]
             CliDefinitionCommand::Maintenance(_) | CliDefinitionCommand::MaintenanceWorker(_) => {
                 Err(CliParseError::validation(

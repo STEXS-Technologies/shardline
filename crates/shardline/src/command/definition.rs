@@ -53,6 +53,8 @@ pub(crate) enum CliDefinitionCommand {
     Admin(AdminCommandArgs),
     /// Verify object-store and metadata integrity.
     Fsck(RootArgs),
+    /// Inspect saved maintenance history without starting work or a worker.
+    History(HistoryArgs),
     /// Run optional child-process maintenance with deadlines and CPU limits (Linux).
     #[cfg(target_os = "linux")]
     #[command(
@@ -737,6 +739,19 @@ pub(crate) struct RootArgs {
     /// Override the deployment root for local metadata state.
     #[arg(long)]
     pub(crate) root: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HistoryArgs {
+    /// Override the deployment root for local metadata state.
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    /// Maximum records to show (1–100).
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub(crate) limit: u16,
+    /// Continue after the next_after run ID from the preceding page.
+    #[arg(long)]
+    pub(crate) after: Option<String>,
 }
 
 // ── CLI value enums ─────────────────────────────────────────────────────
