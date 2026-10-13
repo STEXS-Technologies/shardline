@@ -143,6 +143,63 @@ fn real_checkpoint_worker_pauses_until_history_commit_and_acknowledgement() {
 }
 
 #[test]
+fn controller_bound_runtime_stops_worker_on_drop_without_capturing_output() {
+    let (_directory, path, scope, definition) = fixture(b"hold");
+    let mut runtime = ProcessTaskRuntime::open(&path, &helper(), scope, definition).unwrap();
+    runtime.stop_with_controller();
+    let mut supervisor = restore_local_task_supervisor::<_, 128>(
+        &path,
+        runtime,
+        scope,
+        definition,
+        BootTaskClock::current(),
+    )
+    .unwrap();
+    supervisor
+        .submit(b"hold", 1, BootTaskClock::current())
+        .unwrap();
+    supervisor.advance(BootTaskClock::current()).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM penelope_runtime_v1 WHERE pid IS NOT NULL)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    });
+    let encoded: Vec<u8> = connection
+        .query_row("SELECT authorization FROM penelope_runtime_v1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let authorization: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        authorization.get("controller_pid"),
+        Some(&serde_json::json!(std::process::id()))
+    );
+    drop(supervisor);
+    assert!(
+        connection
+            .query_row("SELECT fenced FROM penelope_runtime_v1", [], |row| row
+                .get::<_, bool>(0))
+            .unwrap()
+    );
+    assert!(
+        !std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".stdout")
+            })
+    );
+}
+
+#[test]
 fn reconstructed_controller_kills_surviving_worker_and_persists_delayed_start_fence() {
     let (_directory, path, scope, definition) = fixture(b"hold");
     let mut supervisor = open(&path, scope, definition);

@@ -2789,3 +2789,35 @@ payload. These are actual process interruption checks, not receipt-only fault
 fixtures. They do not prove every interruption point, remote-call cancellation
 or cluster-wide exactly-once execution. The guide now states that stopping a
 worker cannot undo a remote request already received by storage.
+
+## Optional worker lifetime independent of output capture
+
+A stronger controller-loss assertion exposed a gap in the preceding binary:
+Nextest run `78e31d7d-5d59-4ace-8f71-e62378c2ebe9` failed after 5.176 seconds
+because the optional worker survived controller termination. The fixture held
+the local mutation barrier, inspected its recorded worker PID, and ran recovery
+to fence the surviving fixture child before reporting failure. The prior test
+proved fencing during recovery, not immediate worker termination.
+
+`ProcessTaskRuntime::stop_with_controller` is now a separate opt-in from output
+capture. Shardline's optional maintenance controller enables it. Managed runtime
+drop fences its owned workers; the existing Linux parent-death signal stops a
+claimed child if the controller dies. Existing library defaults remain unchanged,
+including reconstructable workers that survive a dropped runtime. Normal inline
+maintenance does not invoke this process runtime. Authorization uses the existing
+optional controller PID field; no new task schema, service or operator setting
+is introduced.
+
+All 11 process-runtime tests pass in 2.09 seconds, including the opt-in drop test,
+default surviving-worker recovery, kernel CPU limits, checkpoint acknowledgements
+and deadline enforcement. Strict reliability and CLI library/test Clippy pass.
+The updated optimized CLI has SHA-256
+`aee2f7cba208a6e669bae90b24cacd9f4c7a494dc853e973b3e677cad86691c2`;
+the release build completed in 3m05s. Nextest run
+`e366253d-bc85-4dde-b4a8-1ea238b19896` passes four selected process tests in
+1.332 seconds. These include the strengthened child-termination test, both
+ordinary interruption fixtures and successful fsck/rebuild/GC/lifecycle-repair
+workflows with completed-history reuse. Fourteen tests are selection exclusions.
+The strengthened test observes the child stopped before invoking recovery;
+recovery still rejects the uncertain mutation. This does not cancel remote
+effects already issued. Formatting, diff checks and the AST graph update pass.
