@@ -3046,3 +3046,23 @@ test. Its log is `/tmp/shardline-batched-deletion.OFZ8WW/test.log`; runtime skip
 and panics were rejected. Strict server library/test Clippy passes. These tests
 extend named recording and ownership evidence, not every secret-delivery or
 external-mutation phase. No runtime behavior or version changed.
+
+## Historical evidence and native profile compatibility audit
+
+The annotated `v1.11.3` tag resolves to
+`98a4dadb865cca14178a27cb7480e1bb4e9eabe3`, exactly the source commit recorded
+for the frozen historical fixtures. Its workspace used StateChronicle/Penelope
+0.1.0. The current all-feature reliability run passes all three deployment
+compatibility tests and all six native-artifact tests.
+
+Historical tests cover 30 chains across all eleven operation kinds, compare
+the reconstructed commitments and signatures with frozen values, independently
+verify signatures, retain mixed-encoding continuation, read envelopes without
+schema markers, and reject tampered roots, missing commitments and rewritten
+storage sequences. Native-artifact tests separately verify the frozen new
+maintenance schema and reject forged roots, mismatched authority and oversized
+or unsupported documents.
+
+These results establish the tested persisted-format compatibility; they do not
+make signed history execution authority or cover every deployment layout.
+No fixture, runtime code or version changed.
