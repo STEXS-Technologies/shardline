@@ -2451,6 +2451,14 @@ tests passed in 0.93 seconds with this extended regression; log:
 Clippy and formatting passed. This extends the transaction-ordering evidence;
 it does not establish a deployment latency bound.
 
+The current full `postgres::` index library selection also passed against a
+fresh disposable PostgreSQL database: 187 executed tests, zero failures and
+zero ignored tests, in 38.40 seconds. Log:
+`/tmp/shardline-batched-deletion.TFtiop/test.log`. The verifier rejected runtime
+skip and panic messages. This covers the selected index metadata operations
+with the publication/retirement fix and both transaction orderings; it does
+not replace process-level mixed-node testing or close the scale gates.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
