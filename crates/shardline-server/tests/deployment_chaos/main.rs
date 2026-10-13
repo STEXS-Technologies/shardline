@@ -54,6 +54,8 @@ mod tracker_replacement;
 
 mod gc_acknowledgement;
 
+mod maintenance_history;
+
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------

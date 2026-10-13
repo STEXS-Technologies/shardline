@@ -1,10 +1,11 @@
 //! A real S3 mutation succeeds while its ordinary CLI acknowledgement is lost.
+use super::maintenance_history::MaintenanceHistory;
 use super::*;
 use axum::{Router, body::Body, extract::State, http::Request, response::IntoResponse};
 use shardline_index::{AsyncIndexStore, PostgresIndexStore, QuarantineCandidate};
 use shardline_server::{
     ObjectStorageAdapter, ServerConfig,
-    task_tracking::{TaskEvidenceStore, TaskExecutionMode, TaskRunState, deployment_fingerprint},
+    task_tracking::{TaskExecutionMode, TaskRunState, deployment_fingerprint},
 };
 use shardline_storage::{ObjectBody, ObjectIntegrity};
 use std::{
@@ -111,30 +112,6 @@ struct ProxyTask(JoinHandle<()>);
 impl Drop for ProxyTask {
     fn drop(&mut self) {
         self.0.abort();
-    }
-}
-
-// Production history inspection runs on blocking threads. Keep the synchronous
-// evidence API off this drill's async runtime workers as well.
-struct MetadataHistory(TaskEvidenceStore);
-
-impl MetadataHistory {
-    fn summaries(
-        &self,
-        deployment: penelope_core::task::Digest,
-        after: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<shardline_server::task_tracking::TaskRunSummary>, shardline_server::ServerError>
-    {
-        tokio::task::block_in_place(|| self.0.summaries(deployment, after, limit))
-    }
-
-    fn read(
-        &self,
-        key: &str,
-        maximum: u64,
-    ) -> Result<Option<Vec<u8>>, shardline_server::ServerError> {
-        tokio::task::block_in_place(|| self.0.read(key, maximum))
     }
 }
 
@@ -359,14 +336,7 @@ async fn run_remote_gc_fault_with_recovery(
             .unwrap();
     }
     let deployment = deployment_fingerprint(&config).unwrap();
-    let (store, history_scope) = TaskEvidenceStore::from_postgres_pool(&config, &pool)
-        .await
-        .unwrap();
-    assert!(
-        history_scope.is_some(),
-        "owned upgraded fixture must expose metadata history"
-    );
-    let store = MetadataHistory(store);
+    let store = MaintenanceHistory::from_postgres_pool(&config, &pool).await;
     let mark = docker_run_owned(
         super::readonly_maintenance_deployment::readonly_cli_arguments(
             &binary,
