@@ -120,6 +120,8 @@ mod storage_migration;
 pub mod task_tracking;
 pub mod test_fixtures;
 pub mod test_invariant_error;
+#[cfg(test)]
+mod test_support;
 pub(crate) mod xet_adapter;
 
 pub use admission::{ExecutionPools, WeightedAdmission};

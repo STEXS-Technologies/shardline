@@ -1,4 +1,5 @@
 mod backend;
+mod publication;
 mod read;
 mod stats;
 mod upload;

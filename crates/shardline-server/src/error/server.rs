@@ -57,7 +57,7 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum ServerError {
     /// Local storage IO failed.
-    #[error("local storage operation failed")]
+    #[error("{}", super::publication::io_message(.0))]
     Io(#[from] IoError),
     /// JSON serialization or deserialization failed.
     #[error("json operation failed")]
@@ -286,6 +286,11 @@ pub enum ServerError {
 }
 
 impl ServerError {
+    pub(crate) fn is_retryable_publication(&self) -> bool {
+        self.is_remote_delete_pending()
+            || matches!(self, Self::Io(error) if super::publication::is_content_unavailable(error))
+    }
+
     /// Returns whether this request must wait for a remote delete to be reconciled.
     #[must_use]
     pub fn is_remote_delete_pending(&self) -> bool {
@@ -377,7 +382,7 @@ impl ServerError {
     }
 
     pub(crate) fn status_code(&self) -> StatusCode {
-        if self.is_remote_delete_pending() {
+        if self.is_retryable_publication() {
             return StatusCode::SERVICE_UNAVAILABLE;
         }
         match self {
@@ -501,7 +506,7 @@ impl IntoResponse for ServerError {
                 HeaderValue::from_static("Bearer realm=\"shardline\""),
             );
         }
-        if self.is_remote_delete_pending()
+        if self.is_retryable_publication()
             || matches!(
                 self,
                 Self::TransferLimiterTimedOut | Self::WorkQueueSaturated | Self::RequestTimedOut
@@ -772,8 +777,13 @@ impl From<ParseStoredFileRecordError> for ServerError {
 /// - `NotFound` → `404 NoSuchKey`
 /// - authorization failures → `403 AccessDenied`
 /// - request MD5 mismatch → `400 BadDigest`
+/// - retryable publication failures → `503 SlowDown` with actionable guidance
 /// - everything else → `500 InternalError`
 impl shardline_s3_adapter::S3ErrorClassify for ServerError {
+    fn s3_retryable_message(&self) -> Option<String> {
+        self.is_retryable_publication().then(|| self.to_string())
+    }
+
     fn s3_class(&self) -> shardline_s3_adapter::S3ErrorClass {
         use shardline_s3_adapter::S3ErrorClass;
         match self {

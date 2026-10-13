@@ -1,6 +1,9 @@
 use axum::{
     body::Body,
-    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderValue, StatusCode,
+        header::{CONTENT_TYPE, RETRY_AFTER},
+    },
     response::{IntoResponse, Response},
 };
 
@@ -216,6 +219,11 @@ impl IntoResponse for S3Error {
         response
             .headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
+        if self.status == StatusCode::SERVICE_UNAVAILABLE {
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+        }
         response
     }
 }
@@ -267,10 +275,19 @@ pub enum S3ErrorClass {
 pub trait S3ErrorClassify {
     /// Returns the S3 error class for this server error.
     fn s3_class(&self) -> S3ErrorClass;
+
+    /// Returns an actionable message when retrying the request is safe.
+    /// Existing classifiers retain their original response by default.
+    fn s3_retryable_message(&self) -> Option<String> {
+        None
+    }
 }
 
 impl<E: S3ErrorClassify> From<E> for S3Error {
     fn from(value: E) -> Self {
+        if let Some(message) = value.s3_retryable_message() {
+            return Self::slow_down().with_message(message);
+        }
         Self::from_class(value.s3_class())
     }
 }

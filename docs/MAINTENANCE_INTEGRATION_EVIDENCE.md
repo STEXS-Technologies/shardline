@@ -11,6 +11,52 @@ commands. Earlier observations describe their tested revision; later notes recor
 subsequent fixes. They are not a substitute for the current checklist or proof of
 untested deployments.
 
+## Staged upload publication
+
+New publication logic lives in `postgres_backend::publication`, with its tests
+in `publication::tests`. Shared PostgreSQL fixtures live in `test_support`.
+These use ordinary Rust module declarations; there are no `#[path]` overrides.
+
+A real-Postgres fixture stages an actual packed xorb, verifies it exists, deletes
+it, and settles the matching delete attempt before publication. Replacing the new
+S3 publication call with the previous call reproduces an incorrect successful
+publication. With the fix, both staged-file and native S3 publication roll back
+their metadata and return a retryable error. A fresh upload retry restores the
+bytes and succeeds. Pending deletes retain their reconciliation error; failed
+conditional publication retains its original result. A separate database
+connection proves the backing-object lock lasts until the transaction ends.
+Both configured publication tests pass in 0.65 seconds. Their payload store is
+local CAS: this deterministic interleaving is not itself a remote-S3 fault drill.
+
+The final check runs inside the metadata transaction on the actual write
+connection. It locks the existing delete slots, supports direct chunks and
+packed xorbs, and bounds concurrent presence checks with existing upload
+parallelism. It applies to newly staged uploads, not arbitrary legacy records
+or copy operations. Before the existing owner setup installs the guard helpers,
+the previous publication behavior remains available. Blackhole benchmarking
+does not require stored bytes. Physical deletion outside the covered guards
+remains outside this guarantee.
+
+HTTP, OCI and native S3 return 503 with `Retry-After: 1` and tell the caller to
+retry an upload whose staged content disappeared. A settled delete is not
+misreported as pending. The public server-error enums remain unchanged; an
+internal typed storage error carries this case. The S3 classifier extension has
+a default preserving existing implementations and error classes.
+
+Validation also passes 261 selected server unit tests, all 178 S3 adapter tests,
+15 configured PostgreSQL history tests in 22.41 seconds, and the actual CLI
+work-session fixture in 34.53 seconds. Strict all-feature, all-target Clippy
+passes for the CLI, server and S3 adapter. The optimized binary still reports
+1.11.3; its SHA-256 is
+`58cef9df53a2d7a97ed9b13486026c1a1ff2987505b3125518d5b10129d0eb21`.
+An immutable copy of that binary passed all 11 selected deployment drills in
+161.516 seconds, including real PostgreSQL/MinIO delete faults, restricted
+commands, concurrent ownership, mixed-version rollout and rollback, and
+container replacement with graceful shutdown. No selected drill skipped at
+runtime; the 12 excluded tests were outside the selection.
+The broader merge gates remain open, including upload presence-check cost and
+uncovered legacy or externally managed writers.
+
 ## Recording capacity in the admin response
 
 The authenticated full-history router fixture now also starts a fresh router

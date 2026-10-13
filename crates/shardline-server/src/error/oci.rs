@@ -60,7 +60,7 @@ impl IntoResponse for OciError {
                 HeaderValue::from_static("Bearer realm=\"shardline\""),
             );
         }
-        if self.0.is_remote_delete_pending() {
+        if self.0.is_retryable_publication() {
             response
                 .headers_mut()
                 .insert(RETRY_AFTER, HeaderValue::from_static("1"));

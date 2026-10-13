@@ -75,6 +75,12 @@ These are scoped results, not a claim that every deployment is compatible:
   covering direct file, dedupe, reconstruction and stored-object references,
   rejected-publication rollback, restricted accounts, cross-schema settlement,
   stale attempts and publication/deletion races.
+- Newly staged Postgres uploads check their backing bytes inside the publication
+  transaction. A configured database fixture deletes an actual staged xorb,
+  settles its marker, and verifies rollback of file and S3 metadata, a retryable
+  response, successful fresh retry, unchanged failed preconditions and lock
+  lifetime. It uses local CAS for the deterministic interleaving; this does not
+  establish the behavior of arbitrary legacy records or unguarded deletion.
 - History distinguishes completed, failed and unresolved runs. Signed records
   and reports are verified; unfinished and corrupt evidence is retained.
 - A mark-only GC comparison preserves released output, status and payload bytes
