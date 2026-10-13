@@ -2232,3 +2232,27 @@ payload inventory. One test passed in 0.07 seconds; log:
 This verifies optional embedded report admission and truthful failure at its
 boundary. It does not establish larger legacy-report cost, remote storage faults
 or physical disk limits. Ordinary command diagnostics retain their own contract.
+
+## Deployment rerun after housekeeping shutdown changes
+
+The final housekeeping CLI (SHA-256
+`65221eb7c90328b6449f86c5638e7beb8daa632e90b65f638e5f40e8d1a3767d`)
+passed all 11 selected deployment drills in 158.009 seconds. They cover mixed
+released/current rollout and rollback, lost and delayed remote-delete replies,
+existing GC permissions, denied optional receipt writes, database-outage recovery
+through repair and sweep, concurrent rebuild ownership, read-only maintenance and
+container replacement with graceful shutdown. Twelve other tests were excluded
+by the selection expression; none of the selected drills skipped at runtime.
+The verifier also rejects background panic messages, including panics emitted
+after otherwise successful assertions. Diagnostics:
+`/tmp/shardline-maintenance-deployments.P4mT9e/test.log`; verifier output:
+`.codex/validation/ux-final-housekeeping-deployments.log`.
+
+A separate current-source schema-routing drill passed against a database
+bootstrapped by released 1.11.3: one test in 0.91 seconds, with no skip or panic
+messages. Diagnostics: `/tmp/shardline-schema-routing.85Mkzb/test.log`;
+verifier output: `.codex/validation/ux-final-schema-routing.log`.
+Both verifiers now reject skip and background panic messages and retain their
+exact expected test-count checks. Shell syntax and diff checks passed.
+These results cover the selected fault scenarios and do not close the broader
+library, legacy-reference or scale gaps in the acceptance checklist.
