@@ -3098,3 +3098,23 @@ and the actionable optional-history warning. Diagnostics are
 `/tmp/shardline-local-permissions.LcevEF`.
 This confirms the optimized warning behavior; it does not establish performance,
 full-capacity incremental cleanup or completion of the remaining merge gates.
+
+### Full-capacity automatic incremental SQLite cleanup
+
+The separate optimized automatic-cleanup fixture passes with all 4,096 history
+slots occupied. It uses `prune_completed_incrementally`, not the compatibility
+cleanup API: each call removes at most 256 run-artifact keys and retires at most
+64 histories. All 4,094 verified completed histories retire in 97 calls;
+retirement markers finish, unfinished and corrupt histories remain inspectable,
+corrupt bytes and user payload remain unchanged, and fresh recording succeeds.
+Initial pagination visits all 4,096 distinct histories and over-capacity admission
+is rejected. Existing oldest-first compatibility assertions remain unchanged
+in their separate fixture.
+
+The exact ignored release test reports one pass, zero failures and zero ignored
+tests in 130.68 seconds; cleanup takes 102.124 seconds including the fixture's
+before/after artifact inventories. Diagnostics are
+`/tmp/shardline-history-capacity.KrWsMv/test.log`.
+The PostgreSQL drill ran concurrently, so these are correctness observations,
+not controlled performance measurements. Larger archives, physical disk growth
+and the broader acceptance gates remain open.

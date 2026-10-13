@@ -4,6 +4,7 @@ use shardline_reliability::MaintenanceArtifactKind;
 use std::num::NonZeroUsize;
 
 mod history_pagination;
+mod incremental_capacity;
 mod local_retention;
 mod postgres_capacity;
 mod postgres_retention;

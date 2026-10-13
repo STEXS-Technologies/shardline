@@ -206,6 +206,12 @@ The following still need implementation or stronger evidence before merge:
   Automatic retention now retires at most 256 run-artifact keys per invocation,
   leaving a marker so larger histories continue later. This limits deletion
   work, not inventory latency or active storage-call duration.
+  A separate optimized SQLite fixture now exercises this automatic API at all
+  4,096 occupied slots: 97 cleanup calls retire 4,094 verified completed runs,
+  with per-call artifact limits, unresolved histories, payload preservation
+  and fresh admission checked. Full-capacity PostgreSQL automatic cleanup is
+  still awaiting its result; earlier PostgreSQL capacity evidence uses the
+  compatibility cleanup API.
   Retention now stops both metadata and legacy traversal when its artifact
   budget is reached. History pagination keeps its full unordered legacy scan
   to preserve page ordering. This removes work after a retention budget break;
