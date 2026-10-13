@@ -1,5 +1,19 @@
 # Maintenance integration: detailed evidence
 
+## Retention ownership cleanup
+
+Retention hold creation and release now retain the same ownership guard used by
+the public metadata barrier. It closes the bound Postgres pool on early errors,
+unwind and cancellation, while normal completion still awaits connection cleanup.
+There is no new process, setting or runtime grant.
+
+A disposable Postgres 16 instance, bootstrapped by released 1.11.3, passed all
+13 `retention_runtime::tests` with `DATABASE_URL` configured. The new factory
+failure test preserves the original error and verifies that both an error and a
+deliberate panic allow an exclusive maintenance owner to acquire within two
+seconds. Existing contention, cancellation and lost-session tests also pass.
+This is evidence for retention ownership cleanup, not every library write path.
+
 This branch adds automatic task history to existing startup and maintenance.
 It is **not ready to merge**. The version stays unchanged; a version bump belongs
 in a separate PR.

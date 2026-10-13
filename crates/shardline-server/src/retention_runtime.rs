@@ -111,8 +111,8 @@ where
     Build: FnOnce() -> Result<RetentionHold, E>,
     E: From<ServerError>,
 {
-    if let Some(url) = config.index_postgres_url() {
-        let pool = maintenance_barrier::postgres_shared_work_pool(url).await?;
+    let barrier = acquire_metadata_write_barrier(config).await?;
+    if let Some(pool) = barrier.postgres_metadata_pool() {
         let hold = build_hold()?;
         let result = PostgresIndexStore::new(pool.clone())
             .upsert_retention_hold(&hold)
@@ -122,7 +122,6 @@ where
         result?;
         Ok(hold)
     } else {
-        let _barrier = maintenance_barrier::acquire_local_shared(config.root_dir()).await?;
         let store =
             LocalIndexStore::new(config.root_dir().to_path_buf()).map_err(ServerError::from)?;
         let hold = build_hold()?;
@@ -143,8 +142,8 @@ pub async fn release_retention_hold(
     config: &ServerConfig,
     object_key: &ObjectKey,
 ) -> Result<bool, ServerError> {
-    if let Some(url) = config.index_postgres_url() {
-        let pool = maintenance_barrier::postgres_shared_work_pool(url).await?;
+    let barrier = acquire_metadata_write_barrier(config).await?;
+    if let Some(pool) = barrier.postgres_metadata_pool() {
         let result = PostgresIndexStore::new(pool.clone())
             .delete_retention_hold(object_key)
             .await
@@ -152,7 +151,6 @@ pub async fn release_retention_hold(
         pool.close().await;
         result
     } else {
-        let _barrier = maintenance_barrier::acquire_local_shared(config.root_dir()).await?;
         Ok(LocalIndexStore::new(config.root_dir().to_path_buf())?
             .delete_retention_hold(object_key)
             .await?)
@@ -336,6 +334,48 @@ mod tests {
         sqlx::query("DELETE FROM shardline_resource_fences WHERE domain='maintenance-remote-delete' AND resource=$1")
             .bind(key.as_str()).execute(&pool).await.unwrap();
         pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::panic)] // Deliberate unwind verifies ownership cleanup.
+    async fn postgres_hold_factory_failure_releases_maintenance_ownership() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let _test_guard = POSTGRES_TEST_LOCK.lock().await;
+        let storage = tempfile::tempdir().unwrap();
+        let config = config(storage.path())
+            .with_index_postgres_url(url.clone())
+            .unwrap();
+        let result =
+            set_retention_hold_with(&config, || Err::<RetentionHold, _>(ServerError::Overflow))
+                .await;
+        assert!(matches!(result, Err(ServerError::Overflow)));
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintenance_barrier::postgres_exclusive_work_pool(&url),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        replacement.close().await;
+
+        let panicking = tokio::spawn(async move {
+            set_retention_hold_with(&config, || -> Result<RetentionHold, ServerError> {
+                panic!("synthetic hold factory panic");
+            })
+            .await
+        });
+        assert!(panicking.await.unwrap_err().is_panic());
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintenance_barrier::postgres_exclusive_work_pool(&url),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        replacement.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
