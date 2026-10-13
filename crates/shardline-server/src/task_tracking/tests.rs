@@ -8,6 +8,7 @@ mod local_retention;
 mod postgres_capacity;
 mod postgres_retention;
 mod report_limits;
+mod startup_recording;
 
 fn config(root: &std::path::Path) -> ServerConfig {
     ServerConfig::new(

@@ -3002,3 +3002,20 @@ tests, not missing results: all 23 pass with the same optimized binary bytes.
 These are disposable deployment fixtures, not proof of current production
 health, exactly-once effects, or every deployment layout. The version remains
 1.11.3; the broader acceptance gates remain open.
+
+## Startup final-recording failures preserve availability and fresh work
+
+`startup_sweep_preserves_work_and_readiness_when_final_recording_fails` passes
+in 0.13 seconds with two local-router fixtures: one rejects report artifacts,
+and one rejects completion sequence 2. Both startup sweeps remove real expired
+LFS staging and keep `/api/v1/status` ready. History has no verified completion
+and cannot be pruned as finished. The receipt may save interruption evidence
+after report failure; denial of sequence 2 prevents that record as well.
+
+After removing the fault, a new router startup removes newly expired staging
+and records a distinct completed run. The earlier unconfirmed run and original
+fixture bytes remain intact. The first test assertion incorrectly required
+sequence 2 to be absent after report failure; inspection showed its valid
+SupervisorInterrupted record, and the corrected assertion checks that event
+rather than mistaking it for completion. This local test does not simulate
+every server mutation or remote backend. No runtime behavior or version changed.
