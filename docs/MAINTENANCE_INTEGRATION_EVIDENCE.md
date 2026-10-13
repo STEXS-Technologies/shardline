@@ -3855,3 +3855,25 @@ library/test Clippy, formatting and diff checks pass. This verifies the staging
 boundary separately from owner loss before admission; active object-store calls
 and atomic intent-transition ownership remain open. Production code and the
 version are unchanged by this additional test.
+
+### Raw-xorb owner loss after a real provider accepted the PUT
+
+The test-support S3 proxy can now delay an accepted PUT's original response.
+A configured PostgreSQL/MinIO test waits until that fault is actually injected,
+then terminates the original request session's backend PID before releasing
+the storage acknowledgement. Shardline rejects the lost owner and leaves the
+upload intent in `Storing`, rather than reporting `Visible`. The test reads the
+stored object and compares its bytes exactly with the uploaded xorb. A fresh
+retry succeeds and advances the intent to `Visible`.
+
+All twelve configured publication cases pass in 12.51 seconds, with no runtime
+skip or panic (`/tmp/shardline-batched-deletion.6NOXYc/test.log`). The test uses
+its own PostgreSQL schema and MinIO stack. Strict server/test-support library
+and test Clippy, formatting and diff checks pass. An unchecked subtraction in
+the test was corrected before this final fixture run.
+
+The pause is a test-only provider fault; it adds no operator setting or runtime
+worker. This demonstrates preservation of an already-applied remote effect and
+unfinished intent at the tested acknowledgement boundary. It does not prove
+cancellation of remote storage calls or atomic fencing of subsequent intent
+transactions. Those remaining boundaries stay in the merge audit.
