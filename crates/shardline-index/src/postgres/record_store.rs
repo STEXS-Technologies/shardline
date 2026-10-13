@@ -132,6 +132,12 @@ impl super::PostgresRecordStore {
 
     /// Atomically commits one file-version record and its latest-file alias.
     ///
+    /// This method commits metadata only. It does not inspect object storage or
+    /// retain an ownership connection held by the caller. Callers publishing
+    /// storage-backed content must validate that content under their operation's
+    /// storage/reference protection. Use the connection-bound variant when an
+    /// existing session owns the operation.
+    ///
     /// # Errors
     ///
     /// Returns [`PostgresMetadataStoreError`] when either row cannot be written. No
@@ -147,6 +153,10 @@ impl super::PostgresRecordStore {
     }
 
     /// Commits a file version and latest alias on the caller's ownership session.
+    ///
+    /// Keeping the session preserves its locks; this method does not validate
+    /// backing bytes in object storage. The caller must perform that validation
+    /// while its reference protection remains held through publication.
     ///
     /// # Errors
     ///
@@ -504,6 +514,12 @@ impl super::PostgresRecordStore {
 
     /// Atomically commits native shard metadata.
     ///
+    /// This compatibility entry point supplies no additional physical object
+    /// keys. Metadata reference checks cannot discover keys hidden in xorb
+    /// payloads or prove that backing bytes exist. Storage-backed publishers
+    /// should derive physical keys from validated payloads and use the explicit
+    /// reference variant, retaining protection while checking storage presence.
+    ///
     /// # Errors
     ///
     /// Returns [`PostgresMetadataStoreError`] when any row in the metadata set cannot
@@ -525,6 +541,10 @@ impl super::PostgresRecordStore {
     /// Publishes native metadata with the physical references derived from
     /// validated xorb payloads. Pending-delete checks and all metadata writes
     /// share one transaction. The existing method retains its signature.
+    /// This checks delete coordination for the supplied keys, not storage
+    /// presence or completeness of the supplied reference set. It acquires a
+    /// connection from this store; use the connection-bound variant to retain
+    /// an existing ownership session.
     ///
     /// # Errors
     ///
@@ -548,6 +568,10 @@ impl super::PostgresRecordStore {
     }
 
     /// Publishes native records, mappings and reference checks on one ownership session.
+    ///
+    /// The caller supplies all physical references and validates their backing
+    /// bytes while protection remains held. This metadata-only method does not
+    /// read object storage or establish that the reference set is complete.
     ///
     /// # Errors
     ///
