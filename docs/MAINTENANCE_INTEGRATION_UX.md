@@ -27,9 +27,9 @@ Upgraded Postgres deployments share history through their existing database.
 Another node using the same database, schema and storage can inspect it.
 Local deployments save history in their existing SQLite metadata.
 
-In production, covered uploads and metadata writes reject a stale database
-owner. They also protect an object while an earlier remote delete is unresolved.
-Postgres provider callbacks record delivery IDs together with their changes,
+In production, covered uploads and metadata writes stop if they lose database
+ownership. Writes to an object also stop while an earlier delete is uncertain.
+Postgres provider callbacks save the delivery ID and its changes together,
 so retrying a successful delivery does not repeat those changes. See the
 [acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) for coverage and limits.
 
@@ -38,14 +38,15 @@ the command's output and exit status. Server warnings use your existing logging
 setup. Shardline never repeats work to repair history or claims verified
 completion from a missing receipt.
 
-Automatic history has a 4,096-run budget per metadata database or schema and a
-separate 4,096-workspace budget for private scratch, including cleanup awaiting
-deletion. When full, Shardline preserves existing evidence and still runs your
-command; it warns if the new run cannot be recorded. Already admitted runs can
-finish recording. Cleanup runs after work, including when recording failed.
-Unfinished and corrupt evidence is retained. New automatic artifacts are limited
-to 64 KiB; older evidence and explicit legacy imports remain unchanged. These
-limits do not bound physical database disk use or old binaries' history.
+If history fills up, your command still runs. Shardline preserves existing
+records and warns if it cannot record the new run. Recording failure does not
+prevent cleanup or stop an already recorded run from saving its result.
+
+Automatic history accepts up to 4,096 runs per metadata database or schema.
+Private temporary workspaces have a separate combined limit of 4,096, including
+workspaces awaiting deletion. New automatic artifacts are limited to 64 KiB.
+These limits preserve existing and imported history; they do not cap physical
+disk use. Interrupted and corrupt records stay available for investigation.
 
 ## Handle a retryable write
 
@@ -70,20 +71,17 @@ alone cannot clear it. Repair does not mark an interrupted GC run completed.
 `Retry-After: 1` suggests when to retry, not when recovery will finish.
 Saving replies adds receipt I/O to GC, using the existing storage and process.
 
-If an upload instead reports `prepared upload content is no longer available;
-retry the upload`, resend it. For covered Postgres uploads, this means staged
-bytes were removed before publication and the file was not made visible. This
-also returns HTTP 503 with `Retry-After: 1`.
+Other retryable write errors also return HTTP 503 with `Retry-After: 1`:
 
-Native Xet shard uploads can likewise return a retryable error if backing
-content disappeared before publication. Upload missing xorbs again, then resend
-the shard. Resending the shard also restores its normalized shard body. The
-failed publication does not leave new file metadata or dedupe mappings visible.
+| Error | What to do |
+| --- | --- |
+| `prepared upload content is no longer available; retry the upload` | Resend the upload. Its staged data disappeared before publication. |
+| `native shard backing content is no longer available; upload missing backing content again, then retry the shard` | Upload missing xorbs, then resend the shard. Resending also restores its normalized shard body. |
+| `database transaction snapshot changed; retry the request in a new transaction` | Retry the request. If your application owns the database transaction, roll it back and start a new one first. |
 
-A write can also return `database transaction snapshot changed; retry the
-request in a new transaction`. Retry the request. Applications managing their
-own database transaction must roll it back and start a new one before retrying.
-Shardline preserves the transaction's configured isolation level.
+For covered Postgres uploads, failed content checks leave no new file metadata
+or dedupe mappings visible.
+Retries preserve the configured database isolation level.
 
 ## Check a result
 
@@ -104,10 +102,10 @@ before repeating mutations; treat corrupt history as untrusted. Older and
 interrupted jobs may have no saved report. CLI diagnostics remain available.
 An alive process does not prove its recorded job is still running: a result may
 have failed to save. Check the original command and logs before repeating work.
-Each history entry includes `next_step` guidance. `history_notice` and
-`inspection_notice` explain when inspection is unavailable. `history_notice`
-also warns when retained history is full or recording availability could not be
-checked. That warning does not change server readiness. An empty list then
+Follow each result's `next_step` guidance. If the response includes
+`history_notice` or `inspection_notice`, read that warning before trusting an
+empty list: inspection or recording may be unavailable, or history may be full.
+These warnings do not change server readiness. An empty list with a warning
 does not prove that no work ran or no deletes are pending.
 
 Verified finished history expires after 30 days; each startup or maintenance
