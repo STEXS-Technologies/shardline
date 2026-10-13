@@ -3943,3 +3943,25 @@ the delay, actionable message and protocol-specific response bodies. The error
 test selection passes all 262 cases (including six test-invariant cases), with
 no failed or ignored tests. This verifies response formatting, not actual
 automatic retry behavior in every external client.
+
+### Optimized deployment validation after upload ownership integration
+
+The optimized CLI built from `9f38dc0c` reports version 1.11.3 and has SHA-256
+`b4cf17301ad8caa2cc2a0a89a826617386139bbdc09fd607e06aabb7f2526049`.
+Both deployment verifiers used pinned copies with that exact hash:
+
+- `verify_maintenance_deployments.sh`: all eleven selected cases passed in
+  145.691 seconds (`/tmp/shardline-maintenance-deployments.15pEMz/test.log`).
+  Coverage includes restricted released/current commands, concurrent rebuild
+  ownership, container replacement, remote-delete faults and mixed-version
+  rollout/rollback against the released 1.11.3 binary.
+- `verify_maintenance_protocol_faults.sh`: all twelve complementary cases passed
+  in 136.151 seconds (`/tmp/shardline-protocol-faults.yjEnlB/test.log`). Coverage
+  includes backend loss during uploads, network faults, clock skew, resumable
+  LFS interruption and workload bursts.
+
+Nextest reports twelve excluded cases in the first run and eleven in the second;
+these are complementary filters, not runtime skips. Together they execute all
+23 cases in the deployment binary, with no selected runtime skip. These are
+current optimized-binary results for the named fixtures, not certification of
+every deployment layout or closure of the remaining merge gates.
