@@ -714,6 +714,9 @@ pub(super) async fn pending_remote_deletes(
         crate::ServerBackend::Local(_) => None,
     };
     let supported = pending.is_some();
+    let inspection_notice = (!supported).then_some(
+        "Pending-delete inspection is unavailable for this backend or database account. An empty list does not prove that no deletes are pending. Check the original GC command and logs before retrying uncertain work.",
+    );
     let mut pending = pending.unwrap_or_default();
     let has_more = pending.len() > limit;
     pending.truncate(limit);
@@ -742,7 +745,8 @@ pub(super) async fn pending_remote_deletes(
         .collect();
     Ok(admin_json(serde_json::json!({
         "api_version": ADMIN_API_VERSION, "observed_at_unix_seconds": observed_at()?,
-        "supported": supported, "pending_deletes": pending, "page": page,
+        "supported": supported, "inspection_notice": inspection_notice,
+        "pending_deletes": pending, "page": page,
     })))
 }
 
@@ -1810,6 +1814,7 @@ mod tests {
         assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
         let body = json_body(response).await;
         assert_eq!(body["supported"], true);
+        assert!(body["inspection_notice"].is_null());
         assert_eq!(body["pending_deletes"][0]["object_key"], long_key.as_str());
         assert_eq!(
             body["pending_deletes"][0]["attempt"],
@@ -1863,6 +1868,36 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
+        // An unavailable row-scoped view must not turn existing pending
+        // attempts into a reassuring empty result or alter their markers.
+        sqlx::query("ALTER TABLE shardline_retention_holds ENABLE ROW LEVEL SECURITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let unavailable = json_body(response).await;
+        assert_eq!(unavailable["supported"], false);
+        assert_eq!(unavailable["pending_deletes"], serde_json::json!([]));
+        assert_eq!(
+            unavailable["inspection_notice"],
+            "Pending-delete inspection is unavailable for this backend or database account. An empty list does not prove that no deletes are pending. Check the original GC command and logs before retrying uncertain work."
+        );
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_resource_fences WHERE domain='maintenance-remote-delete'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 2);
+        sqlx::query("ALTER TABLE shardline_retention_holds DISABLE ROW LEVEL SECURITY")
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(index.finish_remote_delete(&first).await.unwrap());
         assert!(index.finish_remote_delete(&second).await.unwrap());
     }
@@ -1881,6 +1916,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["supported"], false);
+        assert_eq!(
+            body["inspection_notice"],
+            "Pending-delete inspection is unavailable for this backend or database account. An empty list does not prove that no deletes are pending. Check the original GC command and logs before retrying uncertain work."
+        );
         assert_eq!(body["pending_deletes"], serde_json::json!([]));
         assert!(body.get("ready").is_none());
     }

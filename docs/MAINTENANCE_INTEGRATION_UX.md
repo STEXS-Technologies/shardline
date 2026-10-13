@@ -101,6 +101,8 @@ completed run it explains that no recovery is needed and points to readiness;
 for an uncertain run it directs you to the owning node, logs or affected data.
 The history endpoint includes `history_notice` when new metadata history is
 unavailable. An empty task list then does not mean maintenance never ran.
+Likewise, `inspection_notice` explains when pending-delete inspection is
+unavailable; an empty response then does not prove that all deletes settled.
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.

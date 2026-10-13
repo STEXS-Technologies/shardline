@@ -211,6 +211,9 @@ role lacks the existing maintenance read privileges. Databases using row-level
 security on these metadata tables also report unsupported, preserving their
 access boundary. An empty list in that response makes no safety claim. Other
 database failures fail the request instead of returning an empty list.
+The additive `inspection_notice` explains this limitation and the next safe
+action when `supported` is false; otherwise it is `null`. It does not certify
+current health or future inspection availability.
 
 This endpoint reads markers only. It sends no storage request and never clears
 or retries a delete. It uses the existing admin authorization, no-store headers
