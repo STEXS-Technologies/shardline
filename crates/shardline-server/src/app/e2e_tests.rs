@@ -999,6 +999,70 @@ async fn embedded_router_clones_keep_housekeeping_alive_until_the_last_router_dr
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_postgres_router_lifetime_preserves_shared_metadata_for_every_role() {
+    use crate::task_tracking::{TaskEvidenceStore, housekeeping::HousekeepingGuard};
+    use std::sync::atomic::Ordering;
+    let Some(fixture) = crate::test_support::postgres_fixture::PostgresFixture::new().await else {
+        eprintln!("SKIPPED: embedded PostgreSQL router lifetime requires DATABASE_URL");
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    for (number, role) in [ServerRole::All, ServerRole::Api, ServerRole::Transfer]
+        .into_iter()
+        .enumerate()
+    {
+        let config = fixture.config.clone().with_server_role(role);
+        let (guard, stopped) = HousekeepingGuard::new();
+        let app = super::router_with_housekeeping_guard(config.clone(), guard, stopped.clone())
+            .await
+            .unwrap();
+        let (ordinary, scope) = TaskEvidenceStore::from_backend(&config, &fixture.backend)
+            .await
+            .unwrap();
+        assert!(scope.is_some());
+        let housekeeping = ordinary.clone().with_housekeeping_stop(stopped.clone());
+        let surviving = app.clone();
+        drop(app);
+        assert!(!stopped.load(Ordering::Relaxed));
+        let response = surviving
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let key = format!("fixture/role-{number}/alive");
+        let saved_key = key.clone();
+        let before_stop = housekeeping.clone();
+        tokio::task::spawn_blocking(move || before_stop.publish(&saved_key, b"saved").unwrap())
+            .await
+            .unwrap();
+        drop(surviving);
+        assert!(stopped.load(Ordering::Relaxed));
+        tokio::task::spawn_blocking(move || {
+            let late = format!("fixture/role-{number}/late");
+            assert!(housekeeping.publish(&late, b"must not save").is_err());
+            assert!(ordinary.read(&late, 32).unwrap().is_none());
+            assert_eq!(ordinary.read(&key, 16).unwrap().unwrap(), b"saved");
+            ordinary
+                .publish(&format!("fixture/role-{number}/application"), b"available")
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stats_endpoint_returns_200() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
 

@@ -3797,3 +3797,21 @@ pass on the development executable in 9.41 seconds, including configuration
 reuse and read-only WAL checks. Strict CLI library/test Clippy, formatting and
 diff checks pass. This check does not establish completion of the remaining
 compatibility or scale gates.
+
+### Shared-metadata router lifetime for all server roles
+
+The configured PostgreSQL library test constructs real routers for `all`,
+`api` and `transfer` roles. Each retains a clone after dropping its original,
+serves `/readyz` successfully, and publishes shared evidence before the last
+clone drops. The last drop sets the housekeeping stop flag. Subsequent
+housekeeping publication is rejected without a new artifact, while existing
+evidence reads and ordinary application publication continue against the same
+shared metadata store.
+
+`app::e2e_tests::embedded_postgres_router_lifetime_preserves_shared_metadata_for_every_role`
+passes in 0.82 seconds with PostgreSQL configured and no runtime skip:
+`/tmp/shardline-batched-deletion.D9r31c/test.log`. The owned schema and pools are
+removed after the assertions. This extends the local router-lifetime proof to
+the three roles; it does not establish every account layout or cancellation
+of an active storage call. Strict server library/test Clippy, formatting and
+diff checks pass. Production behavior and the version are unchanged.
