@@ -79,9 +79,12 @@ The following still need implementation or stronger evidence before merge:
   `CasCoordinator` uses the backend index store, whose PostgreSQL transition
   opens a pool transaction and atomically updates the intent with its event.
   That transaction is separate from the request-owned connection used for
-  native file publication. Trace its GC/recovery consumers and test a late
-  transition after request-session loss before extending the stale-writer
-  guarantee to upload intent state. Atomic event recording alone does not prove
+  native file publication. GC reachability uses file records and dedupe mappings,
+  not upload intent state. Startup reconciliation checks existing file visibility
+  or storage presence and changes intent state; it does not publish file metadata
+  from the intent. A late-transition test after request-session loss remains
+  necessary before extending the stale-writer guarantee to upload intent state.
+  Atomic event recording alone does not prove
   request ownership, and this finding does not show that file publication bypasses
   its fence.
   An older GC binary does not establish the current remote-delete markers.
