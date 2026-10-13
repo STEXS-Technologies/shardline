@@ -87,6 +87,11 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
                         io::stderr().lock(),
                         "Maintenance history could not be inspected; this does not establish whether work ran or the server is ready."
                     );
+                    if let Some(guidance) =
+                        crate::history_inspection::failure_guidance(error.as_ref())
+                    {
+                        let _guidance_written = writeln!(io::stderr().lock(), "{guidance}");
+                    }
                     error_chain_status(error.as_ref(), ExitCode::FAILURE)
                 }
             };
