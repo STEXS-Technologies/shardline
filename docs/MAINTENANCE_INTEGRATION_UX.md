@@ -46,7 +46,7 @@ available. To inspect history over HTTP, use the existing
 | A run is completed | Its saved result verified as successful. Use `/api/v1/status` to check the server now. |
 | A run is failed, interrupted, unresolved or corrupt | Read its `next_step` and original command logs. Inspect partial effects before repeating a mutation; preserve corrupt evidence. |
 | A write returns `503` for an unresolved remote delete | Check the original GC command, then run `shardline repair` with the same configuration to verify saved delete replies. Retry the write after reconciliation. |
-| Repair leaves a delete pending | Investigate the original GC and storage logs. Missing replies cannot be replaced by checking that the object is absent. |
+| Repair leaves a delete pending | Check repair logs: a backlog can need several runs. Missing or invalid replies require investigation; checking that the object is absent cannot replace a reply. |
 
 ## What users gain
 
@@ -83,8 +83,14 @@ run ordinary repair with the same database, schema and storage configuration:
 shardline repair
 ```
 
-Repair verifies up to 64 saved successful delete replies per run, without
-sending another user-object delete. Your next sweep can also recover them.
+Repair examines up to 64 saved replies per run, including invalid evidence,
+without sending another user-object delete. Your next sweep can also recover them.
+For a backlog, repeat repair with the same configuration; saved scan progress
+allows later runs to reach replies beyond retained invalid evidence. Check logs
+for `processed saved remote delete replies`: `settled` counts cleared attempts,
+and `retained` counts evidence that could not settle an attempt. A run examining
+64 replies may have more to check; it does not mean all pending objects were
+recovered. Inspect pending deletes again after repair.
 Missing or invalid replies leave the object blocked for investigation; absence
 alone cannot clear it. Repair does not mark an interrupted GC run completed.
 `Retry-After: 1` suggests when to retry, not when recovery will finish.
