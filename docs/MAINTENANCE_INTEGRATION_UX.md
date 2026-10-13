@@ -118,13 +118,18 @@ for authentication, pagination and response fields.
 
 ## Upgrade using the existing workflow
 
-Use the usual owner-run `shardline db migrate up`, then restart upgraded nodes.
-It installs the optional history and protection functions even when no migration
-entries are pending. Runtime accounts need no new grants. See
-[rolling upgrades](ROLLING_UPGRADE.md) for the deployment order and older-GC limits.
-Pause destructive GC during the rollout and replace its binary before resuming
-your existing schedule. Upgrading servers alone cannot protect deletes performed
-by an old GC binary.
+1. Pause destructive GC and let existing GC commands finish.
+2. Run the usual owner-run `shardline db migrate up` with the upgraded binary
+   and your existing database and schema configuration.
+3. Replace server roles using your normal drain and restart procedure. Replace
+   the binaries or images used by existing maintenance jobs too.
+4. Check pending deletes and investigate interrupted work, then resume your
+   existing GC schedule.
+
+Owner setup installs the optional history and protection functions even when no
+migration entries are pending. Runtime accounts need no new grants. Upgrading
+servers alone cannot protect deletes performed by an old GC binary. See
+[rolling upgrades](ROLLING_UPGRADE.md) for the role order and rollback limits.
 
 New local and upgraded server history stays in metadata, outside user payload
 inventory. Before the owner upgrade, unavailable metadata history causes a
