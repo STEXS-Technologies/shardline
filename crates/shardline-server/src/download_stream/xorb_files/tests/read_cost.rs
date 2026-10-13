@@ -230,6 +230,18 @@ async fn legacy_chunk_reads_report_bounded_s3_request_cost() {
             ))
         ));
         provider.lock().unwrap().objects.remove(&path);
+        // A caller must receive the initial storage failure before it can
+        // construct successful HTTP headers around the returned stream.
+        assert!(matches!(
+            crate::download_stream::file_record_byte_stream(
+                store.clone(),
+                record.clone(),
+                None,
+                crate::admission::ExecutionPools::default_sizes().blocking_io,
+            )
+            .await,
+            Err(crate::ServerError::NotFound)
+        ));
         assert!(matches!(
             super::collect(&store, &record, None).await,
             Err(crate::ServerError::NotFound)

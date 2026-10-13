@@ -4474,3 +4474,27 @@ do not establish cloud latency, throughput or a production SLO. Larger archives
 and broader deployment costs remain separate gate requirements.
 The final focused fixture also passes after the lint corrections
 (`/tmp/shardline-legacy-read-cost-final.log`).
+
+### Initial chunk failures precede HTTP success
+
+Optimized deployment validation of the checked-GET change exposed a regression:
+the MinIO partition drill returned initial HTTP 200 headers before its lazy
+first fallback chunk read failed. The complementary protocol suite passed 11
+of 12 scenarios; the partition failure reproduced in isolation. The separate
+11-scenario deployment suite passed. These results do not constitute a passing
+23-scenario run for that executable.
+
+The fallback reader now reads and validates its first chunk before returning
+the stream. Later chunks remain lazy; the change adds no provider requests or
+whole-file buffering. A missing initial chunk now fails stream construction,
+with a regression assertion that failed before this correction.
+
+All 52 streaming tests and strict server Clippy pass after the correction
+(`/tmp/shardline-legacy-read-eager-first-tests.log` and
+`/tmp/shardline-legacy-read-eager-first-clippy.log`). The optimized executable
+still reports version 1.11.3 and has SHA256
+`cae74a6f813de4233065b38e32a048c4be5bb7eb1c328ced5f50e57ed3dab207`.
+Its isolated partition drill passes: GET fails with 500 during the confirmed
+partition and recovery succeeds after reconnection
+(`/tmp/shardline-eager-first-partition.JcmidC/test.log`). This targeted replay
+does not replace the outstanding broader acceptance review.

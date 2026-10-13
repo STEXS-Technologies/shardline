@@ -537,7 +537,13 @@ async fn single_container_file_stream(
             }
         },
     );
-    Ok(Box::pin(streams.try_flatten()))
+    // Validate the first fallback chunk before the caller constructs HTTP
+    // success headers. Later chunks remain lazy; no complete file is buffered.
+    let mut remaining: ServerByteStream = Box::pin(streams.try_flatten());
+    let first = remaining.try_next().await?.ok_or(ServerError::Overflow)?;
+    Ok(Box::pin(
+        stream::once(async move { Ok(first) }).chain(remaining),
+    ))
 }
 
 struct LocalObjectByteStreamState {
