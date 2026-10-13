@@ -2638,3 +2638,30 @@ child processes. Diagnostics: `/tmp/shardline-retention-permissions.xDnFW1` and
 `/tmp/shardline-oci-upgrade.rLl5Qb`; verifier outputs:
 `.codex/validation/ux-publication-retirement-race-permissions.log` and
 `.codex/validation/ux-publication-retirement-race-oci.log`.
+
+## Additional protocol and backend fault coverage
+
+The remaining 12 deployment drills passed in 135.305 seconds using the same
+optimized CLI SHA-256
+`d3744a4af7d7da87c4c012591a0389cb1626290fab2051fa525de79c6818f26a`.
+Log: `/tmp/shardline-protocol-faults.PVAOWm/test.log`. Together with the preceding
+11-drill run, all 23 deployment tests have passing evidence across two runs of
+the same runtime bytes. Neither run contains a selected runtime skip or panic.
+The 11 exclusions reported by this new run are selection exclusions.
+
+The new verifier exercises workload bursts, PostgreSQL/MinIO/Redis loss,
+network partition and packet faults, verifier clock skew, and LFS/OCI/S3 upload
+recovery. It copies the supplied binary and clock-shim library into an owned
+temporary fixture and uses disposable Compose projects. The clock-shim copy
+has SHA-256 `ad7333813b54202579a4960b3635b67691f4810e9847a11607ef31b3445a8c8f`.
+
+The first attempt had nine passes and three MinIO recovery timeouts:
+`/tmp/shardline-protocol-faults.SEqRPy/test.log`. An isolated Docker reproduction
+changed the automatically published port from 33452 to 33453 after restart.
+The fixture kept clients and recovery probes on the original endpoint. It now
+reserves a stable MinIO API port, as it already did for PostgreSQL. All three
+previously failing tests pass after this fixture correction. No production
+runtime behavior changed. Formatting, strict deployment-test Clippy, Bash
+syntax, diff checks and the AST graph update passed. Broader merge gates remain
+open; these fault results do not establish universal exactly-once execution or
+the health of an existing deployment.
