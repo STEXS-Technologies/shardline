@@ -779,6 +779,16 @@ fn unfinished_history_does_not_starve_finished_history_retention() {
 
 #[test]
 fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_history() {
+    verify_metadata_backlog(130);
+}
+
+#[test]
+fn larger_metadata_backlog_preserves_pagination_and_safe_retention() {
+    verify_metadata_backlog(1024);
+}
+
+fn verify_metadata_backlog(finished_count: usize) {
+    let total_count = finished_count.checked_add(2).unwrap();
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
     let deployment = deployment_fingerprint(&config).unwrap();
@@ -789,7 +799,7 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
     std::fs::create_dir_all(root.path().join("chunks")).unwrap();
     let payload = root.path().join("chunks/user-payload");
     std::fs::write(&payload, b"existing payload bytes").unwrap();
-    for _ in 0..130 {
+    for _ in 0..finished_count {
         tracker
             .begin(
                 "finished",
@@ -828,7 +838,7 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
         }
         after = page.last().map(|run| run.id().to_owned());
     }
-    assert_eq!(ids.len(), 132);
+    assert_eq!(ids.len(), total_count);
     let inspection = began.elapsed();
     let mut oldest_finished = std::collections::BTreeMap::new();
     for id in &ids {
@@ -849,10 +859,15 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
     let now = shardline_protocol::unix_now_seconds_lossy().saturating_add(31 * 86400);
     let mut cleanup = std::time::Duration::ZERO;
     let mut surviving_ids = ids.clone();
-    for expected in [64, 64, 2, 0] {
+    let mut remaining_finished = finished_count;
+    let mut retention_calls = 0_usize;
+    loop {
+        let expected = remaining_finished.min(64);
         let began = std::time::Instant::now();
         assert_eq!(store.prune_completed(deployment, now).unwrap(), expected);
-        cleanup += began.elapsed();
+        retention_calls = retention_calls.checked_add(1).unwrap();
+        remaining_finished = remaining_finished.checked_sub(expected).unwrap();
+        cleanup = cleanup.checked_add(began.elapsed()).unwrap();
         let mut deleted_cursor = None;
         for _ in 0..expected {
             let (_, id) = oldest_finished.pop_first().unwrap();
@@ -877,12 +892,16 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
             let expected_ids = surviving_ids
                 .iter()
                 .filter(|id| id.as_str() > cursor.as_str())
+                .take(100)
                 .cloned()
                 .collect::<Vec<_>>();
             assert_eq!(
                 actual, expected_ids,
                 "a deleted cursor must not reset or skip the next page"
             );
+        }
+        if expected == 0 {
+            break;
         }
     }
     assert!(oldest_finished.is_empty());
@@ -895,12 +914,12 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
         status::TaskEvidenceEntry::Unreadable { id, .. } if id == "unreadable"
     )));
     assert_eq!(store.read("manifests/unreadable", 100).unwrap(), original);
-    let mut retiring = 0;
+    let mut retiring = 0_usize;
     store
         .visit_prefix(
             &ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}retiring/")).unwrap(),
             |_| {
-                retiring += 1;
+                retiring = retiring.checked_add(1).unwrap();
                 Ok(())
             },
         )
@@ -918,7 +937,8 @@ fn metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_
             .is_empty()
     );
     eprintln!(
-        "132-run metadata fixture: full paginated inspection {inspection:?}; four retention calls {cleanup:?}"
+        "{}-run metadata fixture: full paginated inspection {inspection:?}; {retention_calls} retention calls {cleanup:?}",
+        total_count
     );
     // An invalid key beyond the requested page must not break inspection of
     // earlier verified history. Reaching that key still exposes the failure.
