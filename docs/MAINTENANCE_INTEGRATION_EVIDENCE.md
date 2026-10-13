@@ -1975,3 +1975,23 @@ checked, and ordinary servers had no child processes. Both runs used the
 official released 1.11.3 comparator. These results extend the tested deployment
 coverage; remaining library write paths and the other open merge gates still
 require their own evidence.
+
+## File-reference copy keeps its request ownership session
+
+Postgres file-reference copy now publishes through the request's existing
+ownership connection when present. Its record reads also borrow that connection,
+avoiding a second-pool acquisition when the request owns the only connection.
+Connection loss fails the operation rather than replacing its owner; callers
+outside an owned request retain the existing pool-based behavior. Record decoding
+uses the existing bounded conversion admission and canonical serialization.
+
+A configured PostgreSQL fixture verifies a successful owned copy with one
+connection, terminates that actual database backend, verifies the subsequent copy
+fails with no destination metadata, and completes a fresh copy and duplicate
+check after releasing the lost request. The individual regression passed in
+0.25 seconds. All six publication tests then passed in 0.94 seconds with no
+ignored tests. Logs: `.codex/validation/ux-copy-owner-test.log` and
+`.codex/validation/ux-copy-publication-tests.log`. Strict all-target Clippy for
+the index and server passed. No configuration, migration or version change was
+made. The optimized process results above predate this session-routing change;
+they must not be treated as verification of this revision.

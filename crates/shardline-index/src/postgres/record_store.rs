@@ -100,6 +100,23 @@ async fn prepare_record_upsert(
 }
 
 impl super::PostgresRecordStore {
+    /// Reads on the caller's ownership connection without replacing it.
+    ///
+    /// # Errors
+    /// Returns a missing-record or metadata error, including connection loss.
+    pub async fn read_record_bytes_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        locator: &PostgresRecordLocator,
+    ) -> Result<Vec<u8>, PostgresMetadataStoreError> {
+        let permit = admit_record_conversion().await?;
+        let row = query("SELECT record FROM shardline_file_records WHERE record_key = $1")
+            .bind(&locator.record_key)
+            .fetch_optional(connection)
+            .await?
+            .ok_or(PostgresMetadataStoreError::RecordNotFound)?;
+        run_record_conversion(permit, move || canonical_record_bytes_from_row(&row)).await
+    }
     /// Inserts or replaces an immutable version record.
     ///
     /// # Errors
