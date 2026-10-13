@@ -3184,3 +3184,20 @@ the server guarantee to arbitrary metadata-only callers.
 Strict `shardline-index` rustdoc passes with warnings denied. Public signatures,
 runtime behavior and the version are unchanged; the remaining write-path audit
 is not closed by this documentation check.
+
+### Upload intent consumers and publication boundary
+
+Source tracing narrows the separate upload-intent ownership audit. PostgreSQL
+`transition_intent_with_event` conditionally updates the current intent state and
+records its event in a pool transaction. Native shard callbacks instead retain
+the request-session connection; a present session with a lost connection returns
+`PoolClosed`, and only calls outside that task-local session use the pool path.
+OCI locked publication similarly requires its resource guard connection.
+
+GC reachability traverses latest/version file records and live dedupe mappings;
+it does not take upload intent status as reachability authority. PostgreSQL
+startup reconciliation reads already-visible file metadata or inspects object
+storage, then updates intent state. It does not reconstruct file publication from
+an intent's status. This source evidence distinguishes bookkeeping from data
+publication but does not replace the pending ownership-loss/recovery interleaving
+test or claim that every upload lifecycle write is request-session fenced.
