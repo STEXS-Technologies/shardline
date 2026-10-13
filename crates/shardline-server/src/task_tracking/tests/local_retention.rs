@@ -2,6 +2,75 @@
 use super::*;
 
 #[test]
+fn incremental_budget_is_shared_across_runs_and_later_runs_eventually_retire() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let deployment = deployment_fingerprint(&config).unwrap();
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    for run in 0..3 {
+        EmbeddedTaskTracker::from_store(store.clone(), deployment)
+            .begin(
+                &format!("incremental-run-{run}"),
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"report")
+            .unwrap();
+    }
+    let histories = store.summaries(deployment, None, 10).unwrap();
+    assert_eq!(histories.len(), 3);
+    for history in histories {
+        for number in 0..140 {
+            store
+                .publish(
+                    &format!("runs/{}/extra/{number:04}", history.id),
+                    b"evidence",
+                )
+                .unwrap();
+        }
+    }
+    let prefix = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}runs/")).unwrap();
+    let count = || {
+        let mut count = 0;
+        store
+            .visit_prefix(&prefix, |_| {
+                count += 1;
+                Ok(())
+            })
+            .unwrap();
+        count
+    };
+    let before = count();
+    assert_eq!(
+        store
+            .prune_completed_incrementally(deployment, u64::MAX)
+            .unwrap(),
+        1
+    );
+    assert_eq!(count(), before - 256);
+    // The partially retired second run must not cause the third to be lost or
+    // block it forever. Two calls suffice for this aggregate backlog.
+    assert_eq!(
+        store
+            .prune_completed_incrementally(deployment, u64::MAX)
+            .unwrap(),
+        2
+    );
+    assert_eq!(count(), 0);
+    assert!(store.summaries(deployment, None, 10).unwrap().is_empty());
+    let retiring = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}retiring/")).unwrap();
+    let mut markers = 0;
+    store
+        .visit_prefix(&retiring, |_| {
+            markers += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(markers, 0);
+}
+
+#[test]
 fn incremental_retirement_bounds_deletions_and_resumes_after_reopening() {
     for metadata_backed in [true, false] {
         let root = tempfile::tempdir().unwrap();
