@@ -3407,3 +3407,21 @@ cargo test --locked -p shardline-server --all-features --lib \
   lifecycle_repair::postgres_recovery::mutation_interruptions_survive_new_postgres_sessions \
   -- --exact --nocapture
 ```
+
+### Cancellation with an already-borrowed ownership connection
+
+The work-pool fixture now distinguishes retained pool handles from an already
+borrowed PostgreSQL connection. Cancellation closes the pool and rejects new
+acquisitions, but the borrowed original session still holds its advisory lock.
+A competing exclusive operation cannot acquire while that session remains
+borrowed. Releasing the connection then permits takeover within the fixture's
+two-second deadline. Pool closure is not a claim of forced cancellation of
+active database work or permission to bypass its ownership.
+
+All three work-pool tests pass with a configured disposable PostgreSQL instance,
+zero failures, zero ignored and no runtime skips in 0.25 seconds:
+`/tmp/shardline-batched-deletion.vkvKqx/test.log`. Strict server library/test
+Clippy, formatting and diff checks pass. This is local-future cancellation with
+an observed database lock, not a network-partition or arbitrary shutdown bound.
+Runtime logic and version are unchanged; the guard's documentation now states
+the borrowed-connection boundary explicitly.
