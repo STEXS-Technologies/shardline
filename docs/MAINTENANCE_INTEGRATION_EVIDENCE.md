@@ -4079,20 +4079,25 @@ attempt at the same filename.
 
 ### Released-server recovery of exact scoped file evidence
 
-The configured PostgreSQL publication suite passed all 19 tests using the actual
-released 1.11.3 executable (`/tmp/shardline-batched-deletion.dsgFqn/test.log`).
-The new rollback fixture creates a scoped file and a different default-scope file
-with the same name, then starts the released server against that database and
-payload root. It waits for the server listener, verifies that startup logged
-intent reconciliation, stops its own child process, and checks that the scoped
-Stored intent and its complete event history remain unchanged. The scoped file
-record remains readable. No database protection change was needed for this case.
+The earlier 19-test pass (`/tmp/shardline-batched-deletion.dsgFqn/test.log`)
+does **not** prove rollback safety. Its process fixture waited for the listener,
+but the released server binds before startup recovery completes. It could stop
+the child before recovery touched the tested record. Expanding the fixture to
+four unfinished states exposed this race: the stricter inspection check failed
+in `/tmp/shardline-batched-deletion.ewKN5y/test.log`.
 
-This proves this specific Stored checkpoint survives released-server startup;
-it does not prove every unfinished state or SQLite rollback. An initial `fsck`
-experiment was discarded as startup evidence because that command opens stores
-directly without server reconciliation. Large-file recovery startup cost and the
-remaining acceptance gates remain open.
+The fixture now waits for HTTP readiness and requires recovery logs for each
+record. It creates a scoped file and a different default-scope file with the
+same name, starts the actual released 1.11.3 server against the same database
+and payload root, then compares each unfinished state and complete event history.
+The corrected readiness-based run failed in
+`/tmp/shardline-batched-deletion.BRPnNV/test.log`: released recovery changed the
+new scoped `Created` intent to `Visible` using the unrelated default-scope file.
+This is a demonstrated compatibility defect requiring protection before merge,
+not a passing rollback drill. The regression fixture remains under development.
+An initial `fsck` experiment also does not establish startup behavior because
+that command opens stores directly without server reconciliation. Rollback proof,
+large-file recovery startup cost and the remaining acceptance gates remain open.
 
 ### Exact scope identity for new file recovery
 
