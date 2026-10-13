@@ -1924,7 +1924,7 @@ async fn normal_router_starts_tracker_and_exposes_authenticated_job_status() {
             .any(|job| job["operation"] == "lfs-startup-session-sweep"
                 && job["state"] == "completed"
                 && job["execution"] == "embedded"
-                && job["next_step"] == "No recovery is needed for this recorded run. Check /api/v1/status separately for current server readiness."
+                && job["next_step"] == "No recovery is needed for this recorded run. Check /readyz separately for current server readiness; /api/v1/status also provides readiness when the admin API is enabled."
                 && job["owner"]["pid"] == std::process::id())
     );
 }

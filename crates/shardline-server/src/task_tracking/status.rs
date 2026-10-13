@@ -45,7 +45,7 @@ impl TaskRunState {
                 "Check the owning node and original command logs. This node cannot confirm whether the work is still running; investigate effects before retrying."
             }
             Self::Completed => {
-                "No recovery is needed for this recorded run. Check /api/v1/status separately for current server readiness."
+                "No recovery is needed for this recorded run. Check /readyz separately for current server readiness; /api/v1/status also provides readiness when the admin API is enabled."
             }
             Self::Failed => {
                 "Read the original command diagnostics and inspect partial changes before retrying."
