@@ -2091,3 +2091,39 @@ evidence about larger legacy archives. The cleanup cost remains relevant to the
 open performance gate; logical admission limits do not cap physical database
 size. This change adds a test and reproduction script, with no runtime, version
 or deployment-configuration change.
+
+### Bounded proof and report reads
+
+History verification now uses bounded metadata pages for referenced blobs and
+materialized reports as well as native records. Hashes, signatures, semantic
+verification, individual size limits and conflicting legacy-copy checks still
+apply. Each reader holds at most 64 bodies of at most 64 KiB; records retain
+their smaller 16 KiB decoding limit. No evidence format or operator setting changes.
+
+The new local regression preserves oversized blobs and reports, damaged reports and
+conflicting legacy blobs as corrupt histories, while retiring the healthy run.
+The broader history suite initially reported 24 passes, two explicit capacity
+tests ignored and one stale operator-guidance assertion. The assertion was
+updated to the existing guidance that a live process does not confirm completion;
+its separate rerun passed. Strict library/test Clippy passed.
+
+The first optimized PostgreSQL run passed the capacity assertions in 362.75
+seconds: creation 89.388 seconds, inspection 36.007 seconds, cleanup 237.165
+seconds and slowest cleanup 4.437 seconds. Its log also contains a Tokio shutdown
+panic after the workload, so it is not clean validation. The fixture now calls
+its explicit cleanup method, and the verifier rejects panic messages even when
+Cargo reports success.
+First-run log: `/tmp/shardline-postgres-capacity.6Cb5LL/test.log`.
+
+The corrected optimized run passed cleanly: one executed test, no ignored tests,
+runtime skips or panic messages, in 350.35 seconds. Creation took 81.508 seconds,
+full inspection 35.159 seconds, and 65 cleanup calls totaled 233.435 seconds;
+the slowest call took 4.538 seconds. All capacity, pagination, unresolved-evidence
+and payload-preservation assertions passed, and explicit fixture cleanup finished.
+Log: `/tmp/shardline-postgres-capacity.Mngbsc/test.log`; verifier output:
+`.codex/validation/ux-batched-artifacts-pg-capacity-clean.log`. The final expanded
+local blob/report fault test, strict library/test Clippy, shell syntax, diff checks
+and AST graph refresh also passed.
+
+These measurements do not establish production latency or a guaranteed speedup.
+The scale gate remains open.

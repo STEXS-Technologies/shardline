@@ -330,6 +330,86 @@ fn batched_native_records_keep_oversized_and_gapped_history_corrupt_and_retained
 }
 
 #[test]
+fn batched_blobs_and_reports_retain_damaged_and_conflicting_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let configured = config(root.path());
+    let deployment = deployment_fingerprint(&configured).unwrap();
+    let store = TaskEvidenceStore::from_config(&configured).unwrap();
+    let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
+    for operation in [
+        "valid",
+        "oversized-blob",
+        "oversized-report",
+        "damaged-report",
+        "conflicting-blob",
+    ] {
+        tracker
+            .begin(
+                operation,
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+    }
+    let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    let legacy = TaskEvidenceStore::from_objects(store.objects.clone());
+    for run in store.summaries(deployment, None, 10).unwrap() {
+        let category = if matches!(
+            run.operation.as_str(),
+            "damaged-report" | "oversized-report"
+        ) {
+            "artifacts"
+        } else {
+            "blobs"
+        };
+        let prefix = format!("{TASK_EVIDENCE_PREFIX}runs/{}/{category}/", run.id);
+        match run.operation.as_str() {
+            "oversized-blob" | "oversized-report" | "damaged-report" => {
+                let size = if run.operation == "damaged-report" {
+                    1
+                } else {
+                    65537
+                };
+                assert!(connection.execute(
+                    "UPDATE shardline_task_artifacts_v1 SET payload = zeroblob(?1) WHERE artifact_key LIKE ?2",
+                    rusqlite::params![size, format!("{prefix}%")],
+                ).unwrap() > 0);
+            }
+            "conflicting-blob" => {
+                store
+                    .visit_prefix(&ObjectPrefix::parse(&prefix).unwrap(), |metadata| {
+                        legacy.publish(
+                            metadata
+                                .key()
+                                .as_str()
+                                .strip_prefix(TASK_EVIDENCE_PREFIX)
+                                .unwrap(),
+                            b"conflicting legacy bytes",
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            _ => {}
+        }
+    }
+    for run in store.summaries(deployment, None, 10).unwrap() {
+        assert_eq!(
+            run.state,
+            if run.operation == "valid" {
+                TaskRunState::Completed
+            } else {
+                TaskRunState::Corrupt
+            }
+        );
+    }
+    assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+    assert_eq!(store.summaries(deployment, None, 10).unwrap().len(), 4);
+}
+
+#[test]
 fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -603,7 +683,7 @@ fn embedded_tasks_publish_verified_success_and_truthful_failure() {
     assert_eq!(unfinished["report"], serde_json::Value::Null);
     assert_eq!(
         unfinished["next_step"],
-        "The recorded local process is alive. Check its logs and wait for its result; do not start a duplicate job."
+        "The recorded process is alive, but no completion is confirmed. The work may still be running or its result may not have been saved. Check the original command and logs before starting work again."
     );
     receipt
         .finish(true, b"inspected: 4; upgraded: 2; failures: 0")

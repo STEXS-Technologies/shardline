@@ -128,6 +128,10 @@ These are scoped results, not a claim that every deployment is compatible:
   cleanup. Full inspection took 37.073 seconds; the slowest cleanup call took
   5.961 seconds in the disposable database. This establishes the tested logical
   capacity behavior while leaving deployment latency and larger archives open.
+  After batching verified blob/report reads, a clean rerun completed full
+  inspection in 35.159 seconds, with a slowest cleanup call of 4.538 seconds.
+  Safety assertions still passed; these fixture measurements are not deployment
+  latency bounds.
 
 See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
 and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)
@@ -142,6 +146,12 @@ The following still need implementation or stronger evidence before merge:
   Direct Postgres file, dedupe, reconstruction and stored-object reference
   publication is covered; this gap concerns paths outside those boundaries
   and references not visible in the protected metadata.
+  In particular, lower-level `PostgresRecordStore` methods publish metadata
+  without inspecting object storage. The plain `commit_native_shard_metadata`
+  entry point also supplies no caller-derived physical reference keys; the
+  server uses the connection-bound variant with those keys and checks backing
+  bytes in its publication transaction. Database reference protection alone
+  does not prove storage presence for library callers.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and

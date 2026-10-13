@@ -88,4 +88,5 @@ async fn full_postgres_history_capacity_preserves_unresolved_evidence() {
         eprintln!("4096-run PostgreSQL history: creation {creation:?}; inspection {inspection:?}; {calls} cleanup calls {cleanup:?}; slowest {slowest:?}");
         drop(unfinished);
     }).await.unwrap();
+    fixture.finish().await;
 }
