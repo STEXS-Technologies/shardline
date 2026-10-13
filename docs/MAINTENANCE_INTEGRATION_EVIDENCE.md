@@ -3262,3 +3262,16 @@ These results verify the corrected native recovery and named CLI workflows;
 they do not establish every remote-storage fault or close the broader gates.
 Strict server library/test Clippy passes with the test feature enabled; formatting,
 diff checks and the AST graph update also pass.
+
+### Ordinary command final-recording fault matrix
+
+The shared-inline actual-handler regression now covers fsck, index rebuild,
+lifecycle repair and GC mark, each with denied report-artifact writes and denied
+completion acknowledgement. All eight cases preserve success, exit zero and
+live output without capture; no case publishes a finished shared history.
+The completion record stays absent, unfinished history does not retire, and
+pre-existing evidence bytes remain unchanged. The focused locked test passes
+in 39.02 seconds. Strict CLI library/test Clippy passes.
+These cases use empty deployment fixtures and prove recording-failure behavior,
+not each operation's external-mutation interleaving. Storage-copy destination
+publication failure has its separate actual CLI fixture above.
