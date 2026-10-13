@@ -29,6 +29,10 @@ export DATABASE_URL="postgres://postgres:owned_schema_fixture@127.0.0.1:$port/sh
 test_name=postgres_logins_can_target_distinct_default_schemas_with_identical_url_options
 CARGO_BUILD_JOBS=2 cargo test --locked -p shardline-server --all-features --lib \
     "$test_name" -- --nocapture --test-threads=1 > "$fixture/test.log" 2>&1
+if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/test.log"; then
+    echo 'FAIL: schema-routing fixture skipped or a background task panicked' >&2
+    exit 1
+fi
 # A renamed or filtered-out test must not turn this verifier green.
 rg -Fx "test task_tracking::tests::$test_name ... ok" "$fixture/test.log"
 rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/test.log"

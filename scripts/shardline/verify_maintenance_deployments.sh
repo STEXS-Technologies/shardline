@@ -22,8 +22,8 @@ cargo nextest run --locked -p shardline-server --all-features --test deployment_
     -E 'test(readonly_maintenance_deployment::) | test(tracker_replacement::) | test(gc_acknowledgement::) | test(drill_deploy_f_real_mixed_version_rollout_and_rollback)' \
     --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \
     > "$fixture/test.log" 2>&1
-if rg -n 'SKIPPED:' "$fixture/test.log"; then
-    echo 'FAIL: a deployment drill skipped at runtime' >&2
+if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/test.log"; then
+    echo 'FAIL: a deployment drill skipped or a background task panicked' >&2
     exit 1
 fi
 # Require every selected drill: a renamed test must not silently shrink coverage.
