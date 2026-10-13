@@ -18,6 +18,7 @@ not start GC.
 | --- | --- |
 | Start a server | It initializes maintenance tracking automatically in existing metadata. No tracker service to start. |
 | Run fsck, repair or GC | Use the same command and configuration. Tracking stays in that command's process. |
+| Run GC without `--mark` or `--sweep`, or copy with `--dry-run` | Read the command output. These dry runs do not save shared task history. |
 | Run multiple nodes | Nodes sharing the same Postgres database, schema and storage can inspect shared history. Covered writes use database ownership checks. |
 | Set a maintenance deadline or CPU limit | Explicitly use `shardline maintenance ...`. Only this optional runner starts a child process. |
 
@@ -54,6 +55,12 @@ metadata. Nodes sharing the same database, schema and storage can inspect the
 same history. Covered writes reject lost ownership and uncertain earlier deletes.
 Postgres provider callbacks commit their delivery ID with their changes, so a
 retry of a successful delivery does not repeat those changes.
+
+Automatic command history covers fsck, index rebuild, lifecycle repair, GC mark
+or sweep, and storage copies. Ordinary `shardline repair` runs lifecycle repair.
+Specialized Hub-tree and LFS-evidence repairs, backups and retention-hold commands
+keep their existing diagnostics; this integration does not add task history to
+those commands. Request and upload state remains separate from maintenance history.
 
 If recording fails or fills up, your command keeps its original output and exit
 status and emits a warning. History can therefore be incomplete. Shardline does
