@@ -65,7 +65,50 @@ pub(crate) enum TaskEvidenceEntry {
     },
 }
 
+/// Add operator guidance only to the administrative view, preserving the public
+/// library summary and the signed evidence formats.
+#[derive(Serialize)]
+pub(crate) struct TaskOperatorView<'evidence> {
+    #[serde(flatten)]
+    evidence: &'evidence TaskEvidenceEntry,
+    next_step: &'static str,
+}
+
 impl TaskEvidenceEntry {
+    pub(crate) const fn operator_view(&self) -> TaskOperatorView<'_> {
+        let state = match self {
+            Self::Verified(summary) => summary.state,
+            Self::Unreadable { state, .. } => *state,
+        };
+        let next_step = match state {
+            TaskRunState::Pending => {
+                "No completion is recorded. Check the original command and logs before starting work again."
+            }
+            TaskRunState::Running => {
+                "The recorded local process is alive. Check its logs and wait for its result; do not start a duplicate job."
+            }
+            TaskRunState::RunningOrInterrupted => {
+                "Check the owning node and original command logs. This node cannot confirm whether the work is still running; investigate effects before retrying."
+            }
+            TaskRunState::Completed => {
+                "No recovery is needed for this recorded run. Check /api/v1/status separately for current server readiness."
+            }
+            TaskRunState::Failed => {
+                "Read the original command diagnostics and inspect partial changes before retrying."
+            }
+            TaskRunState::NeedsReconciliation => {
+                "Inspect the affected data and original command logs before repeating a mutation. Check the saved report when available."
+            }
+            TaskRunState::Corrupt => {
+                "Preserve the stored evidence and inspect storage and original command logs. Do not rely on this record or retry uncertain mutations from it."
+            }
+        };
+        TaskOperatorView {
+            evidence: self,
+            next_step,
+        }
+    }
+
     pub(crate) fn id(&self) -> &str {
         match self {
             Self::Verified(summary) => &summary.id,
