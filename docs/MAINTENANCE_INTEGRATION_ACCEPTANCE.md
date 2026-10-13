@@ -75,6 +75,15 @@ The following still need implementation or stronger evidence before merge:
   This is an existing guarantee boundary, not evidence that the integration
   introduced missing-content publication. It still limits the stronger guarantee
   this branch can promise to library users.
+  Upload lifecycle transitions also need a distinct ownership-loss check:
+  `CasCoordinator` uses the backend index store, whose PostgreSQL transition
+  opens a pool transaction and atomically updates the intent with its event.
+  That transaction is separate from the request-owned connection used for
+  native file publication. Trace its GC/recovery consumers and test a late
+  transition after request-session loss before extending the stale-writer
+  guarantee to upload intent state. Atomic event recording alone does not prove
+  request ownership, and this finding does not show that file publication bypasses
+  its fence.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and
