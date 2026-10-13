@@ -4,6 +4,7 @@ use shardline_reliability::MaintenanceArtifactKind;
 use std::num::NonZeroUsize;
 
 mod postgres_capacity;
+mod postgres_retention;
 
 fn config(root: &std::path::Path) -> ServerConfig {
     ServerConfig::new(

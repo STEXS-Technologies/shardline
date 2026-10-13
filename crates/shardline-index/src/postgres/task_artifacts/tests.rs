@@ -4,6 +4,117 @@ use super::*;
 const PREFIX: &str = "_shardline_tasks/v1/";
 
 #[tokio::test]
+async fn bounded_deletion_preserves_atomicity_outer_transaction_and_timeout() {
+    let Some(pool) = super::super::connect_isolated_postgres().await else {
+        return;
+    };
+    let store = PostgresIndexStore::new(pool);
+    store.initialize_task_history_scope().await.unwrap();
+    let keys: Vec<String> = (0..64)
+        .map(|index| format!("{PREFIX}batch/{index:02}"))
+        .collect();
+    for key in &keys {
+        store.publish_task_artifact(key, b"evidence").await.unwrap();
+    }
+    let mut connection = store.pool().acquire().await.unwrap();
+    sqlx::query("SET statement_timeout='17s'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let mut outer = connection.begin().await.unwrap();
+    assert_eq!(
+        PostgresIndexStore::delete_task_artifacts_on_connection(&mut outer, &keys)
+            .await
+            .unwrap(),
+        64
+    );
+    let outer_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *outer)
+        .await
+        .unwrap();
+    assert_eq!(outer_timeout, "17s");
+    outer.rollback().await.unwrap();
+    assert!(
+        store
+            .read_task_artifact(&keys[0], 8)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Absent keys are no-ops. Inject failure at the last real deletion to
+    // verify that earlier deletions in the same batch roll back too.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        "CREATE FUNCTION reject_batch_delete_fixture() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF OLD.artifact_key = '_shardline_tasks/v1/batch/63' THEN
+             RAISE EXCEPTION 'injected final artifact deletion failure';
+           END IF;
+           RETURN OLD;
+         END $$;
+         CREATE TRIGGER reject_batch_delete_fixture BEFORE DELETE ON shardline_task_artifacts_v1
+         FOR EACH ROW EXECUTE FUNCTION reject_batch_delete_fixture()"
+            .to_owned(),
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    assert!(
+        PostgresIndexStore::delete_task_artifacts_on_connection(&mut connection, &keys)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .read_task_artifact(&keys[0], 8)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        "DROP TRIGGER reject_batch_delete_fixture ON shardline_task_artifacts_v1;
+         DROP FUNCTION reject_batch_delete_fixture()"
+            .to_owned(),
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    assert!(
+        PostgresIndexStore::delete_task_artifacts_on_connection(
+            &mut connection,
+            &vec![keys[0].clone(); 65]
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        PostgresIndexStore::delete_task_artifacts_on_connection(&mut connection, &keys)
+            .await
+            .unwrap(),
+        64
+    );
+    assert!(
+        store
+            .task_artifact_page(PREFIX, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        PostgresIndexStore::delete_task_artifacts_on_connection(&mut connection, &keys)
+            .await
+            .unwrap(),
+        0
+    );
+    let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(timeout, "17s");
+    drop(connection);
+    store.pool().close().await;
+}
+
+#[tokio::test]
 async fn borrowed_session_preserves_target_transaction_and_timeout() {
     let Some(pool) = super::super::connect_isolated_postgres().await else {
         return;
@@ -558,12 +669,34 @@ async fn existing_role_permissions_control_publication_reads_and_retention() {
     );
     assert!(reader.delete_task_artifact(&key).await.is_err());
     assert!(writer.delete_task_artifact(&key).await.is_err());
+    for restricted_store in [&reader, &writer] {
+        let mut restricted_connection = restricted_store.pool().acquire().await.unwrap();
+        assert!(
+            PostgresIndexStore::delete_task_artifacts_on_connection(
+                &mut restricted_connection,
+                std::slice::from_ref(&key)
+            )
+            .await
+            .is_err()
+        );
+    }
     assert!(unprivileged.read_task_artifact(&key, 9).await.is_err());
     assert!(unprivileged.task_artifact_page(PREFIX, None).await.is_err());
     gc.publish_task_artifact(&format!("{PREFIX}gc"), b"gc evidence")
         .await
         .unwrap();
     assert!(gc.delete_task_artifact(&key).await.unwrap());
+    let mut gc_connection = gc.pool().acquire().await.unwrap();
+    assert_eq!(
+        PostgresIndexStore::delete_task_artifacts_on_connection(
+            &mut gc_connection,
+            &[format!("{PREFIX}gc")]
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    drop(gc_connection);
     let spoof = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {quoted_schema}.shardline_task_artifact_read_v1($1,$2,$3)"
     )))

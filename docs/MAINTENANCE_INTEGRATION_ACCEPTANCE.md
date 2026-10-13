@@ -132,6 +132,10 @@ These are scoped results, not a claim that every deployment is compatible:
   inspection in 35.159 seconds, with a slowest cleanup call of 4.538 seconds.
   Safety assertions still passed; these fixture measurements are not deployment
   latency bounds.
+  Batching retirement deletion subsequently passed the same capacity fixture:
+  full inspection took 33.903 seconds, total cleanup 210.186 seconds and the
+  slowest cleanup call 4.180 seconds. Separate configured fixtures cover
+  second-batch failure and recovery, caller rollback and existing role permissions.
 
 See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
 and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)

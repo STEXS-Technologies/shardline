@@ -364,6 +364,41 @@ impl PostgresIndexStore {
         Self::finish_task_artifact_transaction(transaction, &timeout).await?;
         Ok(removed)
     }
+
+    /// Deletes at most 64 evidence keys atomically on the caller's connection.
+    /// Uses the existing private deletion function and permissions. Preserves
+    /// the caller's transaction and statement timeout.
+    ///
+    /// # Errors
+    /// Returns an oversized batch, authorization, installation or database error.
+    pub async fn delete_task_artifacts_on_connection(
+        connection: &mut PgConnection,
+        keys: &[String],
+    ) -> Result<usize, PostgresMetadataStoreError> {
+        if keys.len() > 64 {
+            return Err(sqlx::Error::Protocol(
+                "task artifact deletion batch exceeds 64 keys".into(),
+            )
+            .into());
+        }
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let (mut transaction, schema, timeout) =
+            Self::task_artifact_transaction(connection).await?;
+        let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
+        let removed: Vec<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT {quoted}.shardline_task_artifact_delete_v1($1, item.key)
+             FROM unnest($2::text[]) WITH ORDINALITY AS item(key, position)
+             ORDER BY item.position"
+        )))
+        .bind(&schema)
+        .bind(keys)
+        .fetch_all(&mut *transaction)
+        .await?;
+        Self::finish_task_artifact_transaction(transaction, &timeout).await?;
+        Ok(removed.into_iter().filter(|removed| *removed).count())
+    }
 }
 
 #[cfg(test)]
