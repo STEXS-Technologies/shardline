@@ -64,6 +64,7 @@ pub(crate) fn run(
     let report = if let Some(url) = config.index_postgres_url() {
         match runtime.block_on(prepare_postgres(config, url)) {
             Ok((pool, store, scope)) => {
+                let _cleanup = crate::maintenance_barrier::WorkPoolCleanup::new(&pool);
                 // Select history on the actual work session before beginning
                 // this run. Reuse its connection, including restricted logins.
                 tracking = match runtime.block_on(tracker.for_work_pool(config, &pool)) {

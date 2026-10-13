@@ -26,6 +26,14 @@ The exact GC ownership-loss regression also passed with a configured database;
 its original `gc_runtime::tests` filter selected zero tests and was discarded.
 Strict all-feature, all-target Clippy and formatting checks passed.
 
+A separate disposable Postgres 16 fixture passed both work-pool cleanup tests.
+Cancellation now has direct evidence: an exclusive owner blocks a competitor,
+then aborts while another caller retains its pool handle. The retained handle
+immediately rejects acquisition and the competitor acquires within the test's
+two-second deadline. This tests local future cancellation, not a network partition.
+The embedded Hub secret sweep uses the same guard for unwind cleanup; cancelling
+its async caller still leaves existing blocking work owned until that work exits.
+
 This branch adds automatic task history to existing startup and maintenance.
 It is **not ready to merge**. The version stays unchanged; a version bump belongs
 in a separate PR.
