@@ -13,6 +13,13 @@ untested deployments.
 
 ## Private tracking admission
 
+The optimized all-feature binary built from `86c807e1` passed all 11 selected
+deployment drills in 147.946 seconds with no runtime skips; 12 unrelated tests
+were filtered out. This revalidates restricted commands, concurrent ownership,
+rollback, remote-delete faults, replacement and shutdown after combining private
+and retired scratch admission. The binary remains version 1.11.3. Shared-history
+growth, whole-operation cost and remaining write-path coverage are still open.
+
 The 4,096-slot automatic-admission budget now includes retired scratch waiting
 for deletion. Admission and retirement share a nonblocking archive-directory
 lease, and verified export reuses its existing lease for retirement. Root identity
