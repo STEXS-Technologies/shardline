@@ -2497,6 +2497,18 @@ all runtime roles, concurrent polling, maintenance report verification and
 PostgreSQL pending-delete pagination without modifying markers. These tests
 validate the documented operator API; they do not certify cluster health.
 
+The complete `task_tracking::` server library selection then passed with
+PostgreSQL configured: 57 executed tests, zero failures, and two explicitly
+ignored full-capacity release-mode drills, in 98.88 seconds. Log:
+`/tmp/shardline-batched-deletion.kHTf09/test.log`. No runtime skip or panic
+messages appeared. The executed selection includes both shutdown fixes,
+relocation, signed outcome/report verification, legacy fallback, PostgreSQL
+scope binding and retention. Its 1,026-run local metadata fixture inspected all
+pages in 12.595 seconds and cleaned eligible evidence in 17 calls totaling
+53.252 seconds, with a slowest call of 4.143 seconds. Unfinished and corrupt
+evidence remained intact. These debug-fixture timings are not deployment
+latency bounds; the two full-capacity drills are not results of this run.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
