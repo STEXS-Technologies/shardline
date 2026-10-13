@@ -75,15 +75,19 @@ The following still need implementation or stronger evidence before merge:
   This is an existing guarantee boundary, not evidence that the integration
   introduced missing-content publication. It still limits the stronger guarantee
   this branch can promise to library users.
-  Upload lifecycle transitions also need a distinct ownership-loss check:
+  Upload lifecycle transitions have a separate ownership boundary:
   `CasCoordinator` uses the backend index store, whose PostgreSQL transition
   opens a pool transaction and atomically updates the intent with its event.
   That transaction is separate from the request-owned connection used for
   native file publication. GC reachability uses file records and dedupe mappings,
   not upload intent state. Startup reconciliation checks existing file visibility
   or storage presence and changes intent state; it does not publish file metadata
-  from the intent. A late-transition test after request-session loss remains
-  necessary before extending the stale-writer guarantee to upload intent state.
+  from the intent. A real native-upload test now terminates the request owner,
+  verifies rejected metadata publication and incomplete intent state, runs
+  reconciliation, then succeeds with a fresh validated upload. It exposed and
+  fixed premature terminal failure when normalization changes the shard key.
+  Transitions after other mutation phases still need checks before extending
+  the stale-writer guarantee to all upload intent state.
   Atomic event recording alone does not prove
   request ownership, and this finding does not show that file publication bypasses
   its fence.

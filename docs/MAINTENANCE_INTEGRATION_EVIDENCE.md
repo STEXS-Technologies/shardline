@@ -3227,3 +3227,14 @@ and verifies the same reconciliation/retry boundary; all 22 local backend tests
 pass in 0.40 seconds, including existing missing-object recovery behavior.
 Strict server library/test Clippy passes. This fixes the named recovery defect,
 not all late upload bookkeeping or every interruption phase.
+
+### Publication regression suite after native recovery correction
+
+All eight configured PostgreSQL publication tests pass with the recovery fix
+in 0.95 seconds: owner-loss copy/native upload, guarded reads, staged S3 backing
+loss, native xorb backing loss, publication lock lifetime and both stale-snapshot
+cases. The fixture uses an owned PostgreSQL database, rejects skipped/empty test
+runs, and preserves diagnostics at
+`/tmp/shardline-batched-deletion.KVYmvG/test.log`.
+This extends the focused native recovery proof without establishing every
+external-storage fault phase. The optimized CLI rebuild is still pending.
