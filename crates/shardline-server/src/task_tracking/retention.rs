@@ -157,6 +157,7 @@ impl TaskEvidenceStore {
         // Cross-login cleanup is limited to metadata-only evidence. Legacy
         // object copies cannot atomically retire their authorization marker.
         for category in ["manifests", "retiring", "scope-bindings"] {
+            self.check_housekeeping()?;
             if self
                 .objects
                 .metadata(&Self::key(&format!("{category}/{}", identity.id))?)?
@@ -172,6 +173,7 @@ impl TaskEvidenceStore {
         ))?;
         let mut legacy_artifacts = false;
         self.objects.visit_prefix(&prefix, |_| {
+            self.check_housekeeping()?;
             legacy_artifacts = true;
             Ok::<(), ServerError>(())
         })?;
