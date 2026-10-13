@@ -1885,3 +1885,41 @@ names the exact threshold and distinguishes optional isolated-runner captures
 from ordinary live CLI output and diagnostic exports. The report endpoint's
 separate 64 KiB read bound was already documented. This adds boundary evidence
 and documentation; no runtime threshold, command behavior or version changes.
+
+## Native client with PostgreSQL and MinIO
+
+Run `bash scripts/shardline/verify_maintenance_native_xet.sh` to exercise the
+native client against disposable PostgreSQL metadata and MinIO payload storage.
+The fixture runs the ordinary owner migration, checks that the remote-delete
+guard is installed, and exercises upload, deduplication, reconstruction and
+download through the existing server library. Missing Docker or a runtime skip
+fails this explicit verifier instead of counting as successful coverage.
+
+The current fixture passed: one executed test, zero failures and zero ignored
+tests, in 5.39 seconds. Evidence is in
+`/tmp/shardline-native-xet.e46mHA/test.log` and
+`.codex/validation/ux-native-xet-postgres-minio.log`. Strict Clippy for the native
+client target also passed. The standalone E2E lockfile was reconciled with
+existing workspace dependencies; package versions and manifests were unchanged.
+
+This proves the covered native client flow with the owner-upgraded database.
+It does not establish arbitrary remote fault handling, cluster-wide exactly-once
+execution or production-scale performance. The deployment binary is validated
+separately; this fixture starts the server through its public library API.
+
+The optimized binary built from `144dfdc8` also passed all 11 selected deployment
+drills in 150.057 seconds, with no runtime skips. Its SHA-256 is
+`e65a0305d8dd421e13e201f80e1b3a0be3bcce25bee0776d28fa6d61d029cc57`;
+the comparator is released 1.11.3. Log:
+`/tmp/shardline-maintenance-deployments.Gcq12C/test.log`. Twelve other tests were
+excluded by the explicit selection and are not part of this claim.
+
+The fixture reserves PostgreSQL's host port alongside both server ports so it
+stays stable across stop/start outage drills. MinIO and Redis use Docker-assigned
+ports. An earlier run rejected a runtime port-allocation skip; a subsequent
+fixture revision with an automatically assigned PostgreSQL port failed both
+outage recoveries. The stable-port revision passed both unchanged recovery
+checks and the full selected matrix. This corrects test infrastructure without
+changing deployment configuration or product retry behavior. Formatting and
+strict Clippy for the deployment target passed; the broader merge gates remain
+open.

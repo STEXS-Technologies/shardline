@@ -3544,7 +3544,9 @@ version = "1.11.3"
 dependencies = [
  "async-trait",
  "chrono",
+ "ed25519-dalek 2.2.0",
  "futures-util",
+ "getrandom 0.3.4",
  "hex",
  "libc",
  "rusqlite",
@@ -3760,6 +3762,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
  "hex",
  "serde_json",
@@ -3771,6 +3774,7 @@ dependencies = [
  "shardline-validation",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
