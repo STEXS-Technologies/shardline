@@ -40,9 +40,9 @@ pub(super) fn store(
                 root,
                 shardline_server::StorageMigrationEndpoint::LocalStateRoot(root.to_path_buf()),
             )?;
-            return Ok(TaskEvidenceStore::from_config(&archive)?);
+            return Ok(TaskEvidenceStore::from_config(&archive)?.require_metadata_publication());
         }
-        return Ok(TaskEvidenceStore::from_config(config)?);
+        return Ok(TaskEvidenceStore::from_config(config)?.require_metadata_publication());
     }
     let Some(url) = config.index_postgres_url() else {
         return Ok(TaskEvidenceStore::from_config(config)?.require_metadata_publication());

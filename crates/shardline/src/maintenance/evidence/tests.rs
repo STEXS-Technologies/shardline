@@ -52,6 +52,10 @@ fn s3_copy_history_uses_private_metadata_without_contacting_payload_or_postgres(
     let copy = operation(source.path(), MaintenanceStorageAdapter::S3, None);
     let history = store(&copy, &configured, Some(archive.path())).unwrap();
     let key = "runs/private-copy/artifacts/report";
+    assert!(history.publish(key, b"orphan result").is_err());
+    history
+        .publish("manifests/private-copy", b"admitted copy")
+        .unwrap();
     history.publish(key, b"exact copy result").unwrap();
     drop(history);
     let reopened = store(&copy, &configured, Some(archive.path())).unwrap();
@@ -99,6 +103,14 @@ fn local_copy_history_does_not_inherit_an_unrelated_server_database() {
         ObjectStorageAdapter::Local
     );
     let history = store(&copy, &publication, None).unwrap();
+    assert!(
+        history
+            .publish("runs/local-copy/artifacts/report", b"orphan result")
+            .is_err()
+    );
+    history
+        .publish("manifests/local-copy", b"admitted copy")
+        .unwrap();
     history
         .publish("runs/local-copy/artifacts/report", b"local result")
         .unwrap();
