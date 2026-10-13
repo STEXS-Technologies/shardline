@@ -13,6 +13,15 @@ untested deployments.
 
 ## Shared history retention after configuration changes
 
+When its candidate batch is full, retention now excludes newer identities
+before reading their scope bindings. Selected runs still require verified scope
+authorization. A real-Postgres 65-run fixture injects a scope-read failure for
+the newest run: cleanup removes the oldest 64 without reading that binding, the
+next invocation fails and preserves the remaining history, and cleanup succeeds
+after restoring reads. The exact test passed in 7.13 seconds, with formatting
+and strict server Clippy passing. This avoids unnecessary scope reads; the
+inventory scan and unresolved-history growth remain open.
+
 Retention now lives in the conventional `task_tracking::retention` module,
 separate from status inspection. The extracted method bodies match the prior
 revision exactly; public methods and storage formats are unchanged. Formatting,
