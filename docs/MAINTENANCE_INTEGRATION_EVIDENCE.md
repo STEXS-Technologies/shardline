@@ -2469,6 +2469,15 @@ remote-delete faults, concurrent ownership, container replacement and mixed
 released/current rollout and rollback. These named fixtures extend the current
 binary's evidence without certifying every deployment layout.
 
+Cross-account retention's legacy-object checks now observe the housekeeping
+stop flag before each identity lookup and at each returned inventory entry.
+Previously this direct object-store scan bypassed the ordinary stop checks.
+All three housekeeping tests passed in 0.11 seconds and all 16 configured
+PostgreSQL history tests passed in 9.27 seconds; PostgreSQL log:
+`/tmp/shardline-batched-deletion.E5Norp/test.log`. Strict server library/test
+Clippy, formatting and graph update passed. These checks do not establish
+cancellation of an active storage call or a measured shutdown latency bound.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
