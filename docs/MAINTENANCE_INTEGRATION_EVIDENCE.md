@@ -2459,6 +2459,16 @@ skip and panic messages. This covers the selected index metadata operations
 with the publication/retirement fix and both transaction orderings; it does
 not replace process-level mixed-node testing or close the scale gates.
 
+The optimized CLI with SHA-256
+`122afac40a21237a7e19f68f52c95bf576c04c16bcac5fbfa13ac66711ba1ad2`
+subsequently passed all 11 selected deployment drills in 143.814 seconds.
+Log: `/tmp/shardline-maintenance-deployments.JJZBlo/test.log`. Twelve tests
+outside the explicit selection were excluded; no selected test skipped at
+runtime and no panic was logged. The selection covers restricted maintenance,
+remote-delete faults, concurrent ownership, container replacement and mixed
+released/current rollout and rollback. These named fixtures extend the current
+binary's evidence without certifying every deployment layout.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
