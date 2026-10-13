@@ -284,7 +284,8 @@ curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
 ```
 
 The response has common API fields and a `task` object containing `id`,
-`operation`, `state`, `report_available` and `report`. A saved report is verified
+`operation`, `state`, `next_step`, `report_available` and `report`. The recovery
+guidance matches the history list for the same recorded state. A saved report is verified
 before disclosure. For example, an incomplete webhook-secret sweep can report
 `inspected: 3`, `upgraded: 2` and `failures: 1` while its state remains
 `needs_reconciliation`. Saving diagnostic counts does not certify completion,
