@@ -170,6 +170,10 @@ The following still need implementation or stronger evidence before merge:
   payload bytes. Metadata inspection
   stops after its eligible page is settled, but filtering unrelated history can
   still require a longer scan; bounded output does not bound latency.
+  A real HTTP fixture now checks the legacy fixed/compressed chunk read budget:
+  four requests for two chunks, and two for a selected file range. GET response
+  metadata replaces a redundant HEAD while retaining full stored-length checks.
+  These request counts do not establish cloud latency or a production SLO.
 - **Remaining deployment layouts.** Work-specific database/schema routing,
   row policies, narrower accounts, library embedding and legacy history need
   coverage beyond the passing fixtures. Corrupt, unfinished or unrelated legacy

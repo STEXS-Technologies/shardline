@@ -303,6 +303,37 @@ impl S3ObjectStore {
         stream_payload_for_range(result, expected_range)
     }
 
+    /// Streams a range while checking the complete object length on that GET.
+    /// No separate HEAD is needed; absence is reported as `None`.
+    ///
+    /// # Errors
+    /// Returns an error for a length/range mismatch or a provider failure.
+    pub async fn stream_range_if_present(
+        &self,
+        key: &ObjectKey,
+        range: ByteRange,
+        expected_length: u64,
+    ) -> Result<Option<S3ByteStream>, S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        let expected_range = validated_external_range(range)?;
+        let result = match self
+            .inner
+            .get_opts(
+                &location,
+                GetOptions::new().with_range(Some(expected_range.clone())),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(S3ObjectStoreError::External(error)),
+        };
+        if result.meta.size != expected_length {
+            return Err(S3ObjectStoreError::IntegrityLengthMismatch);
+        }
+        stream_payload_for_range(result, expected_range).map(Some)
+    }
+
     /// Copies a byte range into a file with one streaming GET.
     ///
     /// Uses the same runtime bridge as other synchronous storage operations.

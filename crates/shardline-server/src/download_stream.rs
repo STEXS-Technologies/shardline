@@ -695,20 +695,23 @@ async fn s3_store_byte_range_stream(
     total_length: u64,
     range: ByteRange,
 ) -> Result<ServerByteStream, ServerError> {
-    let metadata = object_store.metadata(&object_key)?;
-    let Some(metadata) = metadata else {
-        return Err(ServerError::NotFound);
-    };
-    if metadata.length() != total_length {
-        return Err(ServerError::ObjectStore(
-            ObjectStoreError::StoredLengthMismatch,
-        ));
-    }
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
     }
-
-    let byte_stream = object_store.stream_range(&object_key, range).await?;
+    let byte_stream = object_store
+        .stream_range_if_present(&object_key, range, total_length)
+        .await
+        .map_err(|error| {
+            if matches!(
+                error,
+                shardline_storage::S3ObjectStoreError::IntegrityLengthMismatch
+            ) {
+                ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch)
+            } else {
+                ServerError::from(error)
+            }
+        })?
+        .ok_or(ServerError::NotFound)?;
 
     Ok(Box::pin(byte_stream.map_err(ServerError::from)))
 }
