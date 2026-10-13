@@ -21,6 +21,10 @@ The version remains 1.11.3. The remaining upgrade limits are listed below.
 
 Use your existing admin token to inspect the endpoints below. Read any warning
 alongside the returned list; an empty list with a warning is inconclusive.
+The admin API is optional and disabled by default. If you have not enabled it,
+these routes return `404`; tracking still runs and command/server logs remain
+available. To inspect history over HTTP, use the existing
+[admin token configuration](ADMIN_READ_API.md#enable-and-authenticate).
 
 | What you see | What to do next |
 | --- | --- |
@@ -89,6 +93,14 @@ Retries preserve the configured database isolation level.
 ## Check a result
 
 Use your existing admin token:
+
+```bash
+curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
+  'https://cas.example.com/api/v1/tasks/maintenance?limit=20'
+```
+
+Replace the example address with your server. Use the dedicated admin read
+token, not a repository token. Follow `page.next_cursor` to inspect later pages.
 
 | Endpoint | What it tells you |
 | --- | --- |

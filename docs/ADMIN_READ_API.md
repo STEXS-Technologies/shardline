@@ -41,8 +41,10 @@ routes with missing or invalid authentication return `401`. Query parsing
 happens only after this concealment/authentication decision.
 
 Keep these routes on an internal ingress. They reveal aggregate capacity,
-topology, backend kinds, and process activity, but never object keys,
-repositories, users, credentials, connection strings, or presigned URLs.
+topology, backend kinds and process activity. Pending-delete inspection also
+reveals affected object keys so operators can investigate blocked writes.
+Treat the admin token as permission to read those keys. Responses do not expose
+credentials, connection strings or presigned URLs.
 
 ## Common response contract
 
