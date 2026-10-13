@@ -8,6 +8,92 @@ use shardline_server::{
 use std::num::NonZeroUsize;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn refused_admission_still_retires_verified_history_and_records_the_next_run() {
+    let root = tempfile::tempdir().unwrap();
+    let fresh = |work_root: std::path::PathBuf| {
+        tokio::task::spawn_blocking(move || {
+            let command = CliCommand::IndexRebuild {
+                root: Some(work_root),
+            };
+            let prepared = prepare(&command).unwrap().unwrap();
+            run(
+                &prepared,
+                vec![OsString::from("shardline"), OsString::from("index-rebuild")],
+            )
+            .unwrap()
+        })
+    };
+    assert!(
+        fresh(root.path().to_owned())
+            .await
+            .unwrap()
+            .evidence_published
+    );
+    let configured = crate::config::load_server_config(Some(root.path()), None).unwrap();
+    let deployment = deployment_fingerprint(&configured).unwrap();
+    let store = TaskEvidenceStore::from_config(&configured).unwrap();
+    let original = store.summaries(deployment, None, 1).unwrap().remove(0);
+    assert_eq!(original.state, TaskRunState::Completed);
+    let metadata = shardline_index::LocalIndexStore::open(root.path().to_owned());
+    let key = format!("_shardline_tasks/v1/manifests/{}", original.id);
+    // Model an aged run while retaining its actual native records and signatures.
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&metadata.read_task_artifact(&key, 65536).unwrap().unwrap())
+            .unwrap();
+    manifest["created_at"] = serde_json::json!(0);
+    metadata.delete_task_artifact(&key).unwrap();
+    metadata
+        .publish_task_artifact(&key, &serde_json::to_vec(&manifest).unwrap())
+        .unwrap();
+    assert_eq!(
+        store.summaries(deployment, None, 1).unwrap()[0].state,
+        TaskRunState::Completed
+    );
+    for id in 0..4095 {
+        metadata
+            .publish_task_artifact(
+                &format!("_shardline_tasks/v1/manifests/zunresolved-{id}"),
+                b"unresolved history",
+            )
+            .unwrap();
+    }
+    assert!(metadata.task_history_admission_full(4096).unwrap());
+    let private = root.path().join(".shardline-maintenance");
+    std::fs::remove_dir_all(&private).unwrap();
+    std::fs::write(&private, b"operator file").unwrap();
+
+    let unrecorded = fresh(root.path().to_owned()).await.unwrap();
+    assert!(unrecorded.success);
+    assert_eq!(unrecorded.exit_code, Some(0));
+    assert!(!unrecorded.evidence_published);
+    assert!(!metadata.contains_task_artifact(&key).unwrap());
+    assert!(!metadata.task_history_admission_full(4096).unwrap());
+
+    let recorded = fresh(root.path().to_owned()).await.unwrap();
+    assert!(recorded.success);
+    assert_eq!(recorded.exit_code, Some(0));
+    assert!(recorded.evidence_published);
+    assert!(metadata.task_history_admission_full(4096).unwrap());
+    assert_eq!(std::fs::read(&private).unwrap(), b"operator file");
+    for id in 0..4095 {
+        assert_eq!(
+            metadata
+                .read_task_artifact(
+                    &format!("_shardline_tasks/v1/manifests/zunresolved-{id}"),
+                    128,
+                )
+                .unwrap()
+                .unwrap(),
+            b"unresolved history"
+        );
+    }
+    let history = store.summaries(deployment, None, 1).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].state, TaskRunState::Completed);
+    assert_ne!(history[0].id, original.id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn full_shared_history_preserves_command_status_without_orphan_records() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join(".shardline-maintenance"), b"operator file").unwrap();
