@@ -68,6 +68,10 @@ These are scoped results, not a claim that every deployment is compatible:
   delayed deletes, restricted GC accounts, denied receipt writes, and recovery
   by ordinary repair or a fresh sweep after a database outage. Unrecorded GC
   outcomes stay unresolved even after their saved delete replies settle.
+  All 21 Postgres delete-guard tests pass with a configured real database,
+  covering direct file, dedupe, reconstruction and stored-object references,
+  rejected-publication rollback, restricted accounts, cross-schema settlement,
+  stale attempts and publication/deletion races.
 - History distinguishes completed, failed and unresolved runs. Signed records
   and reports are verified; unfinished and corrupt evidence is retained.
 - A mark-only GC comparison preserves released output, status and payload bytes
@@ -90,6 +94,9 @@ The following still need implementation or stronger evidence before merge:
 
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.
+  Direct Postgres file, dedupe, reconstruction and stored-object reference
+  publication is covered; this gap concerns paths outside those boundaries
+  and references not visible in the protected metadata.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and
