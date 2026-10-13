@@ -2210,3 +2210,13 @@ Both tests passed in 0.08 seconds with no ignored tests. Log:
 These fixtures verify the HTTP contract for local metadata; they do not establish
 PostgreSQL pagination or automatic-admission capacity. The capacity fixtures
 above cover the latter separately.
+
+The configured PostgreSQL router fixture also follows the HTTP cursor at full
+history capacity. The next page retains the recording warning and shows a corrupt
+entry without trusted owner or operation fields. All 15 PostgreSQL metadata tests
+passed in 9.60 seconds, including account row policies, immutable schema routing
+and shared-scope retirement. Diagnostics:
+`/tmp/shardline-batched-deletion.468Wtt/test.log`; verifier output:
+`.codex/validation/ux-pg-http-pagination-tests.log`.
+This extends the real-database HTTP evidence to a second page; exhaustive
+pagination remains covered by the separate capacity fixture.
