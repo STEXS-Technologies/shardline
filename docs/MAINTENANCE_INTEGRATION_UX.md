@@ -115,6 +115,7 @@ finish. The next startup can finish interrupted cleanup.
 Automatic history accepts up to 4,096 runs per metadata database or schema.
 Private temporary workspaces have a separate combined limit of 4,096, including
 workspaces awaiting deletion. New automatic artifacts are limited to 64 KiB.
+That limit applies to saved history, not normal live output or diagnostic exports.
 Existing and imported history is preserved. These are admission limits, not
 physical disk limits; see the [capacity limits](MAINTENANCE_INTEGRATION_ACCEPTANCE.md#known-gaps).
 

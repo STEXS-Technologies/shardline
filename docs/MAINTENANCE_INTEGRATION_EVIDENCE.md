@@ -2363,3 +2363,19 @@ Together with the configured PostgreSQL history and process drills above, these
 checks establish the normal startup mechanism and operator response contract.
 Remaining deployment-layout coverage keeps gate 1 open; verified operator
 distinctions do not close the separate mutation safety or scale requirements.
+
+## Current optimized large diagnostics
+
+The corrected optimized CLI passed the released/current 4,096-entry mark-only GC
+diagnostic comparison. Both exports exceed 1 MiB, preserve every persisted entry,
+and match released diagnostic content apart from the documented live countdown.
+Stdout, stderr and exit status match; payload hashes remain unchanged and current
+GC records its own completion outside the payload inventory. Diagnostics:
+`/tmp/shardline-large-diagnostics.fI4KaS`; verifier output:
+`.codex/validation/ux-current-large-diagnostics.log`.
+
+Source inspection confirms ordinary inline maintenance calls the original handler
+without the explicit isolated runner's command-stream capture. Automatic history
+artifact limits therefore do not truncate the command's output or exports. The
+operator guide now states that distinction. This mark-only synthetic inventory
+fixture does not establish reclamation safety or production latency.
