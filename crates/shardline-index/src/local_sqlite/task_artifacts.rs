@@ -7,6 +7,9 @@ use std::ops::ControlFlow;
 
 use super::{LocalIndexStore, LocalIndexStoreError};
 
+/// Bounded key/body pairs; `None` retains an oversized row without loading it.
+pub type LocalTaskArtifactPage = Vec<(String, Option<Vec<u8>>)>;
+
 fn exists(connection: &Connection) -> Result<bool, LocalIndexStoreError> {
     Ok(connection
         .query_row(
@@ -204,6 +207,48 @@ impl LocalIndexStore {
         }
     }
 
+    /// Returns at most 64 literal-prefix artifacts with bounded payloads.
+    /// Each body is limited to 64 KiB; oversized rows have `None` bodies.
+    /// Missing tables return an empty page without creating metadata. The
+    /// lexical cursor need not exist and is excluded from the next page.
+    ///
+    /// # Errors
+    /// Returns database failures.
+    pub fn bounded_task_artifact_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+    ) -> Result<LocalTaskArtifactPage, LocalIndexStoreError> {
+        let connection = self.open_connection()?;
+        if !exists(&connection)? {
+            return Ok(Vec::new());
+        }
+        let query = if after.is_some() {
+            "SELECT artifact_key, CASE WHEN length(payload)<=65536 THEN payload END
+             FROM shardline_task_artifacts_v1
+             WHERE artifact_key >= ?1 AND artifact_key > ?2
+             ORDER BY artifact_key COLLATE BINARY LIMIT 64"
+        } else {
+            "SELECT artifact_key, CASE WHEN length(payload)<=65536 THEN payload END
+             FROM shardline_task_artifacts_v1
+             WHERE artifact_key >= ?1 AND ?2 IS NULL
+             ORDER BY artifact_key COLLATE BINARY LIMIT 64"
+        };
+        let mut statement = connection.prepare(query)?;
+        let rows = statement.query_map(params![prefix, after], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+        })?;
+        let mut page = Vec::new();
+        for row in rows {
+            let (key, bytes) = row?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            page.push((key, bytes));
+        }
+        Ok(page)
+    }
+
     /// Removes task evidence during verified retention, without touching payloads.
     /// Returns whether a row existed. Missing optional tables remain untouched.
     ///
@@ -225,6 +270,59 @@ impl LocalIndexStore {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn bounded_payload_pages_keep_literal_prefix_limits_and_deleted_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::open(root.path().to_owned());
+        let prefix = "_tasks%/";
+        assert!(
+            store
+                .bounded_task_artifact_page(prefix, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!exists(&store.open_connection().unwrap()).unwrap());
+        for index in 0..65 {
+            store
+                .publish_task_artifact(&format!("{prefix}{index:03}"), b"opaque")
+                .unwrap();
+        }
+        store
+            .publish_task_artifact(&format!("{prefix}065"), &vec![7; 65536])
+            .unwrap();
+        store
+            .publish_task_artifact(&format!("{prefix}066"), &vec![8; 65537])
+            .unwrap();
+        store
+            .publish_task_artifact("_tasksX/keep", b"keep")
+            .unwrap();
+        let first = store.bounded_task_artifact_page(prefix, None).unwrap();
+        assert_eq!(first.len(), 64);
+        assert!(first.iter().all(|(key, bytes)| key.starts_with(prefix)
+            && bytes.as_deref() == Some(b"opaque".as_slice())));
+        let cursor = &first.last().unwrap().0;
+        assert!(store.delete_task_artifact(cursor).unwrap());
+        let second = store
+            .bounded_task_artifact_page(prefix, Some(cursor))
+            .unwrap();
+        assert_eq!(second.len(), 3);
+        assert_eq!(
+            second.get(1).unwrap().1.as_deref(),
+            Some(vec![7; 65536].as_slice())
+        );
+        assert!(second.get(2).unwrap().1.is_none());
+        assert!(
+            store
+                .bounded_task_artifact_page(prefix, Some(&second.last().unwrap().0))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.read_task_artifact("_tasksX/keep", 4).unwrap(),
+            Some(b"keep".to_vec())
+        );
+    }
 
     #[test]
     fn immutable_artifacts_survive_reopen_and_reject_conflicts_and_large_reads() {

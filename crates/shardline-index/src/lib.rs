@@ -94,6 +94,7 @@ pub use lifecycle::{
 };
 pub use local_sqlite::{
     LocalIndexStore, LocalIndexStoreError, LocalRecordLocator, LocalRecordStore,
+    LocalTaskArtifactPage,
 };
 pub use memory::{
     MemoryIndexStore, MemoryIndexStoreError, MemoryRecordLocator, MemoryRecordStore,
