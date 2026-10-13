@@ -3646,9 +3646,12 @@ SHA-256 `92b570163e03ecbd9f07b3385b7992a05f0ebb5fa25aaba526fd400a6b689a23`.
 With this executable selected through `CARGO_BIN_EXE_shardline`, all 20
 maintenance cases and all four history cases pass (24 passed, zero skipped,
 2.281 seconds; Nextest run `646d7567-e963-46b5-b77f-11ded2ddb445`).
-The configured pending-delete CLI suite also passes all three cases, with no
-runtime skip, in 0.41 seconds:
+The configured pending-delete CLI suite also passes all three cases on the
+development executable, with no runtime skip, in 0.41 seconds:
 `/tmp/shardline-batched-deletion.34Y7VY/test.log`.
+Although the release override was exported for that invocation, Cargo's test
+launcher selects its built executable. That result must not be counted as
+optimized-binary inspection evidence; direct executable selection is required.
 
 The released/current restricted-root comparison passes all five command forms
 and the fully read-only SQLite fsck check with the same optimized executable:
@@ -3714,3 +3717,36 @@ pinned optimized executable through Nextest also passes in 0.052 seconds (run
 excluded). Strict CLI library/test Clippy, formatting and diff checks pass.
 This confirms the existing configuration workflow for the named fixture;
 broader schema and account compatibility remains open.
+
+### Direct optimized inspection validation
+
+An audit of executable selection found that `cargo test -p shardline` selects
+its built CLI even when `CARGO_BIN_EXE_shardline` was exported beforehand. The
+earlier configured Cargo-driven fixture is therefore development evidence,
+as corrected above. A direct run against the older optimized binary passes
+three cases but fails the subsequently added connection-error guidance case;
+that expected failure confirms why source and binary identities matter.
+
+The release executable rebuilt from `8a649b64` has SHA-256
+`4c2e03ee590e6ae5ae3e8784e554d046be863c230aaf9210c27e8aa5f9c3ccdc`.
+The new `scripts/shardline/verify_maintenance_inspection.sh` pins a copy of the
+CLI, creates its own PostgreSQL container, migrates it with that CLI and invokes
+the compiled libtest executable directly with the override. All four cases
+pass in 10.01 seconds, with zero skips and the pinned hash checked afterward:
+`/tmp/shardline-inspection.FjhGZy/test.log`.
+
+All five history cases also pass on this executable through Nextest in 0.097
+seconds, with zero skips (run `f9fc5ba5-3b82-4d54-ba7c-e9c74a95f0fd`). The shell
+syntax and diff checks pass. No version bump or broader guarantee is implied.
+
+To reproduce, compile the inspection test without running it:
+
+```bash
+cargo test --locked -p shardline --test pending_deletes_e2e --no-run
+bash scripts/shardline/verify_maintenance_inspection.sh \
+  /absolute/path/to/current/shardline \
+  /absolute/path/to/the/printed/pending_deletes_e2e-test-executable
+```
+
+Use the executable path printed by Cargo, not the source test file. The verifier
+requires Docker and runs only its own disposable container.
