@@ -1923,3 +1923,21 @@ checks and the full selected matrix. This corrects test infrastructure without
 changing deployment configuration or product retry behavior. Formatting and
 strict Clippy for the deployment target passed; the broader merge gates remain
 open.
+
+## Conditional cleanup preserves a concurrent publisher
+
+The Postgres S3 loser-upload cleanup formerly read the latest hash and then
+deleted the latest alias unconditionally in another transaction. A publication
+between those steps could lose its acknowledged alias. Cleanup now repeats the
+expected-hash condition in the transactional DELETE. A failed condition returns
+false and preserves both the newer alias and the losing version for ordinary GC.
+Successful cleanup removes the matching alias and version together.
+
+A configured disposable PostgreSQL fixture publishes a loser, publishes a
+different winner before cleanup, verifies the winner and losing version remain,
+then verifies matching cleanup and an absent-alias retry. It passed one executed
+test with no ignored tests in 0.25 seconds. Log:
+`.codex/validation/ux-conditional-cleanup-test.log`. Strict all-target Clippy for
+the index and server passed. This closes that specific race, not every remaining
+write-path or deployment-scale gate. No migration, configuration or version
+change is required.

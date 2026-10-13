@@ -423,6 +423,40 @@ impl super::PostgresRecordStore {
         Ok(())
     }
 
+    /// Removes a file reference only if its latest hash still matches `record`.
+    /// A concurrent publisher's latest alias and the losing version are retained
+    /// when the condition fails.
+    ///
+    /// # Errors
+    /// Returns a metadata error if the transaction cannot complete.
+    pub async fn delete_file_version_metadata_if_latest(
+        &self,
+        record: &FileRecord,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let latest = self.latest_record_locator(record);
+        let removed = query(
+            "DELETE FROM shardline_file_records
+             WHERE record_key = $1 AND content_hash = $2",
+        )
+        .bind(&latest.record_key)
+        .bind(&record.content_hash)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if removed == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let version = self.version_record_locator(record);
+        query("DELETE FROM shardline_file_records WHERE record_key = $1")
+            .bind(&version.record_key)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     /// Atomically commits native shard metadata.
     ///
     /// # Errors
@@ -1256,6 +1290,64 @@ mod tests {
             Err(super::super::PostgresMetadataStoreError::RecordNotFound)
         ));
         assert_eq!(store.read_latest_record_bytes(&record).await.unwrap(), None);
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn conditional_file_cleanup_preserves_a_newer_publisher() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut loser = sample_record(None);
+        loser.total_bytes = 50;
+        store.commit_file_version_metadata(&loser).await.unwrap();
+        // Cleanup has read the loser; another node publishes before deletion.
+        let mut winner = loser.clone();
+        winner.content_hash = "c".repeat(64);
+        store.commit_file_version_metadata(&winner).await.unwrap();
+        assert!(
+            !store
+                .delete_file_version_metadata_if_latest(&loser)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.read_latest_record_bytes(&loser).await.unwrap(),
+            Some(serde_json::to_vec(&winner).unwrap())
+        );
+        assert_eq!(
+            store
+                .read_record_bytes(&store.version_record_locator(&loser))
+                .await
+                .unwrap(),
+            serde_json::to_vec(&loser).unwrap()
+        );
+        assert!(
+            store
+                .delete_file_version_metadata_if_latest(&winner)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .read_latest_record_bytes(&winner)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store
+                .read_record_bytes(&store.version_record_locator(&winner))
+                .await,
+            Err(super::super::PostgresMetadataStoreError::RecordNotFound)
+        ));
+        assert!(
+            !store
+                .delete_file_version_metadata_if_latest(&winner)
+                .await
+                .unwrap()
+        );
         pool.close().await;
     }
 
