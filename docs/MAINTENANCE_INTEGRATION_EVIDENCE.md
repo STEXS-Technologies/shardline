@@ -890,3 +890,11 @@ evidence coverage checks guidance and omitted identity fields. Strict server
 Clippy across all features and targets, and workspace formatting, pass.
 The field is added only to the administrative view: public library summaries
 and stored signed records keep their existing formats.
+
+The report endpoint also returns `next_step` from the same state-based guidance.
+HTTP coverage checks that a failed startup sweep has matching list/report
+guidance while readiness remains `ready`. An unfinished run with no saved
+report remains `running`, returns no report and warns against a duplicate job.
+All 32 task-tracking tests, including metadata and relocation tests, pass with
+the owned released-migration PostgreSQL fixture and no runtime skips. Strict
+server Clippy and workspace formatting pass after this extension.

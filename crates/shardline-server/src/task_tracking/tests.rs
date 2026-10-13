@@ -416,6 +416,17 @@ fn embedded_tasks_publish_verified_success_and_truthful_failure() {
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].state, TaskRunState::Running);
     assert_eq!(before[0].execution, TaskExecutionMode::Embedded);
+    let unfinished = store
+        .embedded_report(deployment, None, &before[0].id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unfinished["state"], "running");
+    assert_eq!(unfinished["report_available"], false);
+    assert_eq!(unfinished["report"], serde_json::Value::Null);
+    assert_eq!(
+        unfinished["next_step"],
+        "The recorded local process is alive. Check its logs and wait for its result; do not start a duplicate job."
+    );
     receipt
         .finish(true, b"inspected: 4; upgraded: 2; failures: 0")
         .unwrap();
@@ -1579,6 +1590,7 @@ async fn failed_startup_sweep_exposes_diagnostics_without_failing_readiness() {
     let diagnostic: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(diagnostic["task"]["state"], "needs_reconciliation");
+    assert_eq!(diagnostic["task"]["next_step"], task["next_step"]);
     assert_eq!(
         diagnostic["task"]["report"],
         "sweep failed; removed count unavailable"
