@@ -13,6 +13,29 @@ untested deployments.
 
 ## Staged upload publication
 
+### Full automatic SQLite history capacity
+
+The explicit release-mode capacity fixture passes with 4,096 retained runs:
+4,094 real completed histories, one unfinished run and one unreadable identity.
+It verifies every paginated ID and each oldest-first cleanup batch, including
+pagination after a deleted cursor. The unfinished run, corrupt bytes and user
+payload remain intact; successful retirement leaves neither cleanup markers
+nor task objects in payload storage.
+
+On this local run, full paginated inspection took 7.114 seconds. The 65 cleanup
+calls took 43.685 seconds in total; the slowest call took 0.802 seconds. The
+complete fixture, including creation and additional assertions, passed in
+84.15 seconds. These measurements use short native embedded histories in an
+optimized build. They do not establish production latency, larger legacy
+history cost, physical database disk limits or PostgreSQL/cloud performance.
+An earlier unoptimized attempt was deliberately interrupted; it is not counted
+as a passing check or used for these timings.
+
+The new verifier runs the otherwise ignored scale test explicitly and requires
+one passing test with none ignored. Formatting, shell syntax, strict all-feature
+all-target server Clippy and the AST graph update pass. Runtime code and the
+version are unchanged by this test-only addition.
+
 ### Transactions with older snapshots
 
 A configured PostgreSQL 16 fixture reproduced unsafe publication when a
@@ -978,6 +1001,21 @@ replacement and shutdown, remote-delete acknowledgement faults, and mixed-versio
 rollout and rollback. Each drill owns its disposable Compose project. The verifier
 rejects runtime skips and an unexpected selected test count, and retains logs.
 It does not cover the separate KVM reboot and two-machine checks below.
+
+The full automatic SQLite history-capacity scale fixture runs explicitly in
+release mode, outside the ordinary unit suite:
+
+```bash
+bash scripts/shardline/verify_maintenance_history_capacity.sh
+```
+
+It creates 4,094 real completed histories, one unfinished run and one unreadable
+identity. It checks every paginated ID, the oldest-first retirement order,
+deleted cursors, preserved unfinished/corrupt evidence, user payload bytes and
+absence of task payload objects. The verifier requires exactly one passing
+test with none ignored and prints inspection, total cleanup and slowest-batch
+times. This local fixture cannot establish PostgreSQL, cloud-storage or
+production latency guarantees.
 
 The storage-copy compatibility check covers new local history through released rollback:
 

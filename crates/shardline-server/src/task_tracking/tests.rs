@@ -964,6 +964,14 @@ fn larger_metadata_backlog_preserves_pagination_and_safe_retention() {
 }
 
 #[test]
+#[ignore = "full-capacity scale drill; run verify_maintenance_history_capacity.sh in release mode"]
+fn full_automatic_metadata_capacity_preserves_inspection_and_cleanup() {
+    // Include one unfinished and one corrupt run in the automatic 4,096-run
+    // budget. Neither may disappear when the finished backlog is retired.
+    verify_metadata_backlog(4094);
+}
+
+#[test]
 fn metadata_retention_uses_creation_time_instead_of_key_order() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -1134,6 +1142,7 @@ fn verify_metadata_backlog(finished_count: usize) {
     }
     let now = shardline_protocol::unix_now_seconds_lossy().saturating_add(31 * 86400);
     let mut cleanup = std::time::Duration::ZERO;
+    let mut slowest_cleanup = std::time::Duration::ZERO;
     let mut surviving_ids = ids.clone();
     let mut remaining_finished = finished_count;
     let mut retention_calls = 0_usize;
@@ -1143,7 +1152,9 @@ fn verify_metadata_backlog(finished_count: usize) {
         assert_eq!(store.prune_completed(deployment, now).unwrap(), expected);
         retention_calls = retention_calls.checked_add(1).unwrap();
         remaining_finished = remaining_finished.checked_sub(expected).unwrap();
-        cleanup = cleanup.checked_add(began.elapsed()).unwrap();
+        let elapsed = began.elapsed();
+        cleanup = cleanup.checked_add(elapsed).unwrap();
+        slowest_cleanup = slowest_cleanup.max(elapsed);
         let mut deleted_cursor = None;
         for _ in 0..expected {
             let (_, id) = oldest_finished.pop_first().unwrap();
@@ -1213,7 +1224,7 @@ fn verify_metadata_backlog(finished_count: usize) {
             .is_empty()
     );
     eprintln!(
-        "{}-run metadata fixture: full paginated inspection {inspection:?}; {retention_calls} retention calls {cleanup:?}",
+        "{}-run metadata fixture: full paginated inspection {inspection:?}; {retention_calls} retention calls {cleanup:?}; slowest cleanup {slowest_cleanup:?}",
         total_count
     );
     // An invalid key beyond the requested page must not break inspection of
