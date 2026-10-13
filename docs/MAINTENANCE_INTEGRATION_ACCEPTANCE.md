@@ -122,6 +122,12 @@ These are scoped results, not a claim that every deployment is compatible:
   oldest-first cleanup preserve unresolved evidence and user payload bytes.
   The slowest cleanup call was 0.802 seconds in this local fixture; this does
   not establish deployment latency or the cost of larger legacy histories.
+- An explicit optimized PostgreSQL fixture also fills all 4,096 automatic
+  history slots, rejects further admission, paginates every ID, preserves
+  interrupted/corrupt evidence and user payload, and records fresh work after
+  cleanup. Full inspection took 37.073 seconds; the slowest cleanup call took
+  5.961 seconds in the disposable database. This establishes the tested logical
+  capacity behavior while leaving deployment latency and larger archives open.
 
 See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
 and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)
