@@ -1,4 +1,4 @@
-//! Protect every new native checkpoint from released recovery, with and without
+//! Protect every new native and raw xorb checkpoint from released recovery, with and without
 //! a physical request key. This tests the writer protocol, not domain publication.
 use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
@@ -31,7 +31,54 @@ where
         .enumerate()
         {
             let payload = format!("native rollback request {present} {ordinal}");
-            let (_xorb, hash) = single_chunk_xorb(payload.as_bytes());
+            let (xorb, hash) = single_chunk_xorb(payload.as_bytes());
+            let xorb_key = crate::xet_adapter::xorb_object_key(&hash).unwrap();
+            if present {
+                objects
+                    .put_if_absent(
+                        &xorb_key,
+                        ObjectBody::from_vec(xorb.to_vec()),
+                        &ObjectIntegrity::new(
+                            crate::local_backend::chunk_hash(&xorb),
+                            xorb.len() as u64,
+                        ),
+                    )
+                    .unwrap();
+            }
+            let xorb_intent = UploadIntent::new(
+                crate::upload_identity::xorb(&hash, xorb.len() as u64),
+                xorb_key.as_str().to_owned(),
+                hash.clone(),
+                xorb.len() as u64,
+            );
+            index.create_intent(&xorb_intent).await.unwrap();
+            for next in [
+                UploadIntentState::Storing,
+                UploadIntentState::Stored,
+                UploadIntentState::MetadataCommitted,
+            ]
+            .into_iter()
+            .take(ordinal)
+            {
+                assert!(
+                    index
+                        .transition_intent(xorb_intent.intent_id(), next)
+                        .await
+                        .unwrap()
+                );
+            }
+            let events = serde_json::to_value(
+                index
+                    .reliability_events(xorb_intent.intent_id())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            cases.push(Case {
+                intent: xorb_intent,
+                state,
+                events,
+            });
             let (body, _file_hash) = single_file_shard(&[(payload.as_bytes(), &hash)]);
             let body_hash = blake3::hash(&body).to_hex().to_string();
             let key = shardline_storage::ObjectKey::parse(&format!(

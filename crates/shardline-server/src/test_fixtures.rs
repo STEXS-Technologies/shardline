@@ -22,6 +22,34 @@ pub fn xet_hash_hex(hash: &MerkleHash) -> String {
     xet_hash_hex_string(ShardlineHash::from_bytes(bytes))
 }
 
+/// Builds a footerless upload and its exact canonical stored representation.
+///
+/// # Errors
+/// Returns an error if fixture construction or normalization fails.
+pub fn footerless_xorb() -> io::Result<(Bytes, Bytes, String)> {
+    use shardline_xet_core::xorb_object::{
+        SerializedXorbObject,
+        xorb_format_test_utils::{ChunkSize, build_raw_xorb},
+    };
+    let serialized = SerializedXorbObject::from_xorb_with_compression(
+        build_raw_xorb(3, ChunkSize::Fixed(640)),
+        CompressionScheme::LZ4,
+        false,
+    )
+    .map_err(io::Error::other)?;
+    let hash = serialized.hash.hex();
+    let canonical = shardline_xet_adapter::normalize_serialized_xorb(
+        shardline_index::parse_xet_hash_hex(&hash).map_err(io::Error::other)?,
+        &serialized.serialized_data,
+    )
+    .map_err(io::Error::other)?;
+    Ok((
+        Bytes::from(serialized.serialized_data),
+        Bytes::from(canonical),
+        hash,
+    ))
+}
+
 /// # Panics
 ///
 /// Panics if serialized xorb object creation fails.

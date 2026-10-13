@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Publication must not expose chunks removed after immutable staging.
 mod native_scope;
+mod xorb_retry;
 use crate::{test_support::postgres_fixture::PostgresFixture, upload_ingest::RequestBodyReader};
 use axum::body::Bytes;
 use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
@@ -1089,7 +1090,7 @@ async fn raw_xorb_upload_rejects_an_already_lost_request_owner_before_creating_i
     };
     let backend = fixture.postgres();
     let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(b"lost raw xorb request owner");
-    let intent_id = format!("xorb-{hash}");
+    let intent_id = crate::upload_identity::xorb(&hash, xorb.len() as u64);
     let session = crate::maintenance_barrier::RequestSession::acquire(
         &backend.gc_barrier_pool,
         backend.request_session_identity.clone(),
@@ -1199,7 +1200,7 @@ async fn raw_xorb_upload_rejects_owner_loss_while_reading_the_request_body() {
     assert!(
         fixture
             .index()
-            .intent_by_id(&format!("xorb-{hash}"))
+            .intent_by_id(&crate::upload_identity::xorb(&hash, xorb.len() as u64))
             .await
             .unwrap()
             .is_none()
@@ -1291,7 +1292,7 @@ async fn raw_xorb_owner_loss_after_provider_put_preserves_unfinished_intent_and_
         })
         .await;
     assert!(proxy.fault_was_injected());
-    let intent_id = format!("xorb-{hash}");
+    let intent_id = crate::upload_identity::xorb(&hash, xorb.len() as u64);
     assert_eq!(
         fixture
             .index()

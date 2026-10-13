@@ -2,6 +2,7 @@
 use std::os::unix::fs::symlink;
 mod native_upload_scope;
 mod upload_rollback;
+mod xorb_retry;
 use std::{io::ErrorKind, num::NonZeroUsize};
 
 use axum::body::Bytes;

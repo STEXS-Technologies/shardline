@@ -398,6 +398,41 @@ pub async fn store_uploaded_xorb_file(
     })
 }
 
+/// Returns the stored length after the same normalization used by xorb uploads.
+///
+/// # Errors
+/// Returns an error for invalid containers or hashes.
+pub fn canonical_uploaded_xorb_length(
+    expected_hash: &str,
+    bytes: &[u8],
+) -> Result<u64, XetAdapterError> {
+    let expected = parse_xet_hash_hex(expected_hash)?;
+    let (canonical, _) = canonicalize_uploaded_xorb(expected, bytes)?;
+    Ok(u64::try_from(canonical.len())?)
+}
+
+/// Returns a staged file's stored length without buffering canonical containers.
+/// Footerless compatibility inputs retain the upload path's existing size cap.
+///
+/// # Errors
+/// Returns an error for unreadable, invalid, or oversized compatibility inputs.
+pub fn canonical_uploaded_xorb_file_length(
+    expected_hash: &str,
+    path: &Path,
+) -> Result<u64, XetAdapterError> {
+    let expected = parse_xet_hash_hex(expected_hash)?;
+    let mut file = File::open(path).map_err(XetAdapterError::Io)?;
+    let length = file.metadata().map_err(XetAdapterError::Io)?.len();
+    match validate_serialized_xorb(&mut file, expected) {
+        Ok(_) => Ok(length),
+        Err(error) if length > MAX_COMPAT_XORB_NORMALIZE_BYTES => Err(error.into()),
+        Err(_) => canonical_uploaded_xorb_length(
+            expected_hash,
+            &std::fs::read(path).map_err(XetAdapterError::Io)?,
+        ),
+    }
+}
+
 fn chunk_hash_file(path: &Path) -> Result<ShardlineHash, XetAdapterError> {
     let mut file = File::open(path).map_err(XetAdapterError::Io)?;
     let mut hasher = blake3::Hasher::new();

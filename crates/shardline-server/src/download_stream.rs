@@ -16,8 +16,12 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
-    ServerError, admission::BoundedPool, chunk_store::chunk_object_key, error::ObjectStoreError,
-    local_backend::chunk_hash, object_store::ServerObjectStore,
+    ServerError,
+    admission::{BoundedPool, blocking_work as blocking_stream_work},
+    chunk_store::chunk_object_key,
+    error::ObjectStoreError,
+    local_backend::chunk_hash,
+    object_store::ServerObjectStore,
     object_store::run_before_local_object_read_hook,
 };
 
@@ -26,33 +30,6 @@ mod xorb_files;
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
-
-// A queued job is aborted when its polling future is dropped. Running jobs
-// retain admission until completion, including initial whole-xorb validation.
-// Subsequent polls read or decode only one bounded portion.
-struct AbortBlockingJob(tokio::task::AbortHandle);
-impl Drop for AbortBlockingJob {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-async fn blocking_stream_work<T: Send + 'static>(
-    pool: &BoundedPool,
-    work: impl FnOnce() -> Result<T, ServerError> + Send + 'static,
-) -> Result<T, ServerError> {
-    let permit = pool
-        .acquire()
-        .await
-        .map_err(|error| ServerError::Io(IoError::other(error)))?;
-    let job = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        work()
-    });
-    let _abort = AbortBlockingJob(job.abort_handle());
-    job.await
-        .map_err(|error| ServerError::Io(IoError::other(error)))?
-}
 
 struct SerializedXorbStreamState {
     file: tempfile::NamedTempFile,
