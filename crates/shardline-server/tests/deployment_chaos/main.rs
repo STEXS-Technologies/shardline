@@ -2166,8 +2166,8 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
 
     assert_s3_bytes(&node_b.base_url(), &token, "f-old", &old_bytes, "N-1 peer").await;
 
-    // A format-preserving dependency upgrade needs no migration window. Test
-    // actual overlap and rollback instead of requiring an unknown migration.
+    // A format-preserving dependency upgrade needs no domain migration window.
+    // Test overlap before optional owner setup, then upgraded history and rollback.
     let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
     let incremental = shardline_server::check_database_schema_compatibility(&pool)
         .await
@@ -2241,6 +2241,37 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
         .await;
         assert_eq!(response.status().as_u16(), 200);
         let status: serde_json::Value = response.json().await.unwrap();
+        assert!(status["history_notice"].is_string());
+        assert!(status["tasks"].as_array().unwrap().is_empty());
+        // The usual owner command installs optional history even when the
+        // domain migration ledger is already current. Startup never installs it.
+        drop(node_a);
+        migrate_chaos_postgres_with_binary(&current_binary, &stack.pg_url).await;
+        node_a = DeploymentServer::spawn_at(
+            &current_binary,
+            &bind_addr,
+            &environment,
+            new_a_root.path(),
+        );
+        node_a.wait_ready(Duration::from_secs(20)).await;
+        assert_s3_bytes(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            &peer_bytes,
+            "owner setup preserves mixed-version writes",
+        )
+        .await;
+        let response = admin_get(
+            &node_a.base_url(),
+            "/api/v1/tasks/maintenance",
+            ADMIN_READ_TOKEN,
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 200);
+        let status: serde_json::Value = response.json().await.unwrap();
+        assert!(status["history_notice"].is_null());
+        assert_eq!(status["history_grouping"], "shared_metadata");
         assert!(
             status["tasks"]
                 .as_array()
@@ -2306,7 +2337,7 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
         )
         .await;
         eprintln!(
-            "chaos({drill}): PASS — incremental N-1/N overlap and rollback preserved bytes, compatible writers and native task outcomes without a migration"
+            "chaos({drill}): PASS — incremental N-1/N overlap, optional owner setup and rollback preserved bytes, compatible writers and native task outcomes without new domain migrations"
         );
         return;
     }

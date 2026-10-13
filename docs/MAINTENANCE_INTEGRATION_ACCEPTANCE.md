@@ -31,6 +31,9 @@ These are scoped results, not a claim that every deployment is compatible:
   without new tracker payload objects. Ordinary startup introduces no worker service.
   Native admin checks distinguish readiness from unavailable history before the
   owner upgrade, then select shared history after upgrade and process restart.
+  Optimized mixed-node overlap and rollback pass before and after the usual
+  owner setup. Read-only container commands preserve released output without
+  writable root or temporary storage; upgraded history needs no S3 write grant.
 - Public-library local router startup covers all three server roles with an
   existing application logging subscriber. Consecutive startups sweep newly
   expired legacy LFS sessions and save distinct completed runs in existing metadata.
