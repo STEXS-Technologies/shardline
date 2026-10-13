@@ -6,6 +6,94 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test]
+async fn healthy_upload_owner_preserves_body_and_digest_errors() {
+    use axum::response::IntoResponse;
+    use shardline_index::{UploadIntentState, UploadIntentStore};
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: healthy upload ownership fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    let session = crate::maintenance_barrier::RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    session.scope(async {
+        let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        ).await.unwrap();
+        let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut **owner.as_mut().unwrap()).await.unwrap();
+        drop(owner);
+        let stream = futures_util::stream::once(async {
+            Err(crate::ServerError::Io(std::io::Error::from(std::io::ErrorKind::InvalidData)))
+        });
+        let error = backend.upload_file_stream(
+            "failed-body-file", RequestBodyReader::from_stream(stream), None, None,
+        ).await.unwrap_err();
+        assert!(matches!(&error, crate::ServerError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData));
+        let response = error.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.headers().contains_key(axum::http::header::RETRY_AFTER));
+        let error = backend.upload_file_stream(
+            "failed-checksum-file", RequestBodyReader::from_bytes(Bytes::from_static(b"bad checksum")),
+            None, Some(&"00".repeat(32)),
+        ).await.unwrap_err();
+        assert!(matches!(error, crate::ServerError::ExpectedBodyHashMismatch));
+        let response = error.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key(axum::http::header::RETRY_AFTER));
+        backend.upload_file("healthy-owner-file", Bytes::from_static(b"healthy owner"), None)
+            .await.unwrap();
+        let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        ).await.unwrap();
+        let current_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut **owner.as_mut().unwrap()).await.unwrap();
+        assert_eq!(current_pid, original_pid);
+    }).await;
+    session.finish().await;
+    for file_id in ["failed-body-file", "failed-checksum-file"] {
+        assert!(matches!(
+            backend.read_record(file_id, None, None).await,
+            Err(crate::ServerError::NotFound)
+        ));
+    }
+    let intent_id: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT intent_id FROM {}.shardline_upload_intents WHERE object_key='record/failed-checksum-file'",
+        fixture.schema
+    ))).fetch_one(&fixture.admin).await.unwrap();
+    assert_eq!(
+        fixture
+            .index()
+            .intent_by_id(&intent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        UploadIntentState::Storing
+    );
+    assert_eq!(
+        fixture
+            .index()
+            .reliability_events(&intent_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        backend
+            .read_record("healthy-owner-file", None, None)
+            .await
+            .is_ok()
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn file_upload_without_digest_returns_retryable_owner_loss_without_intents() {
     use std::sync::{
         Arc,

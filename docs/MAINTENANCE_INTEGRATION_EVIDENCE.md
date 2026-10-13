@@ -4026,3 +4026,20 @@ plain-file tests and the existing digest-file, raw-xorb, native-shard and physic
 publication fixtures. These named scenarios do not close the remaining write
 and deployment audit or establish exactly-once remote storage effects.
 Strict server library and test Clippy, formatting and diff checks also pass.
+
+### Healthy upload owners preserve ordinary failures
+
+A configured PostgreSQL test now checks the other side of the ownership-loss
+classification. A body-stream I/O failure retains its original `InvalidData`
+error and HTTP 500 response; a checksum mismatch retains
+`ExpectedBodyHashMismatch` and HTTP 400. Neither receives `Retry-After`.
+The failed uploads publish no file record, and the checksum attempt retains
+exactly its two admission events in `Storing`. A subsequent valid upload succeeds
+on the same request session, with its PostgreSQL backend PID unchanged.
+
+All sixteen configured publication cases pass in 12.45 seconds with no runtime
+skip (`/tmp/shardline-batched-deletion.o9b6Au/test.log`). Production code is
+unchanged by this additional verification. Source inspection confirms that the
+two normal file-upload liveness checks are outside the chunk loop; their number
+does not grow with file size. This is a query-count property, not a measured
+production latency or throughput guarantee.
