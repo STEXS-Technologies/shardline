@@ -1,7 +1,13 @@
 # Maintenance integration: merge checklist
 
 **Not ready to merge.** The normal process model is implemented, but the full
-compatibility and failure audit is still open. The version remains 1.11.3;
+rollback audit has found a concrete defect: readiness-based testing of released
+1.11.3 turns a new scoped Created file intent into Visible when an unrelated
+default-scope file shares its name. The earlier listener-based pass stopped the
+server too early and does not establish rollback safety. This defect must be
+fixed and verified across the affected stores and upload states before merge.
+
+The full compatibility and failure audit is still open. The version remains 1.11.3;
 the version bump belongs in a separate PR.
 
 For operators, read [Maintenance without another service](MAINTENANCE_INTEGRATION_UX.md).
