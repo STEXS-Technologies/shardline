@@ -2318,3 +2318,20 @@ Diagnostics: `/tmp/shardline-retention-permissions.jFWv4Z`; verifier output:
 `.codex/validation/ux-final-retention-permissions.log`. Shell syntax and diff
 checks passed. This proves the named retention-writer permission boundary; full
 GC accounts and row-policy history behavior have their separate fixtures above.
+
+## Current-source native client verification
+
+The native Xet client fixture passed against current source with disposable
+owner-upgraded PostgreSQL and MinIO: one executed test in 6.20 seconds, no ignored
+tests in the result and nine tests excluded by the exact selection. It covers
+upload, deduplication, reconstruction and download. The verifier rejects runtime
+skips and background panic messages. Diagnostics:
+`/tmp/shardline-native-xet.nebTlC/test.log`; verifier output:
+`.codex/validation/ux-current-native-xet.log`.
+
+The SQLite full-capacity verifier now rejects those messages too; its existing
+exact count and capacity-marker checks remain. Shell syntax and diff checks
+passed for both scripts. The capacity fixture was not rerun for this log-check
+change; its recorded scale measurements above remain the relevant evidence.
+The native fixture builds the current library source, rather than executing the
+optimized CLI. It does not prove every legacy layout or deployment health.
