@@ -3606,3 +3606,35 @@ artifact keys and payloads (4.65 seconds).
 Strict server/CLI library and test Clippy, formatting and diff checks pass;
 the AST graph is refreshed. This change adds no health service, process,
 configuration or version bump and does not certify cluster-wide health.
+
+### Inspect pending deletes without enabling the admin API
+
+`shardline history --pending-deletes` reads the configured PostgreSQL inspection
+function through one evidence connection. It creates no server backend, local
+state, object adapter or worker. It issues no storage requests and neither
+retries nor settles an attempt. `--limit` bounds the page to 1–100 entries;
+`--after` accepts the preceding `next_after` attempt epoch with the same mode
+and configuration. Unavailable inspection exposes `supported: false` and the
+same inconclusive notice as HTTP; an empty page is not a safety authorization.
+
+The CLI and admin endpoint share a semantic pending-delete view module. The
+HTTP response retains its authenticated envelope, cursor, fields and guidance.
+All 32 configured admin API tests pass in 0.65 seconds, including long-key
+pagination, unavailable inspection and marker preservation:
+`/tmp/shardline-batched-deletion.A0Kem4/test.log`, with no runtime skip.
+
+The configured CLI fixture creates its own schema, admits three pending
+attempts (including a 3,500-character key suffix), invokes the actual executable
+without an admin token, and follows every one-entry page. It compares every
+marker row exactly before and after and verifies that its local root remains
+empty. The accompanying local fixture returns an explicit unsupported view
+without creating state. Both pass in 0.41 seconds:
+`/tmp/shardline-batched-deletion.1gBhiQ/test.log`, with no runtime skip.
+A separate invalid-cursor CLI check passes in 0.01 seconds and explains the
+attempt cursor before contacting an unavailable database.
+
+All four existing history CLI cases, both generated-artifact cases and all
+three legacy CLI API cases pass. Strict server/CLI library and test Clippy,
+formatting and diff checks pass; the AST graph is refreshed. Upgrade guidance
+now supplies this inspection command. The version is unchanged, and the broader
+compatibility, write-path and scale gates remain open.

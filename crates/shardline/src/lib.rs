@@ -55,6 +55,7 @@ mod lfs_repair;
 mod logging;
 #[cfg(target_os = "linux")]
 mod maintenance;
+mod pending_delete_inspection;
 #[cfg(target_os = "linux")]
 pub use maintenance::{MaintenanceOperation, MaintenanceStorageAdapter};
 pub mod local_output;
