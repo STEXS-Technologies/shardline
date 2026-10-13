@@ -17,6 +17,24 @@ not start GC.
 **This branch is still under development and is not ready to merge.**
 The version remains 1.11.3. The remaining upgrade limits are listed below.
 
+## What to do when something goes wrong
+
+Use your existing admin token to inspect the endpoints below. Read any warning
+alongside the returned list; an empty list with a warning is inconclusive.
+
+| What you see | What to do next |
+| --- | --- |
+| Server readiness fails | Check server logs and its storage/database dependencies. Maintenance history does not establish readiness. |
+| The server is ready, but history has a warning | Check server or command logs for the recording failure. Your work may have run without a saved result; check its effects before running it again. |
+| A run is completed | That run needs no recovery. Use `/api/v1/status` to check the server now. |
+| A run is failed, interrupted, unresolved or corrupt | Read its `next_step` and original command logs. Inspect partial effects before repeating a mutation; preserve corrupt evidence. |
+| A write returns `503` for an unresolved remote delete | Check the original GC command, then run `shardline repair` with the same configuration to verify saved delete replies. Retry the write after reconciliation. |
+| Repair leaves a delete pending | Investigate the original GC and storage logs. Missing replies cannot be replaced by checking that the object is absent. |
+
+Check `/api/v1/tasks/maintenance` for recorded runs and
+`/api/v1/tasks/maintenance/deletes` for pending deletes. These are read-only
+inspection endpoints. You do not need to start a tracker or another worker.
+
 ## What users gain
 
 Maintenance history survives a process failure. You can distinguish completed
