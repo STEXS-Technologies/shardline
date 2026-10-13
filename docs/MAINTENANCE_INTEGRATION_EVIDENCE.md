@@ -2487,6 +2487,16 @@ that an ordinary fresh store resumes relocation. All six relocation tests
 passed in 0.43 seconds; strict server library/test Clippy and formatting passed.
 This is cooperative cancellation, with the same active-storage-call limit.
 
+The complete `app::admin_api::tests::` selection subsequently passed with a
+fresh configured PostgreSQL fixture: 32 executed tests, zero failures and zero
+ignored tests, in 0.63 seconds. Log:
+`/tmp/shardline-batched-deletion.2UzcRv/test.log`. The verifier found no runtime
+skip or panic messages. This includes disabled-route concealment,
+authentication before query validation, read-only responses, security headers,
+all runtime roles, concurrent polling, maintenance report verification and
+PostgreSQL pending-delete pagination without modifying markers. These tests
+validate the documented operator API; they do not certify cluster health.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
