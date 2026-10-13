@@ -932,3 +932,27 @@ The latter use the owned released-migration PostgreSQL fixture with no runtime
 skips. Strict server Clippy and workspace formatting also pass.
 The rebuilt full-feature CLI also passes the native released/current copy,
 legacy relocation, rollback and execute-only fallback verifier.
+
+## Saved delete replies during payload copy
+
+Storage migration now recognizes saved delete replies by their verified
+signature, namespace and content-addressed filename. Recognized replies remain
+at the source and are excluded from payload inventory and writes. No metadata
+connection or source mutation is added; unreadable or unrecognized objects
+retain the original behavior, including list-only inventory without read access.
+Control-object recognition now lives in the normal `evidence_inventory` module.
+
+The real PostgreSQL recovery fixture passes with dry-run and actual local
+copies. It excludes the verified reply, copies both user objects unchanged,
+and preserves invalid bytes plus a signed reply under a mismatched namespace.
+The original reply still exists and its pending attempt is still blocked after
+copy. Recovery subsequently advances past the 64 invalid records and settles
+the valid reply without deleting user objects. Released 1.11.3 migrations
+bootstrap the fixture; the test runs without skipping.
+
+All 25 migration tests, strict server Clippy and formatting pass. The rebuilt
+full-feature CLI passes the native released/current copy, legacy relocation,
+rollback and execute-only fallback verifier. Unsigned scan
+cursors and other unrecognized objects retain legacy copy behavior; this does
+not identify every control object or upgrade older binaries. Operators must
+reconcile pending deletes against the original storage before switching targets.

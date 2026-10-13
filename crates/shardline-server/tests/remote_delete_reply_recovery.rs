@@ -4,6 +4,7 @@
 use ed25519_dalek::SigningKey;
 use shardline_index::{PostgresIndexStore, RemoteDeleteReceipt};
 use shardline_protocol::ShardlineHash;
+use shardline_server::{StorageMigrationEndpoint, StorageMigrationOptions, run_storage_migration};
 use shardline_server_core::{
     ServerObjectStore, remote_delete::recover_saved_remote_delete_replies,
 };
@@ -131,7 +132,7 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
     let unknown = ObjectKey::parse("reply-recovery/missing-reply").unwrap();
     let unknown_permit = work.begin_remote_delete(&unknown).await.unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let objects = ServerObjectStore::local(directory.path().to_path_buf()).unwrap();
+    let objects = ServerObjectStore::local(directory.path().join("chunks")).unwrap();
     // Recovery may only consume reply evidence. Even a user object recreated
     // outside a covered write path must never be deleted by reconciliation.
     let known_payload = b"user bytes present during saved-reply recovery";
@@ -156,6 +157,48 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
         write(&objects, &poison, b"invalid evidence");
         poison_keys.push(poison);
     }
+    // A payload copy must not export a verified saved reply into another
+    // deployment. Invalid or misplaced evidence retains old copy semantics.
+    let namespace_alias = if namespace == "00".repeat(32) {
+        "11".repeat(32)
+    } else {
+        "00".repeat(32)
+    };
+    let receipt_bytes = serde_json::to_vec(&receipt).unwrap();
+    let misplaced = ObjectKey::parse(&format!(
+        "_shardline_tasks/v1/delete-replies/{namespace_alias}/replies/{}.json",
+        blake3::hash(&receipt_bytes).to_hex()
+    ))
+    .unwrap();
+    write(&objects, &misplaced, &receipt_bytes);
+    let destination = tempfile::tempdir().unwrap();
+    let options = StorageMigrationOptions::new(
+        StorageMigrationEndpoint::LocalStateRoot(directory.path().to_path_buf()),
+        StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
+    );
+    let inventory = run_storage_migration(&options.clone().with_dry_run(true)).unwrap();
+    assert_eq!(inventory.scanned_objects, 67);
+    assert_eq!(inventory.inserted_objects, 0);
+    let copied = run_storage_migration(&options).unwrap();
+    assert_eq!(copied.scanned_objects, 67);
+    assert_eq!(copied.inserted_objects, 67);
+    let copied_objects = ServerObjectStore::local(destination.path().join("chunks")).unwrap();
+    assert!(!copied_objects.contains(&receipt_key).unwrap());
+    assert!(objects.contains(&receipt_key).unwrap());
+    assert_eq!(read(&copied_objects, &object), known_payload);
+    assert_eq!(read(&copied_objects, &unknown), unknown_payload);
+    assert_eq!(read(&copied_objects, &misplaced), receipt_bytes);
+    assert_eq!(
+        read(&copied_objects, poison_keys.first().unwrap()),
+        b"invalid evidence"
+    );
+    assert!(
+        replay
+            .begin_remote_delete(&object)
+            .await
+            .unwrap_err()
+            .is_remote_delete_pending()
+    );
     let first = recover_saved_remote_delete_replies(&replay, &objects)
         .await
         .unwrap();
