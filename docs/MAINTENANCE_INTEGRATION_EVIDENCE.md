@@ -4441,3 +4441,36 @@ Pagination, pending-reply scan details and quantitative history budgets live in
 the CLI reference, with direct links from the short guide. The guide still
 states the PostgreSQL owner-setup prerequisite, automatic SQLite setup, old-GC
 rollback restriction and absence of a cluster-wide exactly-once guarantee.
+
+### Legacy chunk read request budget
+
+A real HTTP fixture for two existing individual chunks found six requests:
+two xorb routing probes, two chunk HEADs and two data GETs. Both FixedChunkV1
+and individually compressed XorbCdcV1 records showed the same cost. A selected
+file range used three requests. The released `v1.11.3` reader's source skips
+xorb probes for these multi-hash records and performs HEAD plus GET per read
+chunk; that comparison is a source audit, not an executed released HTTP fixture.
+
+The new additive S3 `stream_range_if_present` API checks full object length and
+returned range from the GET response. The server uses that response instead of
+a separate chunk HEAD, preserving its typed missing-object and stored-length
+errors. Length now belongs to the response supplying the bytes, rather than a
+separate earlier observation. The existing `stream_range` API is unchanged.
+
+The HTTP fixture then passes at four requests for two chunks and two requests
+for a selected file range, for both representations. It checks byte-exact
+output, no reads of unselected chunk objects, trailing-byte rejection and
+missing-object behavior. A direct partial-object GET also verifies the full
+object length from Content-Range and returns only the requested bytes with one
+HTTP request. This restores the released source's request budget for the named
+legacy formats without removing multi-container routing.
+
+All 52 download-stream tests pass
+(`/tmp/shardline-legacy-read-stream-regression.log`), as do all 163 selected S3
+storage tests (`/tmp/shardline-legacy-read-storage-regression.log`). Strict server
+and storage Clippy passes (`/tmp/shardline-legacy-read-clippy-final.log`). The
+HTTP fixture uses an owned local provider and dummy credentials; these counts
+do not establish cloud latency, throughput or a production SLO. Larger archives
+and broader deployment costs remain separate gate requirements.
+The final focused fixture also passes after the lint corrections
+(`/tmp/shardline-legacy-read-cost-final.log`).

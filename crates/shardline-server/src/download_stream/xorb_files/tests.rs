@@ -1,4 +1,5 @@
 use futures_util::TryStreamExt;
+mod read_cost;
 use shardline_index::{FileChunkRecord, FileRecord, StorageRepresentation};
 use shardline_protocol::ByteRange;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
