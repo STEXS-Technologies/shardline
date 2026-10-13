@@ -76,8 +76,9 @@ The following still need implementation or stronger evidence before merge:
   This is an existing guarantee boundary, not evidence that the integration
   introduced missing-content publication. It still limits the stronger guarantee
   this branch can promise to library users.
-  Raw-xorb and native-shard request uploads now create, read and advance their
-  intents on the original request-owned database connection. A lost connection
+  Raw-xorb, native-shard and digest-checked file request uploads now create,
+  read and advance their intents on the original request-owned database
+  connection. A lost connection
   cannot be replaced to finish that request's bookkeeping. Detected owner loss
   returns HTTP 503 with `Retry-After: 1`; the client must make a fresh request.
   Standalone library calls and startup reconciliation retain their existing

@@ -268,7 +268,11 @@ where
             .await
     }
 
-    async fn begin_upload_scoped(
+    /// Creates or verifies an upload intent with the caller's reliability scope.
+    ///
+    /// # Errors
+    /// Returns [`CasError`] when identity validation or persistence fails.
+    pub async fn begin_upload_scoped(
         &self,
         intent: &shardline_index::UploadIntent,
         tenant: &str,

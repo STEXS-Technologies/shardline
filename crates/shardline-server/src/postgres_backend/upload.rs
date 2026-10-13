@@ -95,33 +95,38 @@ impl super::PostgresBackend {
             )
         });
         let coordinator = CasCoordinator::new(
-            self.index_store.clone(),
+            super::upload_intents::RequestUploadIntentStore::new(
+                self.index_store.clone(),
+                self.request_session_identity.clone(),
+            ),
             (),
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
-        if let Some(intent) = &intent {
-            coordinator.begin_upload(intent).await?;
-            coordinator
-                .transition_upload_scoped(
-                    "shardline",
-                    &reliability_repository,
-                    intent.intent_id(),
-                    UploadIntentState::Storing,
-                )
-                .await?;
-        }
-        let object_store = self.object_store();
-        let mut ingestor = FileUploadIngestor::new_with_parallelism(
-            self.chunk_size,
-            expected_sha256.is_some(),
-            self.upload_max_in_flight_chunks,
-        );
-        while let Some(bytes) = body.next_bytes().await? {
-            ingestor.ingest_body_chunk(&object_store, &bytes).await?;
-        }
+        let result = async {
+            if let Some(intent) = &intent {
+                coordinator
+                    .begin_upload_scoped(intent, "shardline", &reliability_repository)
+                    .await?;
+                coordinator
+                    .transition_upload_scoped(
+                        "shardline",
+                        &reliability_repository,
+                        intent.intent_id(),
+                        UploadIntentState::Storing,
+                    )
+                    .await?;
+            }
+            let object_store = self.object_store();
+            let mut ingestor = FileUploadIngestor::new_with_parallelism(
+                self.chunk_size,
+                expected_sha256.is_some(),
+                self.upload_max_in_flight_chunks,
+            );
+            while let Some(bytes) = body.next_bytes().await? {
+                ingestor.ingest_body_chunk(&object_store, &bytes).await?;
+            }
 
-        async {
             let (record, response) = ingestor
                 .finish(&object_store, file_id, repository_scope, expected_sha256)
                 .await?;
@@ -176,7 +181,12 @@ impl super::PostgresBackend {
             }
             Ok(response)
         }
-        .await
+        .await;
+        if coordinator.index().owner_lost() {
+            Err(ServerError::StaleResourceFence)
+        } else {
+            result
+        }
     }
 
     /// Stores a raw xorb body under its content hash.
