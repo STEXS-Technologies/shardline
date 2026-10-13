@@ -1959,3 +1959,19 @@ The fixture was bootstrapped using the owner command before isolated test schema
 were created. This includes record publication, delete protection, receipt
 recovery, artifact permissions and schema-specific index tests; it does not
 replace optimized process-level deployment verification of the new binary.
+
+The optimized binary subsequently built from `92ef6c27` passed all 11 selected
+deployment drills in 159.971 seconds, with no runtime skips. Twelve tests outside
+the explicit selection were excluded. Log:
+`/tmp/shardline-maintenance-deployments.txewFw/test.log`. Binary SHA-256:
+`f81ef6c2afc9757b0848a2cee088a2f2c5516891aa8b40163da0629085f45a21`.
+It still reports version 1.11.3 and includes the conditional-cleanup fix.
+
+The same binary also passed the restricted released/current OCI and S3 process
+drill: `.codex/validation/ux-current-oci-upgrade.log`, diagnostics
+`/tmp/shardline-oci-upgrade.h7Lga7`. Existing grants and the released ledger were
+preserved; lost ownership, publication failure, SIGKILL and fresh retry were
+checked, and ordinary servers had no child processes. Both runs used the
+official released 1.11.3 comparator. These results extend the tested deployment
+coverage; remaining library write paths and the other open merge gates still
+require their own evidence.
