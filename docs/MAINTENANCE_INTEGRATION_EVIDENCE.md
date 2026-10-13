@@ -2741,3 +2741,17 @@ The ordinary command/cleanup-order fixture passes all four combinations in
 39.58 seconds, preserving command status when cleanup fails. Strict server and
 CLI library/test Clippy and diff checks pass. These checks establish incremental
 retirement semantics, not a production speedup or a hard command-exit deadline.
+
+The optimized CLI also passes the two-invocation retirement verifier:
+`/tmp/shardline-incremental-cleanup.QAJRua`. Its current binary SHA-256 is
+`30d3403fe1f1e48df826baa407d7d01a16de12b6ac79a135b4d3994637a24d87`;
+the released comparator is
+`166b5558c9895ebbb7439af2915fdfa44d6d4f2a830f816e257f294b639fc9d8`.
+It creates a real completed ordinary run, ages that fixture manifest and adds
+400 legacy artifact rows. The first subsequent index rebuild removes exactly
+256 old run keys, hides the expired manifest and preserves the retirement
+marker. The next rebuild removes the remaining keys and marker. Both commands
+preserve released stdout, stderr and successful exit status, payload bytes stay
+identical, and two fresh run manifests remain. The release build completed in
+2m42s. This proves the tested CLI cleanup boundary; inventory latency and broader
+deployment guarantees remain open.
