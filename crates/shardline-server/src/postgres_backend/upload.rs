@@ -141,15 +141,19 @@ impl super::PostgresBackend {
                 )
                 .await
             {
-                self.record_store
-                    .commit_file_version_metadata_on_connection(
-                        connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
-                        &record,
-                    )
-                    .await?;
+                self.commit_staged_file_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    &record,
+                )
+                .await?;
             } else {
-                self.record_store
-                    .commit_file_version_metadata(&record)
+                let mut connection = self
+                    .record_store
+                    .pool()
+                    .acquire()
+                    .await
+                    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+                self.commit_staged_file_on_connection(&mut connection, &record)
                     .await?;
             }
             if let Some(intent) = &intent {

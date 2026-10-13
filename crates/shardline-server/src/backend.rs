@@ -441,8 +441,7 @@ impl ServerBackend {
             .postgres_connection_mut()
             .ok_or(ServerError::StaleResourceFence)?;
         let published = backend
-            .record_store()
-            .publish_s3_object_on_connection(
+            .publish_prepared_s3_on_connection(
                 connection,
                 &prepared.record,
                 entry,

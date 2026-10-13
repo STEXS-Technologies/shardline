@@ -70,6 +70,11 @@ alone cannot clear it. Repair does not mark an interrupted GC run completed.
 `Retry-After: 1` suggests when to retry, not when recovery will finish.
 Saving replies adds receipt I/O to GC, using the existing storage and process.
 
+If an upload instead reports `prepared upload content is no longer available;
+retry the upload`, resend it. For covered Postgres uploads, this means staged
+bytes were removed before publication and the file was not made visible. This
+also returns HTTP 503 with `Retry-After: 1`.
+
 ## Check a result
 
 Use your existing admin token:
