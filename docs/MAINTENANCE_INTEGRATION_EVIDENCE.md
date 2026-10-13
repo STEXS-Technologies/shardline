@@ -3066,3 +3066,22 @@ or unsupported documents.
 These results establish the tested persisted-format compatibility; they do not
 make signed history execution authority or cover every deployment layout.
 No fixture, runtime code or version changed.
+
+## Actionable optional-history warnings
+
+CLI admission and final-recording warnings now say that work continues or has
+finished with its original exit code, that history has not confirmed the result,
+and that the operator should check output, logs and affected data before retrying.
+Embedded-job warnings say that the server continues and give the same inspection
+action. This replaces receipt/domain-barrier terminology in those messages.
+
+Strict CLI/server library-and-test Clippy passes. The existing permissions
+verifier passes with debug binary
+`4df32ebb38458fcf17ed2b67a547008e666a7f0b08172a81b57c1aec5a300e1f`
+against released 1.11.3: all four commands preserve output and status under a
+0555 root, and fully read-only SQLite fsck preserves durable bytes and history
+while rendering the new warning. Its assertions check continuation and the
+retry-inspection guidance; diagnostics are
+`/tmp/shardline-local-permissions.8eV8C0`. This is a behavior/text check, not an
+optimized-performance result. Execution, storage semantics and version are
+unchanged.

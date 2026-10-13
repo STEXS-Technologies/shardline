@@ -86,7 +86,8 @@ done
 cmp "$fixture/readonly-fsck-released.stdout" "$fixture/readonly-fsck-current.stdout"
 cmp "$fixture/readonly-fsck-released.status" "$fixture/readonly-fsck-current.status"
 rg -qF 'maintenance tracking unavailable' "$fixture/readonly-fsck-current.stderr"
-rg -qF 'no verified task outcome will be available' "$fixture/readonly-fsck-current.stderr"
+rg -qF 'the command will still run, but its result will not be confirmed in history' "$fixture/readonly-fsck-current.stderr"
+rg -qF 'Check command output and logs before retrying' "$fixture/readonly-fsck-current.stderr"
 sha256sum "$root/metadata.sqlite3" "$root/metadata.sqlite3-wal" > "$fixture/readonly-after.sha256"
 cmp "$fixture/readonly-before.sha256" "$fixture/readonly-after.sha256"
 test "$(sqlite3 "$root/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key GLOB '_shardline_tasks/v1/manifests/*';")" = 4

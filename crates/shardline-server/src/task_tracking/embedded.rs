@@ -386,6 +386,6 @@ impl Drop for TaskReceipt {
 
 pub(crate) fn tracking_error(error: &(dyn std::error::Error + Send + Sync)) {
     tracing::warn!(
-        "optional background task tracking unavailable: {error}; serving continues, task completion is not certified"
+        "background job history unavailable; the server continues. Check job logs and affected data before retrying: {error}"
     );
 }

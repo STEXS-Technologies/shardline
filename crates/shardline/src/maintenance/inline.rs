@@ -245,7 +245,7 @@ fn run_prepared(
         Err(error) => {
             // Work already ran. Retain its unconfirmed history and preserve
             // the original exit status; never retry work to repair a receipt.
-            tracing::warn!(run = %id, "maintenance completed with exit {exit_code}, but its receipt is unconfirmed; original result is preserved; inspect effects before retrying: {error}");
+            tracing::warn!(run = %id, "maintenance finished with exit {exit_code}, but its result was not confirmed in history. Check command logs and affected data before retrying: {error}");
             false
         }
     };
