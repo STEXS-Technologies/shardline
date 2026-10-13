@@ -2610,6 +2610,16 @@ retirement and the blocked-read deadline. The repository's CI and deployment
 examples remain pinned to PostgreSQL 16; this additional result does not
 establish a minimum-version policy or compatibility with every HA provider.
 
+The latest optimized CLI, SHA-256
+`d3744a4af7d7da87c4c012591a0389cb1626290fab2051fa525de79c6818f26a`,
+then passed all 11 selected deployment fault drills in 145.617 seconds.
+Log: `/tmp/shardline-maintenance-deployments.cS2WoU/test.log`. This binary
+includes SQLite batching, cooperative cleanup checks and the ordinary-error
+output fix. Twelve tests outside the explicit selection were excluded; none
+of the selected drills skipped at runtime and no panic was logged. The named
+rollout/rollback, remote-delete, ownership, restricted-command and replacement
+fixtures pass with these bytes. Remaining gate coverage is unchanged.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
