@@ -86,6 +86,10 @@ These are scoped results, not a claim that every deployment is compatible:
   Ordinary guarded reads retain their read pool to avoid ownership-mutex
   re-entry. All seven publication fixtures pass; the corrected optimized binary
   passes the 11 selected deployment drills and restricted OCI/S3 process drill.
+  The other 12 deployment drills also pass with the same optimized binary,
+  covering backend interruptions, network faults, clock skew and protocol
+  recovery. The fixture reserves MinIO's endpoint across restarts; Docker's
+  automatic port reassignment previously caused three recovery timeouts.
   These results cover the named paths, not every lower-level library caller.
 - Newly staged Postgres uploads check their backing bytes inside the publication
   transaction. A configured database fixture deletes an actual staged xorb,

@@ -677,16 +677,19 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
     let compose_file_for_command = compose_file.clone();
     let project_for_command = project.clone();
     // Keep PostgreSQL's endpoint stable when outage drills stop and start it.
-    // Docker's automatic published ports can change on restart. Reserve it
-    // alongside both server listeners so this fixture cannot reuse its port.
-    // Other services can use Docker's atomic port allocation.
+    // Docker's automatic published ports can change on restart. Reserve the
+    // backend ports used by persistent clients alongside both server listeners
+    // so recovery reconnects to the same endpoints.
     let postgres_listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
     let postgres_port = postgres_listener.local_addr().ok()?.port();
+    let minio_listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let minio_port = minio_listener.local_addr().ok()?.port();
     let bind_listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
     let bind_port = bind_listener.local_addr().ok()?.port();
     let secondary_bind_listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
     let secondary_bind_port = secondary_bind_listener.local_addr().ok()?.port();
     drop(postgres_listener);
+    drop(minio_listener);
     let started = tokio::task::spawn_blocking(move || {
         std::process::Command::new("docker")
             .args([
@@ -700,7 +703,7 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
                 "--quiet-pull",
             ])
             .env("SHARDLINE_CHAOS_PG_PORT", postgres_port.to_string())
-            .env("SHARDLINE_CHAOS_MINIO_PORT", "0")
+            .env("SHARDLINE_CHAOS_MINIO_PORT", minio_port.to_string())
             .env("SHARDLINE_CHAOS_MINIO_CONSOLE_PORT", "0")
             .env("SHARDLINE_CHAOS_REDIS_PORT", "0")
             .output()
