@@ -236,7 +236,13 @@ impl PostgresBackend {
                 let visible_file_record = if let Some(file_id) =
                     intent.object_key().strip_prefix("record/")
                 {
-                    match self.read_record(file_id, None, None).await {
+                    let crate::upload_intent_recovery::FileRecoveryScope::Known(scope) =
+                        crate::upload_intent_recovery::file_recovery_scope(&reliability_events)
+                    else {
+                        tracing::warn!(intent_id = %intent.intent_id(), "legacy file scope cannot be verified; preserving unfinished intent");
+                        continue;
+                    };
+                    match self.read_record(file_id, None, scope.as_ref()).await {
                         Ok(record) => {
                             match crate::upload_intent_recovery::file_record_matches_intent(
                                 intent,

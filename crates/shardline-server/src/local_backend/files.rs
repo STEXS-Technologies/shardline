@@ -146,7 +146,8 @@ impl LocalBackend {
         expected_sha256: Option<&str>,
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
-        let reliability_repository = reliability_repository_scope(repository_scope);
+        let reliability_repository =
+            crate::upload_intent_recovery::file_intent_repository_scope(repository_scope)?;
 
         let intent = expected_sha256.map(|expected_hash| {
             UploadIntent::new(
@@ -164,7 +165,9 @@ impl LocalBackend {
         );
         if let Some(intent) = &intent {
             let _metadata_guard = self.metadata_write_lock.lock().await;
-            coordinator.begin_upload(intent).await?;
+            coordinator
+                .begin_upload_scoped(intent, "shardline", &reliability_repository)
+                .await?;
             coordinator
                 .transition_upload_scoped(
                     "shardline",

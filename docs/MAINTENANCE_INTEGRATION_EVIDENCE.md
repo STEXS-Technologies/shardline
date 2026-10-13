@@ -4076,3 +4076,33 @@ SHA-256 in place of its previous synthetic `sha256` placeholder.
 All 22 local backend cases pass in 0.45 seconds, including matching recovery,
 preservation of a checksum-failed `Storing` attempt and an unrelated `Stored`
 attempt at the same filename.
+
+### Exact scope identity for new file recovery
+
+New scoped file intents encode their validated repository components in the
+existing repository string as `scope-json-v1:` followed by structured JSON.
+This string is part of the existing authenticated operation identity. It keeps
+slash-containing components separate and distinguishes an absent revision from
+the literal revision `-`. Default-scope evidence retains `default`; existing
+opaque labels and signatures are never rewritten. No new database column,
+public data type, configuration or process is added.
+
+Local file admission now uses the scoped coordinator entry point from its
+baseline onward, matching PostgreSQL. Recovery decodes exact new scope evidence,
+reads the corresponding record namespace, checks its typed scope and bytes,
+and then advances progress. Legacy scoped labels remain unresolved because their
+slash-separated form can represent more than one valid scope.
+
+All eighteen configured PostgreSQL publication cases passed in 12.83 seconds
+without runtime skips (`/tmp/shardline-batched-deletion.UbiyH1/test.log`). The
+new case exercises two distinct scopes whose old labels collide, absent versus
+literal-dash revisions, successful recovery in each actual namespace, rejection
+of bytes present only in another scope or the default namespace, unchanged file
+metadata, and unchanged evidence for an ambiguous legacy intent.
+
+All 104 local backend tests passed in 1.29 seconds, including new scoped upload
+and recovery for absent and literal-dash revisions. Strict server library/test
+Clippy, formatting and diff checks pass. The released 1.11.3 digest enum already
+supports the existing canonical encoding used here, but source inspection alone
+does not establish old-server interpretation of these new scope strings. The
+mixed-version audit and large-file startup verification cost remain open.
