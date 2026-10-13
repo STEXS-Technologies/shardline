@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+mod native_upload_scope;
 mod upload_rollback;
 use std::{io::ErrorKind, num::NonZeroUsize};
 

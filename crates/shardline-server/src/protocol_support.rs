@@ -33,7 +33,8 @@ pub(crate) fn scope_namespace(
     core_ps::scope_namespace(repository_scope)
 }
 
-/// Returns a stable reliability identity for a repository token scope.
+/// Historical ambiguous spelling, retained for compatibility fixtures.
+#[cfg(test)]
 pub(crate) fn reliability_repository_scope(
     repository_scope: Option<&shardline_protocol::RepositoryScope>,
 ) -> String {

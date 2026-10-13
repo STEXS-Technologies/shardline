@@ -149,6 +149,7 @@ pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
 mod gc_tests;
 mod transfer_limiter;
+mod upload_identity;
 pub mod upload_ingest;
 mod upload_intent_recovery;
 mod validation;

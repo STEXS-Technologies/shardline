@@ -12,6 +12,10 @@ Normal router startup now defers eligible file-byte verification to its own
 process lifetime. Held-read fixtures cover 65 MiB files across multiple containers
 on SQLite and PostgreSQL for all three server roles. Startup still checks saved
 evidence and candidate metadata; these fixtures do not bound all startup work.
+Native shard reuse across repositories is now fixed and tested on both metadata
+backends, including retries alongside older unfinished history. Actual released
+startup preserves all four new native checkpoints in default and scoped
+namespaces, with both present and missing physical request objects.
 
 The full compatibility and failure audit is still open. The version remains 1.11.3;
 the version bump belongs in a separate PR.
@@ -72,13 +76,6 @@ for exact fixtures, historical measurements and their boundaries.
 
 The following still need implementation or stronger evidence before merge:
 
-- **Native shard reuse across repositories.** A current local fixture uploads
-  one native shard successfully in the default namespace, then attempts the
-  same bytes in a repository namespace. That second upload fails with
-  `UploadIntentConflict`: the body-derived intent ID is shared, while its
-  authenticated history is bound to the first repository. This supported
-  publication pattern needs a fix and PostgreSQL/rollback verification before
-  merge. The passing file-intent scope fixtures do not cover native shards.
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.
   Direct Postgres file, dedupe, reconstruction and stored-object reference

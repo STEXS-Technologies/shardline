@@ -7,7 +7,7 @@ use shardline_index::{FileRecord, UploadIntent, UploadIntentState};
 use shardline_protocol::RepositoryScope;
 use shardline_reliability::LifecycleEvent;
 
-const FILE_SCOPE_PREFIX: &str = "scope-json-v1:";
+use crate::upload_identity::SCOPE_PREFIX;
 pub(crate) mod startup;
 
 pub(crate) enum FileRecoveryScope {
@@ -20,15 +20,7 @@ pub(crate) enum FileRecoveryScope {
 pub(crate) fn file_intent_repository_scope(
     scope: Option<&RepositoryScope>,
 ) -> Result<String, ServerError> {
-    scope.map_or_else(
-        || Ok("default".to_owned()),
-        |scope| {
-            Ok(format!(
-                "{FILE_SCOPE_PREFIX}{}",
-                serde_json::to_string(scope)?
-            ))
-        },
-    )
+    crate::upload_identity::repository(scope)
 }
 
 pub(crate) fn file_recovery_scope(events: &[LifecycleEvent]) -> FileRecoveryScope {
@@ -41,7 +33,7 @@ pub(crate) fn file_recovery_scope(events: &[LifecycleEvent]) -> FileRecoveryScop
     event
         .operation
         .repository
-        .strip_prefix(FILE_SCOPE_PREFIX)
+        .strip_prefix(SCOPE_PREFIX)
         .and_then(|value| serde_json::from_str::<RepositoryScope>(value).ok())
         .map_or(FileRecoveryScope::Unresolved, |scope| {
             FileRecoveryScope::Known(Some(scope))

@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Publication must not expose chunks removed after immutable staging.
+mod native_scope;
 use crate::{test_support::postgres_fixture::PostgresFixture, upload_ingest::RequestBodyReader};
 use axum::body::Bytes;
 use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
@@ -951,7 +952,9 @@ async fn native_upload_recovery_preserves_each_durable_boundary() {
         backend.upload_xorb(&hash, xorb).await.unwrap();
         let (shard, file_hash) =
             crate::test_fixtures::single_file_shard(&[(payload.as_bytes(), &hash)]);
-        let intent_id = format!("shard-{}", blake3::hash(&shard).to_hex());
+        let (intent_id, _repository) =
+            crate::upload_identity::native_shard(blake3::hash(&shard).to_hex().as_ref(), None)
+                .unwrap();
         let session = crate::maintenance_barrier::RequestSession::acquire(
             &backend.gc_barrier_pool,
             backend.request_session_identity.clone(),
@@ -1350,7 +1353,8 @@ async fn lost_native_upload_owner_cannot_be_recovered_from_intent_bookkeeping() 
     let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(payload);
     backend.upload_xorb(&hash, xorb).await.unwrap();
     let (shard, file_hash) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
-    let intent_id = format!("shard-{}", blake3::hash(&shard).to_hex());
+    let (intent_id, _repository) =
+        crate::upload_identity::native_shard(blake3::hash(&shard).to_hex().as_ref(), None).unwrap();
     let session = crate::maintenance_barrier::RequestSession::acquire(
         &backend.gc_barrier_pool,
         backend.request_session_identity.clone(),
