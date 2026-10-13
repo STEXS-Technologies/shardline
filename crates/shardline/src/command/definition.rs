@@ -53,8 +53,11 @@ pub(crate) enum CliDefinitionCommand {
     Admin(AdminCommandArgs),
     /// Verify object-store and metadata integrity.
     Fsck(RootArgs),
-    /// Run durable, bounded maintenance with signed result artifacts (Linux).
+    /// Run optional child-process maintenance with deadlines and CPU limits (Linux).
     #[cfg(target_os = "linux")]
+    #[command(
+        long_about = "Run maintenance in an optional child process with deadlines, CPU limits and saved results (Linux).\n\nNormal fsck, index rebuild, gc, repair and storage migrate commands already track work in their existing process. They need no worker runner, state directory or task ID.\n\nUse a new task ID for a fresh scan. Reusing an ID inspects or resumes its pinned task; it does not replay an uncertain mutation. Inspect interrupted outcomes and storage effects before retrying."
+    )]
     Maintenance(MaintenanceArgs),
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
@@ -87,7 +90,7 @@ pub(crate) struct MaintenanceArgs {
     /// Private state directory outside the deployment root; retain for recovery.
     #[arg(long)]
     pub(crate) state_dir: PathBuf,
-    /// Stable task identity. Repeating it resumes the original pinned task.
+    /// Identity for this task; use a new ID for fresh work, retain it for recovery.
     #[arg(long)]
     pub(crate) task_id: String,
     #[command(subcommand)]
