@@ -4319,3 +4319,31 @@ Both deployment verifiers confirm their pinned copies have these bytes:
 
 There are no runtime skips in the selected deployment cases. The eight merge
 gates retain their remaining requirements; the version remains 1.11.3.
+
+## Current ordinary-command output and fresh-scan audit
+
+The current optimized executable (`3f839d2c9717fbb696f73fa3f445645e41886f362c52a52e31faec0b704da792`)
+passes `verify_maintenance_large_diagnostics.sh` against actual released 1.11.3
+(`/tmp/shardline-large-diagnostics.sLWj9V/`). A 4,096-object inventory produces a
+1,490,946-byte retention export and a 1,376,258-byte orphan export. Released and
+current stdout, stderr, status, inventory keys and stable diagnostic fields match;
+every synthetic payload byte remains unchanged. Countdown fields are excluded
+from comparison because wall time changes them.
+
+After the recorded completion, the fixture adds another orphan. The next ordinary
+invocation discovers and marks all 4,097 objects, preserves their bytes and saves
+a distinct completion. A prior saved result is not reused as a fresh scan.
+
+Code review confirms the relevant distinction: ordinary commands in
+`maintenance/shared_inline.rs` call `entry::run_direct` with their original output
+path. The full stdout/stderr files in `maintenance/capture.rs` belong to the
+explicit optional runner. Thus the 64 KiB automatic history-artifact admission
+limit does not impose that limit on ordinary command output or these exports.
+The explicit runner's capture and overall physical storage cost retain their
+separate audit requirements; logical admission limits are not disk quotas.
+
+The PostgreSQL history access functions also explicitly check row-policy access
+before their schema-wide operations. The existing row-policy fixture verifies
+refusal and preservation of ordinary startup work, rather than tenant-scoped
+history. It does not certify arbitrary tenant policies. These findings refine
+the remaining capacity and deployment audit; they do not close all eight gates.
