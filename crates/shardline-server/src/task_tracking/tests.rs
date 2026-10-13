@@ -6,6 +6,7 @@ use std::num::NonZeroUsize;
 mod history_pagination;
 mod postgres_capacity;
 mod postgres_retention;
+mod report_limits;
 
 fn config(root: &std::path::Path) -> ServerConfig {
     ServerConfig::new(
