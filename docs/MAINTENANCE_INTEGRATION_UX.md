@@ -58,7 +58,7 @@ object has an unresolved remote delete; retry after reconciliation
 ```
 
 Other objects remain available. Check the original GC process and logs, then
-run ordinary repair with the same database and storage configuration:
+run ordinary repair with the same database, schema and storage configuration:
 
 ```bash
 shardline repair
