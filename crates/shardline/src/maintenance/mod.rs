@@ -14,6 +14,7 @@ mod path_codec;
 mod shared_inline;
 mod verified;
 mod worker;
+mod workspace_admission;
 
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
