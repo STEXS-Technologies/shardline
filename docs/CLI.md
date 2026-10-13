@@ -38,6 +38,14 @@ Read-only SQLite needs its readable WAL sidecars. When they are unavailable,
 the command explains how to inspect the running deployment or a consistent
 backup. Keep the database and WAL together.
 
+Use `shardline history --pending-deletes` to inspect pending remote-delete
+attempts with the same configuration, without an admin token. Its JSON contains
+`supported`, `inspection_notice`, `pending_deletes` and `next_after`. Continue
+with `--pending-deletes --after ATTEMPT`, using its `next_after` value.
+Unavailable inspection is inconclusive; a pending attempt may still be running.
+The command performs no storage requests, retries or settlement. Recovery
+guidance points to the original GC logs and ordinary `shardline repair`.
+
 ## Durable Maintenance (Linux)
 
 Normal Linux maintenance commands allocate their own run identities and execute

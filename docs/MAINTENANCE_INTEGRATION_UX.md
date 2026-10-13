@@ -45,6 +45,17 @@ You can inspect saved history without enabling the admin API:
 shardline history
 ```
 
+Inspect unresolved remote deletes with the same configuration:
+
+```bash
+shardline history --pending-deletes
+```
+
+This view does not send deletes or clear attempts. Check `supported` and
+`inspection_notice`: unavailable inspection is inconclusive. A pending attempt
+may still belong to running GC. Use its `next_step` and original command logs
+before retrying work. Pagination uses `next_after` with the same mode.
+
 Use the same configuration as the original command or server. The command
 prints a JSON page with verified states, recovery guidance and recording
 warnings. Use `--limit 20` to set the page size and pass its `next_after` value
@@ -188,7 +199,8 @@ for authentication, pagination and response fields.
    maintenance-window requirements if your schema is behind.
 3. Replace server roles using your normal drain and restart procedure. Replace
    the binaries or images used by existing maintenance jobs too.
-4. Check pending deletes and investigate interrupted work, then resume your
+4. Run `shardline history --pending-deletes` and investigate interrupted work,
+   then resume your
    existing GC schedule.
 
 Owner setup installs the optional history and protection functions even when no

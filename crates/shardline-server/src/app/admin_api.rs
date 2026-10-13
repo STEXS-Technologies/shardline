@@ -718,40 +718,21 @@ pub(super) async fn pending_remote_deletes(
         }
         crate::ServerBackend::Local(_) => None,
     };
-    let supported = pending.is_some();
-    let inspection_notice = (!supported).then_some(
-        "Pending-delete inspection is unavailable for this backend or database account. An empty list does not prove that no deletes are pending. Check the original GC command and logs before retrying uncertain work.",
-    );
-    let mut pending = pending.unwrap_or_default();
-    let has_more = pending.len() > limit;
-    pending.truncate(limit);
-    let next_cursor = if has_more {
-        pending
-            .last()
-            .map(|(_, epoch)| encode_cursor(&epoch.to_string(), &query))
-            .transpose()?
-    } else {
-        None
-    };
+    let inspection = crate::pending_delete_inspection_page(pending, limit)?;
+    let next_cursor = inspection
+        .next_after
+        .as_deref()
+        .map(|epoch| encode_cursor(epoch, &query))
+        .transpose()?;
     let page = AdminPage {
         limit,
-        returned: pending.len(),
+        returned: inspection.pending_deletes.len(),
         next_cursor,
     };
-    let pending: Vec<_> = pending
-        .into_iter()
-        .map(|(key, epoch)| {
-            serde_json::json!({
-                "object_key": key, "attempt": epoch.to_string(), "state": "pending",
-                "reason": "delete has not been proved settled",
-                "next_step": "Check the original GC command and logs. Run shardline repair with the same database, schema and storage configuration to recover saved replies. Missing or invalid replies remain blocked; object absence alone cannot clear them.",
-            })
-        })
-        .collect();
     Ok(admin_json(serde_json::json!({
         "api_version": ADMIN_API_VERSION, "observed_at_unix_seconds": observed_at()?,
-        "supported": supported, "inspection_notice": inspection_notice,
-        "pending_deletes": pending, "page": page,
+        "supported": inspection.supported, "inspection_notice": inspection.inspection_notice,
+        "pending_deletes": inspection.pending_deletes, "page": page,
     })))
 }
 

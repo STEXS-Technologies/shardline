@@ -749,7 +749,10 @@ pub(crate) struct HistoryArgs {
     /// Maximum records to show (1–100).
     #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=100))]
     pub(crate) limit: u16,
-    /// Continue after the next_after run ID from the preceding page.
+    /// Inspect pending delete attempts instead of saved maintenance runs.
+    #[arg(long)]
+    pub(crate) pending_deletes: bool,
+    /// Continue after next_after from the preceding page with the same mode.
     #[arg(long)]
     pub(crate) after: Option<String>,
 }

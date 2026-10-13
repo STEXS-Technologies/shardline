@@ -71,13 +71,27 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
     }
     let command = match command {
         Ok(crate::command::ParsedCommand::History(history_args)) => {
-            return match crate::history_inspection::run(
-                history_args.root.as_deref(),
-                history_args.after,
-                usize::from(history_args.limit),
-            )
-            .await
-            {
+            let inspection_subject = if history_args.pending_deletes {
+                "Pending-delete state"
+            } else {
+                "Maintenance history"
+            };
+            let inspection = if history_args.pending_deletes {
+                crate::pending_delete_inspection::run(
+                    history_args.root.as_deref(),
+                    history_args.after,
+                    usize::from(history_args.limit),
+                )
+                .await
+            } else {
+                crate::history_inspection::run(
+                    history_args.root.as_deref(),
+                    history_args.after,
+                    usize::from(history_args.limit),
+                )
+                .await
+            };
+            return match inspection {
                 Ok(page) => match to_string_pretty(&page) {
                     Ok(text) => stdout_text(format_args!("{text}\n")),
                     Err(error) => error_chain_status(&error, ExitCode::FAILURE),
@@ -85,7 +99,7 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
                 Err(error) => {
                     let _ignored = writeln!(
                         io::stderr().lock(),
-                        "Maintenance history could not be inspected; this does not establish whether work ran or the server is ready."
+                        "{inspection_subject} could not be inspected; this does not establish whether work ran or the server is ready."
                     );
                     if let Some(guidance) =
                         crate::history_inspection::failure_guidance(error.as_ref())

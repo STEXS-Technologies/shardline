@@ -59,7 +59,9 @@ For this integration's upgrade from released 1.11.3:
    migrations pending does not install the new protection functions.
 3. Roll the server roles using the drain and readiness checks below. Replace
    the binaries or images used by existing maintenance jobs as well.
-4. Check pending deletes and investigate interrupted work before resuming the
+4. Inspect pending deletes with `shardline history --pending-deletes` using the
+   same configuration. Read `supported` and `inspection_notice`; unavailable
+   inspection is inconclusive. Investigate interrupted work before resuming the
    existing destructive GC schedule. Saved successful replies can be recovered
    by ordinary `shardline repair`; missing replies remain blocked. No extra
    tracker service or schedule is required.
