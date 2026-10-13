@@ -2509,6 +2509,23 @@ pages in 12.595 seconds and cleaned eligible evidence in 17 calls totaling
 evidence remained intact. These debug-fixture timings are not deployment
 latency bounds; the two full-capacity drills are not results of this run.
 
+SQLite retention now removes at most 64 exact artifact keys in one immediate
+transaction instead of opening and committing a connection for each artifact.
+The retirement path still deletes legacy copies first and preserves its marker
+on failure. A trigger-induced second-key failure verifies whole-batch rollback;
+tests also cover unselected evidence, missing tables, duplicates and oversized
+batch rejection. All eight SQLite artifact tests passed in 0.38 seconds after
+the final checked-count adjustment. Strict index/server library/test Clippy,
+formatting and graph update passed.
+
+The combined tracking selection with batched retirement passed 57 tests in
+113.43 seconds, with the same two explicit capacity exclusions; log:
+`/tmp/shardline-batched-deletion.LFVfq3/test.log`. Its 1,026-run local fixture
+took 14.676 seconds for inspection and 60.534 seconds for 17 cleanup calls,
+with a slowest call of 4.613 seconds. This run overlapped compilation and graph
+work; it does not demonstrate an overall speedup over the preceding run.
+Atomicity and fewer SQLite commits are established; broader cost remains open.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and

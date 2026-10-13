@@ -372,12 +372,99 @@ impl LocalIndexStore {
             [key],
         )? != 0)
     }
+
+    /// Atomically removes up to 64 exact evidence keys during verified retention.
+    /// Missing tables stay absent; duplicate keys count only once.
+    /// This does not authorize retention or delete user payload objects.
+    /// # Errors
+    /// Returns database failures or rejects a batch larger than 64 keys.
+    pub fn delete_task_artifacts(&self, keys: &[String]) -> Result<usize, LocalIndexStoreError> {
+        if keys.len() > 64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "task artifact deletion batch exceeds 64 keys",
+            )
+            .into());
+        }
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let mut connection = self.open_connection()?;
+        if !exists(&connection)? {
+            return Ok(0);
+        }
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut removed = 0_usize;
+        {
+            let mut statement = transaction
+                .prepare("DELETE FROM shardline_task_artifacts_v1 WHERE artifact_key = ?1")?;
+            for key in keys {
+                removed = removed.saturating_add(statement.execute([key])?);
+            }
+        }
+        transaction.commit()?;
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn bounded_deletion_is_atomic_and_preserves_unselected_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(root.path().to_owned()).unwrap();
+        assert_eq!(
+            store
+                .delete_task_artifacts(&["missing".to_owned()])
+                .unwrap(),
+            0
+        );
+        let connection = store.open_connection().unwrap();
+        assert!(!exists(&connection).unwrap());
+        for key in ["first", "blocked", "preserved"] {
+            store.publish_task_artifact(key, b"original").unwrap();
+        }
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_artifact_deletion BEFORE DELETE ON shardline_task_artifacts_v1
+             WHEN OLD.artifact_key = 'blocked' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            store
+                .delete_task_artifacts(&["first".to_owned(), "blocked".to_owned()])
+                .is_err()
+        );
+        assert!(store.contains_task_artifact("first").unwrap());
+        assert!(store.contains_task_artifact("blocked").unwrap());
+        assert!(
+            store
+                .delete_task_artifacts(&vec!["first".to_owned(); 65])
+                .is_err()
+        );
+        assert!(store.contains_task_artifact("first").unwrap());
+        connection
+            .execute_batch("DROP TRIGGER fail_artifact_deletion")
+            .unwrap();
+        assert_eq!(
+            store
+                .delete_task_artifacts(&[
+                    "first".to_owned(),
+                    "first".to_owned(),
+                    "blocked".to_owned()
+                ])
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store.read_task_artifact("preserved", 8).unwrap().unwrap(),
+            b"original"
+        );
+    }
 
     #[test]
     fn concurrent_admission_cannot_exceed_the_last_available_slot() {
