@@ -78,9 +78,24 @@ impl super::PostgresBackend {
             Err(ServerError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
         };
-        self.record_store
-            .delete_file_version_metadata(&record)
-            .await?;
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &self.request_session_identity,
+        )
+        .await
+        {
+            self.record_store
+                .delete_file_version_metadata_on_connection(
+                    connection
+                        .as_mut()
+                        .ok_or_else(|| PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                    &record,
+                )
+                .await?;
+        } else {
+            self.record_store
+                .delete_file_version_metadata(&record)
+                .await?;
+        }
         Ok(true)
     }
 
@@ -111,10 +126,26 @@ impl super::PostgresBackend {
             // upload won. Do not delete the winner's record.
             return Ok(false);
         }
-        Ok(self
-            .record_store
-            .delete_file_version_metadata_if_latest(&record)
-            .await?)
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &self.request_session_identity,
+        )
+        .await
+        {
+            Ok(self
+                .record_store
+                .delete_file_version_metadata_if_latest_on_connection(
+                    connection
+                        .as_mut()
+                        .ok_or_else(|| PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                    &record,
+                )
+                .await?)
+        } else {
+            Ok(self
+                .record_store
+                .delete_file_version_metadata_if_latest(&record)
+                .await?)
+        }
     }
 
     pub(crate) async fn read_file_stream(

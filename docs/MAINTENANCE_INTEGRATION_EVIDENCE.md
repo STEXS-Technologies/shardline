@@ -1995,3 +1995,19 @@ ignored tests. Logs: `.codex/validation/ux-copy-owner-test.log` and
 the index and server passed. No configuration, migration or version change was
 made. The optimized process results above predate this session-routing change;
 they must not be treated as verification of this revision.
+
+File-reference deletion now follows the same ownership rule for both ordinary
+deletion and expected-hash cleanup. The existing pool-based index methods retain
+their signatures and delegate to connection-taking variants. No ownership
+connection is replaced after loss, and the conditional DELETE still rechecks the
+hash atomically.
+
+The one-connection fixture now also verifies successful ordinary and conditional
+deletion, an absent-reference result, and rejection of both delete paths after
+terminating the actual request owner. The source remains readable afterward.
+All six publication tests passed in 0.98 seconds and all eleven index record-store
+tests passed in 0.40 seconds, with zero ignored tests. Logs:
+`.codex/validation/ux-delete-owner-publication-tests.log` and
+`.codex/validation/ux-delete-owner-index-tests.log`. Strict all-target index/server
+Clippy and the AST graph refresh passed. Optimized deployment validation still
+needs to include these session-routing changes.

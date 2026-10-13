@@ -29,6 +29,24 @@ async fn file_reference_copy_cannot_replace_a_lost_request_owner() {
                     .await
                     .unwrap()
             );
+            let source = backend
+                .read_record("copy-source", None, None)
+                .await
+                .unwrap();
+            assert!(
+                backend
+                    .delete_file_reference_if_latest("copy-owned", &source.content_hash)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                backend
+                    .copy_file_reference("copy-source", "copy-delete")
+                    .await
+                    .unwrap()
+            );
+            assert!(backend.delete_file_reference("copy-delete").await.unwrap());
+            assert!(!backend.delete_file_reference("copy-delete").await.unwrap());
             let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
                 &backend.request_session_identity,
             )
@@ -45,6 +63,13 @@ async fn file_reference_copy_cannot_replace_a_lost_request_owner() {
                 .await
                 .unwrap();
             assert!(terminated);
+            assert!(backend.delete_file_reference("copy-source").await.is_err());
+            assert!(
+                backend
+                    .delete_file_reference_if_latest("copy-source", &source.content_hash)
+                    .await
+                    .is_err()
+            );
             assert!(
                 backend
                     .copy_file_reference("copy-source", "copy-owner-lost")
@@ -54,6 +79,7 @@ async fn file_reference_copy_cannot_replace_a_lost_request_owner() {
         })
         .await;
     session.finish().await;
+    assert!(backend.read_record("copy-source", None, None).await.is_ok());
     assert!(matches!(
         backend.read_record("copy-owner-lost", None, None).await,
         Err(crate::ServerError::NotFound)

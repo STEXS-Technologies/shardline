@@ -428,7 +428,21 @@ impl super::PostgresRecordStore {
         &self,
         record: &FileRecord,
     ) -> Result<(), PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        self.delete_file_version_metadata_on_connection(&mut connection, record)
+            .await
+    }
+
+    /// Removes metadata on the caller's non-replaceable ownership connection.
+    ///
+    /// # Errors
+    /// Returns a metadata error, including connection loss.
+    pub async fn delete_file_version_metadata_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        record: &FileRecord,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
         let latest = self.latest_record_locator(record);
         let version = self.version_record_locator(record);
         query("DELETE FROM shardline_file_records WHERE record_key = $1 OR record_key = $2")
@@ -450,7 +464,21 @@ impl super::PostgresRecordStore {
         &self,
         record: &FileRecord,
     ) -> Result<bool, PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        self.delete_file_version_metadata_if_latest_on_connection(&mut connection, record)
+            .await
+    }
+
+    /// Conditionally removes metadata on the caller's ownership connection.
+    ///
+    /// # Errors
+    /// Returns a metadata error, including connection loss.
+    pub async fn delete_file_version_metadata_if_latest_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        record: &FileRecord,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
         let latest = self.latest_record_locator(record);
         let removed = query(
             "DELETE FROM shardline_file_records
