@@ -2127,3 +2127,37 @@ and AST graph refresh also passed.
 
 These measurements do not establish production latency or a guaranteed speedup.
 The scale gate remains open.
+
+### Batched retirement deletion
+
+Retirement now deletes up to 64 PostgreSQL artifact keys in one transaction on
+one checked connection. It calls the existing private deletion function with
+the existing permissions; it adds no schema change or runtime grant. Legacy
+copies are removed before their metadata batch, the expired manifest is hidden
+first, and the retirement marker and signed binding remain until cleanup finishes.
+Local-only deletion retains its previous behavior.
+
+Eight artifact tests passed against a configured disposable PostgreSQL database,
+including caller rollback, a failure on the last of 64 deletions, rejection of
+65-key batches, idempotent deletion and preservation of a 17-second caller timeout.
+The restricted-account fixture permits batching with existing GC permissions and
+rejects read-only and publication-only accounts. Log:
+`/tmp/shardline-batched-deletion.Lq0Dga/test.log`.
+
+A separate server fixture added 130 artifacts with duplicate legacy copies and
+injected a second-batch deletion failure. Exactly the first 64 metadata artifacts
+remained deleted, the failed batch rolled back, and the marker and binding survived.
+A fresh call removed the remaining evidence without changing user payload.
+One executed test passed in 0.94 seconds; log:
+`/tmp/shardline-batched-deletion.ZI63K0/test.log`. The existing PostgreSQL history
+module also passed all 15 configured tests in 9.62 seconds, including interrupted
+retirement authorization and schema routing; log:
+`/tmp/shardline-batched-deletion.DhKAvS/test.log`.
+
+The optimized full-capacity fixture passed cleanly in 327.11 seconds: creation
+82.784 seconds, inspection 33.903 seconds, and 65 cleanup calls totaling 210.186
+seconds, with a slowest call of 4.180 seconds. All capacity and payload-safety
+assertions passed. Log: `/tmp/shardline-postgres-capacity.gGST2u/test.log`;
+verifier output: `.codex/validation/ux-batched-deletion-pg-capacity.log`.
+Strict index/server library and test Clippy and diff checks passed.
+These measurements leave production latency and larger legacy archives open.

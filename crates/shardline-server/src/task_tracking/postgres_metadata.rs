@@ -346,6 +346,21 @@ impl PostgresTaskMetadata {
         })
     }
 
+    pub(super) fn delete_batch(&self, keys: &[String]) -> Result<(), ServerError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.run(async {
+            let mut connection = self.connection().await?;
+            let result =
+                PostgresIndexStore::delete_task_artifacts_on_connection(&mut connection, keys)
+                    .await
+                    .map(|_| ())
+                    .map_err(ServerError::from);
+            self.finish(connection, result).await
+        })
+    }
+
     pub(super) fn finish_retirement(&self, id: &str) -> Result<(), ServerError> {
         self.run(async {
             let mut connection = self.connection().await?;

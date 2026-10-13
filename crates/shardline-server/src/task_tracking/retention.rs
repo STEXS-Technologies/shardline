@@ -205,10 +205,35 @@ impl TaskEvidenceStore {
             super::TASK_EVIDENCE_PREFIX,
             identity.id
         ))?;
-        self.visit_prefix(&run_prefix, |metadata| {
-            self.delete_artifact(metadata.key())?;
-            Ok::<(), ServerError>(())
-        })?;
+        if let Some(postgres) = &self.postgres_metadata {
+            let delete_metadata_batch = |keys: &[String]| {
+                postgres.delete_batch(keys)?;
+                if let Some(local) = &self.local_metadata {
+                    for key in keys {
+                        local.delete_task_artifact(key)?;
+                    }
+                }
+                Ok::<(), ServerError>(())
+            };
+            let mut keys = Vec::with_capacity(64);
+            self.visit_prefix(&run_prefix, |metadata| {
+                // Remove legacy copies before committing metadata deletion.
+                // On any failure the retirement marker remains resumable.
+                self.objects.delete_if_present(metadata.key())?;
+                keys.push(metadata.key().as_str().to_owned());
+                if keys.len() == 64 {
+                    delete_metadata_batch(&keys)?;
+                    keys.clear();
+                }
+                Ok::<(), ServerError>(())
+            })?;
+            delete_metadata_batch(&keys)?;
+        } else {
+            self.visit_prefix(&run_prefix, |metadata| {
+                self.delete_artifact(metadata.key())?;
+                Ok::<(), ServerError>(())
+            })?;
+        }
         if let Some(postgres) = &self.postgres_metadata {
             // Keep the signed binding until the marker disappears atomically;
             // a replacement login can still authorize interrupted cleanup.
