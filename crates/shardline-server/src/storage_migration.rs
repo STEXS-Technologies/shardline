@@ -220,7 +220,7 @@ fn is_task_evidence(source: &ServerObjectStore, key: &ObjectKey) -> bool {
         // Only a verified association is recognizable control evidence. Keep
         // arbitrary or damaged bytes under an otherwise recognized run ID.
         matches!(
-            store.history_scope_binding_match(&identity, identity.deployment),
+            store.history_scope_binding_match_for_manifest(&identity, identity.deployment, &bytes),
             Ok(Some(_))
         )
     } else {
@@ -390,13 +390,33 @@ mod tests {
             1
         );
         assert_eq!(snapshot(), original);
-        // A matching filename alone must not hide arbitrary legacy bytes.
+        unfinished
+            .finish(true, b"finished before retirement")
+            .unwrap();
         let binding = objects
             .list_prefix(&binding_prefix)
             .unwrap()
             .into_iter()
             .find(|metadata| metadata.key() != &unrelated)
             .unwrap();
+        let id = binding.key().as_str().rsplit('/').next().unwrap();
+        let manifest_path = source
+            .path()
+            .join(format!("chunks/_shardline_tasks/v1/manifests/{id}"));
+        let manifest = fs::read(&manifest_path).unwrap();
+        let retiring_path = source
+            .path()
+            .join(format!("chunks/_shardline_tasks/v1/retiring/{id}"));
+        fs::create_dir_all(retiring_path.parent().unwrap()).unwrap();
+        fs::write(retiring_path, manifest).unwrap();
+        fs::remove_file(manifest_path).unwrap();
+        let retiring_inventory = snapshot();
+        let copied_retiring = run_storage_migration(&options).unwrap();
+        assert_eq!(copied_retiring.scanned_objects, 2);
+        assert_eq!(copied_retiring.already_present_objects, 2);
+        assert_eq!(copied_retiring.inserted_objects, 0);
+        assert_eq!(snapshot(), retiring_inventory);
+        // A matching filename alone must not hide arbitrary legacy bytes.
         let damaged = b"unrecognized legacy bytes at the same run ID";
         fs::write(
             source.path().join("chunks").join(binding.key().as_str()),
@@ -416,7 +436,6 @@ mod tests {
             .unwrap(),
             damaged
         );
-        drop(unfinished);
     }
 
     #[test]

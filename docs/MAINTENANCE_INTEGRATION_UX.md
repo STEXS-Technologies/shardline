@@ -121,6 +121,8 @@ read-only; it does not require new source write permissions.
 Current copies exclude verified legacy history scope bindings, including those
 for unfinished runs, and leave the source evidence unchanged. Unrecognized or
 damaged objects retain their existing copy behavior.
+This also covers cleanup interrupted after moving the manifest into a retirement
+marker, while its verified bytes are still available.
 Copies to S3-only endpoints keep task history in private temporary storage on
 the command's host, without adding objects or permissions to the payload bucket.
 That history is not available through other nodes and can be removed by
