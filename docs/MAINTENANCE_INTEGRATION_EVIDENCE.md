@@ -3815,3 +3815,28 @@ removed after the assertions. This extends the local router-lifetime proof to
 the three roles; it does not establish every account layout or cancellation
 of an active storage call. Strict server library/test Clippy, formatting and
 diff checks pass. Production behavior and the version are unchanged.
+
+### Raw-xorb rejection after request-session loss
+
+A real PostgreSQL fixture terminates the original request's backend PID before
+attempting a new raw-xorb upload. Before the correction, that upload succeeds
+and the test fails (`/tmp/shardline-batched-deletion.a1QBCy/test.log`).
+
+Raw-xorb uploads now check the same request-owned session before and after
+staging and around object-store work. These checks never acquire a replacement
+connection. Detected session loss returns the existing stale-fence error;
+stale-fence HTTP responses now include `Retry-After: 1` with their existing 503
+status. Calls without an HTTP request session retain their existing library
+behavior.
+
+The corrected configured test verifies the error, HTTP status/header, absence
+of a new intent, and successful upload with a fresh invocation. All ten
+publication cases pass in 3.18 seconds with no skip or panic:
+`/tmp/shardline-batched-deletion.Y2mvNs/test.log`. The fixture's old zero-pass
+matcher falsely matched `10 passed`; inspecting the complete log confirmed the
+passing suite, and the matcher now requires a numeric boundary. Strict server
+library/test Clippy, formatting and diff checks pass.
+
+This does not atomically fence separate intent transitions or cancel a storage
+call when ownership is lost during that call. Those phase boundaries remain in
+the merge audit; no cluster-wide exactly-once claim or version bump is made.

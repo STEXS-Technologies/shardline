@@ -108,6 +108,12 @@ The following still need implementation or stronger evidence before merge:
   publishing file metadata. The native-publication tests therefore do not prove
   request-owner fencing for raw-xorb intent transitions. Audit both paths at
   each mutation boundary before claiming every upload lifecycle is fenced.
+  Raw-xorb requests now verify their original, non-replaceable request session
+  before and after staging and around storage work. A configured test exposed
+  acceptance after an already-lost owner; the corrected path rejects it before
+  intent creation with HTTP 503 and `Retry-After: 1`, and a fresh upload succeeds.
+  These checks detect session loss at those boundaries. They do not atomically
+  fence the separate intent transactions or cancel an active storage request.
   An older GC binary does not establish the current remote-delete markers.
 - **Uncertain remote outcomes.** Missing or invalid delete replies leave an
   object blocked. Object absence alone cannot safely clear it. Recovery and
