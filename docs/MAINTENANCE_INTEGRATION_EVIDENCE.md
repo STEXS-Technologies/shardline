@@ -4305,6 +4305,17 @@ Executed checks:
   (`/tmp/shardline-native-scope-clippy.log`); formatting and diff checks pass.
 
 The earlier optimized deployment drills test the executable before this native
-identity fix. A new optimized build and its deployment checks remain separate
-verification work. The eight merge gates retain their remaining requirements;
-the version remains 1.11.3.
+identity fix. A fresh optimized CLI containing the fix builds in 3m 03s, reports
+`shardline 1.11.3` and has SHA-256
+`3f839d2c9717fbb696f73fa3f445645e41886f362c52a52e31faec0b704da792`.
+Both deployment verifiers confirm their pinned copies have these bytes:
+
+- All 11 maintenance deployment drills pass in 142.199 seconds
+  (`/tmp/shardline-maintenance-deployments.IZ2psG/test.log`).
+- All 12 protocol fault drills pass in 139.628 seconds
+  (`/tmp/shardline-protocol-faults.NzTc8D/test.log`).
+- The five restricted local command comparisons and fully read-only SQLite fsck
+  pass (`/tmp/shardline-local-permissions.WSTSFe/`).
+
+There are no runtime skips in the selected deployment cases. The eight merge
+gates retain their remaining requirements; the version remains 1.11.3.
