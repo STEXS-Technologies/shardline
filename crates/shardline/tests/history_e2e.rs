@@ -2,6 +2,49 @@
 use std::process::Command;
 
 #[test]
+fn history_reuses_explicit_config_and_environment_file_from_another_directory() {
+    let deployment = tempfile::tempdir().unwrap();
+    let invocation = tempfile::tempdir().unwrap();
+    let config = deployment.path().join("selected.toml");
+    let environment = deployment.path().join("selected.env");
+    std::fs::write(&config, "[server]\nfrontends = [\"s3\"]\n").unwrap();
+    std::fs::write(
+        &environment,
+        format!("SHARDLINE_ROOT_DIR={}\n", deployment.path().display()),
+    )
+    .unwrap();
+    // Explicit selection must take precedence over an unrelated cwd config.
+    std::fs::write(invocation.path().join("shardline.toml"), "invalid toml").unwrap();
+    let binary = std::env::var_os("CARGO_BIN_EXE_shardline")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_shardline").into());
+    let run = |operation: &str| {
+        Command::new(&binary)
+            .env_clear()
+            .current_dir(invocation.path())
+            .arg("--config")
+            .arg(&config)
+            .arg("--env-file")
+            .arg(&environment)
+            .arg(operation)
+            .output()
+            .unwrap()
+    };
+    let work = run("fsck");
+    assert!(work.status.success(), "{work:?}");
+    let output = run("history");
+    assert!(output.status.success(), "{output:?}");
+    let page: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(page["tasks"][0]["state"], "completed");
+    assert!(deployment.path().join("metadata.sqlite3").is_file());
+    assert_eq!(std::fs::read_dir(invocation.path()).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(config).unwrap(),
+        "[server]\nfrontends = [\"s3\"]\n"
+    );
+}
+
+#[test]
 fn history_command_reads_ordinary_runs_without_private_runner_configuration() {
     let root = tempfile::tempdir().unwrap();
     let binary = std::env::var_os("CARGO_BIN_EXE_shardline")

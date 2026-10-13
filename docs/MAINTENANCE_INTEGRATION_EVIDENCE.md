@@ -3698,3 +3698,19 @@ The configured four-case CLI suite passes with no runtime skip in 10.02 seconds:
 formatting and diff checks pass. This adds actual-command evidence to the
 existing database-level inspection checks; it does not establish support for
 every restricted-account or schema layout.
+
+### Reusing existing configuration for CLI history
+
+An actual-command fixture runs fsck and history from a separate directory using
+the same explicit config and environment file. The environment file selects the
+deployment root. An unrelated malformed `shardline.toml` in the invocation
+directory is ignored; history reads the completed fsck run from the selected
+deployment, the explicit config stays unchanged, and the invocation directory
+gets no metadata or tracking workspace.
+
+The development-executable case passes in 4.47 seconds. Selecting the previously
+pinned optimized executable through Nextest also passes in 0.052 seconds (run
+`cc8b6f7d-beaa-49f2-9b94-49975a5c27d3`, one selected case, four intentionally
+excluded). Strict CLI library/test Clippy, formatting and diff checks pass.
+This confirms the existing configuration workflow for the named fixture;
+broader schema and account compatibility remains open.
