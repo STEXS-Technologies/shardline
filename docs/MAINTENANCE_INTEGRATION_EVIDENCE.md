@@ -2478,6 +2478,15 @@ PostgreSQL history tests passed in 9.27 seconds; PostgreSQL log:
 Clippy, formatting and graph update passed. These checks do not establish
 cancellation of an active storage call or a measured shutdown latency bound.
 
+Legacy relocation now also checks shutdown before classifying each artifact,
+before reading a scope binding and before removing a verified archived copy.
+This includes oversized entries that previously returned early without a stop
+check. The new regression supplies an oversized inventory entry after shutdown,
+verifies an interrupted result and unchanged legacy evidence, then verifies
+that an ordinary fresh store resumes relocation. All six relocation tests
+passed in 0.43 seconds; strict server library/test Clippy and formatting passed.
+This is cooperative cancellation, with the same active-storage-call limit.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
