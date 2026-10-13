@@ -202,8 +202,12 @@ logs before deciding what happened.
 The additive `next_step` field gives the safe recovery action. After checking
 the original command, run `shardline repair` with the same database, schema and object
 storage configuration. It verifies saved successful delete replies and settles
-their matching attempts without deleting the object again. Repeated runs work
-through the backlog. If no reply was saved, the marker remains pending; elapsed
+their matching attempts without deleting the object again. Each run examines
+at most 64 saved replies, including invalid evidence. Repeated runs work
+through the backlog using saved scan progress; a pending marker after one run
+does not establish that its reply is missing. Check repair logs for examined,
+settled and retained counts, then inspect pending deletes again. If no reply
+was saved, the marker remains pending; elapsed
 time or a missing object cannot safely clear it. See the
 [maintenance guide](MAINTENANCE_INTEGRATION_UX.md#handle-a-retryable-write).
 
