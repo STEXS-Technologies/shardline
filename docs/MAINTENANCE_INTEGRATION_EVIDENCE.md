@@ -4166,3 +4166,48 @@ Clippy, formatting and diff checks pass. The released 1.11.3 digest enum already
 supports the existing canonical encoding used here, but source inspection alone
 does not establish old-server interpretation of these new scope strings. The
 mixed-version audit and large-file startup verification cost remain open.
+
+## File recovery outside readiness startup
+
+Normal public-router startup now checks upload evidence and candidate metadata,
+then runs eligible file-byte verification in one task owned by the router's
+lifetime. It uses the existing process and stop signal, not a worker PID, timer,
+task ID or operator service. Shutdown preserves unfinished evidence; already
+running storage I/O may finish. The public standalone backend constructor keeps
+its eager recovery behavior. The existing 30-second eligibility rule is retained.
+
+The 65 MiB held-read fixtures exposed a real multi-container reader defect:
+records containing different container hashes fell through to individual-chunk
+keys. The reader now groups adjacent container terms, authenticates one container
+at a time and decodes bounded physical chunks. Logical file offsets are independent
+of container-relative chunk ranges. Selected ranges, repeated terms and mixed
+individual-chunk fallback remain supported. No domain record is rewritten.
+
+Executed checks for this change:
+
+- Five configured startup fixtures pass in 16.55 seconds, with no runtime skips
+  (`/tmp/shardline-batched-deletion.WnLRJh/test.log`). Both SQLite and PostgreSQL
+  exercise 65 MiB files for All, Api and Transfer roles. The storage read is held
+  while `/readyz` succeeds; release then reaches verified completion. Separate
+  cases cover eager standalone recovery, router-stop/abort with fresh recovery,
+  and preserved evidence after checksum mismatch or corrupt stored bytes.
+- All 51 download-stream tests pass, including cross-container ranges, selected
+  multi-chunk terms, repeated references, individual-chunk fallback, inconsistent
+  authenticated lengths/ranges and one-work-slot streaming
+  (`/tmp/shardline-multi-container-stream-tests.log`).
+- All 59 object-store and 105 local-backend cases pass
+  (`/tmp/shardline-file-recovery-object-tests.log` and
+  `/tmp/shardline-file-recovery-local-tests.log`). The local group executes the
+  actual released 1.11.3 server rollback fixture.
+- All 19 configured PostgreSQL publication cases pass in 12.47 seconds, with no
+  runtime skips (`/tmp/shardline-batched-deletion.TrTAnN/test.log`), including
+  actual released-server preservation of new unfinished file evidence.
+- Strict server library/test Clippy passes
+  (`/tmp/shardline-file-recovery-clippy.log`); formatting and diff checks pass.
+
+These fixtures establish that file checksum reads no longer block normal router
+readiness. They do not bound metadata inventory scans, total verification cost,
+remote-storage latency or all startup work. A verification warning preserves the
+intent; readiness is not certification of every stored file. Whole-file formats
+unsupported by this streaming verifier remain unconfirmed. Broader deployment,
+failure and capacity gates remain open; the version is still 1.11.3.

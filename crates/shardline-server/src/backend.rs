@@ -216,6 +216,21 @@ impl ServerBackend {
     ///
     /// Returns [`ServerError`] when the object store or Postgres backend fails to initialise.
     pub async fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
+        Self::from_config_with_recovery(config, false)
+            .await
+            .map(|(backend, _pending_files)| backend)
+    }
+
+    pub(crate) async fn from_config_for_router(
+        config: &ServerConfig,
+    ) -> Result<(Self, bool), ServerError> {
+        Self::from_config_with_recovery(config, true).await
+    }
+
+    async fn from_config_with_recovery(
+        config: &ServerConfig,
+        defer_file_bytes: bool,
+    ) -> Result<(Self, bool), ServerError> {
         let object_store = object_store_from_config(config)?;
 
         // Probe object storage — warn but don't fail (S3 may be slow to start)
@@ -264,9 +279,18 @@ impl ServerBackend {
             tracing::info!("startup schema compatibility check: postgres OK");
 
             // Reconcile any stuck upload intents from a previous crash
-            backend.reconcile_stuck_upload_intents().await?;
-
-            return Ok(Self::Postgres(backend));
+            let pending_files = if defer_file_bytes {
+                backend
+                    .reconcile_upload_intents(
+                        std::time::Duration::from_secs(30),
+                        &crate::upload_intent_recovery::startup::RecoveryPass::Startup,
+                    )
+                    .await?
+            } else {
+                backend.reconcile_stuck_upload_intents().await?;
+                false
+            };
+            return Ok((Self::Postgres(backend), pending_files));
         }
 
         let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
@@ -287,9 +311,18 @@ impl ServerBackend {
         tracing::info!("startup probe: sqlite metadata OK");
 
         // Reconcile any stuck upload intents from a previous crash
-        backend.reconcile_stuck_upload_intents().await?;
-
-        Ok(Self::Local(backend))
+        let pending_files = if defer_file_bytes {
+            backend
+                .reconcile_upload_intents(
+                    std::time::Duration::from_secs(30),
+                    &crate::upload_intent_recovery::startup::RecoveryPass::Startup,
+                )
+                .await?
+        } else {
+            backend.reconcile_stuck_upload_intents().await?;
+            false
+        };
+        Ok((Self::Local(backend), pending_files))
     }
 
     pub(crate) async fn upload_xorb_stream(

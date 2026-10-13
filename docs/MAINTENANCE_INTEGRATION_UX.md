@@ -14,6 +14,12 @@ or configuration for normal startup. Maintenance keeps its original process
 and live output. Your existing timer still starts GC; starting the server does
 not start GC.
 
+On startup, Shardline checks saved upload progress, then verifies eligible
+published files in the same process while serving requests. Large files do not
+hold up readiness for their checksum verification.
+If verification fails or shutdown interrupts it, Shardline preserves the unfinished
+evidence; it does not invent a successful upload. No worker service is needed.
+
 | Your workflow | What changes |
 | --- | --- |
 | Start a server | It initializes maintenance tracking automatically in existing metadata. No tracker service to start. |
