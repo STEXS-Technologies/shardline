@@ -21,13 +21,10 @@ not start GC.
 | Run multiple nodes | Nodes sharing the same Postgres database, schema and storage can inspect shared history. Covered writes use database ownership checks. |
 | Set a maintenance deadline or CPU limit | Explicitly use `shardline maintenance ...`. Only this optional runner starts a child process. |
 
-The child process lets the optional runner stop or limit its own maintenance
-job. Write safety comes from database ownership checks and delete protection,
-not from giving a worker another PID. Normal operation needs no worker runner.
-On Linux, the optional runner stops its child when the controller exits or dies.
-If the runner stops unexpectedly, inspect its recorded outcome and
-storage effects before retrying. Stopping a worker cannot undo a remote request
-that storage has already received.
+Use the optional child only when you want a deadline or CPU limit. On Linux,
+it stops when its controller exits or dies. Database ownership and delete
+protection provide write safety. After an interruption, inspect the outcome
+before retrying: a remote storage request may already have taken effect.
 
 **This branch is still under development and is not ready to merge.**
 The version remains 1.11.3. The remaining upgrade limits are listed below.
@@ -52,25 +49,16 @@ available. To inspect history over HTTP, use the existing
 
 ## What users gain
 
-Saved maintenance evidence survives a process failure. When recording succeeds,
-you can inspect the recorded outcome without setting up another service. If
-recording fails, history can be incomplete even though the command ran.
-History does not automatically rerun jobs or prove current cluster health.
+You get saved maintenance outcomes in existing SQLite or upgraded Postgres
+metadata. Nodes sharing the same database, schema and storage can inspect the
+same history. Covered writes reject lost ownership and uncertain earlier deletes.
+Postgres provider callbacks commit their delivery ID with their changes, so a
+retry of a successful delivery does not repeat those changes.
 
-Upgraded Postgres deployments share history through their existing database.
-Another node using the same database, schema and storage can inspect it.
-Local deployments save history in their existing SQLite metadata.
-
-In production, covered uploads and metadata writes stop if they lose database
-ownership. Writes to an object also stop while an earlier delete is uncertain.
-Postgres provider callbacks save the delivery ID and its changes together,
-so retrying a successful delivery does not repeat those changes. See the
-[acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) for coverage and limits.
-
-If optional history fails or fills up, your command still runs with its original
-output and exit status. CLI warnings go to stderr; server warnings use existing
-logs. Shardline preserves existing evidence and never repeats work to repair
-history or invents completion when a result could not be saved.
+If recording fails or fills up, your command keeps its original output and exit
+status and emits a warning. History can therefore be incomplete. Shardline does
+not replay work to fill a gap, invent completion, or treat history as proof of
+current cluster health. See the [coverage and limits](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
 
 ## Handle a retryable write
 
@@ -94,17 +82,11 @@ Missing or invalid replies leave the object blocked for investigation; absence
 alone cannot clear it. Repair does not mark an interrupted GC run completed.
 `Retry-After: 1` suggests when to retry, not when recovery will finish.
 
-Other retryable write errors also return HTTP 503 with `Retry-After: 1`:
-
-| Error | What to do |
-| --- | --- |
-| `prepared upload content is no longer available; retry the upload` | Resend the upload. Its staged data disappeared before publication. |
-| `native shard backing content is no longer available; upload missing backing content again, then retry the shard` | Upload missing xorbs, then resend the shard. Resending also restores its normalized shard body. |
-| `database transaction snapshot changed; retry the request in a new transaction` | Retry the request. If your application owns the database transaction, roll it back and start a new one first. |
-
-For covered Postgres uploads, failed content checks leave no new file metadata
-or dedupe mappings visible.
-Retries preserve the configured database isolation level.
+Other retryable errors explain the required action: resend an upload whose
+staged content disappeared, upload missing xorbs before resending a native
+shard, or retry in a new database transaction. If your application owns that
+transaction, roll it back first. Covered Postgres content-check failures publish
+no new file metadata or dedupe mappings; retries keep your configured isolation.
 
 ## Check a result
 
@@ -125,32 +107,30 @@ token, not a repository token. Follow `page.next_cursor` to inspect later pages.
 | `/api/v1/tasks/maintenance/$RUN_ID/report` | Saved counts for a server job, when available. |
 | `/api/v1/tasks/maintenance/deletes` | Objects with pending deletes. |
 
-These endpoints only inspect state. A pending delete can belong to a running
-GC, and an alive process can have finished work without saving its result.
-Follow `next_step` and check the original logs before repeating work. Older or
-interrupted runs may have no report; existing CLI diagnostics remain available.
-Read `history_notice` and `inspection_notice` before trusting an empty list.
+Follow `next_step` and read `history_notice` and `inspection_notice`. A pending
+delete may belong to a running GC; a missing report may mean recording failed.
+These endpoints inspect state and do not retry work. Keep the original command
+logs and diagnostics when investigating an interruption.
 
 ## History retention and limits
 
-You do not need to configure a history cleanup job. Verified finished history
-is eligible for cleanup after 30 days. Each startup or
-maintenance invocation can remove up to 64 old runs and retire at most 256
-run-artifact keys. Large histories finish cleanup over later invocations;
-their retirement markers remain until cleanup succeeds. Interrupted and corrupt history stays
-for investigation. Save reports separately if you need a permanent audit archive.
-Large or legacy archives can still slow inspection and final command cleanup.
-Server startup does not wait for history cleanup. Maintenance commands perform
-it after their application work finishes, so it can delay command exit.
-At shutdown, history cleanup stops between storage calls; an active call may
-finish. The next startup can finish interrupted cleanup.
+Cleanup runs automatically; no new timer is needed. Verified finished history
+becomes eligible after 30 days. Interrupted and corrupt history stays for
+investigation. Save reports separately for a permanent archive.
 
-Automatic history accepts up to 4,096 runs per metadata database or schema.
-Private temporary workspaces have a separate combined limit of 4,096, including
-workspaces awaiting deletion. New automatic artifacts are limited to 64 KiB.
-That limit applies to saved history, not normal live output or diagnostic exports.
-Existing and imported history is preserved. These are admission limits, not
-physical disk limits; see the [capacity limits](MAINTENANCE_INTEGRATION_ACCEPTANCE.md#known-gaps).
+| Limit | Effect |
+| --- | --- |
+| 64 old runs and 256 run-artifact keys per cleanup invocation | Larger histories continue cleanup on later invocations. |
+| 4,096 automatic runs per metadata database or schema | When full, work continues with a recording warning. |
+| 4,096 private workspaces, including those awaiting deletion | Separate from the shared-history limit. |
+| 64 KiB per new automatic artifact | Limits saved history, not live output or diagnostic exports. |
+
+These limits do not cap physical disk use or inspection time. Existing and
+imported history is preserved. Large archives can slow inspection and command
+exit: commands clean history after their work, while server startup does not
+wait for cleanup. Shutdown stops cleanup between storage calls; an active call
+may finish. Later startup resumes partial cleanup. See the
+[capacity limits](MAINTENANCE_INTEGRATION_ACCEPTANCE.md#known-gaps).
 
 See the [admin API guide](ADMIN_READ_API.md#get-apiv1tasksmaintenance)
 for authentication, pagination and response fields.
