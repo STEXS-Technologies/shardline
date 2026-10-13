@@ -2538,6 +2538,15 @@ behavior after SQLite batching, not a production latency bound or a controlled
 performance comparison. Larger legacy archives and unresolved-history growth
 retain the limits described in the acceptance checklist.
 
+The SQLite end-to-end retirement regression now also injects failure in the
+second batch after the first 64-key batch commits. It verifies exact retained
+marker bytes, absence of the hidden manifest, preservation of every later
+metadata row and unchanged payload bytes. Removing the fault and reopening a
+fresh evidence store completes retirement without creating another job.
+`task_tracking::tests::local_retention::interrupted_sqlite_batches_preserve_authorization_and_resume`
+passed in 0.35 seconds. Strict server library/test Clippy, formatting and graph
+update passed. The test lives in a normal `local_retention` module.
+
 All 16 configured server metadata tests passed in 10.50 seconds, and the
 interrupted multi-batch retirement fixture passed in 1.19 seconds. Logs:
 `/tmp/shardline-batched-deletion.LpKeO7/test.log` and
