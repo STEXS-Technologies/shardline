@@ -55,8 +55,7 @@ impl TaskEvidenceStore {
     ) -> Result<BTreeMap<(u64, String), TaskRunIdentity>, ServerError> {
         let prefix = ObjectPrefix::parse(&format!("{}{category}/", super::TASK_EVIDENCE_PREFIX))?;
         let mut candidates: BTreeMap<(u64, String), TaskRunIdentity> = BTreeMap::new();
-        let mut payloads = BTreeMap::new();
-        let mut payload_cursor: Option<String> = None;
+        let mut reader = super::manifest_reader::ManifestReader::new(self, &prefix, None);
         self.visit_prefix(&prefix, |metadata| {
             let id = metadata
                 .key()
@@ -65,42 +64,7 @@ impl TaskEvidenceStore {
                 .next()
                 .ok_or(ServerError::InvalidPath)?;
             let suffix = format!("{category}/{id}");
-            let read = (|| {
-                let key = metadata.key().as_str();
-                if self.postgres_metadata.is_some() || self.local_metadata.is_some() {
-                    if !payloads.contains_key(key)
-                        && payload_cursor.as_deref().is_none_or(|after| key > after)
-                    {
-                        let page = if let Some(postgres) = &self.postgres_metadata {
-                            postgres
-                                .bounded_page(prefix.as_str(), payload_cursor.as_deref())?
-                                .into_iter()
-                                .map(|(artifact_key, artifact)| (artifact_key, artifact.bytes))
-                                .collect()
-                        } else if let Some(local) = &self.local_metadata {
-                            local.bounded_task_artifact_page(
-                                prefix.as_str(),
-                                payload_cursor.as_deref(),
-                            )?
-                        } else {
-                            Vec::new()
-                        };
-                        payload_cursor = page.last().map(|(last_key, _)| last_key.clone());
-                        payloads = page.into_iter().collect();
-                    }
-                    if let Some(payload) = payloads.remove(key) {
-                        let bytes = payload.ok_or(ServerError::RequestBodyTooLarge)?;
-                        if self
-                            .read_objects(&suffix, 65536)?
-                            .is_some_and(|legacy| legacy != bytes)
-                        {
-                            return Err(ServerError::InvalidContentHash);
-                        }
-                        return Ok(Some(bytes));
-                    }
-                }
-                self.read(&suffix, 65536)
-            })();
+            let read = reader.read(metadata.key().as_str(), &suffix);
             let bytes = match read {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => return Ok::<(), ServerError>(()),

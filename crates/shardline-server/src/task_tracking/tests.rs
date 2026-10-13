@@ -152,6 +152,84 @@ fn local_metadata_conflicts_and_duplicate_legacy_evidence_remain_visible() {
 }
 
 #[test]
+fn manifest_reader_crosses_pages_and_preserves_legacy_checks() {
+    let root = tempfile::tempdir().unwrap();
+    let store = TaskEvidenceStore::from_config(&config(root.path())).unwrap();
+    let legacy = TaskEvidenceStore::from_objects(store.objects.clone());
+    for number in 0..67 {
+        let suffix = format!("manifests/{number:03}");
+        store.publish(&suffix, suffix.as_bytes()).unwrap();
+    }
+    legacy
+        .publish("manifests/064", b"different legacy bytes")
+        .unwrap();
+    legacy.publish("manifests/legacy", b"legacy only").unwrap();
+    store
+        .publish("manifests/oversized", &vec![0; 65537])
+        .unwrap();
+    let prefix = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}manifests/")).unwrap();
+    let deleted_cursor = TaskEvidenceStore::key("manifests/031").unwrap();
+    store.delete_artifact(&deleted_cursor).unwrap();
+    let mut reader = super::manifest_reader::ManifestReader::new(&store, &prefix, None);
+    for number in 0..67 {
+        let suffix = format!("manifests/{number:03}");
+        let key = TaskEvidenceStore::key(&suffix).unwrap();
+        let read = reader.read(key.as_str(), &suffix);
+        if number == 31 {
+            assert!(read.unwrap().is_none());
+        } else if number == 64 {
+            assert!(matches!(read, Err(ServerError::InvalidContentHash)));
+        } else {
+            assert_eq!(read.unwrap().as_deref(), Some(suffix.as_bytes()));
+        }
+    }
+    let oversized = TaskEvidenceStore::key("manifests/oversized").unwrap();
+    assert!(matches!(
+        reader.read(oversized.as_str(), "manifests/oversized"),
+        Err(ServerError::RequestBodyTooLarge)
+    ));
+    // Legacy enumeration can move backwards after the ordered metadata pass.
+    let key = TaskEvidenceStore::key("manifests/legacy").unwrap();
+    assert_eq!(
+        reader
+            .read(key.as_str(), "manifests/legacy")
+            .unwrap()
+            .as_deref(),
+        Some(b"legacy only".as_slice())
+    );
+    let key = TaskEvidenceStore::key("manifests/000").unwrap();
+    assert_eq!(
+        reader
+            .read(key.as_str(), "manifests/000")
+            .unwrap()
+            .as_deref(),
+        Some(b"manifests/000".as_slice())
+    );
+    // Nested keys must never substitute their bytes for the canonical manifest.
+    store
+        .publish("manifests/nested/000", b"wrong nested bytes")
+        .unwrap();
+    let nested = TaskEvidenceStore::key("manifests/nested/000").unwrap();
+    assert_eq!(
+        reader
+            .read(nested.as_str(), "manifests/000")
+            .unwrap()
+            .as_deref(),
+        Some(b"manifests/000".as_slice())
+    );
+    let mut resumed =
+        super::manifest_reader::ManifestReader::new(&store, &prefix, Some(deleted_cursor.as_str()));
+    let key = TaskEvidenceStore::key("manifests/032").unwrap();
+    assert_eq!(
+        resumed
+            .read(key.as_str(), "manifests/032")
+            .unwrap()
+            .as_deref(),
+        Some(b"manifests/032".as_slice())
+    );
+}
+
+#[test]
 fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());

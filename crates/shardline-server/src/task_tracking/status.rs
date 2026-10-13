@@ -189,6 +189,8 @@ impl TaskEvidenceStore {
         let prefix = ObjectPrefix::parse(&format!("{}manifests/", super::TASK_EVIDENCE_PREFIX))?;
         let mut identities: BTreeMap<String, Option<TaskRunIdentity>> = BTreeMap::new();
         let after_key = after.map(|id| format!("{}{id}", prefix.as_str()));
+        let mut reader =
+            super::manifest_reader::ManifestReader::new(self, &prefix, after_key.as_deref());
         self.visit_prefix_until(&prefix, after_key.as_deref(), |metadata| {
             let id = metadata
                 .key()
@@ -220,13 +222,14 @@ impl TaskEvidenceStore {
                     },
                 );
             }
-            let mut identity = match self.read(&format!("manifests/{id}"), 65536) {
-                // Retention can remove an expired manifest during enumeration.
-                Ok(None) => return Ok(ControlFlow::Continue(())),
-                Ok(Some(bytes)) => serde_json::from_slice::<TaskRunIdentity>(&bytes).ok(),
-                Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => None,
-                Err(error) => return Err(error),
-            };
+            let mut identity =
+                match reader.read(metadata.key().as_str(), &format!("manifests/{id}")) {
+                    // Retention can remove an expired manifest during enumeration.
+                    Ok(None) => return Ok(ControlFlow::Continue(())),
+                    Ok(Some(bytes)) => serde_json::from_slice::<TaskRunIdentity>(&bytes).ok(),
+                    Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => None,
+                    Err(error) => return Err(error),
+                };
             if let Some(candidate) = identity.as_ref() {
                 let legacy_matches = candidate.deployment == deployment;
                 // Verify before admitting a foreign login's identity. Corrupt
