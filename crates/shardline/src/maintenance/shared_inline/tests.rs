@@ -389,6 +389,47 @@ fn interrupted_admission_preserves_unfinished_history_at_each_record_boundary() 
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_command_succeeds_when_shared_admission_records_are_denied() {
+    for sequence in 0..=2 {
+        let root = tempfile::tempdir().unwrap();
+        let configured = config(root.path());
+        let work_config = configured.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            let store = TaskEvidenceStore::from_config(&work_config).unwrap();
+            store.publish("runs/fixture/blobs/seed", b"fixture").unwrap();
+            let connection = rusqlite::Connection::open(work_config.root_dir().join("metadata.sqlite3")).unwrap();
+            connection.execute_batch(&format!(
+                "CREATE TRIGGER fixture_reject_admission BEFORE INSERT ON shardline_task_artifacts_v1
+                 WHEN NEW.artifact_key GLOB '_shardline_tasks/v1/runs/*/records/{sequence:010}'
+                 BEGIN SELECT RAISE(ABORT, 'fixture rejects admission'); END;"
+            )).unwrap();
+            let operation = MaintenanceOperation::IndexRebuild { root: work_config.root_dir().to_owned() };
+            let configuration = super::super::configuration::Configuration {
+                command: crate::CliCommand::IndexRebuild { root: Some(work_config.root_dir().to_owned()) },
+                config: work_config.clone(), config_path: None, migration: None,
+            };
+            super::super::configuration::scope(configuration, || -> Result<_> {
+                Ok(run(&operation, vec![OsString::from("shardline"), OsString::from("index-rebuild")], &work_config))
+            }).unwrap()
+        }).await.unwrap();
+        assert!(output.success);
+        assert_eq!(output.exit_code, Some(0));
+        assert!(!output.evidence_published);
+        assert!(output.capture.is_none());
+        let store = TaskEvidenceStore::from_config(&configured).unwrap();
+        let deployment =
+            shardline_server::task_tracking::deployment_fingerprint(&configured).unwrap();
+        let history = store.summaries(deployment, None, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(!matches!(
+            history[0].state,
+            TaskRunState::Completed | TaskRunState::Failed
+        ));
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 0);
+    }
+}
+
 #[test]
 fn saved_report_without_completion_acknowledgement_stays_unresolved() {
     let root = tempfile::tempdir().unwrap();

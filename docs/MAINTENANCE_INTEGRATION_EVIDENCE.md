@@ -2702,3 +2702,14 @@ For this ordinary shared receipt path, the current phase evidence is:
 
 Strict CLI library/test Clippy, formatting and diff checks pass. No runtime code
 or version changed.
+
+The application fallback is now exercised directly too:
+`ordinary_command_succeeds_when_shared_admission_records_are_denied` passes in
+14.65 seconds. Three fresh fixtures reject intent, start or checkpoint record
+publication while the real ordinary index-rebuild handler runs against local
+metadata. Each command returns success and exit code 0 with no output capture
+and no published completion. Its one unfinished history entry survives
+completed-history pruning. Handler summaries remain live on stdout.
+Strict CLI library/test Clippy and diff checks pass. This tests successful empty
+local rebuilds; it does not substitute for released/current output comparisons,
+failure-outcome coverage or the external-mutation audit.
