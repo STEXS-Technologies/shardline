@@ -87,6 +87,10 @@ These are scoped results, not a claim that every deployment is compatible:
   without changing isolation, and consistent snapshot/physical lock ordering.
   Long transactions at these isolation levels can delay unrelated delete
   admissions; broader concurrency and cost still need assessment.
+  The optimized snapshot-protection revision also passes all 11 selected
+  deployment drills, the restricted released/current OCI/S3 process drill and
+  184 configured PostgreSQL index tests. These extend the evidence above; they
+  do not close the broader merge gates below.
 - History distinguishes completed, failed and unresolved runs. Signed records
   and reports are verified; unfinished and corrupt evidence is retained.
 - A mark-only GC comparison preserves released output, status and payload bytes
