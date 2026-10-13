@@ -58,4 +58,18 @@ payload_inventory > "$fixture/payload-after.sha256"
 cmp "$fixture/payload-before.sha256" "$fixture/payload-after.sha256"
 test ! -e "$root/chunks/_shardline_tasks"
 test "$(sqlite3 "$root/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '%/records/%' AND json_type(CAST(payload AS TEXT), '$.event.Completed') IS NOT NULL;")" = 1
-echo "PASS: normal GC preserves released output, status, payload bytes and 4096-entry diagnostic exports larger than 1 MiB while recording its own completion; diagnostics: $fixture"
+# A second receipt alone would not prove a fresh reachability scan. Introduce
+# a new orphan after completion and require the next ordinary invocation to
+# discover and mark it, while preserving every payload byte.
+printf -v fresh_hash '%064x' "$((count + 1))"
+printf '%s' 'new orphan after completed GC' > "$root/chunks/00/$fresh_hash"
+payload_inventory > "$fixture/payload-before-fresh.sha256"
+env -i "$current" "${arguments[@]}" > "$fixture/fresh.stdout" 2> "$fixture/fresh.stderr"
+jq -e --argjson count "$((count + 1))" 'length == $count and all(.[]; .expired == false)' \
+    "$fixture/retention.json" > "$fixture/fresh-retention-count.log"
+jq -e --argjson count "$((count + 1))" 'length == $count and all(.[]; .quarantine_state == "quarantined")' \
+    "$fixture/orphans.json" > "$fixture/fresh-orphan-count.log"
+payload_inventory > "$fixture/payload-after-fresh.sha256"
+cmp "$fixture/payload-before-fresh.sha256" "$fixture/payload-after-fresh.sha256"
+test "$(sqlite3 "$root/metadata.sqlite3" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '%/records/%' AND json_type(CAST(payload AS TEXT), '$.event.Completed') IS NOT NULL;")" = 2
+echo "PASS: normal GC preserves released diagnostics and payload bytes; the next invocation discovers new work and records a distinct completion; diagnostics: $fixture"
