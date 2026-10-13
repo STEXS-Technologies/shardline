@@ -58,9 +58,10 @@ the command explains the problem and exits unsuccessfully. Inspect the running
 deployment with its sidecars, or a consistent backup that preserves the
 database and WAL together.
 
-To check the server now, use `shardline health --server https://cas.example.com`
-with your server address. Saved history and current health answer different
-questions.
+To check whether the server is ready now, request `/readyz` at your server
+address, for example `curl -f https://cas.example.com/readyz`. This endpoint
+needs no admin token. `shardline health --server https://cas.example.com`
+checks process liveness through `/healthz`; it does not check readiness.
 
 Do not rerun maintenance just to inspect its previous result: ordinary
 commands start fresh work. The optional
@@ -71,7 +72,7 @@ they do not browse the history of ordinary commands.
 | --- | --- |
 | Server readiness fails | Check server logs and its storage/database dependencies. Maintenance history does not establish readiness. |
 | The server is ready, but history has a warning | Check server or command logs for the recording failure. Your work may have run without a saved result; check its effects before running it again. |
-| A run is completed | Its saved result verified as successful. Use `/api/v1/status` to check the server now. |
+| A run is completed | Its saved result verified as successful. Check `/readyz` for current readiness, or `/api/v1/status` if the admin API is enabled. |
 | A run is failed, interrupted, unresolved or corrupt | Read its `next_step` and original command logs. Inspect partial effects before repeating a mutation; preserve corrupt evidence. |
 | A write returns `503` for an unresolved remote delete | Check the original GC command, then run `shardline repair` with the same configuration to verify saved delete replies. Retry the write after reconciliation. |
 | Repair leaves a delete pending | Check repair logs: a backlog can need several runs. Missing or invalid replies require investigation; checking that the object is absent cannot replace a reply. |

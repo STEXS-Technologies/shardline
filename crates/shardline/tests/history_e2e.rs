@@ -40,6 +40,12 @@ fn history_command_reads_ordinary_runs_without_private_runner_configuration() {
         assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
         assert_eq!(page["tasks"][0]["state"], "completed");
         assert!(page["tasks"][0]["next_step"].is_string());
+        assert!(
+            page["tasks"][0]["next_step"]
+                .as_str()
+                .unwrap()
+                .contains("/readyz")
+        );
         assert_eq!(artifacts(), before);
     }
     let rejected = Command::new(&binary)

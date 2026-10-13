@@ -3585,3 +3585,24 @@ that sealed WAL databases with missing sidecars can be inspected. SQLite's
 describe this boundary. Remaining merge gates retain their original scope.
 Strict index/server/CLI library and test Clippy, formatting and diff checks pass.
 The version remains unchanged.
+
+### Readiness guidance without the optional admin API
+
+Completed history now directs operators to `/readyz` for current server
+readiness, and identifies `/api/v1/status` as an alternative when the admin
+API is enabled. The guides distinguish `shardline health` and `/healthz`
+process liveness from the backend readiness check. Historical completion
+continues to describe only its recorded run.
+
+A current public-router test disables the admin API, replaces its owned
+metadata database with an unusable directory, and checks the actual responses:
+`/healthz` remains 200 with `status: ok`, `/readyz` returns 503 with only
+`error: service unavailable`, and `/api/v1/status` remains 404. It passes in
+0.01 seconds. The existing authenticated startup-history test passes with its
+updated guidance assertion in 0.04 seconds. Actual CLI history inspection,
+without an admin token, includes the `/readyz` action and preserves all saved
+artifact keys and payloads (4.65 seconds).
+
+Strict server/CLI library and test Clippy, formatting and diff checks pass;
+the AST graph is refreshed. This change adds no health service, process,
+configuration or version bump and does not certify cluster-wide health.

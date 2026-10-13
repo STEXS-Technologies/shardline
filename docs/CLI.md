@@ -364,11 +364,20 @@ shardline hold list --active-only
 shardline hold release --object-key s3://team-assets/model.pt
 ```
 
-Probe a running server's health:
+Probe process liveness:
 
 ```bash
 shardline health --server http://127.0.0.1:8080
 ```
+
+Check this server's readiness, including its backend check:
+
+```bash
+curl -f http://127.0.0.1:8080/readyz
+```
+
+Both endpoints work without enabling the admin API. A successful liveness
+probe does not establish readiness or cluster-wide health.
 
 Run benchmarks:
 

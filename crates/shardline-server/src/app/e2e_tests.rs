@@ -893,6 +893,54 @@ async fn ready_endpoint_returns_200() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_failure_is_visible_without_admin_api_while_health_remains_live() {
+    let (app, root) = test_app(&[ServerFrontend::Xet]).await;
+    tokio::fs::remove_file(root.path().join("metadata.sqlite3"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(root.path().join("metadata.sqlite3"))
+        .await
+        .unwrap();
+    let health = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    assert_eq!(body_json(health).await["status"], "ok");
+    let ready = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body_json(ready).await,
+        serde_json::json!({"error": "service unavailable"})
+    );
+    let admin = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stats_endpoint_returns_200() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
 
