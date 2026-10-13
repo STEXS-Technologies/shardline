@@ -3334,3 +3334,11 @@ that another repair can check later replies. Existing structured counts remain
 available. These messages do not assert that later replies exist, that all
 pending markers were examined, or that retained evidence authorizes a retry.
 Recovery, command results and exit status are unchanged; this is logging only.
+
+The optimized CLI including this guidance builds successfully and still reports
+`shardline 1.11.3`. Its SHA-256 is
+`cd83f50eef7fdb998b24ea663afe2eceb437caa5ebe618599b246aa66148afb0`.
+All 20 maintenance CLI scenarios pass with zero skips in 2.117 seconds (Nextest
+`e4962a00-3e45-458e-a012-559717270f10`). This verifies the named CLI behaviors;
+the earlier deployment fault results belong to their separately identified
+binary, and this run does not replace those results or close the merge gates.
