@@ -32,38 +32,49 @@ The version remains 1.11.3. The remaining upgrade limits are listed below.
 
 ## What to do when something goes wrong
 
-Use your existing admin token to inspect the endpoints below. Read any warning
-alongside the returned list; an empty list with a warning is inconclusive.
-The admin API is optional and disabled by default. If you have not enabled it,
-these routes return `404`; tracking still runs and command/server logs remain
-available. To inspect history over HTTP, use the existing
-[admin token configuration](ADMIN_READ_API.md#enable-and-authenticate).
-
-You can inspect saved history without enabling the admin API:
+Start with saved maintenance history. This command needs no admin token or
+worker setup:
 
 ```bash
 shardline history
 ```
 
-Inspect unresolved remote deletes with the same configuration:
+Use the same configuration and deployment root as your server or original
+maintenance command. For example, if your server uses an explicit config file:
+
+```bash
+shardline --config /etc/shardline/shardline.toml history
+```
+
+Read each run's `state` and `next_step`, together with any `history_notice`.
+An empty page does not prove maintenance never ran; recording may have failed.
+Inspection starts no worker, performs no cleanup and does not create or migrate
+local metadata.
+
+For a write blocked by an uncertain delete, inspect pending attempts instead:
 
 ```bash
 shardline history --pending-deletes
 ```
 
-This view does not send deletes or clear attempts. Check `supported` and
-`inspection_notice`: unavailable inspection is inconclusive. A pending attempt
-may still belong to running GC. Use its `next_step` and original command logs
-before retrying work. Pagination uses `next_after` with the same mode.
+This view does not send deletes or clear attempts. If `supported` is false or
+`inspection_notice` reports unavailable inspection, the result cannot tell you
+whether objects are safe to write. A pending attempt may still belong to running
+GC; read its `next_step` and original command logs before retrying work.
 
-Use the same configuration as the original command or server. The command
-prints a JSON page with verified states, recovery guidance and recording
-warnings. Use `--limit 20` to set the page size and pass its `next_after` value
-as `--after RUN_ID` for the next page. It starts no worker, performs no cleanup
-and does not create or migrate local metadata. An empty page does not prove
-maintenance never ran; recording may have failed.
+Both commands show up to 20 entries by default. When `next_after` is not null,
+copy its value into the corresponding command to read the next page:
 
-For read-only SQLite deployments, inspection needs the existing readable
+```bash
+shardline history --after '<next_after from history>'
+shardline history --pending-deletes --after '<next_after from pending deletes>'
+```
+
+Keep the same configuration, root and inspection mode for every page. The two
+modes use different cursors; do not exchange them. Use `--limit` to choose a
+page size between 1 and 100.
+
+For read-only SQLite deployments using WAL, inspection needs the existing readable
 `metadata.sqlite3-wal` and `metadata.sqlite3-shm` files. If they are missing,
 the command explains the problem and exits unsuccessfully. Inspect the running
 deployment with its sidecars, or a consistent backup that preserves the
@@ -145,7 +156,10 @@ no new file metadata or dedupe mappings; retries keep your configured isolation.
 
 ## Check a result
 
-Use your existing admin token:
+For remote inspection over HTTP, use your existing admin read token. This is
+optional: the admin API is disabled by default and returns `404` until enabled.
+Tracking and the CLI commands above work without it. See
+[admin token configuration](ADMIN_READ_API.md#enable-and-authenticate).
 
 ```bash
 curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
