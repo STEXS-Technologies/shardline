@@ -185,7 +185,10 @@ fn run_inner(
     if let Err(error) = writable {
         // No application work has started. Keep the original handler and its
         // domain barriers; only post-work housekeeping inspects retained state.
-        tracing::warn!(workspace = %state.display(), "private maintenance tracking unavailable; existing command continues with available metadata history: {error}");
+        // Private scratch is optional when deployment history can record the
+        // outcome. That fallback is normal on restricted roots; shared_inline
+        // warns separately if recording actually fails.
+        tracing::debug!(workspace = %state.display(), "private maintenance tracking unavailable; existing command continues with available metadata history: {error}");
         let output = super::shared_inline::run(operation, arguments, &config);
         // Admission pressure must not starve exports and verified cleanup.
         // The shared path already retired history; avoid a second retention batch.
