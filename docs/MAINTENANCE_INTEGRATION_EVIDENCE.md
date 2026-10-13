@@ -4410,3 +4410,34 @@ one completed receipt and no payload history directory, so the benchmark itself
 does not create maintenance receipts. Timing/RSS files record fixture costs;
 they do not establish an SLO or a performance improvement. This binary pin is
 retained explicitly rather than attributing that run to a later executable.
+
+### Optimized deployment checks after canonical xorb correction
+
+The optimized build for `9fc1549f` finishes successfully in 3m19s and reports
+`shardline 1.11.3`. Its SHA256 is
+`1e41b44dfb4ecefd0da9c863e903171feb30ed547b3691e4f973a0e6de0db8e0`.
+Both complementary deployment scripts pin these same bytes:
+
+- `verify_maintenance_deployments.sh`: all 11 selected scenarios pass in
+  145.634s (`/tmp/shardline-maintenance-deployments.sOdMGt/test.log`), including
+  actual mixed-version rollout/rollback, restricted commands, replacement,
+  competing ownership and remote-delete faults.
+- `verify_maintenance_protocol_faults.sh`: all 12 selected scenarios pass in
+  146.454s (`/tmp/shardline-protocol-faults.wGy3fW/test.log`), including protocol
+  interruption, backend/connection loss, network faults and clock skew.
+- `verify_maintenance_local_permissions.sh`: all five released/current command
+  forms match under a 0555 root. Fully read-only SQLite fsck also preserves
+  released output/status and existing evidence; unavailable optional recording
+  warns without reporting completion (`/tmp/shardline-local-permissions.PdGhgZ/`).
+
+No configured scenario skips at runtime. The two Nextest filters select
+complementary halves of the same 23-test binary; their excluded-test counts are
+not skipped deployment fixtures. These results update the executable evidence
+without closing the remaining compatibility, phase and capacity audit.
+
+The operator guide now presents the existing process model, practical benefits,
+upgrade steps, inspection and recovery actions in 139 lines rather than 263.
+Pagination, pending-reply scan details and quantitative history budgets live in
+the CLI reference, with direct links from the short guide. The guide still
+states the PostgreSQL owner-setup prerequisite, automatic SQLite setup, old-GC
+rollback restriction and absence of a cluster-wide exactly-once guarantee.

@@ -16,6 +16,10 @@ Native shard reuse across repositories is now fixed and tested on both metadata
 backends, including retries alongside older unfinished history. Actual released
 startup preserves all four new native checkpoints in default and scoped
 namespaces, with both present and missing physical request objects.
+Canonical xorb retry identity now uses the stored length rather than footerless
+wire length. Both backends cover retry and recovery at every unfinished
+checkpoint; actual released startup also preserves the new xorb histories with
+physical bytes present or missing.
 
 The full compatibility and failure audit is still open. The version remains 1.11.3;
 the version bump belongs in a separate PR.
