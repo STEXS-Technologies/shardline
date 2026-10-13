@@ -34,3 +34,4 @@ pub(crate) use records::{
     StoredObjectPresenceRecord,
 };
 pub use store::{LocalIndexStore, LocalRecordLocator, LocalRecordStore};
+pub use task_artifacts::LocalTaskArtifactPage;

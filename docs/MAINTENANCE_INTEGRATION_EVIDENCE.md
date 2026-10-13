@@ -13,6 +13,21 @@ untested deployments.
 
 ## Retention batch reads
 
+SQLite retention now uses bounded payload pages as well. The additive local
+reader returns at most 64 bodies of at most 64 KiB, preserves literal prefixes
+and deleted cursors, and leaves a missing optional table uncreated. It uses the
+existing artifact table and makes no migration-ledger change. Both backends
+share the retention payload cache and retain legacy-conflict checks.
+
+All five SQLite artifact tests passed, as did the reversed-creation-time
+regression and the 132-run pagination/cleanup fixture. The latter retained its
+unfinished and unreadable evidence through four cleanup calls. The configured
+real-Postgres multi-page retention regression also passed after this shared
+cache change. Formatting and strict all-feature, all-target Clippy passed for
+both crates. These results establish bounded payload reads and unchanged cleanup
+selection; they do not establish a production performance target or remove the
+full inventory scan.
+
 Postgres retention now fetches bounded manifest payloads in pages instead of
 reading each manifest separately. A page contains at most 64 bodies of at most
 64 KiB each. Oversized records retain their length without transferring their

@@ -41,9 +41,10 @@ The production benefits are:
 These are protections for the tested operations. Other library write paths,
 older GC binaries and references hidden in legacy payloads still have open checks.
 
-If optional history cannot be saved, Shardline warns on stderr and preserves
-the command's output and exit status. It never repeats work to repair history
-or claims verified completion from a missing receipt. Later maintenance can
+If optional history cannot be saved, CLI tracking warns on stderr and preserves
+the command's output and exit status. Server warnings use your existing logging
+setup. Shardline never repeats work to repair history or claims verified
+completion from a missing receipt. Later maintenance can
 retry temporary-file cleanup without repeating completed work.
 
 ## Handle a retryable write
