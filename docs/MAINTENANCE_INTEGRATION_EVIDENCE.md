@@ -2962,3 +2962,20 @@ router startup and cooperative shutdown. The retained log is
 `/tmp/shardline-batched-deletion.QClLW6/test.log`. No runtime skip messages or
 panics were accepted. This run does not replace the separately executed release
 capacity drills or establish production latency.
+
+## Generic record mutation caller audit
+
+Repository call-site review distinguishes metadata adapters from protected
+server workflows:
+
+| Path | Authority and validation boundary |
+| --- | --- |
+| Native PostgreSQL uploads | Both memory and file staging call the validated server publication wrapper; an existing request connection is retained, and a lost connection rejects publication. |
+| Ordinary PostgreSQL rebuild | `run_index_rebuild` constructs its adapters from the dedicated exclusive work pool and closes that pool after work. Generic rebuild writes are metadata reconstruction, not new upload validation. |
+| File-reference copy | Uses the request connection when present; otherwise follows the existing pool-backed library behavior. Copies existing metadata rather than validating fresh staged content. |
+| Raw `PostgresRecordStore` and `RecordMutation` | Receive no object-store handle. Pool construction supplies neither execution authority nor proof of backing-content presence. |
+
+The `PostgresRecordStore` type documentation now states the contract for generic
+trait methods as well as the named publication APIs. This source audit does not
+extend physical-content guarantees to arbitrary library callers or hidden
+legacy references. No signature, runtime behavior or version changed.
