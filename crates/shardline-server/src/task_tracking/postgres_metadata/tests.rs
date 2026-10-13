@@ -129,6 +129,110 @@ fn library_backend_without_runtime_returns_an_error_without_starting_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replacement_login_retires_shared_history_after_source_pool_closes() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let source_role = format!("{}_source", fixture.schema);
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {source_role} LOGIN PASSWORD 'owned_retention_source';
+         GRANT USAGE ON SCHEMA {} TO {source_role};
+         GRANT SELECT,INSERT,DELETE ON {}.shardline_reliability_events TO {source_role}",
+        fixture.schema, fixture.schema,
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    let mut source_url = url::Url::parse(fixture.config.index_postgres_url().unwrap()).unwrap();
+    source_url.set_username(&source_role).unwrap();
+    source_url
+        .set_password(Some("owned_retention_source"))
+        .unwrap();
+    let source_config = fixture
+        .config
+        .clone()
+        .with_index_postgres_url(source_url.to_string())
+        .unwrap();
+    let source_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(source_url.as_str())
+        .await
+        .unwrap();
+    let (source, source_scope) =
+        TaskEvidenceStore::from_postgres_pool(&source_config, &source_pool)
+            .await
+            .unwrap();
+    let source_scope = source_scope.unwrap();
+    let source_deployment = deployment_fingerprint(&source_config).unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    assert_ne!(source_deployment, deployment);
+    tokio::task::spawn_blocking(move || {
+        let tracker = EmbeddedTaskTracker::from_store(source, source_deployment)
+            .with_history_scope(source_scope);
+        for _ in 0..2 {
+            tracker
+                .begin(
+                    "previous-account-complete",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"complete")
+                .unwrap();
+        }
+        drop(
+            tracker
+                .begin(
+                    "previous-account-interrupted",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap(),
+        );
+    })
+    .await
+    .unwrap();
+    source_pool.close().await;
+    let (replacement, replacement_scope) =
+        TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+            .await
+            .unwrap();
+    assert_eq!(replacement_scope, Some(source_scope));
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            replacement.prune_completed(deployment, u64::MAX).unwrap(),
+            2
+        );
+        let history = replacement
+            .summaries_with_scope(deployment, replacement_scope, None, 10)
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.first().unwrap().operation,
+            "previous-account-interrupted"
+        );
+        assert!(!matches!(
+            history.first().unwrap().state,
+            TaskRunState::Completed | TaskRunState::Failed
+        ));
+    })
+    .await
+    .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {source_role}; DROP ROLE {source_role}"
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_scope_retention_accepts_foreign_configuration_without_crossing_scopes() {
     let Some(fixture) = Fixture::new().await else {
         return;
