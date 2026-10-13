@@ -3782,3 +3782,18 @@ passes in 0.02 seconds. This verifies the router's actual guard ownership rather
 than only constructing guards directly. It does not prove cancellation of
 active storage I/O or every embedded deployment layout, and production behavior
 is unchanged. Strict server library/test Clippy, formatting and diff checks pass.
+
+### Reject malformed history bounds before opening the deployment
+
+The CLI now checks the existing 128-byte history cursor limit and page-size
+bounds before configuration loading or database access. An oversized cursor
+explains that `--after` must come from the history page's `next_after`; valid
+cursor handling and the server's pagination contract remain unchanged.
+
+An actual-command test uses a 129-byte cursor with an unavailable PostgreSQL
+endpoint. It fails with the cursor action instead of a pool timeout, produces
+no JSON and creates no local state (0.01 seconds). All six history CLI cases
+pass on the development executable in 9.41 seconds, including configuration
+reuse and read-only WAL checks. Strict CLI library/test Clippy, formatting and
+diff checks pass. This check does not establish completion of the remaining
+compatibility or scale gates.
