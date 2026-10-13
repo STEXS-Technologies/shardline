@@ -213,6 +213,12 @@ upgrade, a test count or the optional runner alone.
 
 ## Current gate audit
 
+SQLite and PostgreSQL receipt faults now cover each admission record, report
+materialization and completion acknowledgement. The PostgreSQL fixture also
+checks exact database row counts after each rejected write. This closes that
+specific evidence gap; external-mutation and process-interruption coverage is
+still required by gate 5.
+
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |
 | 1: automatic startup | Process model and default initialization verified; deployment coverage remains open. | Current public-router startup covers all three roles locally and with PostgreSQL, including fresh sweeps, readiness and same-PID shared history. Local embedding preserves application-owned logging. Restricted schema routing and actual-process drills extend the shared-backend evidence. Remaining deployment layouts in the known gaps still need review. |

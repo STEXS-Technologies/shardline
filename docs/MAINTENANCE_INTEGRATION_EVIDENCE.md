@@ -4600,3 +4600,29 @@ same executable. Runtime fixture skips are rejected; excluded Nextest filters
 select the complementary half. The version remains 1.11.3.
 Strict CLI Clippy also passes after the test correction
 (`/tmp/shardline-report-phase-clippy.log`).
+
+### PostgreSQL receipt write faults at each durable boundary
+
+The configured receipt fixture injects real PostgreSQL trigger failures at
+admission records 0, 1 and 2, the materialized result and completion record 3.
+Each case reopens history, rejects a completed/failed outcome, verifies every
+earlier record and the missing rejected record, and confirms that finished-run
+retention preserves its manifest. Direct database queries also check exact
+record and materialized-artifact counts, so a payload-history fallback cannot
+satisfy the fixture accidentally. No application work is replayed by this test.
+
+The checked-in verifier
+`scripts/shardline/verify_maintenance_postgres_receipt_phases.sh` creates an owned
+PostgreSQL 16 container, installs actual released migrations, performs current
+owner setup and runs the exact named test. Runtime skips, panics and a missing
+or renamed test fail verification. The final verifier passes all five cases in
+one test (`/tmp/shardline-postgres-receipt-phases.ct1l7r/test.log`, 29.33 seconds).
+Strict CLI Clippy passes (`/tmp/shardline-postgres-receipt-clippy.log`). The first
+compile attempt was rejected by SQLx's dynamic-SQL audit requirement;
+fixture-only DDL now explicitly marks generated hex identifiers and fixed
+predicates as audited.
+
+This establishes the shared metadata receipt's admission/report/acknowledgement
+behavior. It does not replace interruption tests around actual external effects,
+storage-copy phases, controller death or ownerless domain writes. Those remain
+separate requirements in the merge gates.
