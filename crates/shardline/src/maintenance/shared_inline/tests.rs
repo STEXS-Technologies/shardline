@@ -516,6 +516,8 @@ async fn ordinary_command_preserves_success_when_report_or_acknowledgement_is_de
                     .execute_batch(&format!(
                 "CREATE TRIGGER fixture_reject_result BEFORE INSERT ON shardline_task_artifacts_v1
                  WHEN NEW.artifact_key GLOB '_shardline_tasks/v1/runs/*/{denied_suffix}'
+                 AND ('{denied_suffix}' <> 'artifacts/*'
+                      OR CAST(NEW.payload AS TEXT) LIKE 'maintenance.success:%')
                  BEGIN SELECT RAISE(ABORT, 'fixture rejects result recording'); END;"
             ))
                     .unwrap();
@@ -591,6 +593,29 @@ async fn ordinary_command_preserves_success_when_report_or_acknowledgement_is_de
                 task.state,
                 TaskRunState::Completed | TaskRunState::Failed
             ));
+            for sequence in 0..=2 {
+                assert!(
+                    store
+                        .read(&format!("runs/{}/records/{sequence:010}", task.id), 65536)
+                        .unwrap()
+                        .is_some(),
+                    "result fault must happen after durable admission and checkpoint"
+                );
+            }
+            let connection =
+                rusqlite::Connection::open(configured.root_dir().join("metadata.sqlite3")).unwrap();
+            let materialized: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM shardline_task_artifacts_v1
+                 WHERE artifact_key GLOB ?1",
+                    [format!("_shardline_tasks/v1/runs/{}/artifacts/*", task.id)],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                materialized,
+                if denied_suffix == "artifacts/*" { 1 } else { 2 }
+            );
             assert!(
                 store
                     .read(&format!("runs/{}/records/0000000003", task.id), 65536)
