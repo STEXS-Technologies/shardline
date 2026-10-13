@@ -3085,3 +3085,16 @@ retry-inspection guidance; diagnostics are
 `/tmp/shardline-local-permissions.8eV8C0`. This is a behavior/text check, not an
 optimized-performance result. Execution, storage semantics and version are
 unchanged.
+
+### Optimized actionable-warning compatibility check
+
+The optimized build of `138dd530` completed successfully and has SHA-256
+`bfb13098f724e0c01dd11db436a85804d6d59225f2fd4b3e12ec35246adf5a90`.
+The local permissions verifier passes against released 1.11.3 with this binary:
+fsck, rebuild, repair and GC preserve output/status under a 0555 root and record
+metadata-backed history without new root entries or permission changes.
+Fully read-only SQLite fsck preserves released output/status, database evidence
+and the actionable optional-history warning. Diagnostics are
+`/tmp/shardline-local-permissions.LcevEF`.
+This confirms the optimized warning behavior; it does not establish performance,
+full-capacity incremental cleanup or completion of the remaining merge gates.
