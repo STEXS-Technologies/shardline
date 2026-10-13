@@ -19,6 +19,31 @@ impl TaskEvidenceStore {
     /// # Errors
     /// Returns storage failures; callers must preserve serving/maintenance availability.
     pub fn prune_completed(&self, deployment: Digest, now: u64) -> Result<usize, ServerError> {
+        self.prune_completed_with_artifact_budget(deployment, now, usize::MAX)
+    }
+
+    /// Retires finished history with at most 256 run-artifact keys per call.
+    /// A key can have both metadata and legacy object copies to remove.
+    /// Unfinished retirement keeps its authorization marker for the next call.
+    /// Manifest, scope-binding and retirement-marker cleanup are separate from
+    /// this artifact budget. Inventory and active storage calls are not timed.
+    ///
+    /// # Errors
+    /// Returns storage failures without authorizing application work to repeat.
+    pub fn prune_completed_incrementally(
+        &self,
+        deployment: Digest,
+        now: u64,
+    ) -> Result<usize, ServerError> {
+        self.prune_completed_with_artifact_budget(deployment, now, 256)
+    }
+
+    fn prune_completed_with_artifact_budget(
+        &self,
+        deployment: Digest,
+        now: u64,
+        mut artifacts_remaining: usize,
+    ) -> Result<usize, ServerError> {
         self.check_housekeeping()?;
         // A retirement marker authorizes only evidence cleanup. It is committed
         // after native completion verification, before hiding the manifest.
@@ -26,8 +51,13 @@ impl TaskEvidenceStore {
         let retiring = self.retention_candidates("retiring", deployment, now, 64)?;
         let mut removed = 0_usize;
         for identity in retiring.into_values() {
-            self.finish_retirement(&identity)?;
+            if !self.finish_retirement(&identity, &mut artifacts_remaining)? {
+                return Ok(removed);
+            }
             removed = removed.saturating_add(1);
+            if artifacts_remaining == 0 {
+                return Ok(removed);
+            }
         }
         if removed == 64 {
             return Ok(removed);
@@ -40,8 +70,13 @@ impl TaskEvidenceStore {
         )?;
         for identity in candidates.into_values() {
             if self.begin_retirement(&identity)? {
-                self.finish_retirement(&identity)?;
+                if !self.finish_retirement(&identity, &mut artifacts_remaining)? {
+                    return Ok(removed);
+                }
                 removed = removed.saturating_add(1);
+                if artifacts_remaining == 0 {
+                    return Ok(removed);
+                }
             }
         }
         Ok(removed)
@@ -199,7 +234,11 @@ impl TaskEvidenceStore {
         Ok(true)
     }
 
-    fn finish_retirement(&self, identity: &TaskRunIdentity) -> Result<(), ServerError> {
+    fn finish_retirement(
+        &self,
+        identity: &TaskRunIdentity,
+        artifacts_remaining: &mut usize,
+    ) -> Result<bool, ServerError> {
         // Hide the expired history first. Status must not advertise a partly
         // removed native proof; the cleanup marker remains outside status.
         self.delete_artifact(&Self::key(&format!("manifests/{}", identity.id))?)?;
@@ -208,6 +247,7 @@ impl TaskEvidenceStore {
             super::TASK_EVIDENCE_PREFIX,
             identity.id
         ))?;
+        let mut deferred = false;
         if self.postgres_metadata.is_some() || self.local_metadata.is_some() {
             let delete_metadata_batch = |keys: &[String]| {
                 self.check_housekeeping()?;
@@ -220,23 +260,36 @@ impl TaskEvidenceStore {
                 Ok::<(), ServerError>(())
             };
             let mut keys = Vec::with_capacity(64);
-            self.visit_prefix(&run_prefix, |metadata| {
+            self.visit_prefix_until(&run_prefix, None, |metadata| {
+                if *artifacts_remaining == 0 {
+                    deferred = true;
+                    return Ok(std::ops::ControlFlow::Break(()));
+                }
                 // Remove legacy copies before committing metadata deletion.
                 // On any failure the retirement marker remains resumable.
                 self.objects.delete_if_present(metadata.key())?;
                 keys.push(metadata.key().as_str().to_owned());
+                *artifacts_remaining = artifacts_remaining.saturating_sub(1);
                 if keys.len() == 64 {
                     delete_metadata_batch(&keys)?;
                     keys.clear();
                 }
-                Ok::<(), ServerError>(())
+                Ok::<_, ServerError>(std::ops::ControlFlow::Continue(()))
             })?;
             delete_metadata_batch(&keys)?;
         } else {
-            self.visit_prefix(&run_prefix, |metadata| {
+            self.visit_prefix_until(&run_prefix, None, |metadata| {
+                if *artifacts_remaining == 0 {
+                    deferred = true;
+                    return Ok(std::ops::ControlFlow::Break(()));
+                }
                 self.delete_artifact(metadata.key())?;
-                Ok::<(), ServerError>(())
+                *artifacts_remaining = artifacts_remaining.saturating_sub(1);
+                Ok::<_, ServerError>(std::ops::ControlFlow::Continue(()))
             })?;
+        }
+        if deferred {
+            return Ok(false);
         }
         if let Some(postgres) = &self.postgres_metadata {
             // Keep the signed binding until the marker disappears atomically;
@@ -251,7 +304,7 @@ impl TaskEvidenceStore {
             self.delete_artifact(&Self::key(&format!("scope-bindings/{}", identity.id))?)?;
             self.delete_artifact(&Self::key(&format!("retiring/{}", identity.id))?)?;
         }
-        Ok(())
+        Ok(true)
     }
 }
 

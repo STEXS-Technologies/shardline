@@ -3,6 +3,118 @@ use super::*;
 use crate::test_support::postgres_fixture::PostgresFixture;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incremental_postgres_retirement_preserves_binding_until_resumed() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let scope = scope.unwrap();
+    let prepare = store.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        EmbeddedTaskTracker::from_store(prepare.clone(), deployment)
+            .with_history_scope(scope)
+            .begin(
+                "incremental-retirement",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"report")
+            .unwrap();
+        let id = prepare
+            .summaries(deployment, None, 10)
+            .unwrap()
+            .remove(0)
+            .id;
+        let legacy = TaskEvidenceStore::from_objects(prepare.objects.clone());
+        for number in 0..400 {
+            let suffix = format!("runs/{id}/extra/{number:04}");
+            prepare.publish(&suffix, b"evidence").unwrap();
+            legacy.publish(&suffix, b"evidence").unwrap();
+        }
+        let prefix = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}runs/{id}/")).unwrap();
+        let mut before = 0;
+        prepare
+            .visit_prefix(&prefix, |_| {
+                before += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            prepare
+                .prune_completed_incrementally(deployment, u64::MAX)
+                .unwrap(),
+            0
+        );
+        let mut after = 0;
+        prepare
+            .visit_prefix(&prefix, |_| {
+                after += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(after, before - 256);
+        assert!(
+            prepare
+                .read(&format!("manifests/{id}"), 65536)
+                .unwrap()
+                .is_none()
+        );
+        for category in ["retiring", "scope-bindings"] {
+            assert!(
+                prepare
+                    .read(&format!("{category}/{id}"), 65536)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        id
+    })
+    .await
+    .unwrap();
+    drop(store);
+    let (fresh, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            fresh
+                .prune_completed_incrementally(deployment, u64::MAX)
+                .unwrap(),
+            1
+        );
+        for category in ["retiring", "scope-bindings"] {
+            assert!(
+                fresh
+                    .read(&format!("{category}/{id}"), 65536)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let prefix = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}runs/{id}/")).unwrap();
+        let mut remaining = 0;
+        fresh
+            .visit_prefix(&prefix, |_| {
+                remaining += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(remaining, 0);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupted_batched_retirement_preserves_marker_and_resumes() {
     let Some(fixture) = PostgresFixture::new().await else {
         return;

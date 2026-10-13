@@ -131,7 +131,9 @@ Read `history_notice` and `inspection_notice` before trusting an empty list.
 
 You do not need to configure a history cleanup job. Verified finished history
 is eligible for cleanup after 30 days. Each startup or
-maintenance invocation can remove up to 64 old runs. Interrupted and corrupt history stays
+maintenance invocation can remove up to 64 old runs and retire at most 256
+run-artifact keys. Large histories finish cleanup over later invocations;
+their retirement markers remain until cleanup succeeds. Interrupted and corrupt history stays
 for investigation. Save reports separately if you need a permanent audit archive.
 Large or legacy archives can still slow inspection and final command cleanup.
 Server startup does not wait for history cleanup. Maintenance commands perform

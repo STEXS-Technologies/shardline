@@ -246,7 +246,7 @@ async fn router_with_housekeeping_guard(
     let retention_store = evidence_store.with_housekeeping_stop(housekeeping_stopped.clone());
     let retention_deployment = crate::task_tracking::deployment_fingerprint(&config)?;
     tokio::task::spawn_blocking(move || {
-        if let Err(error) = retention_store.prune_completed(
+        if let Err(error) = retention_store.prune_completed_incrementally(
             retention_deployment,
             shardline_protocol::unix_now_seconds_lossy(),
         ) && !housekeeping_stopped.load(Ordering::Relaxed)

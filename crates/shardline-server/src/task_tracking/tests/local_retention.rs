@@ -2,6 +2,99 @@
 use super::*;
 
 #[test]
+fn incremental_retirement_bounds_deletions_and_resumes_after_reopening() {
+    for metadata_backed in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let deployment = deployment_fingerprint(&config).unwrap();
+        let configured = TaskEvidenceStore::from_config(&config).unwrap();
+        let store = if metadata_backed {
+            configured
+        } else {
+            TaskEvidenceStore::from_objects(configured.objects)
+        };
+        EmbeddedTaskTracker::from_store(store.clone(), deployment)
+            .begin(
+                "incremental-retirement",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"original report")
+            .unwrap();
+        let id = store.summaries(deployment, None, 10).unwrap().remove(0).id;
+        let manifest = store
+            .read(&format!("manifests/{id}"), 65536)
+            .unwrap()
+            .unwrap();
+        for number in 0..400 {
+            let suffix = format!("runs/{id}/extra/{number:04}");
+            store.publish(&suffix, b"original evidence").unwrap();
+            if metadata_backed {
+                TaskEvidenceStore::from_objects(store.objects.clone())
+                    .publish(&suffix, b"original evidence")
+                    .unwrap();
+            }
+        }
+        let prefix = ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}runs/{id}/")).unwrap();
+        let count = |store: &TaskEvidenceStore| {
+            let mut count = 0;
+            store
+                .visit_prefix(&prefix, |_| {
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap();
+            count
+        };
+        let original_count = count(&store);
+        let payload = root.path().join("chunks/user-payload");
+        std::fs::write(&payload, b"preserved user bytes").unwrap();
+        assert_eq!(
+            store
+                .prune_completed_incrementally(deployment, u64::MAX)
+                .unwrap(),
+            0
+        );
+        assert_eq!(count(&store), original_count - 256);
+        assert!(
+            store
+                .read(&format!("manifests/{id}"), 65536)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .read(&format!("retiring/{id}"), 65536)
+                .unwrap()
+                .unwrap(),
+            manifest
+        );
+        let objects = store.objects.clone();
+        drop(store);
+        let fresh = if metadata_backed {
+            TaskEvidenceStore::from_config(&config).unwrap()
+        } else {
+            TaskEvidenceStore::from_objects(objects)
+        };
+        assert_eq!(
+            fresh
+                .prune_completed_incrementally(deployment, u64::MAX)
+                .unwrap(),
+            1
+        );
+        assert_eq!(count(&fresh), 0);
+        assert!(
+            fresh
+                .read(&format!("retiring/{id}"), 65536)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read(&payload).unwrap(), b"preserved user bytes");
+    }
+}
+
+#[test]
 fn interrupted_sqlite_batches_preserve_authorization_and_resume() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
