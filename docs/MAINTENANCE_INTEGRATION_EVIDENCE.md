@@ -1941,3 +1941,12 @@ test with no ignored tests in 0.25 seconds. Log:
 the index and server passed. This closes that specific race, not every remaining
 write-path or deployment-scale gate. No migration, configuration or version
 change is required.
+
+The same regression fixture now also holds the winner's publication transaction
+open while cleanup starts on another connection. It observes the actual wait
+through `pg_blocking_pids`, commits the winner, and verifies that the waiting
+cleanup returns false and preserves the winner's bytes and losing version.
+This tests PostgreSQL's predicate recheck after a row-lock wait without relying
+on a sleep to establish overlap. The strengthened fixture passed in 0.31 seconds
+with one executed test and no ignored tests; log:
+`.codex/validation/ux-conditional-overlap-test.log`.
