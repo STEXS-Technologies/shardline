@@ -4755,3 +4755,31 @@ uploads still succeed, file download returns the original bytes and root
 permissions remain 0555. Cleanup restores permissions. This proves the layout
 with an existing writable barrier; it does not prove compatibility when that
 barrier is absent or itself read-only.
+
+## Optimized deployment checks after the SQLite/S3 fix
+
+The optimized binary built from `c3be89e0`, SHA-256
+`2b13ae613c9acdd6546fba9d77ab9e035b98355e8559fe4c01a11741d2a33962`,
+reports version 1.11.3 and passes all 23 deployment scenarios. The deployment
+verifier runs 11 in 144.913 seconds; the protocol-fault verifier runs the other
+12 in 140.949 seconds. Their complementary filters exclude the other group's
+tests; no selected scenario skips at runtime. Each verifier pins its own copy
+of the binary and uses disposable owned Docker fixtures.
+
+Diagnostics: `/tmp/shardline-maintenance-deployments.XWkd0l/test.log` and
+`/tmp/shardline-protocol-faults.KU2CX0/test.log`. These are current evidence for
+the named startup, ownership, replacement, remote-delete, rollout/rollback,
+network-partition and protocol-interruption cases, not closure of every gate.
+
+## Released/current storage-copy size boundary
+
+`verify_storage_migration_size_compatibility.sh` compares the same optimized
+binary with actual released 1.11.3. Both copy a 64 MiB object byte-for-byte;
+both reject a 65 MiB object without creating its destination payload. Stdout,
+stderr and exit status match at both sizes. Both dry-run inventories accept
+the 65 MiB object, report its byte count and create no payload, with identical
+output. Diagnostics: `/tmp/shardline-storage-size.Ftw2jM`.
+
+The 64 MiB buffered-object limit also appears in the `v1.11.3` source. The CLI
+reference now documents it. This establishes the existing boundary and its
+preservation; it does not measure production throughput or long-operation cost.
