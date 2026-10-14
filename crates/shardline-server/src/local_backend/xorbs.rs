@@ -29,6 +29,8 @@ impl LocalBackend {
         expected_hash: &str,
         body: Bytes,
     ) -> Result<XorbUploadResponse, ServerError> {
+        let _barrier =
+            crate::maintenance_barrier::acquire_local_shared(&self.metadata_root).await?;
         self.upload_xorb_stream(expected_hash, RequestBodyReader::from_bytes(body))
             .await
     }

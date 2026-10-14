@@ -122,6 +122,9 @@ impl LocalBackend {
         body: Bytes,
         repository_scope: Option<&RepositoryScope>,
     ) -> Result<UploadFileResponse, ServerError> {
+        validate_identifier(file_id)?;
+        let _barrier =
+            crate::maintenance_barrier::acquire_local_shared(&self.metadata_root).await?;
         self.upload_file_stream(
             file_id,
             RequestBodyReader::from_bytes(body),

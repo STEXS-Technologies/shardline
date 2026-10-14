@@ -4652,3 +4652,29 @@ This supplements the existing admission-failure copy fixture. It establishes
 local destination-metadata faults after actual copy effects, not killed-copy
 processes, every remote-provider phase or live-snapshot consistency. The operator
 guide now gives the specific action for a successful copy with missing history.
+
+### Automatic GC coordination for public local uploads
+
+A direct local xorb upload reproduced successful completion while exclusive GC
+held the filesystem barrier (`/tmp/shardline-local-library-ownership-red.log`).
+Public `LocalBackend::upload_file` and `upload_xorb` now acquire the existing
+shared barrier before upload work. The backend retains an absolute metadata
+root so this lock follows its metadata even if a library caller changes working
+directory; local metadata with a remote object adapter uses that metadata root
+too. Streamed HTTP methods keep their existing request-owned outer barrier.
+No public signature, domain encoding, configuration or process is added.
+
+New tests verify xorb waiting, file waiting before any payload write and byte-exact
+completion after GC releases ownership. A cancellation fixture stages physical
+file bytes while publication is held, proves that exclusive GC still waits,
+cancels the actual public upload, then verifies that GC proceeds and file metadata
+remains unpublished. Staged immutable bytes may remain as unreferenced data;
+cancellation does not authorize replay or fabricate publication.
+
+All 37 selected local-backend tests pass with actual released 1.11.3 recovery and
+no runtime fixture skips (`/tmp/shardline-local-library-ownership-final.log`,
+1.93 seconds). Strict server Clippy passes
+(`/tmp/shardline-local-library-ownership-clippy.log`). The earlier 35-test run
+omitted the released binary environment setting and skipped the two rollback
+fixtures; it is not the complete configured result. Optimized workload validation
+for this local ownership change remains pending.
