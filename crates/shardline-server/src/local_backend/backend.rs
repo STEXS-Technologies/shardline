@@ -41,6 +41,11 @@ pub struct LocalBackend {
 impl LocalBackend {
     /// Creates a local backend and initializes its directory structure.
     ///
+    /// Initialization prepares the existing GC lock file when permissions allow.
+    /// Public uploads acquire this barrier automatically before writing. An
+    /// existing read-only deployment can still initialize for reads; uploads
+    /// require the barrier to be available.
+    ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the local directories cannot be created.
@@ -137,6 +142,13 @@ impl LocalBackend {
             metadata_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             protocol_upload_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
+        if let Err(error) =
+            crate::maintenance_barrier::prepare_local_barrier(&backend.metadata_root).await
+        {
+            // Preserve read-only initialization. Uploads still acquire the
+            // barrier before writing and cannot bypass an unavailable lock.
+            tracing::debug!("local upload barrier preparation unavailable: {error}");
+        }
         Ok(backend)
     }
 

@@ -375,25 +375,18 @@ async fn acquire_local(
     Ok(MaintenanceBarrierGuard::Local { file })
 }
 
+/// Prepare the existing lock file while initialization can still create root
+/// entries. Opening it neither takes ownership nor waits for active maintenance.
+pub(crate) async fn prepare_local_barrier(root: &Path) -> Result<(), ServerError> {
+    drop(open_local_lock_file(root.join(LOCAL_BARRIER_FILE_NAME)).await?);
+    Ok(())
+}
+
 /// Waits cooperatively for the OS lock. Only opening the file uses a blocking
 /// worker: cancellation must not leave a worker waiting for another process to
 /// release its lock, or exhaust the blocking pool and prevent runtime shutdown.
 async fn acquire_local_file_lock(path: PathBuf, exclusive: bool) -> Result<File, ServerError> {
-    let file = tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(
-            path.parent()
-                .ok_or_else(|| std::io::Error::other("maintenance lock has no parent"))?,
-        )?;
-        File::options()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)
-    })
-    .await
-    .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
-    .map_err(ServerError::Io)?;
+    let file = open_local_lock_file(path).await?;
     let mut retry_delay = Duration::from_millis(10);
     loop {
         let result = if exclusive {
@@ -410,6 +403,24 @@ async fn acquire_local_file_lock(path: PathBuf, exclusive: bool) -> Result<File,
         tokio::time::sleep(retry_delay).await;
         retry_delay = retry_delay.saturating_mul(2).min(Duration::from_millis(50));
     }
+}
+
+async fn open_local_lock_file(path: PathBuf) -> Result<File, ServerError> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(
+            path.parent()
+                .ok_or_else(|| std::io::Error::other("maintenance lock has no parent"))?,
+        )?;
+        File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+    })
+    .await
+    .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
+    .map_err(ServerError::Io)
 }
 
 /// Acquires an exclusive application-resource lock through the shared local root.
@@ -820,6 +831,43 @@ mod tests {
             shutdown_completed,
             "runtime shutdown waited for an externally held lock"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_preparation_preserves_existing_exclusive_owner_without_waiting() {
+        let storage = shardline_test_support::TempStorage::new();
+        let owner = acquire_local_exclusive(storage.path()).await.unwrap();
+        std::fs::write(
+            storage.path().join(LOCAL_BARRIER_FILE_NAME),
+            b"existing lock bytes",
+        )
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            prepare_local_barrier(storage.path()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            std::fs::read(storage.path().join(LOCAL_BARRIER_FILE_NAME)).unwrap(),
+            b"existing lock bytes"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                acquire_local_shared(storage.path())
+            )
+            .await
+            .is_err()
+        );
+        drop(owner);
+        let shared =
+            tokio::time::timeout(Duration::from_secs(2), acquire_local_shared(storage.path()))
+                .await
+                .unwrap()
+                .unwrap();
+        drop(shared);
     }
 
     #[tokio::test(flavor = "multi_thread")]

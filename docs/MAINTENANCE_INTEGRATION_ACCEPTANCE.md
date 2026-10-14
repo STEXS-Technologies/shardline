@@ -131,7 +131,12 @@ The following still need implementation or stronger evidence before merge:
   waiter or writing payloads. A subsequent exclusive GC and file upload succeed.
   With a pre-existing writable barrier and live SQLite WAL/SHM files, both
   methods also succeed under a 0555 metadata root without changing its mode.
-  This does not cover a restricted root lacking the existing barrier file.
+  Initialization now prepares the existing barrier automatically before a root
+  is restricted; both public upload methods remain usable afterward. Preparation
+  does not wait for or release an existing GC owner. A legacy root already
+  restricted without its barrier still initializes for reads, but uploads reject
+  the unavailable lock before writing. This preserves ownership; it does not
+  establish writable compatibility for that legacy library layout.
   Plain file requests without upload intents also check their original session
   before body ingestion and after ingestion. Publication failures check that
   same session to return retryable ownership loss without reacquiring it.
