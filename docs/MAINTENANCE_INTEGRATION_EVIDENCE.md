@@ -5370,3 +5370,28 @@ integration-test Clippy passes. Logs:
 `.codex/validation/gc-fresh-module.log` and
 `.codex/validation/gc-fresh-module-clippy.log`.
 This covers local marking; it does not establish every sweep or remote-I/O fault.
+
+### Latest-pointer rebuild interrupted during partial mutation
+
+The semantic `maintenance_support::rebuild_interruptions` module seeds real
+files through the public SDK, removes only two derived latest pointers, and
+holds the second rebuild insertion in an owned SQLite trigger. It observes the
+first restored pointer and an active writer before sending SIGTERM to the
+original CLI PID. The committed pointer survives and the second transaction
+rolls back. Immutable version metadata stays byte-identical; both original
+versions and an unaffected latest file download correctly.
+
+Ordinary history reports unresolved work without rebuilding anything. A new
+uploaded version is added and its derived pointer removed. The next explicit
+rebuild restores the two missing pointers, including that later version; all
+four payloads download correctly. The old native journal/WAL remain unchanged
+and unresolved, alongside the new completed run. The focused actual-process
+test passes against the current optimized CLI without skips; strict CLI
+integration-test Clippy passes. Logs:
+`.codex/validation/rebuild-mutation-cut.log` and
+`.codex/validation/rebuild-mutation-clippy.log`.
+This covers local latest pointers, not every reconstruction, dedupe or remote
+rebuild mutation.
+The complete CLI harness also passes all 33 tests without skips against this
+optimized binary in 5.06 seconds, including the repair and fresh-GC additions.
+Log: `.codex/validation/rebuild-mutation-release-cli-all.log`.
