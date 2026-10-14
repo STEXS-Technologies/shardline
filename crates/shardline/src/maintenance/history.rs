@@ -16,7 +16,7 @@ pub(super) fn verify(
     definition: TaskDefinition,
     key: &VerifyingKey,
 ) -> Result<()> {
-    let mut journal = SqliteTaskJournal::open(path, scope, definition)?;
+    let mut journal = SqliteTaskJournal::open_read_only(path, scope, definition)?;
     let key_id = artifact::key_id(key);
     let mut buffer = vec![0; 65536];
     for index in 0..definition.budget.max_history_records {

@@ -179,7 +179,8 @@ pub(super) fn retry_exports(
         }
         let path = directory.join("tasks.sqlite");
         super::history::verify(&path, directory, identity.scope, identity.definition, &key)?;
-        let mut journal = SqliteTaskJournal::open(&path, identity.scope, identity.definition)?;
+        let mut journal =
+            SqliteTaskJournal::open_read_only(&path, identity.scope, identity.definition)?;
         let mut projection =
             penelope_core::task::TaskProjection::new(identity.scope, identity.definition)?;
         let mut records = Vec::new();

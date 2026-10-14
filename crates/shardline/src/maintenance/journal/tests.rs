@@ -215,6 +215,38 @@ fn unfinished_and_corrupt_backlogs_do_not_starve_completed_export() {
 }
 
 #[test]
+fn unfinished_export_reads_native_journal_without_rewriting_or_restarting_it() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let store = TaskEvidenceStore::from_config(&config).unwrap();
+    let deployment = shardline_server::task_tracking::deployment_fingerprint(&config).unwrap();
+    let blocked = root.path().join("chunks/_shardline_tasks/v1/manifests");
+    fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+    fs::write(&blocked, b"publication denied").unwrap();
+    let directory = retained(root.path(), "unexported", false);
+    let path = directory.join("tasks.sqlite");
+    let before = fs::read(&path).unwrap();
+    let identity_before = fs::read(directory.join("identity.json")).unwrap();
+    fs::remove_file(blocked).unwrap();
+    retry_exports(
+        &root.path().join(".shardline-maintenance"),
+        &store,
+        deployment,
+    )
+    .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        fs::read(directory.join("identity.json")).unwrap(),
+        identity_before
+    );
+    let history = store.summaries(deployment, None, 100).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, "unexported");
+    assert_eq!(history[0].state, TaskRunState::NeedsReconciliation);
+    assert!(directory.exists());
+}
+
+#[test]
 fn another_exporter_does_not_block_maintenance_or_delete_its_journals() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());

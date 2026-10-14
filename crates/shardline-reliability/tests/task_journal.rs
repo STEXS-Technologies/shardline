@@ -80,6 +80,37 @@ fn started(path: &Path) -> (SqliteTaskJournal, TaskProjection) {
 }
 
 #[test]
+fn read_only_journal_preserves_evidence_and_rejects_creation_and_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("tasks.sqlite");
+    let (scope, definition, input) = fixture();
+    assert!(SqliteTaskJournal::open_read_only(&path, scope, definition).is_err());
+    assert!(!path.exists());
+    let empty = directory.path().join("empty.sqlite");
+    drop(rusqlite::Connection::open(&empty).unwrap());
+    let empty_before = std::fs::read(&empty).unwrap();
+    let mut empty_reader = SqliteTaskJournal::open_read_only(&empty, scope, definition).unwrap();
+    assert!(empty_reader.read(scope, TaskSequence::ZERO).is_err());
+    drop(empty_reader);
+    assert_eq!(std::fs::read(&empty).unwrap(), empty_before);
+    let (writer, _) = started(&path);
+    drop(writer);
+    let before = std::fs::read(&path).unwrap();
+    let mut reader = SqliteTaskJournal::open_read_only(&path, scope, definition).unwrap();
+    let record = intent(scope, definition, input);
+    assert_eq!(
+        reader.read(scope, TaskSequence::ZERO).unwrap(),
+        Some(record)
+    );
+    let mut buffer = [0; 128];
+    assert_eq!(reader.read_blob(scope, input, &mut buffer).unwrap(), 5);
+    assert_eq!(&buffer[..5], b"input");
+    assert!(reader.commit(&record, Some(b"input")).is_err());
+    drop(reader);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
 fn reopen_preserves_records_and_exact_blobs_and_retry_is_idempotent() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("tasks.sqlite");

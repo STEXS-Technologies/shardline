@@ -4918,3 +4918,25 @@ test. Moving an owned prior size fixture to workspace storage allowed the
 successful rerun. This was validation resource pressure, not a PostgreSQL
 runtime result. These checks cover saved metadata archives; other private
 journals, configurations and remaining merge gates still require their audit.
+
+## Read-only native journal verification and export
+
+Retained native journals now use a read-only SQLite handle during verification
+and evidence export. These paths no longer initialize tables or change journal
+settings. Execution and recovery retain the original writable constructor.
+
+All 13 journal tests pass. The new inspection case rejects missing-database
+creation and commits, leaves an empty database uninitialized, verifies stored
+records and blobs, and preserves the database bytes. All 40 maintenance unit
+tests pass in 40.34 seconds. A new failed-export case preserves the unfinished
+journal and identity bytes, retains its workspace and exposes its outcome as
+`NeedsReconciliation` after evidence export becomes available. Existing completed
+export, corrupt-backlog, failed-recording and recovery checks remain green.
+Strict reliability and CLI Clippy pass.
+
+Logs: `/tmp/shardline-read-only-journal.log`,
+`/tmp/shardline-read-only-maintenance.log`,
+`/tmp/shardline-read-only-reliability-clippy.log` and
+`/tmp/shardline-read-only-cli-clippy.log`. This establishes read-only handling
+for these native journal paths; it does not close the remaining predecessor,
+deployment or failure-phase audit.
