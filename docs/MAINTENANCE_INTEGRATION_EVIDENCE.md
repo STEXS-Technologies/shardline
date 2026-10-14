@@ -5058,3 +5058,36 @@ names; the corrected assertion checks the actual directory value. No recording,
 execution or retry semantics change. Logs:
 `/tmp/shardline-archive-warning-directory-final.log` and
 `/tmp/shardline-archive-warning-clippy.log`.
+
+## Host-local history with unrelated PostgreSQL configuration
+
+`history --local` explicitly selects existing host-local SQLite metadata rather
+than the configured server database. Without `--root`, it uses the same project
+state location as raw S3-to-S3 copy recording. The page labels its source and
+states that PostgreSQL history is excluded. Normal history retains its configured
+database scope. The local mode rejects missing SQLite metadata and conflicts
+with archive and pending-delete modes; it never initializes storage or retries
+work.
+
+Two actual CLI tests pass in 9.67 seconds. A local-to-local copy runs with an
+unavailable unrelated PostgreSQL URL, preserves destination bytes, and records
+local history. Ordinary history still fails against that configured database;
+the explicit local mode verifies the copy's completed result. A later source
+object is not copied by inspection. The second test checks mode conflicts and
+absence of initialization in an empty root.
+
+A real MinIO S3-to-S3 process fixture also passes in 9.95 seconds with unrelated
+PostgreSQL settings on both copying and inspection. It kills the ordinary copy
+after an accepted PUT, then reads its unresolved history with `--local` from
+the same project. The original PID and destination bytes are preserved, and a
+later source object remains uncopied.
+
+All 26 maintenance CLI tests pass with the current debug binary in 234.451
+seconds, with no skipped tests. The real-workflow fixture takes 90.336 seconds
+and is reported slow; this is a correctness run, not a performance comparison.
+Strict CLI and server Clippy pass. Logs:
+`/tmp/shardline-local-copy-config-history-verified.log`,
+`/tmp/shardline-local-history-s3-config.log`,
+`/tmp/shardline-local-history-cli-all.log`,
+`/tmp/shardline-local-history-clippy-final.log` and
+`/tmp/shardline-local-history-server-clippy.log`.
