@@ -251,9 +251,12 @@ destination write and after report materialization, before completion
 acknowledgement. Both cuts preserve copied data and unresolved history, and
 inspection does not resume copying. A separate MinIO fixture now proves the
 local-to-S3 cut after an accepted PUT but before its response: source-root
-inspection exposes unfinished history without replay. Other remote-copy phases
-still need evidence. S3-to-S3 accepted-PUT interruption and cold-start inspection
-now also pass; these fixtures do not close the phase audit.
+inspection exposes unfinished history without replay. S3-to-S3 accepted-PUT
+interruption and cold-start inspection also pass. Actual SIGTERM cuts now cover
+both source types after the accepted PUT and after report materialization but
+before completion acknowledgement. The report cuts retain exactly three native
+records and unresolved shared history. These fixtures extend the phase audit;
+admission/checkpoint process cuts and remaining operations still need evidence.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |

@@ -5008,3 +5008,35 @@ Logs: `/tmp/shardline-embedded-barrier-library-final.log`,
 `/tmp/shardline-local-permissions.9vut8b`. The first build stopped at a linker
 bus error before executing the regression test. Moving owned completed release
 fixtures to workspace storage allowed the red fixture and successful reruns.
+
+## Remote copy shutdown at accepted PUT and saved report
+
+Four new real MinIO process fixtures send SIGTERM to the original ordinary CLI
+PID during local-to-S3 and S3-to-S3 copying. Each source type is interrupted
+after an accepted PUT with its response delayed, and after materializing a
+successful report but before committing completion. The saved-report fixtures
+hold the native SQLite writer, verify three admission/checkpoint records and
+successful original stdout, then assert termination by signal 15 and unchanged
+record count. They observe a completed artifact filename rather than temporary
+output files. Destination bytes are independently read back exactly.
+
+Every cut exposes `needs_reconciliation` with the original CLI PID through
+ordinary history. Adding another source object before inspection proves that
+inspection does not continue copying. No task payload is written into remote
+user-object storage. These are interruption checks for ordinary in-process
+maintenance, not changes to its process model.
+
+All nine remote-copy fixtures pass together in 43.77 seconds with the current
+debug CLI and two test threads: the four new SIGTERM cuts, two existing kill
+cuts, both predecessor archive cases and the unsafe-history-path success case.
+There are no runtime skips; the other 60 S3 tests are excluded by the filter.
+Strict server Clippy passes. Logs:
+`/tmp/shardline-remote-copy-all-phases.log` and
+`/tmp/shardline-remote-copy-sigterm-clippy.log`.
+
+The first four-case run passed three cases and exposed an incorrect fixture
+assumption that a local-source copy keeps private scratch below its source root.
+All storage-copy scratch uses the owned TMPDIR. The fixture now finds that
+owned workspace and verifies the completion cut explicitly. The corrected
+four-case run and the complete nine-case run pass. These results establish the
+named shutdown/report cuts, not every remote call or remaining admission phase.
