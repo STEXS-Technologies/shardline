@@ -5206,3 +5206,16 @@ read-only SQLite files. Logs:
 `.codex/validation/restricted-directory-cli-permissions.log`.
 The local GC suite also passes with the new barrier path; its executed cases
 and timing are recorded in `.codex/validation/restricted-directory-gc-tests.log`.
+
+After this production change, all 29 maintenance CLI tests pass without skips
+in 93.45 seconds with the current debug build. This includes the three new
+admission cuts and the existing real workflows, process interruptions,
+configuration routing, archive inspection and restricted-root cases. The
+real-workflow test exceeds 60 seconds in this debug run; this is correctness
+evidence, not a production timing comparison.
+
+The public-library startup fixture also passes in 0.26 seconds. It verifies all
+three server roles, application-owned logging, fresh cleanup on consecutive
+starts and history in the original server PID. Logs:
+`.codex/validation/restricted-directory-cli-all.log` and
+`.codex/validation/restricted-directory-embedded-startup.log`.
