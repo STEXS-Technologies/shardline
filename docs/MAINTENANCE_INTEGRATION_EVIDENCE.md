@@ -5352,3 +5352,21 @@ integration-test Clippy and formatting pass. Logs:
 `.codex/validation/repair-mutation-clippy-final.log`.
 The binary is the current optimized build recorded above. These SQLite cases
 do not establish all PostgreSQL or remote mutation boundaries.
+
+### Fresh GC after interrupted marking
+
+The existing two actual GC termination cuts now live in the semantic
+`maintenance_support::gc_interruptions` module. They cover observed domain
+marking and materialized report creation while the native completion commit is
+blocked. Inspection through a subsequent fsck leaves a later orphan unmarked,
+preserves the earlier candidate and keeps the interrupted run unresolved.
+
+The fixture now explicitly runs the next ordinary `gc --mark`. It discovers and
+marks exactly one new candidate, preserves the original candidate and both
+objects' bytes, and retains the old native journal's three records. History
+contains the original unresolved GC and separate completed fsck and fresh-GC
+runs. Both cuts pass against the current optimized binary; strict CLI
+integration-test Clippy passes. Logs:
+`.codex/validation/gc-fresh-module.log` and
+`.codex/validation/gc-fresh-module-clippy.log`.
+This covers local marking; it does not establish every sweep or remote-I/O fault.

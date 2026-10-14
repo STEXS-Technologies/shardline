@@ -303,6 +303,10 @@ missing-object quarantine entries and stale webhook deliveries for both command
 forms. Each preserves the committed first change, rolls back the interrupted
 second transaction, verifies surviving evidence and starts fresh recovery without
 changing the old unresolved receipt. Other operation-specific cuts remain open.
+The ordinary GC mutation/report interruption fixture now also runs a fresh GC
+after its read-only inspection. That GC marks a later orphan absent from the
+interrupted run, preserves the original quarantine entry and payload bytes,
+and records a separate completed run while the old run remains unresolved.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |
