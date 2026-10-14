@@ -122,14 +122,15 @@ fn resolve_root_dir(root_override: Option<&Path>, configured_root: &Path) -> Pat
     }
 
     if let Ok(current_dir) = current_dir() {
-        if let Some(root) = discover_project_root(&current_dir) {
-            return root;
-        }
-
-        return default_project_root(&current_dir);
+        return project_state_root(&current_dir);
     }
 
     configured_root.to_path_buf()
+}
+
+/// Existing local project discovery, without loading unrelated server settings.
+pub(crate) fn project_state_root(current_dir: &Path) -> PathBuf {
+    discover_project_root(current_dir).unwrap_or_else(|| default_project_root(current_dir))
 }
 
 fn discover_project_root(current_dir: &Path) -> Option<PathBuf> {

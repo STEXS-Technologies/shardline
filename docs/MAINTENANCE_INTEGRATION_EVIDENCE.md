@@ -4846,3 +4846,36 @@ Clippy with all features, library and tests, and strict CLI library/integration
 Clippy pass. The release build passes in 2 minutes 28 seconds. These checks
 prove this accepted-PUT interruption and history workflow, not every remote-copy
 phase or closure of the remaining merge gates.
+
+## S3-to-S3 copy history without worker setup
+
+The MinIO fixture reproduced the two-S3-endpoint inspection gap: after an
+accepted destination PUT and process kill, ordinary project history returned
+zero tasks. Diagnostics: `/tmp/shardline-s3-only-history-red-final.log`.
+New S3-to-S3 outcomes now use the host's normal local project metadata. The
+existing project-root discovery is shared with normal history; it does not
+load unrelated server settings into the endpoint-only copy. Both payload
+endpoints remain bound by the task definition, and local-to-S3/local-destination
+selection is preserved. Existing private archives are not rewritten or removed.
+
+The fresh-project fixture starts with no local metadata database. After a real
+accepted PUT and process kill, plain `shardline history` from that project
+reports one `needs_reconciliation` run with the actual CLI PID. New source
+objects are not copied by inspection, original destination bytes remain exact
+and S3 contains no task-history payload objects. The cold-start scenario passes
+in 5.140 seconds. A separate unsafe-root fixture points `.shardline` through a
+symlink: copying still succeeds and reports one inserted object, recording
+warns, the outside directory stays empty and the symlink remains unchanged.
+
+The optimized binary SHA-256
+`e29233dae92bc44ea53802e01c4f5def8b5654eba8bcb345caead2045a6c8dae`
+reports version 1.11.3. The three real MinIO cases pass in 14.963 seconds;
+the cold-start case is additionally verified after removing fixture bootstrap.
+All 22 maintenance CLI tests pass in 2.411 seconds with zero skips. Six focused
+history tests and all 21 configuration tests pass. Strict server Clippy with
+all features/library/tests and strict CLI library/tests Clippy pass. The
+released/current 64/65 MiB copy-boundary comparison also passes. The release
+build takes 2 minutes 34 seconds. Logs are under
+`/tmp/shardline-s3-only-release.3sL0eR`, with focused unit and Clippy logs named
+`/tmp/shardline-s3-only-history-*`. These cover the named raw-endpoint workflows;
+older archives, other configurations and remaining phase/cost gates remain open.

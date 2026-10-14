@@ -233,18 +233,24 @@ fn source_config(
         shardline_server::StorageMigrationEndpoint::S3(_) => fallback_root.to_path_buf(),
     };
     let root = crate::local_output::resolved_output_path(&root)?;
-    let config = shardline_server::ServerConfig::new(
-        "127.0.0.1:0".parse()?,
-        "http://localhost".to_owned(),
-        root,
-        std::num::NonZeroUsize::new(4096).ok_or("invalid maintenance chunk size")?,
-    );
+    let config = metadata_config(root)?;
     Ok(match source {
         shardline_server::StorageMigrationEndpoint::LocalStateRoot(_) => config,
         shardline_server::StorageMigrationEndpoint::S3(s3) => {
             config.with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3))
         }
     })
+}
+
+// Construct the optional history target without touching its filesystem. A
+// denied or unsafe history root must fail recording, not the original copy.
+fn metadata_config(root: std::path::PathBuf) -> Result<shardline_server::ServerConfig> {
+    Ok(shardline_server::ServerConfig::new(
+        "127.0.0.1:0".parse()?,
+        "http://localhost".to_owned(),
+        root,
+        std::num::NonZeroUsize::new(4096).ok_or("invalid maintenance chunk size")?,
+    ))
 }
 
 fn publication_config(
@@ -272,6 +278,10 @@ fn publication_config(
             ) {
                 return source_config(config.root_dir(), source);
             }
+            // With two raw S3 endpoints, history belongs to this host's normal
+            // local project state. Endpoint credentials do not establish a
+            // deployment database association or a cluster-wide execution owner.
+            return metadata_config(crate::config::project_state_root(config.root_dir()));
         }
         return source_config(config.root_dir(), destination);
     }

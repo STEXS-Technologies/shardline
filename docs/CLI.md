@@ -143,8 +143,9 @@ interrupted cleanup resumes later, and unresolved and corrupt histories are
 retained. These policies do not grant any
 extra storage permissions.
 
-Without writable local storage, commands use their available deployment history.
-An S3-only copy has no such fallback. If history
+Without writable private task storage, commands use their available metadata
+history. S3-to-S3 copies use this host's local project metadata, discovered from
+the working directory just like ordinary local history. If history
 cannot be recorded, Shardline warns and preserves the original command's result
 under its existing domain barriers. It does not claim verified completion or
 automatically repeat work to recover a missing receipt.
@@ -393,6 +394,8 @@ Dry-run inventory can include larger objects without reading their bodies.
 Copy history uses the local destination's SQLite metadata. For a local-to-S3
 copy, it uses the local source's SQLite metadata instead. Inspect that root with
 `shardline history --root /path/to/local/root`; inspection does not resume copying.
+With two S3 endpoints, run `shardline history` from the same project working
+directory. Its copy history is local to that host, not shared S3 payload data.
 These endpoint-only commands do not establish a PostgreSQL metadata association.
 
 Run garbage collection:
