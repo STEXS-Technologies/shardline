@@ -3,7 +3,7 @@ use crate::{
     SqliteTaskJournal,
     task_journal::{decode, unavailable},
 };
-use penelope_core::task::{
+use penelope::core::task::{
     TaskDefinition, TaskGeneration, TaskProjection, TaskRecord, TaskScope, runtime::TaskPortError,
 };
 use rusqlite::{Connection, params};
@@ -20,7 +20,7 @@ pub(super) struct Authorization {
     pub scope: TaskScope,
     pub generation: TaskGeneration,
     pub definition: TaskDefinition,
-    pub deadline: penelope_core::task::TaskTick,
+    pub deadline: penelope::core::task::TaskTick,
     pub input_schema: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_pid: Option<u32>,

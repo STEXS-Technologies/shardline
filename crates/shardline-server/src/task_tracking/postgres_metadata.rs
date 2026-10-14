@@ -1,7 +1,7 @@
 //! Evidence I/O on an existing server pool, separate from execution authority.
 use std::{fmt, future::Future, time::Duration};
 
-use penelope_core::task::Digest;
+use penelope::core::task::Digest;
 use shardline_index::{PostgresIndexStore, PostgresMetadataStoreError, PostgresTaskArtifact};
 use sqlx::{Connection, PgPool, Postgres, pool::PoolConnection};
 

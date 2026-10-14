@@ -1,6 +1,6 @@
 //! Inspect automatic metadata history without blocking async runtime workers.
 
-use penelope_core::task::Digest;
+use penelope::core::task::Digest;
 use shardline_server::{
     ServerConfig, ServerError,
     task_tracking::{TaskEvidenceStore, TaskRunSummary},

@@ -10,14 +10,14 @@
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
-use statechronicle_commit::sign::sign_commit;
-use statechronicle_commit::{
+use statechronicle::commit::sign::sign_commit;
+use statechronicle::commit::{
     batch::CommitBatch,
     builder::CommitBuilder,
     roots::{compute_state_root, state_root_updates},
 };
-use statechronicle_core::{canonicalize::canonicalize_and_digest, digest::ContentDigest};
-use statechronicle_domain::{
+use statechronicle::core::{canonicalize::canonicalize_and_digest, digest::ContentDigest};
+use statechronicle::domain::{
     commit::{Commit, CommitScope, ProfileId},
     event::{Event, StateCommitment},
     ids::{CommitId, EventId, IntentId},
@@ -229,7 +229,7 @@ mod tests {
         upload_lifecycle_event,
     };
     use ed25519_dalek::VerifyingKey;
-    use statechronicle_commit::{
+    use statechronicle::commit::{
         roots::{event_root, state_root_updates},
         sign::verify_commit,
     };

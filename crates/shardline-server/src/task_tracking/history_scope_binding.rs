@@ -1,5 +1,5 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use penelope_core::task::Digest;
+use penelope::core::task::Digest;
 use serde::{Deserialize, Serialize};
 
 use super::{TaskEvidenceStore, TaskRunIdentity};

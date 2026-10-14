@@ -4,7 +4,7 @@ use super::{
     storage::{Authorization, connect, projection},
 };
 use crate::task_journal::unavailable;
-use penelope_core::task::{
+use penelope::core::task::{
     Digest, TaskFault, TaskGeneration, TaskScope, TaskStatus, runtime::TaskPortError,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};

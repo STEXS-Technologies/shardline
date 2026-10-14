@@ -1,9 +1,9 @@
 use super::{Result, artifact};
 use ed25519_dalek::VerifyingKey;
-use penelope_core::task::{
+use penelope::core::task::{
     TaskDefinition, TaskExecutionEvent, TaskScope, TaskSequence, runtime::TaskJournal,
 };
-use penelope_statechronicle::task::CheckpointStateVerifier;
+use penelope::statechronicle::task::CheckpointStateVerifier;
 use shardline_reliability::{
     CheckpointArtifactVerifier, MaintenanceArtifactKind, SqliteTaskJournal,
 };

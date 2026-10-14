@@ -33,9 +33,9 @@ shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
 shardline-rebuild.workspace = true
 shardline-reliability = { workspace = true, features = ["task-journal"] }
-penelope-core.workspace = true
+penelope.workspace = true
 ed25519-dalek.workspace = true
-statechronicle-domain.workspace = true
+statechronicle.workspace = true
 shardline-fsck.workspace = true
 shardline-gc.workspace = true
 shardline-hub-api.workspace = true

@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 #![allow(clippy::panic_in_result_fn)]
-use penelope_core::task::Digest;
+use penelope::core::task::Digest;
 use rusqlite::Connection;
 use shardline_reliability::MaintenanceArtifactProof;
 use std::{
@@ -272,7 +272,7 @@ fn wait_for(mut check: impl FnMut() -> bool) -> Result<()> {
 
 #[test]
 fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> Result<()> {
-    use penelope_core::task::{TaskProjection, TaskRecord, TaskStatus};
+    use penelope::core::task::{TaskProjection, TaskRecord, TaskStatus};
     use shardline_server::task_tracking::TaskEvidenceStore;
     for arguments in [
         vec!["fsck"],
@@ -349,7 +349,7 @@ fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> R
                 identity.scope,
                 projection.generation(),
                 &public_key,
-                &statechronicle_domain::intent::KeyId(format!(
+                &statechronicle::domain::intent::KeyId(format!(
                     "shardline-maintenance:{}",
                     hex::encode(identity.public_key)
                 )),

@@ -1,8 +1,8 @@
 //! Native deterministic semantics; existing evidence encodings remain independent.
 use serde::{Deserialize, Serialize};
-use statechronicle_domain::intent::Operation;
-use statechronicle_profile::StateProfile;
-use statechronicle_profiles::{
+use statechronicle::domain::intent::Operation;
+use statechronicle::profile::StateProfile;
+use statechronicle::profiles::{
     custom::TypedProfile,
     registry::{ProfileRegistry, ProfileRules},
 };
@@ -65,7 +65,7 @@ pub fn native_resumable_profile() -> &'static TypedProfile<ResumableLifecyclePro
 /// # Errors
 /// Returns registration failures if domain/schema/operation rules are invalid.
 pub fn native_lifecycle_registry()
--> Result<ProfileRegistry, statechronicle_profiles::error::ProfileError> {
+-> Result<ProfileRegistry, statechronicle::profiles::error::ProfileError> {
     ProfileRegistry::with_custom(&*PROFILES)
 }
 

@@ -1,5 +1,5 @@
 use super::{Input, MaintenanceOperation, Result, artifact, target, verified::VerifiedRuntime};
-use penelope_core::task::{
+use penelope::core::task::{
     Digest, EffectContract, ExecutionBudget, Reconciliation, RecoveryMode, TaskDefinition, TaskId,
     TaskInputDigest, TaskRecoveryPolicy, TaskScope, TaskStatus, TaskTenantId,
     runtime::{TaskClock, TaskJournal},
@@ -30,7 +30,7 @@ fn definition(executable: &Path, automatic: bool) -> Result<TaskDefinition> {
             max_checkpoint_commits: 4,
             cpu_ticks: if automatic { u64::MAX } else { 600 },
             deadline_tick: if automatic {
-                penelope_core::task::TaskTick::new(u64::MAX)
+                penelope::core::task::TaskTick::new(u64::MAX)
             } else {
                 BootTaskClock::current().saturating_add(1_800_000)
             },

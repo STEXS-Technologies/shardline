@@ -56,14 +56,14 @@ pub struct TaskRunIdentity {
     /// Creation time, used for retention rather than execution deadlines.
     pub created_at: u64,
     /// The pinned Penelope scope.
-    pub scope: penelope_core::task::TaskScope,
+    pub scope: penelope::core::task::TaskScope,
     /// The complete execution contract.
-    pub definition: penelope_core::task::TaskDefinition,
+    pub definition: penelope::core::task::TaskDefinition,
     /// Verification key pinned before dispatch. Never a private signing key.
     pub public_key: [u8; 32],
     /// Logical deployment target, independent of password and S3 secret
     /// rotation. PostgreSQL login names remain part of the legacy scope.
-    pub deployment: penelope_core::task::Digest,
+    pub deployment: penelope::core::task::Digest,
     /// Runtime protection model.
     pub execution: TaskExecutionMode,
     /// Host identity for observation. This is not a distributed lease or a fence.
@@ -77,7 +77,7 @@ pub struct TaskRunIdentity {
 /// Rejects malformed Postgres connection configuration.
 pub fn deployment_fingerprint(
     config: &ServerConfig,
-) -> Result<penelope_core::task::Digest, ServerError> {
+) -> Result<penelope::core::task::Digest, ServerError> {
     use std::str::FromStr;
     let root = config
         .root_dir()
@@ -98,7 +98,7 @@ pub fn deployment_fingerprint(
         format!("local:{root:?}")
     };
     let objects = deployment_object_target(config, &root);
-    Ok(penelope_core::task::Digest::of(
+    Ok(penelope::core::task::Digest::of(
         format!("shardline.deployment-target.v1|{metadata}|{objects}").as_bytes(),
     ))
 }
@@ -137,7 +137,7 @@ fn deployment_object_target(config: &ServerConfig, root: &std::path::Path) -> St
 pub async fn resolved_postgres_deployment_fingerprint(
     config: &ServerConfig,
     connection: &mut sqlx::PgConnection,
-) -> Result<penelope_core::task::Digest, ServerError> {
+) -> Result<penelope::core::task::Digest, ServerError> {
     use std::str::FromStr;
     let url = config.index_postgres_url().ok_or_else(|| {
         shardline_index::PostgresMetadataStoreError::Unsupported(
@@ -175,7 +175,7 @@ pub async fn resolved_postgres_deployment_fingerprint(
         identity,
         deployment_object_target(config, &root),
     ))?;
-    Ok(penelope_core::task::Digest::of(&target))
+    Ok(penelope::core::task::Digest::of(&target))
 }
 
 /// Immutable publication in existing deployment storage. Local deployments use

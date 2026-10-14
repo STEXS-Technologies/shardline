@@ -5,7 +5,7 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, Digest, EffectContract, ExecutionBudget, Reconciliation, RecoveryMode, TaskDefinition,
     TaskExecutionEvent, TaskGeneration, TaskId, TaskInputDigest, TaskProjection, TaskRecord,
     TaskRecoveryPolicy, TaskScope, TaskSequence, TaskStatus, TaskTenantId, TaskTick,
@@ -13,7 +13,7 @@ use penelope_core::task::{
         RuntimeProgress, TaskJournal, TaskObservation, TaskPortError, TaskRuntime, TaskStart,
     },
 };
-use penelope_executor::task::TaskSupervisor;
+use penelope::executor::task::TaskSupervisor;
 use shardline_reliability::{SqliteTaskJournal, restore_local_task_supervisor};
 use std::{
     path::Path,
@@ -556,7 +556,7 @@ fn checkpoint_acknowledgement_requires_durable_commit_and_failure_poisons_dispat
     assert_eq!(reader.read(scope, TaskSequence::new(3)).unwrap(), None);
     assert!(matches!(
         supervisor.advance(TaskTick::new(4)),
-        Err(penelope_executor::task::SupervisorError::ReconstructionRequired)
+        Err(penelope::executor::task::SupervisorError::ReconstructionRequired)
     ));
     assert_eq!(state.lock().unwrap().starts, 1);
 }

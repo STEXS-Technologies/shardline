@@ -1,10 +1,10 @@
 use super::{MaintenanceArtifactKind, MaintenanceArtifactProof, verify_maintenance_artifact};
 use ed25519_dalek::VerifyingKey;
-use penelope_core::task::{Digest, TaskExecutionEvent, TaskRecord};
-use penelope_statechronicle::task::{
+use penelope::core::task::{Digest, TaskExecutionEvent, TaskRecord};
+use penelope::statechronicle::task::{
     CheckpointStateError, CheckpointStateEvidence, CheckpointStateVerifier, bind_checkpoint_state,
 };
-use statechronicle_domain::intent::KeyId;
+use statechronicle::domain::intent::KeyId;
 
 /// Verifies real StateChronicle proofs before correlating Penelope checkpoints.
 /// Supply bytes from the immutable journal blob and a deployment-trusted key.

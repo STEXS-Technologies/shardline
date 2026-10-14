@@ -1,5 +1,5 @@
 use super::{Input, MaintenanceOperation, Result, artifact, target};
-use penelope_core::task::{TaskGeneration, TaskScope};
+use penelope::core::task::{TaskGeneration, TaskScope};
 use shardline_reliability::{MaintenanceArtifactKind, ProcessWorker};
 use std::path::Path;
 

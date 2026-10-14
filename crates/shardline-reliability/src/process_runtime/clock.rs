@@ -3,7 +3,7 @@ use super::{
     storage::connect,
 };
 use crate::task_journal::unavailable;
-use penelope_core::task::{
+use penelope::core::task::{
     TaskScope, TaskTick,
     runtime::{TaskClock, TaskPortError},
 };

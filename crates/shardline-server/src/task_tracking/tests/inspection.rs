@@ -6,7 +6,7 @@ async fn explicit_archive_inspection_preserves_scope_isolation_and_corrupt_evide
     let config = config(root.path());
     let store = TaskEvidenceStore::from_config(&config).unwrap();
     let deployment = deployment_fingerprint(&config).unwrap();
-    let foreign = penelope_core::task::Digest::of(b"original archive deployment");
+    let foreign = penelope::core::task::Digest::of(b"original archive deployment");
     for target in [deployment, foreign] {
         EmbeddedTaskTracker::from_store(store.clone(), target)
             .begin(

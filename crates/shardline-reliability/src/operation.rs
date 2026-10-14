@@ -141,10 +141,10 @@ impl OperationIdentity {
     /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn penelope_digest(&self) -> Result<PenelopeDigest, ReliabilityError> {
         self.validate()?;
-        let bytes = statechronicle_core::canonicalize::canonicalize(self)
+        let bytes = statechronicle::core::canonicalize::canonicalize(self)
             .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))?;
         Ok(PenelopeDigest(
-            penelope_domain::ContentDigest::sha256(&bytes).0,
+            penelope::domain::ContentDigest::sha256(&bytes).0,
         ))
     }
 

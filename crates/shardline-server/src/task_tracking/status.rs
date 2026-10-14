@@ -1,6 +1,6 @@
 use super::{TaskEvidenceStore, TaskExecutionMode, TaskRunIdentity};
 use crate::ServerError;
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, Digest, TaskExecutionEvent, TaskProjection, TaskRecord, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
@@ -552,7 +552,7 @@ impl TaskEvidenceStore {
                 | TaskExecutionEvent::CheckpointMigrated { checkpoint, .. } => Some(checkpoint),
                 TaskExecutionEvent::Completed { output }
                 | TaskExecutionEvent::Reconciled {
-                    result: penelope_core::task::Reconciliation::Completed { output, .. },
+                    result: penelope::core::task::Reconciliation::Completed { output, .. },
                 } => Some(output),
                 TaskExecutionEvent::Started
                 | TaskExecutionEvent::FaultObserved { .. }
@@ -574,7 +574,7 @@ impl TaskEvidenceStore {
                         identity.scope,
                         record.generation,
                         &key,
-                        &statechronicle_domain::intent::KeyId(format!(
+                        &statechronicle::domain::intent::KeyId(format!(
                             "shardline-maintenance:{}",
                             hex::encode(identity.public_key)
                         )),
@@ -610,7 +610,7 @@ impl TaskEvidenceStore {
                             record.event,
                             TaskExecutionEvent::Completed { .. }
                                 | TaskExecutionEvent::Reconciled {
-                                    result: penelope_core::task::Reconciliation::Completed { .. }
+                                    result: penelope::core::task::Reconciliation::Completed { .. }
                                 }
                         )
                     {
@@ -623,7 +623,7 @@ impl TaskEvidenceStore {
                             record.event,
                             TaskExecutionEvent::Completed { .. }
                                 | TaskExecutionEvent::Reconciled {
-                                    result: penelope_core::task::Reconciliation::Completed { .. }
+                                    result: penelope::core::task::Reconciliation::Completed { .. }
                                 }
                         )
                     {

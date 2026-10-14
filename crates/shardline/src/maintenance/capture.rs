@@ -1,5 +1,5 @@
 use super::{Result, artifact};
-use penelope_core::task::{Digest, TaskGeneration};
+use penelope::core::task::{Digest, TaskGeneration};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{

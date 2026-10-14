@@ -162,17 +162,17 @@ struct Input {
     operation: MaintenanceOperation,
     #[serde(with = "path_codec::optional")]
     config: Option<PathBuf>,
-    target: penelope_core::task::Digest,
+    target: penelope::core::task::Digest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command: Option<Vec<Vec<u8>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    command_digest: Option<penelope_core::task::Digest>,
+    command_digest: Option<penelope::core::task::Digest>,
 }
 
 fn target(
     config: &shardline_server::ServerConfig,
     operation: &MaintenanceOperation,
-) -> Result<penelope_core::task::Digest> {
+) -> Result<penelope::core::task::Digest> {
     // Credentials are never persisted. Logical S3 addressing and all metadata
     // targets are bound; credential rotation alone does not change a task.
     let migration = if let MaintenanceOperation::StorageMigrate {
@@ -191,7 +191,7 @@ fn target(
     } else {
         String::new()
     };
-    Ok(penelope_core::task::Digest::of(
+    Ok(penelope::core::task::Digest::of(
         format!(
             "{:?}|{:?}|{:?}|{:?}|{migration}",
             config.root_dir(),

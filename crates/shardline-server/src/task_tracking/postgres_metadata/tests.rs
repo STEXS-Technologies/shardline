@@ -196,7 +196,7 @@ async fn automatic_scope_binding_requires_a_live_metadata_manifest() {
         identity.public_key = *key.verifying_key().as_bytes();
         identity.id = hex::encode(identity.public_key);
         identity.scope.task =
-            penelope_core::task::TaskId::from_digest(Digest::of(identity.id.as_bytes()));
+            penelope::core::task::TaskId::from_digest(Digest::of(identity.id.as_bytes()));
         let manifest = serde_json::to_vec(&identity).unwrap();
         store
             .publish(&format!("manifests/{}", identity.id), &manifest)

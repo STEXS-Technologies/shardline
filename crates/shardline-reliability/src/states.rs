@@ -97,7 +97,7 @@ impl UploadLifecycleState {
 
 impl EvidenceState for UploadLifecycleState {
     fn validate_transition(self, next: Self) -> Result<(), crate::ReliabilityError> {
-        statechronicle_profile::StateProfile::validate(
+        statechronicle::profile::StateProfile::validate(
             &crate::UploadLifecycleProfile,
             Some(&self),
             &crate::LifecycleCommand::Transition {
@@ -174,7 +174,7 @@ impl ResumableLifecycleState {
 
 impl EvidenceState for ResumableLifecycleState {
     fn validate_transition(self, next: Self) -> Result<(), crate::ReliabilityError> {
-        statechronicle_profile::StateProfile::validate(
+        statechronicle::profile::StateProfile::validate(
             &crate::ResumableLifecycleProfile,
             Some(&self),
             &crate::LifecycleCommand::Transition {

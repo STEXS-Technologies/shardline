@@ -1,11 +1,11 @@
 use super::{Error, Result};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use penelope_core::task::{Digest, TaskGeneration, TaskScope};
+use penelope::core::task::{Digest, TaskGeneration, TaskScope};
 use shardline_reliability::{
     MaintenanceArtifact, MaintenanceArtifactKind, MaintenanceArtifactProof,
     sign_maintenance_artifact, verify_maintenance_artifact,
 };
-use statechronicle_domain::intent::KeyId;
+use statechronicle::domain::intent::KeyId;
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},

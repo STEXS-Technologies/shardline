@@ -423,10 +423,10 @@ fn shared_history_preserves_legacy_fallback_and_scoped_pagination() {
     let config = config(root.path());
     let objects = object_store_from_config(&config).unwrap();
     let store = TaskEvidenceStore::from_config(&config).unwrap();
-    let legacy = penelope_core::task::Digest::of(b"first login");
-    let foreign = penelope_core::task::Digest::of(b"second login");
-    let shared = penelope_core::task::Digest::of(b"shared schema");
-    let other = penelope_core::task::Digest::of(b"other schema");
+    let legacy = penelope::core::task::Digest::of(b"first login");
+    let foreign = penelope::core::task::Digest::of(b"second login");
+    let shared = penelope::core::task::Digest::of(b"shared schema");
+    let other = penelope::core::task::Digest::of(b"other schema");
     for (index, (deployment, scope, operation)) in [
         (legacy, Some(shared), "own-bound"),
         (foreign, Some(shared), "foreign-bound"),
@@ -546,8 +546,8 @@ fn history_scope_bindings_preserve_legacy_results_and_reject_substitution() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
     let deployment = deployment_fingerprint(&config).unwrap();
-    let scope = penelope_core::task::Digest::of(b"resolved scope");
-    let other_scope = penelope_core::task::Digest::of(b"other scope");
+    let scope = penelope::core::task::Digest::of(b"resolved scope");
+    let other_scope = penelope::core::task::Digest::of(b"other scope");
     let store = TaskEvidenceStore::from_config(&config).unwrap();
     let tracker = EmbeddedTaskTracker::new(object_store_from_config(&config).unwrap(), deployment)
         .with_history_scope(scope);
@@ -719,7 +719,11 @@ fn embedded_tasks_publish_verified_success_and_truthful_failure() {
     assert_eq!(diagnostic["report_available"], true);
     assert!(
         store
-            .embedded_report(penelope_core::task::Digest::of(b"foreign"), None, failed_id)
+            .embedded_report(
+                penelope::core::task::Digest::of(b"foreign"),
+                None,
+                failed_id
+            )
             .unwrap()
             .is_none()
     );
@@ -737,7 +741,7 @@ fn embedded_tasks_publish_verified_success_and_truthful_failure() {
     assert!(
         store
             .summaries(
-                penelope_core::task::Digest::of(b"other-deployment"),
+                penelope::core::task::Digest::of(b"other-deployment"),
                 None,
                 10
             )
@@ -750,7 +754,7 @@ fn embedded_tasks_publish_verified_success_and_truthful_failure() {
         .join(failed_id)
         .join("artifacts")
         .join(hex::encode(
-            penelope_core::task::Digest::of(b"failures: 1").0,
+            penelope::core::task::Digest::of(b"failures: 1").0,
         ));
     std::fs::write(&report_path, b"failures: 0").unwrap();
     assert!(store.embedded_report(deployment, None, failed_id).is_err());
@@ -788,7 +792,7 @@ fn background_report_tampering_and_record_gaps_are_visible() {
             .join("chunks/_shardline_tasks/v1/runs")
             .join(run)
             .join("artifacts")
-            .join(hex::encode(penelope_core::task::Digest::of(b"report").0)),
+            .join(hex::encode(penelope::core::task::Digest::of(b"report").0)),
         b"edited",
     )
     .unwrap();
@@ -844,7 +848,7 @@ fn evidence_retention_removes_only_verified_finished_runs() {
     let deployment = deployment_fingerprint(&config).unwrap();
     let store = TaskEvidenceStore::from_config(&config).unwrap();
     let tracker = EmbeddedTaskTracker::new(object_store_from_config(&config).unwrap(), deployment)
-        .with_history_scope(penelope_core::task::Digest::of(b"retention scope"));
+        .with_history_scope(penelope::core::task::Digest::of(b"retention scope"));
     tracker
         .begin(
             "finished",
@@ -879,7 +883,7 @@ fn evidence_retention_removes_only_verified_finished_runs() {
     std::fs::write(
         root.path().join(format!(
             "chunks/_shardline_tasks/v1/runs/{corrupt_id}/artifacts/{}",
-            hex::encode(penelope_core::task::Digest::of(b"original").0)
+            hex::encode(penelope::core::task::Digest::of(b"original").0)
         )),
         b"tampered",
     )
@@ -919,7 +923,7 @@ fn evidence_retention_removes_only_verified_finished_runs() {
 
 #[test]
 fn interrupted_evidence_cleanup_resumes_without_replaying_work() {
-    use penelope_core::task::Digest;
+    use penelope::core::task::Digest;
     use shardline_storage::{ObjectPrefix, ObjectStore};
     // Crash after the marker, after hiding status, during artifact deletion,
     // and after all run objects were deleted but before clearing the marker.
@@ -959,7 +963,7 @@ fn interrupted_evidence_cleanup_resumes_without_replaying_work() {
         if boundary >= 2 {
             std::fs::remove_file(root.path().join(format!(
                 "chunks/{TASK_EVIDENCE_PREFIX}runs/{id}/artifacts/{}",
-                hex::encode(penelope_core::task::Digest::of(b"complete").0)
+                hex::encode(penelope::core::task::Digest::of(b"complete").0)
             )))
             .unwrap();
         }
@@ -1609,8 +1613,8 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
         observed.id = format!("observed-{}", observed.id);
         observed.operation = "observed-work-session".to_owned();
         observed.public_key = *key.verifying_key().as_bytes();
-        observed.scope.task = penelope_core::task::TaskId::from_digest(
-            penelope_core::task::Digest::of(observed.id.as_bytes()),
+        observed.scope.task = penelope::core::task::TaskId::from_digest(
+            penelope::core::task::Digest::of(observed.id.as_bytes()),
         );
         role_store
             .publish(

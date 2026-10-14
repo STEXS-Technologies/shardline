@@ -1,7 +1,7 @@
 use crate::ReliabilityError;
-use penelope_core::task::{Digest, TaskGeneration, TaskScope};
+use penelope::core::task::{Digest, TaskGeneration, TaskScope};
 use serde::{Deserialize, Serialize};
-use statechronicle_profile::StateProfile;
+use statechronicle::profile::StateProfile;
 
 /// Immutable maintenance artifact role; wire tags are pinned by schema one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

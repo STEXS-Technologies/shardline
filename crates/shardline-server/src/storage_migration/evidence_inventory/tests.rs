@@ -54,7 +54,7 @@ async fn remote_copy_reuses_legacy_manifest_and_preserves_unrecognized_bytes() {
         source_root.path().to_owned(),
     ))
     .unwrap();
-    let deployment = penelope_core::task::Digest::of(b"legacy-remote-copy");
+    let deployment = penelope::core::task::Digest::of(b"legacy-remote-copy");
     let unfinished = crate::task_tracking::EmbeddedTaskTracker::new(objects.clone(), deployment)
         .begin(
             "unfinished",

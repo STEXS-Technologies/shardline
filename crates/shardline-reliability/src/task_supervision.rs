@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use penelope_core::task::{TaskDefinition, TaskScope, TaskTick, runtime::TaskRuntime};
-use penelope_executor::task::{SupervisorError, TaskSupervisor};
+use penelope::core::task::{TaskDefinition, TaskScope, TaskTick, runtime::TaskRuntime};
+use penelope::executor::task::{SupervisorError, TaskSupervisor};
 
 use crate::SqliteTaskJournal;
 

@@ -67,7 +67,7 @@ fn automatic_report_limit_preserves_unresolved_work_and_existing_evidence() {
             .read(
                 &format!(
                     "runs/{oversized_id}/artifacts/{}",
-                    hex::encode(penelope_core::task::Digest::of(&vec![b'b'; 65537]).0)
+                    hex::encode(penelope::core::task::Digest::of(&vec![b'b'; 65537]).0)
                 ),
                 65537
             )
