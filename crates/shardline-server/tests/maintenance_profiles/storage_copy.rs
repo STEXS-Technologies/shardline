@@ -312,6 +312,44 @@ fn verify_copy_history(profile: CopyProfile) {
         bytes
     );
     if let Some(before) = archive_before {
+        if !completed {
+            let workspace = before
+                .keys()
+                .find(|path| path.file_name().is_some_and(|name| name == "tasks.sqlite"))
+                .and_then(|path| path.parent())
+                .expect("predecessor must retain its native journal");
+            let native = Command::new(&binary)
+                .env_clear()
+                .current_dir(source.path())
+                .args(["history", "--archive", "--root"])
+                .arg(workspace)
+                .output()
+                .unwrap();
+            assert!(
+                native.status.success(),
+                "{}",
+                String::from_utf8_lossy(&native.stderr)
+            );
+            let native_page: serde_json::Value = serde_json::from_slice(&native.stdout).unwrap();
+            assert_eq!(
+                native_page
+                    .pointer("/tasks/0/state")
+                    .and_then(serde_json::Value::as_str),
+                Some("needs_reconciliation")
+            );
+            assert_eq!(
+                native_page
+                    .pointer("/tasks/0/owner/pid")
+                    .and_then(serde_json::Value::as_u64),
+                Some(u64::from(child.0.id()))
+            );
+            assert_eq!(
+                native_page
+                    .get("native_journal")
+                    .and_then(serde_json::Value::as_bool),
+                Some(true)
+            );
+        }
         for (path, bytes) in before {
             assert_eq!(
                 fs::read(&path).unwrap(),

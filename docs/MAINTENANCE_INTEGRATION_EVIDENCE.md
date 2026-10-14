@@ -4940,3 +4940,39 @@ Logs: `/tmp/shardline-read-only-journal.log`,
 `/tmp/shardline-read-only-cli-clippy.log`. This establishes read-only handling
 for these native journal paths; it does not close the remaining predecessor,
 deployment or failure-phase audit.
+
+## Direct inspection when shared export failed
+
+`history --archive --root WORKSPACE` now recognizes an individual native
+workspace containing its saved identity and journal. It verifies the complete
+task projection, referenced blobs, signed checkpoints and materialized results.
+Isolated results also require matching captured stdout/stderr. The same state
+and recovery guidance are used as ordinary history. Inspection opens SQLite
+read-only with symlink refusal and performs no export or application execution.
+Existing journal file permissions are accepted inside their private owner-only
+directory; inspection does not chmod them.
+
+Five journal/export tests pass in 5.58 seconds. The new cases cover completed
+and interrupted unexported native histories, unchanged database bytes,
+single-workspace pagination, damaged materialized artifacts and damaged captured
+stdout. All 13 journal storage tests pass, including symlink refusal. Two actual
+CLI archive tests pass in 4.52 seconds: a real ordinary rebuild with denied
+shared export remains directly inspectable, while damaged result bytes are
+rejected. The initial full CLI run passed its 23 existing tests; its new fixture
+incorrectly expected an explicit runner to have automatic shared-history
+identity. The corrected fixture uses ordinary rebuild and passes its focused
+rerun. These results do not claim that the failed initial full run was green.
+
+The predecessor interrupted S3-to-S3 process fixture also passes in 5.06 seconds.
+The current debug binary inspects both shared archive metadata and the retained
+native workspace written by the earlier optimized branch binary, preserving
+all existing evidence bytes except SQLite SHM read-lock bookkeeping. It verifies
+the recorded PID and unresolved state; the later source object remains uncopied.
+The predecessor is the same `b8d56...` branch binary described above, not released
+1.11.3. This check extends the named legacy-archive proof without asserting that
+every older workspace layout is covered.
+
+Logs: `/tmp/shardline-native-archive-tests-final.log`,
+`/tmp/shardline-native-archive-journal.log`,
+`/tmp/shardline-native-archive-cli-focused.log` and
+`/tmp/shardline-native-archive-predecessor.log`.

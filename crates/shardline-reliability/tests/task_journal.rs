@@ -95,6 +95,12 @@ fn read_only_journal_preserves_evidence_and_rejects_creation_and_commit() {
     assert_eq!(std::fs::read(&empty).unwrap(), empty_before);
     let (writer, _) = started(&path);
     drop(writer);
+    #[cfg(unix)]
+    {
+        let alias = directory.path().join("alias.sqlite");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(SqliteTaskJournal::open_read_only(&alias, scope, definition).is_err());
+    }
     let before = std::fs::read(&path).unwrap();
     let mut reader = SqliteTaskJournal::open_read_only(&path, scope, definition).unwrap();
     let record = intent(scope, definition, input);

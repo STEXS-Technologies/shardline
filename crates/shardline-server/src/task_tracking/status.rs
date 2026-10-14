@@ -50,7 +50,9 @@ pub enum TaskRunState {
 }
 
 impl TaskRunState {
-    pub(crate) const fn next_step(self) -> &'static str {
+    /// Operator guidance for this evidence state; it never authorizes a retry.
+    #[must_use]
+    pub const fn next_step(self) -> &'static str {
         match self {
             Self::Pending => {
                 "No completion is recorded. Check the original command and logs before starting work again."
