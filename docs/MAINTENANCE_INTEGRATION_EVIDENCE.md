@@ -119,6 +119,41 @@ workspace admission limits. Log:
 does not replace the separately configured PostgreSQL process fixtures or
 establish that optional database-dependent tests exercised a live database.
 
+## Shutdown evidence map
+
+The final source review checks `app.rs`, `maintenance_barrier.rs` and
+`task_tracking/housekeeping.rs`. Normal shutdown marks optional housekeeping
+stopped before draining HTTP connections, retains the configured drain timeout
+and marks it stopped again on exit. Dropping the router also sets that flag.
+Retention and relocation check it between storage calls. The existing active
+call may finish; later cleanup uses the retained evidence. This is cooperative
+cancellation, not a mechanism to kill arbitrary filesystem or remote I/O.
+
+| Failure or replacement | Evidence | Required interpretation |
+| --- | --- | --- |
+| CLI process termination during recording or mutation | Current owned PostgreSQL receipt, repair, latest-pointer and derived-index cuts; current local CLI interruption tests | Preserve committed partial work and unresolved receipts. Inspection performs no replay. A fresh command discovers current work and gets a distinct identity. |
+| Container kill, replacement and normal SIGTERM | Current 11-case deployment verifier | Replacement keeps old unresolved evidence and starts only one server process. Later startup records fresh work. Normal SIGTERM exits successfully. |
+| Actual machine reboot | Current native VM verifier, with the unchanged released GC service | Boot identity changes; interrupted evidence and payloads survive. Cold startup does not resume an old GC; a fresh GC discovers the later orphan. |
+| Cross-host partition and node loss | Earlier optimized two-guest `node-loss` verifier | A live partitioned owner blocks the contender. Source guest death releases the backend owner; the independently admitted waiter completes. Saved old bytes remain unchanged. |
+| Cross-host coordination loss while source lives | Earlier optimized two-guest `connection-loss`, `repair-connection-loss` and `gc-connection-loss` verifiers | Losing the lock-owning session fails source metadata work without replacing that session. The distinct contender completes; repair preserves the expired hold. |
+| Current backend outages and remote faults | Current 12-case protocol/backend verifier plus current delete takeover drills | Current protocol operations reject lost ownership. An already-issued delete cannot be treated as cancelled merely because its owner disappeared. Matching trusted replies may settle it; unknown outcomes remain blocked. |
+| Router disappearance during history I/O | Four real HTTP/S3 housekeeping boundary tests | Stop before subsequent calls, allow an active call to finish, preserve metadata needed for fresh cleanup and retain ordinary application availability. |
+
+The four two-machine logs were re-inspected for their explicit PASS markers:
+`.codex/validation/ux-optimized-cross-host-{node-loss,connection-loss,repair-connection-loss,gc-connection-loss}.log`.
+They are historical optimized executions, not a claim that those four VM modes
+were rerun against the latest executable. Current process/VM/container/backend
+results are recorded in their separate evidence sections above. Together with
+the current source review they establish the named ownership and replacement
+contracts; they do not certify arbitrary deployment health.
+
+The work pool retains its original ownership connection and uses close-on-drop
+for cancellation. PostgreSQL server-side work can retain locks until its backend
+actually ends: the current mutation fixtures explicitly demonstrate that after
+CLI SIGTERM. A saved receipt never authorizes a replacement to continue an
+unknown external effect. These rules match the main guide's shutdown and
+retryable-delete guidance and require no separate worker service.
+
 This branch adds automatic task history to existing startup and maintenance.
 It is **not ready to merge**. The version stays unchanged; a version bump belongs
 in a separate PR.
