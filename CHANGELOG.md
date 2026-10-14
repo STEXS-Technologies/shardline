@@ -10,7 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Upgrade StateChronicle and Penelope integration dependencies to 0.2.0 while
   preserving existing reliability evidence encodings, Merkle envelopes, database
-  schemas, and upload/session recovery behavior.
+  domain records and compatible upload/session recovery behavior. The normal
+  PostgreSQL owner upgrade installs additive protection/history objects without
+  changing released migration-ledger entries; SQLite installs its compatibility
+  guards during initialization.
 - Adapt StateChronicle signing keys internally while retaining the existing
   public Ed25519 key API and zeroizing the temporary seed copy.
 
