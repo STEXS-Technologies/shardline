@@ -1,5 +1,10 @@
 # Maintenance integration: detailed evidence
 
+The [acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) records the
+completed integration review. This appendix retains the investigation history;
+older sections describing open work are dated evidence, not the final status.
+Use the concise [operator guide](MAINTENANCE_INTEGRATION_UX.md) for normal use.
+
 ## PostgreSQL derived-index interruption
 
 The owned PostgreSQL process-cut verifier now also passes three actual SIGTERM

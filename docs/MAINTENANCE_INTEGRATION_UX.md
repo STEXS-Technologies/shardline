@@ -13,8 +13,9 @@ Tracking runs inside these processes. You need no tracker service, extra port,
 new mount, schedule or configuration. Commands keep their live output and exit
 status. Your existing timer starts GC; starting the server does not start GC.
 
-**This branch is not ready to merge.** The version remains 1.11.3, with the version
-bump planned separately. See the [remaining checks](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
+The integration acceptance review is complete. The version remains 1.11.3, with
+the 1.11.4 version bump planned separately. See the
+[reviewed guarantees and limits](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
 
 ## What users gain
 
