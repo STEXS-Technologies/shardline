@@ -4706,3 +4706,15 @@ existing evidence while warning about unavailable optional recording
 (`/tmp/shardline-local-permissions.oNZN7H`). These checks cover CLI commands,
 not every embedded-library filesystem layout. The previous 23 deployment-fault
 results belong to the earlier executable, whose hash is recorded above.
+
+### Complete maintenance CLI suite after local ownership
+
+All 21 current `maintenance_e2e` scenarios pass on the pinned optimized executable
+with SHA256 `f66ee56e6c07669e9110efc3c35d00835f61f70aabf5b205c2598c8faf401ab4`
+(`/tmp/shardline-local-owned-release.7D3Ad9/maintenance-cli.log`, 4.088 seconds).
+Nextest reports zero skipped tests. This includes the new post-copy result faults,
+existing controller death, ordinary GC interruption after effects/report,
+fresh-run allocation, same-process execution, explicit configuration, non-UTF8
+paths and restricted-root behavior. These executable results supplement the
+focused local upload ownership and cancellation tests; broader deployment
+and remaining merge-gate requirements still need their own evidence.
