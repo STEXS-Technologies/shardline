@@ -1,253 +1,31 @@
 # Maintenance integration: merge checklist
 
-**Not ready to merge.** The normal process model is implemented, but the full
-rollback audit remains open. Readiness-based testing found that released 1.11.3
-could falsely complete a new scoped file intent from a same-name default file.
-The compatibility guard now preserves all four unfinished states in both scoped
-and default namespaces during actual released-server startup on PostgreSQL and
-SQLite. Legacy control records still recover, and current recovery remains
-functional. The earlier listener-based pass is superseded: it stopped too early.
-Remaining deployment combinations and overall startup cost still need review.
-Normal router startup now defers eligible file-byte verification to its own
-process lifetime. Held-read fixtures cover 65 MiB files across multiple containers
-on SQLite and PostgreSQL for all three server roles. Startup still checks saved
-evidence and candidate metadata; these fixtures do not bound all startup work.
-Native shard reuse across repositories is now fixed and tested on both metadata
-backends, including retries alongside older unfinished history. Actual released
-startup preserves all four new native checkpoints in default and scoped
-namespaces, with both present and missing physical request objects.
-Canonical xorb retry identity now uses the stored length rather than footerless
-wire length. Both backends cover retry and recovery at every unfinished
-checkpoint; actual released startup also preserves the new xorb histories with
-physical bytes present or missing.
-
-The full compatibility and failure audit is still open. The version remains 1.11.3;
-the version bump belongs in a separate PR.
+**The integration and UX acceptance review is complete.** The branch is ready
+for PR review under the upgrade and recovery rules below. It has not been merged
+or deployed. The version remains 1.11.3; the 1.11.4 version bump belongs in a
+separate PR.
 
 For operators, read [Maintenance without another service](MAINTENANCE_INTEGRATION_UX.md).
-For test details and commands, read the [evidence appendix](MAINTENANCE_INTEGRATION_EVIDENCE.md).
+For source reviews, executed checks and reproduction commands, read the
+[evidence appendix](MAINTENANCE_INTEGRATION_EVIDENCE.md). The appendix preserves
+historical findings, including gaps subsequently resolved; this checklist is
+the final acceptance assessment.
 
 ## Experience that must remain simple
 
-Keep using the existing server command, maintenance commands and GC timer.
-Normal tracking runs inside their existing process. It adds no service, port,
-mount, schedule or operator-selected task ID. Every scheduled invocation starts
-fresh work; saved history never replaces a new scan.
+Keep the existing server commands, maintenance commands and GC timer. Tracking
+runs inside their existing process. It adds no service, port, mount, schedule or
+operator-selected task ID. Server startup does not start destructive GC. Every
+scheduled invocation performs fresh work; saved history never replaces a scan.
 
-The optional `shardline maintenance ...` runner can use a child for deadlines
-and CPU limits. Those controls do not apply to ordinary commands.
-
-Tracking must preserve command output, exit codes, configuration handling,
-diagnostic exports and existing safety barriers. Failure to save optional
-history produces a warning, not a verified completion or an automatic retry.
-
-## What has been tested
-
-These results cover named fixtures. They do not certify every deployment.
-
-| Area | Verified behavior | Limit |
-| --- | --- | --- |
-| Startup | Normal commands initialize tracking in the existing process. All four metadata/payload combinations cover all three roles. The PostgreSQL/S3 process fixture uses ordinary `serve`, separate node roots, existing metadata grants and credentials denied S3 task writes. Public embedding preserves application logging and performs fresh sweeps. | These cover the supported backend/role matrix; nonstandard filesystem and tenant-policy configurations retain their separate compatibility audit. |
-| Existing commands | Released/current comparisons preserve output, status, configuration errors, diagnostic exports and restricted-root behavior. Both ordinary repair forms pass. The released systemd GC service runs with its original restrictions. | Comparisons cover the named commands and configurations. |
-| Fresh work | Consecutive invocations discover new work and produce distinct results. Completed history does not replace a scan. | An explicit retry still requires investigation of uncertain effects. |
-| Optional recording failures | Admission and final-recording faults preserve tested CLI work, startup LFS/S3 cleanup and Hub secret upgrades. Destination-history failure preserves a local storage copy. | These are specific fault points, not every external-mutation phase. |
-| Shared ownership | Configured PostgreSQL and process drills reject stale owners on covered file, dedupe, reconstruction, stored-object, OCI and S3 paths. | Metadata-only library APIs require caller-held ownership and storage validation. |
-| Uncertain deletes | Covered writes return retryable errors. Saved successful replies settle matching attempts without another user-object delete. Missing replies remain blocked. | Older GC does not create the new markers; pause it during upgrade and rollback. |
-| Backing data | Staged and native PostgreSQL publication fixtures reject missing physical data and roll back metadata. Stale Repeatable Read/Serializable snapshots require fresh transactions. | Local-CAS interleavings do not establish every remote-S3 fault or legacy reference layout. |
-| Interruption and replacement | Named process, reboot, container, cross-host and connection-loss drills preserve unfinished evidence and fresh takeover. The optional Linux child stops with its controller. | Phase-by-phase coverage and remaining deployment layouts stay open. |
-| Shutdown | Optional cleanup stops between storage calls when draining begins or the router is dropped. Partial cleanup resumes later. | Active storage I/O may finish; ordinary application work is not cancelled by this flag. |
-| History capacity | Separate optimized SQLite and PostgreSQL tests fill all 4,096 slots. Automatic cleanup retires 4,094 completed runs in 97 calls, within the per-call artifact limit, preserving unresolved evidence and user data. Fresh recording succeeds. | Logical limits do not bound physical disk use, inventory latency or production cost. |
-| Upgrade and rollback | Named mixed-node fixtures preserve domain data, migration records and existing runtime grants before and after owner setup. Historical signed evidence verifies without rewriting. | Remaining legacy and deployment combinations require review. |
-| Operator guidance | HTTP tests distinguish readiness, failed jobs, corrupt or unavailable history, full recording capacity and pending deletes. The read-only `history` CLI includes pending-delete inspection without enabling the admin API or configuring the optional runner. The guide gives actions for each. | Historical completion does not certify current deployment health. |
-
-The optimized deployment evidence includes all 23 fault scenarios across two
-complementary runs of the same binary. After the native recovery correction,
-the optimized CLI suite passes all 23 scenarios, including destination-history
-failure after successful copying and process termination during copying or
-after its report is saved.
-These counts supplement the behavior checks above and do not close a gate on
-their own.
-
-The existing local benchmark comparison covers concurrency 1, 32 and 128 with
-matching report schema and non-performance counters. A 4,096-entry GC mark-only
-comparison preserves diagnostics larger than 1 MiB. Neither establishes
-distributed performance or safe reclamation for every legacy layout.
-The configured PostgreSQL/local-storage benchmark also preserves workload
-counters and settings at concurrency 1, 32 and 128 after automatic public upload
-ownership. Embedded cancellation releases the GC barrier in its configured
-fixture. These results do not establish remote-storage cost or a production SLO.
-
-See the appendix's [test table](MAINTENANCE_INTEGRATION_EVIDENCE.md#what-has-been-tested)
-and [reproduction commands](MAINTENANCE_INTEGRATION_EVIDENCE.md#reproducing-the-machine-tests)
-for exact fixtures, historical measurements and their boundaries.
-
-## Known gaps
-
-The following still need implementation or stronger evidence before merge:
-
-- **Legacy copy archives and configuration combinations.** New S3-to-S3 copies
-  now use normal local project metadata; a cold-start MinIO fixture verifies
-  ordinary history inspection without worker setup. Unsafe history paths warn
-  while preserving successful copying. Existing host-private archives remain
-  preserved. Explicit owner-only archive inspection now verifies completed and
-  interrupted metadata histories from the predecessor binary without rewriting
-  their files or replaying copying. An individual native workspace can also be
-  inspected directly when shared export failed. Current completed/interrupted
-  fixtures and the predecessor's interrupted MinIO copy preserve native evidence
-  and expose verified state without export or replay. Remaining legacy layouts
-  and deployment/configuration combinations still belong to the audit.
-  Endpoint-only copy history now has an explicit `history --local` inspection
-  mode, independent of server PostgreSQL settings. The local-copy CLI comparison
-  preserves normal history's configured database scope and checks the local
-  mode without initialization or replay; remote-copy coverage is recorded in
-  the evidence appendix.
-
-  Remote legacy-history recognition now reuses one immutable manifest within a
-  copy rather than rereading it for every run artifact. An actual HTTP/S3 client
-  fixture preserves dry-run counts, payload bytes and arbitrary malformed legacy
-  objects while reducing manifest requests from 136 to 2 for its unfinished run.
-  The cache retains only one recognized run and is discarded after each copy;
-  it does not add a limit to the copied inventory or establish cloud latency.
-
-- **Remaining write paths and older GC.** Some library callers and references
-  hidden inside legacy payloads do not use the covered ownership checks.
-  Direct Postgres file, dedupe, reconstruction and stored-object reference
-  publication is covered; this gap concerns paths outside those boundaries
-  and references not visible in the protected metadata.
-  In particular, lower-level `PostgresRecordStore` methods publish metadata
-  without inspecting object storage. The plain `commit_native_shard_metadata`
-  entry point also supplies no caller-derived physical reference keys; the
-  server uses the connection-bound variant with those keys and checks backing
-  bytes in its publication transaction. Database reference protection alone
-  does not prove storage presence for library callers.
-  The metadata-only API also exists in released 1.11.3: its native commit writes
-  records and mappings in a database transaction without an object-store input.
-  This is an existing guarantee boundary, not evidence that the integration
-  introduced missing-content publication. It still limits the stronger guarantee
-  this branch can promise to library users.
-  Raw-xorb, native-shard and digest-checked file request uploads now create,
-  read and advance their intents on the original request-owned database
-  connection. A lost connection
-  cannot be replaced to finish that request's bookkeeping. Detected owner loss
-  returns HTTP 503 with `Retry-After: 1`; the client must make a fresh request.
-  Public `PostgresBackend::upload_file` and `upload_xorb` calls now establish
-  their request-owned session automatically. Nested calls reuse the existing
-  session and reject its loss rather than acquiring a replacement. Lower-level
-  metadata APIs and startup reconciliation retain their existing pool-based
-  APIs and require the caller's applicable ownership checks.
-  Public local file and xorb uploads also acquire the existing shared filesystem
-  GC barrier automatically, before payload writes. Local embedding therefore
-  needs no caller-managed lock for those upload methods. Lower-level metadata
-  methods remain outside this high-level upload boundary.
-  Both public upload methods cancel while waiting for GC without leaving a
-  waiter or writing payloads. A subsequent exclusive GC and file upload succeed.
-  With a pre-existing writable barrier and live SQLite WAL/SHM files, both
-  methods also succeed under a 0555 metadata root without changing its mode.
-  Initialization now prepares the existing barrier automatically before a root
-  is restricted; both public upload methods remain usable afterward. Preparation
-  does not wait for or release an existing GC owner. A legacy root already
-  restricted without its barrier also retains guarded file and xorb uploads on
-  Linux when its SQLite files and payload directories remain writable. A
-  released 1.11.3 SDK fixture confirms that layout supported uploads. Current
-  owners additionally lock the existing root directory, retaining the legacy
-  file lock when available. This creates no root entry or permission change and
-  prevents a later lock-file creation from splitting current ownership. Existing
-  legacy file owners still block current writers. A real Linux read-only bind
-  mount also preserves released SDK file uploads when existing SQLite/WAL/SHM
-  files and chunks are mounted writable beneath it, with no legacy barrier file.
-  The current directory guard remains held when file creation returns EROFS.
-  The mounted comparison also covers an existing legacy lock file. Linux owners
-  open that file read-only when required and still wait for its owners; they
-  do not bypass it or require a writable mount.
-  Other permission and
-  filesystem layouts remain part of the compatibility audit.
-  Plain file requests without upload intents also check their original session
-  before body ingestion and after ingestion. Publication failures check that
-  same session to return retryable ownership loss without reacquiring it.
-  Upload progress is not proof that bytes still exist. Native file publication
-  checks backing data in its publication transaction; raw xorbs store immutable
-  bytes without publishing file metadata. GC uses file records and dedupe
-  mappings as reachability authority, and reconciliation never publishes files
-  solely from an intent. Already-active remote storage calls may still finish
-  after connection loss. Broader mutation coverage remains part of this audit.
-  File-intent recovery now preserves attempts without a `Stored` checkpoint.
-  For later attempts with a verifiable scope, it checks the published bytes against the
-  saved SHA-256 before completing progress. New scoped file intents now preserve
-  exact repository components and recover within that scope. Unrelated or
-  missing file metadata cannot settle a logical file intent. Ambiguous legacy
-  scoped identities remain preserved. Actual released-server startup preserves
-  new scope evidence with the compatibility guard installed. Router-owned file
-  verification now runs outside readiness startup; all-role SQLite/PostgreSQL
-  fixtures cover multi-container 65 MiB files. Larger backlogs, remote-storage
-  cost and remaining deployment combinations still need review.
-  An older GC binary does not establish the current remote-delete markers.
-- **Uncertain remote outcomes.** Missing or invalid delete replies leave an
-  object blocked. Object absence alone cannot safely clear it. Recovery and
-  remote effects outside the covered paths need further checks.
-- **Scale and retained history.** Bounded pages are tested; whole-operation cost,
-  larger reports, broad deployment performance and total unresolved-history
-  growth are not fully established. Automatic private-workspace admission is
-  limited to 4,096 slots, preserving evidence and falling back to shared history;
-  active private workspaces and retired scratch now share that limit. Shared
-  metadata has its own 4,096-run automatic-admission budget, with new artifacts
-  limited to 64 KiB. Existing evidence and explicit legacy imports remain
-  unrestricted. These are logical admission limits, not physical disk limits;
-  whole-operation cost and broader scaling remain open.
-  Metadata fixtures with 132, 1,026 and 4,096 runs
-  drain completed history in batches while retaining unfinished and corrupt history, but
-  retention and legacy inspection still walk the inventory.
-  Automatic retention now retires at most 256 run-artifact keys per invocation,
-  leaving a marker so larger histories continue later. This limits deletion
-  work, not inventory latency or active storage-call duration.
-  A separate optimized SQLite fixture now exercises this automatic API at all
-  4,096 occupied slots: 97 cleanup calls retire 4,094 verified completed runs,
-  with per-call artifact limits, unresolved histories, payload preservation
-  and fresh admission checked. The corresponding optimized PostgreSQL automatic
-  cleanup fixture also passes at all 4,096 slots, retiring 4,094 completed runs
-  in 97 calls with the same preservation and per-call budget checks. Earlier
-  compatibility cleanup fixtures remain separate.
-  Retention now stops both metadata and legacy traversal when its artifact
-  budget is reached. History pagination keeps its full unordered legacy scan
-  to preserve page ordering. This removes work after a retention budget break;
-  selecting eligible histories and reaching that break can still require
-  inventory scans, so it does not establish a whole-operation latency bound.
-  A separate legacy object-store fixture retires one completed run with over
-  10,000 artifacts across 40 calls, reopening the history store each time.
-  It checks the 256-key budget, resumable markers and unchanged unfinished
-  evidence, corrupt history and user payload. A separate legacy archive fixture
-  paginates all 1,026 distinct histories exactly once, then incrementally retires
-  1,024 finished runs while preserving unfinished and corrupt history and user
-  payload. Neither fixture establishes production latency or broader cost.
-  Local prefix traversal now skips unrelated directories. The optimized
-  1,026-history fixture preserves the same pagination and cleanup assertions,
-  with 24 cleanup calls before and after the change; measured cleanup falls
-  from 186.46 to 5.39 seconds in this local fixture. Eligible history scans,
-  larger inventories and remote deployment cost remain open.
-  An optimized ordinary CLI fixture verifies exact
-  256-key progress over two invocations, released output/status and unchanged
-  payload bytes. Metadata inspection
-  stops after its eligible page is settled, but filtering unrelated history can
-  still require a longer scan; bounded output does not bound latency.
-  A real HTTP fixture now checks the legacy fixed/compressed chunk read budget:
-  four requests for two chunks, and two for a selected file range. GET response
-  metadata replaces a redundant HEAD while retaining full stored-length checks.
-  These request counts do not establish cloud latency or a production SLO.
-- **Remaining deployment layouts.** Work-specific database/schema routing,
-  row policies, narrower accounts, library embedding and legacy history need
-  coverage beyond the passing fixtures. A configured PostgreSQL inspection test
-  now verifies a login with only existing schema usage and reliability-table
-  SELECT: it reads completed history, cannot access the artifact table directly
-  or another schema, and leaves saved evidence unchanged. This covers that
-  account configuration. Enabling a deny-all row policy on ordinary metadata
-  then disables shared inspection, exposes the unavailable-history warning and
-  preserves evidence; arbitrary tenant policy combinations remain unverified.
-  Corrupt, unfinished or
-  unrelated legacy objects can still enter an older raw storage copy.
+Ordinary commands keep live output, diagnostic destinations and their operation
+result. Optional recording failure warns without falsely confirming completion
+or repeating work. The optional Linux `shardline maintenance` child supplies
+explicit deadlines and CPU limits; ordinary execution has no tracker deadline.
 
 ## Eight merge gates
 
-All eight remain the completion criteria. No gate is closed by a dependency
-upgrade, a test count or the optional runner alone.
+The original eight requirements remain the completion criteria:
 
 1. Unmodified server commands and manifests initialize tracking automatically.
    Cover local metadata, Postgres/S3, server roles and library embedding without
@@ -271,144 +49,75 @@ upgrade, a test count or the optional runner alone.
 
 ## Current gate audit
 
-SQLite and PostgreSQL receipt faults now cover each admission record, report
-materialization and completion acknowledgement. The PostgreSQL fixture also
-checks exact database row counts after each rejected write. This closes that
-specific evidence gap; external-mutation and process-interruption coverage is
-still required by gate 5.
+All eight pass for the reviewed integration contracts. Passing does not certify
+arbitrary external deployments or remove the explicit limits below.
 
-Ordinary local storage-copy process termination is now covered after an actual
-destination write and after report materialization, before completion
-acknowledgement. Both cuts preserve copied data and unresolved history, and
-inspection does not resume copying. A separate MinIO fixture now proves the
-local-to-S3 cut after an accepted PUT but before its response: source-root
-inspection exposes unfinished history without replay. S3-to-S3 accepted-PUT
-interruption and cold-start inspection also pass. Actual SIGTERM cuts now cover
-both source types after the accepted PUT and after report materialization but
-before completion acknowledgement. The report cuts retain exactly three native
-records and unresolved shared history. A separate S3-to-S3 SIGTERM cut now holds
-the source inventory response after the three starting records are committed,
-before any destination write. Inspection preserves that checkpoint and exposes
-unresolved history without copying either the original or a later source object.
-Actual local-copy SIGTERM cuts also cover zero, one and two committed starting
-records. Native archive inspection reports pending before execution is committed
-and needs reconciliation after the started record, preserves database/WAL and
-identity bytes, and performs no destination writes. The same zero/one/two-record
-process cuts now cover fsck, index rebuild, GC mark and both repair command forms.
-Each checks its operation identity, preserves native evidence and leaves user
-payload unchanged. Domain-mutation and external-effect coverage across remaining
-operations still belongs to the phase audit.
+| Gate | Acceptance evidence |
+| --- | --- |
+| 1: automatic startup | SQLite/local, SQLite/S3, PostgreSQL/local and PostgreSQL/S3 cover All, API and Transfer roles. Public embedding preserves application logging. Ordinary nodes share PostgreSQL history across separate roots, record server PIDs, perform fresh sweeps and need no tracker child, mount or S3 task-write permission. |
+| 2: existing command behavior | Released/current comparisons cover twenty invalid-configuration cases, five restricted-root command forms, read-only SQLite fsck, diagnostics larger than 1 MiB, S3 copying/rollback and removed working directories. The unchanged released GC unit passes under its original systemd restrictions. Original output/result are preserved; optional recording warnings remain visible. |
+| 3: fresh work and ownership | Later orphans, expired holds, versions and retained shards are discovered by fresh invocations. Concurrent ordinary rebuilds serialize through maintenance ownership. Completed history is never execution authority. High-level upload and metadata-only ownership boundaries have a source-backed review. |
+| 4: capacity and cleanup | Current optimized SQLite/PostgreSQL drills fill all 4,096 slots and retire 4,094 finished runs in 97 bounded calls, preserving unresolved evidence and payloads. Legacy tests cover 1,026 runs and 10,000 artifacts. Workload comparisons at concurrency 1, 32 and 128 preserve stable counters/settings. Source review verifies fallback, live-output handling and documented limits. |
+| 5: interruption safety | Native admission/checkpoint and completion-before-shared-ack cuts cover tracked command forms. PostgreSQL adds 25 receipt cuts, partial repair, latest-pointer and three derived-index mutation cuts. Local mutations, accepted remote copy PUTs, source inventory and reports have process cuts. Delete acknowledgement loss, delayed takeover and saved-reply recovery preserve uncertainty without replay. Optional controller death terminates its child and retains unresolved effects. |
+| 6: replacement and shutdown | Current process cuts, container replacement, SIGTERM, real VM reboot and backend faults pass. Four earlier optimized two-machine drills cover partitions, node loss and rebuild/repair/GC connection loss while the source lives. Current source review verifies nonreplaceable ownership and cooperative history shutdown; active calls may finish. |
+| 7: mixed versions and rollback | Actual released/current overlap, owner setup and rollback preserve payloads, compatible writers, migration records and runtime grants. Released startup preserves all four unfinished file/native/xorb checkpoints across scoped/default identities and present/missing bytes. Predecessor archives verify read-only without rewriting. The destructive-GC pause remains mandatory. |
+| 8: operator distinctions | Readiness, failed optional work, corrupt/full/unavailable history and pending deletes have distinct responses/actions. The current walkthrough runs startup, fsck, repair, GC and history, verifies state/next_step fields and direct SIGTERM. Inspection/recovery need no admin API or worker setup. |
 
-An additional actual-process cut covers fsck, rebuild, GC mark and both repair
-forms after durable native completion but before shared publication acknowledgement.
-Ordinary history stays unresolved; explicit native inspection verifies completion
-without changing the journal. The next ordinary invocation exports the verified
-old result, retires its private scratch and records a separate completed run.
-User payload is preserved. Domain-specific mutation cuts remain in the phase audit.
-Lifecycle repair now also has six actual SIGTERM mutation cuts: expired holds,
-missing-object quarantine entries and stale webhook deliveries for both command
-forms. Each preserves the committed first change, rolls back the interrupted
-second transaction, verifies surviving evidence and starts fresh recovery without
-changing the old unresolved receipt. Other operation-specific cuts remain open.
-The ordinary GC mutation/report interruption fixture now also runs a fresh GC
-after its read-only inspection. That GC marks a later orphan absent from the
-interrupted run, preserves the original quarantine entry and payload bytes,
-and records a separate completed run while the old run remains unresolved.
-An actual SIGTERM during latest-pointer rebuild now preserves a committed
-pointer and rolls back the interrupted next write. Immutable versions and
-payload remain readable; fresh rebuild also discovers a later version. The
-earlier receipt remains unresolved. Three more actual SIGTERM cuts cover stale
-reconstruction pruning, stale dedupe pruning and dedupe restoration from retained
-shards. They preserve partial progress and payloads, discover new work on the
-next rebuild and retain the old unresolved receipt. Other backend and remote
-mutation combinations remain in the operation-specific audit.
-An owned PostgreSQL process fixture now also covers five shared-recording cuts
-for each of those five ordinary command forms. It verifies exact native/shared
-progress, read-only inspection and a distinct fresh run after actual SIGTERM.
-The fixture explicitly cancels its injected server-side sleep; it does not
-establish immediate cancellation of arbitrary remote I/O when a client exits.
-A PostgreSQL partial-repair cut also verifies that a competing exclusive rebuild
-waits while the interrupted command's database session still owns maintenance.
-After the fixture cancels that session's paused query, rebuild succeeds. A fresh
-repair handles remaining and newly expired holds, preserves protected payloads
-and leaves the interrupted receipt unresolved. Other mutation paths remain open.
-The shutdown audit found and fixed a legacy-history boundary: shutdown during
-an S3 metadata lookup previously allowed a subsequent body download. Four real
-HTTP/S3 client cases now cover metadata lookup, active body download, absence
-checking before publication and deletion before metadata cleanup. They verify
-stopping before subsequent calls while permitting an active call to finish,
-preserving metadata for fresh cleanup and leaving ordinary reads available.
-These cases do not establish cancellation of arbitrary active storage I/O.
+All 23 named current deployment drills pass across two complementary runs of the
+same production binary. The current CLI harness passes 34 ordinary tests; four
+owned PostgreSQL tests run separately without selected skips. The maintenance
+unit selection passes 42 tests. Counts supplement operation-specific evidence.
+Historical two-machine runs are identified explicitly, rather than described as
+latest-binary executions.
 
-| Gate | Finding | Evidence and remaining work |
-| --- | --- | --- |
-| 1: automatic startup | Verified for ordinary startup, the backend/role matrix and public embedding. | Current fixtures cover SQLite/local, SQLite/S3, PostgreSQL/local and PostgreSQL/S3 across All, API and Transfer roles. Ordinary PostgreSQL/S3 processes share history across separate roots, record their server PIDs, perform fresh sweeps, preserve payloads and start no tracker child or GC. The runtime role lacks direct task-table grants and cannot write S3 task objects. Public-library startup preserves application logging and needs no worker setup or new mount. Unusual filesystem layouts and tenant policies remain in the separate compatibility audit; startup cost remains in gate 4. |
-| 2: existing command behavior | Named released/current comparisons pass; full compatibility audit remains open. | Current optimized comparisons preserve stdout, stderr and status for twenty configuration failures across fsck, rebuild, GC and both repair forms. Five restricted-root forms, fully read-only SQLite fsck, large diagnostic exports and actual S3 copy/rollback pass. S3 copying also preserves released behavior when the working directory has been removed. Native archive inspection leaves journal and identity bytes unchanged. Current-binary revalidation passes with the byte-identical released GC service and its original systemd restrictions, including real guest reboot cuts. Remaining supported deployment combinations retain their separate audit. |
-| 3: fresh work and ownership | Fresh discovery verified; concurrency evidence covers named workflows. | The optimized ordinary GC fixture discovers an orphan added after its previous completion, marks it and records a distinct result. Current configuration tests preserve admitted targets and isolate parallel invocations. PostgreSQL rebuild and takeover drills establish ownership for their named paths; the remaining write-path audit still limits broader claims. |
-| 4: capacity and cleanup | Full SQLite/PostgreSQL capacity, legacy archives and bounded atomic cleanup pass; cost review remains open. | Both current 4,096-slot release drills preserve unresolved evidence and payload bytes, including PostgreSQL after publication locking. SQLite and PostgreSQL second-batch failures preserve resumable retirement. Current optimized checks also cover 1,026 legacy runs and a 10,000-artifact legacy run. Released/current workload comparisons pass at concurrency 1, 32 and 128. These observations do not establish a latency bound or physical disk quota; the remaining review must identify any integration overhead that can block ordinary work. |
-| 5: interruption safety | Named interruption and remote-delete faults pass; the phase-by-phase audit remains open. | Lost acknowledgements, denied saved replies, interrupted history retirement and process termination have passing fixtures. Remaining work must account for admission, checkpoint, mutation, report proposal and completion acknowledgement across supported operations, including the remaining library write paths. |
-| 6: replacement and shutdown | Named node-loss, ownership-loss and replacement drills pass; coverage remains open. | Container replacement, SIGTERM, native reboot and cross-host/connection-loss fixtures distinguish unfinished work from completion. Cooperative history shutdown and fresh cleanup resumption pass. Remaining layouts and active storage-call shutdown behavior still need review. |
-| 7: mixed versions and rollback | Named rollout and rollback fixtures pass; the remaining compatibility audit stays open. | Existing domain formats, migration records and runtime grants survive the tested upgrades and rollback. Older GC must remain paused until job binaries are replaced; it does not create the new delete markers. Remaining legacy histories and deployment layouts still need review. |
-| 8: operator distinctions | Response contract and documented recovery guidance verified. | Current HTTP tests distinguish degraded readiness, failed optional work, corrupt history, full recording capacity and unavailable delete inspection. A configured PostgreSQL test checks pending-delete pagination, guidance and preservation of markers. The operator guide maps each case to an action without dependency internals. This does not certify cluster health or close the safety and scale gates. |
+## Completed focused reviews
 
-The [gate-audit evidence](MAINTENANCE_INTEGRATION_EVIDENCE.md#startup-and-operator-gate-audit)
-records the executed checks. Gates 2–7 retain their requirements above and remain
-open until their remaining compatibility, failure and cost evidence is complete.
-
-### Remaining merge assessment
-
-The remaining review is bounded to the integration's existing contracts. Each
-item below must produce a source-backed finding and a link to the relevant
-evidence before its gate can close. Passing another general deployment drill
-does not replace these findings.
-
-| Item | Required finding | Gates |
-| --- | --- | --- |
-| PostgreSQL derived-index interruption: verified | Three actual SIGTERM cuts cover partial reconstruction pruning, dedupe pruning and dedupe restoration. Each preserves payloads and native evidence, leaves the old run unresolved and discovers later work on fresh rebuild. See the PostgreSQL derived-index interruption evidence. | 3, 5 |
-| Public write boundaries: reviewed | Public local and PostgreSQL file/xorb uploads acquire protection automatically; the public client delegates to those methods. HTTP streamed writes use the outer request owner. PostgreSQL server publication checks backing objects before committing on that connection. Metadata-only store APIs retain caller ownership and storage-validation responsibilities. See the public write-boundary inventory in the evidence document and the library guidance in the reliability architecture. | 3, 5 |
-| Ordinary-command overhead: reviewed | Admission failures fall back before the original handler; report/acknowledgement failures preserve its result without replay. Live output bypasses the saved scalar receipt and normal execution has no tracker CPU/deadline limit. PostgreSQL evidence calls have individual five-second timeouts. Admission and automatic cleanup have count/byte budgets, but inventory and active storage calls have no total latency bound. Existing capacity, legacy and workload measurements support correctness, not a zero-overhead claim. See the overhead review in the evidence document. | 2, 4 |
-| Shutdown and ownership loss: reviewed | Current CLI mutation cuts, container replacement, native reboot and backend-kill drills preserve unresolved evidence and perform fresh work. Four earlier optimized two-machine drills separately establish partitioned-owner blocking, node loss and rebuild/repair/GC connection loss. Source review confirms nonreplaceable work sessions and cooperative housekeeping cancellation. Active remote calls may finish; unknown delete results stay blocked pending reconciliation. See the shutdown evidence map. | 5, 6 |
-| Upgrade and rollback inventory: reviewed | The four backend layouts and three roles have startup evidence. Actual released/current overlap, owner setup and rollback preserve payloads, writers, migration records and grants. Native archive inspection preserves predecessor bytes. Destructive GC remains paused during rollout/rollback; storage cutover still requires writer/GC coordination. Restricted-root and tenant-policy outcomes are documented without promising arbitrary filesystem locking or policy access. See the rollout evidence map. | 2, 7 |
-| Final operator walkthrough: verified | Current ordinary serve, readiness, fsck, repair, mutating GC, history and pending-delete inspection run successfully in an owned local fixture; history exposes completed state and string next_step fields, and direct SIGTERM exits successfully. Retryable errors and pending-delete recovery are backed by the existing response/fault fixtures. The main guide retains the simple commands and recovery actions. | 2, 8 |
-
-Cluster-wide exactly-once execution, cancellation of arbitrary active remote
-I/O, a physical history disk quota and certification of a user's deployment
-health are not established by this integration. They must not appear as product
-guarantees. Any finding that weakens an existing supported contract requires a
-fix and appropriate verification before merge.
+| Review | Evidence |
+| --- | --- |
+| PostgreSQL derived-index interruption | [Three actual mutation cuts](MAINTENANCE_INTEGRATION_EVIDENCE.md#postgresql-derived-index-interruption). |
+| Public write boundaries | [Entry-point inventory](MAINTENANCE_INTEGRATION_EVIDENCE.md#public-write-boundary-inventory) and [library guidance](RELIABILITY_ARCHITECTURE.md#library-upload-guarantees). |
+| Ordinary-command overhead | [Fallback, output and resource review](MAINTENANCE_INTEGRATION_EVIDENCE.md#ordinary-command-overhead-review). |
+| Shutdown and ownership loss | [Failure/replacement evidence map](MAINTENANCE_INTEGRATION_EVIDENCE.md#shutdown-evidence-map). |
+| Upgrade and rollback | [Backend, grants and rollout map](MAINTENANCE_INTEGRATION_EVIDENCE.md#rollout-evidence-map-and-operator-walkthrough). |
+| Operator walkthrough | [Executed commands and response checks](MAINTENANCE_INTEGRATION_EVIDENCE.md#rollout-evidence-map-and-operator-walkthrough). |
 
 ## Ownership and recovery rules
 
-The operation audit must preserve these distinct ownership rules. The common
-receipt tests do not replace operation-specific mutation checks.
+| Operation | Owner and recovery |
+| --- | --- |
+| Fsck | Diagnostics; inspection does not resume domain work. |
+| Index rebuild | Exclusive maintenance owner. Transactions may commit partial progress; fresh rebuild rediscovers current inputs. |
+| Lifecycle repair | Shared protection and existing row conditions; not every repair is serialized. Fresh repair handles current eligible rows and trusted saved replies. |
+| Mutating GC | Exclusive owner, durable remote-delete attempts and reference protection. Unknown outcomes block affected writes. Trusted matching replies can settle attempts without another user-object delete. |
+| Storage copy | Existing cutover contract: callers coordinate writers and GC. History adds neither a cluster cutover lock nor automatic replay. |
+| Server startup sweeps | Existing server owns fresh cleanup. Replacement records its own run and retains uncertain foreign history. |
 
-| Ordinary operation | Effect and owner | Current interruption evidence |
-| --- | --- | --- |
-| Fsck | Diagnostics; no domain mutation to replay. | Native admission and native-completion/shared-acknowledgement cuts; five PostgreSQL receipt-publication cuts. |
-| Index rebuild | Exclusive local or PostgreSQL maintenance ownership; mutations remain in existing index transactions. | Actual partial latest-pointer cuts and three derived-index mutation cuts on both SQLite and PostgreSQL; concurrent ordinary rebuilds; PostgreSQL session retention and receipt cuts. The public write-boundary review remains open. |
-| Repair, including explicit lifecycle repair | Shared maintenance ownership and existing operation-specific transactions. | Six actual local lifecycle mutation cuts; PostgreSQL partial-repair/session-retention cut; receipt cuts for both forms. Shared ownership does not serialize all repairs. |
-| GC mark/sweep | Exclusive scan ownership; protected remote deletes additionally retain attempt/fence state. | Local mutation/report cuts and fresh discovery; actual remote deletion with lost acknowledgement, saved-reply/database-outage recovery and takeover; real reboot cuts. Remaining physical-storage/reference layouts need review. |
-| Storage copy | Existing copy/cutover contract: callers coordinate writers and GC. Tracking does not add cluster-wide cutover ownership. | Local destination mutation/report cuts; actual accepted S3 PUT/report cuts for local and S3 sources; source-inventory interruption; retained native inspection without replay. |
+High-level local and PostgreSQL file/xorb uploads acquire protection automatically.
+HTTP uploads retain their request owner through publication. Metadata-only library
+APIs require caller-held ownership and storage validation; they have no object-store
+input and cannot certify backing bytes or complete references.
 
-The current CLI source pins ordinary work to its admitted configuration and
-invokes the original handler once. Optional recording is observation, not
-authorization to repeat an interrupted mutation. The remaining gate audit must
-cover the listed backend/reference gaps without converting copy history or a
-metadata-only library API into a stronger ownership promise.
+## Limits and deployment requirements
 
-Task history records an outcome. Transactions, locks and operation-specific
-fencing authorize changes. A separate PID does not provide exactly-once effects.
-A foreign PID does not prove that a remote job is alive or dead.
+- Pause destructive GC during upgrade and rollback, finish old jobs, run the
+  usual PostgreSQL owner upgrade and replace maintenance binaries. Older GC
+  does not create new delete markers. Retain protection state during rollback.
+- History establishes neither cluster-wide exactly-once execution nor current
+  deployment health. Check readiness separately. A foreign PID is not a lease.
+- Process loss does not cancel arbitrary active database/storage calls. A backend
+  may retain ownership until it actually ends. Unknown remote outcomes require
+  reconciliation; object absence alone cannot settle a delete.
+- Automatic history admission and incremental cleanup have logical limits.
+  Unfinished/corrupt evidence stays retained. Limits do not truncate live output
+  or impose a disk quota. Inventory and active I/O can add latency; fixture
+  timings establish no production latency or throughput guarantee.
+- Restricted-root Linux fixtures do not certify network filesystems with different
+  locking semantics. Tenant policies can make inspection unavailable; keep those
+  restrictions and use original logs.
+- Moving live optional-runner state between hosts/PID namespaces is unsupported.
+  A changed executable cannot run an older pinned definition; inspect effects
+  before intentionally starting a new run.
 
-An idempotency key protects a retry when the duplicate check and effect commit
-together. A fence protects takeover when the effect atomically rejects an old
-owner. Unknown effects require investigation before retry; a new task ID does
-not make a retry safe. Recorded completion does not certify current cluster health.
-
-Keep existing request, upload, cache, OIDC and webhook owners. Starting Shardline
-must not turn these into automatically retried maintenance jobs. Preserve lazy
-Hub secret upgrades when a startup sweep fails.
-
-The normal owner-run database upgrade installs the optional metadata and
-protection functions. See [rolling upgrades](ROLLING_UPGRADE.md) for deployment
-steps and limitations; the tracker itself requires no new service or runtime grant.
+These explicit boundaries remain part of the reviewed contract. Follow the
+[rolling-upgrade procedure](ROLLING_UPGRADE.md) and concise
+[operator guide](MAINTENANCE_INTEGRATION_UX.md).

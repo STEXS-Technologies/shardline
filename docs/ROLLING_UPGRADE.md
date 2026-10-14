@@ -19,9 +19,9 @@ runtime a longer grace period so the server's deadline runs before SIGKILL.
 
 ## StateChronicle/Penelope 0.2.0 dependency upgrade
 
-**This branch is not ready for rollout.** The version remains 1.11.3; the next
-patch's version bump and release tag belong in a separate PR. Check the
-[acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) before deployment.
+The integration acceptance review is complete. The version remains 1.11.3; the
+1.11.4 version bump and release tag belong in a separate PR. Review the
+[verified guarantees and limits](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) before deployment.
 
 Keep the existing server commands, maintenance commands and GC timer. Tracking
 runs in their existing process, with normal maintenance output streamed live.

@@ -101,8 +101,8 @@ bounds. Existing and imported history is preserved. Large archives can slow
 inspection and command exit: ordinary commands clean history after their work,
 while server startup does not wait for cleanup. Shutdown stops cleanup between
 storage calls; an active call may finish. Later startup resumes partial cleanup.
-See the [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md#known-gaps)
-for the remaining capacity audit.
+See the [acceptance review](MAINTENANCE_INTEGRATION_ACCEPTANCE.md#current-gate-audit)
+for the capacity evidence and deployment limits.
 
 ## Durable Maintenance (Linux)
 
