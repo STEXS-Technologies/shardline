@@ -4783,3 +4783,31 @@ output. Diagnostics: `/tmp/shardline-storage-size.Ftw2jM`.
 The 64 MiB buffered-object limit also appears in the `v1.11.3` source. The CLI
 reference now documents it. This establishes the existing boundary and its
 preservation; it does not measure production throughput or long-operation cost.
+
+## Ordinary storage-copy process interruption
+
+`maintenance_support::storage_copy_interruptions::killed_storage_copy_preserves_effects_without_completion_or_inspection_replay`
+uses the ordinary optimized `storage migrate` command, without the optional
+worker. Each owned fixture has 256 local objects and isolates private scratch
+with `TMPDIR`. After three durable admission records, a real SQLite writer
+holds the private completion journal. The test observes a complete destination
+object and kills the process either before its report exists or after the exact
+successful report artifact exists. The first cut checks report absence after
+process death; the second also checks live output reported all 256 insertions.
+
+Both cuts verify the original command PID, byte-exact copied data, three
+remaining journal records, absence of the shared completion record and one
+`needs_reconciliation` result. After adding another source object, the ordinary
+read-only history command still reports that unresolved run and does not copy
+the new object. Completed-history pruning preserves the unfinished run.
+
+The initial named-object observation could reach that object only after the
+report was saved. The corrected fixture observes the first visible committed
+object, rather than assuming inventory order. Its phase assertions pass ten
+consecutive stress iterations (20 real process kills) in 2.274 seconds, with no
+runtime skips. Diagnostics: `/tmp/shardline-storage-copy-interruptions-stability.log`.
+Strict CLI integration-test Clippy passes. The full maintenance CLI suite on
+the same optimized SHA-256 `2b13ae613c9acdd6546fba9d77ab9e035b98355e8559fe4c01a11741d2a33962`
+passes all 22 tests in 2.336 seconds with zero skips
+(`/tmp/shardline-storage-copy-interruptions-full-cli.log`). This is local-copy
+evidence; remote-copy and remaining phase requirements still need review.

@@ -113,6 +113,7 @@ available through the optional [admin read API](ADMIN_READ_API.md#get-apiv1tasks
 | Readiness fails | Check server logs and database/storage availability. |
 | History is unavailable or recording warns | Check configuration, dependencies and original command logs. Work may have run; inspect its effects before repeating it. |
 | A storage copy succeeds but saving its history warns | Check the copy output and destination data. Inspect history without rerunning the copy; the warning does not undo copied objects. |
+| A storage copy is interrupted | Inspect destination data and pending deletes before deciding whether to repeat the copy. History inspection never resumes it. |
 | A run completed | Read its saved result. Check `/readyz` separately for current readiness. |
 | A run failed, was interrupted, is unresolved or is corrupt | Follow `next_step` and inspect partial effects before retrying. Preserve corrupt evidence. |
 | A write returns `503` for an uncertain delete | Check the original GC and its logs. After it stops, run `shardline repair` with the same configuration, inspect pending deletes again, then retry after reconciliation. |

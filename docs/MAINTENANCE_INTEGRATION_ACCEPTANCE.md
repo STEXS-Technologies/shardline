@@ -62,8 +62,9 @@ These results cover named fixtures. They do not certify every deployment.
 
 The optimized deployment evidence includes all 23 fault scenarios across two
 complementary runs of the same binary. After the native recovery correction,
-the optimized CLI suite passes all 21 scenarios, including destination-history
-failure after successful copying.
+the optimized CLI suite passes all 22 scenarios, including destination-history
+failure after successful copying and process termination during copying or
+after its report is saved.
 These counts supplement the behavior checks above and do not close a gate on
 their own.
 
@@ -227,6 +228,12 @@ materialization and completion acknowledgement. The PostgreSQL fixture also
 checks exact database row counts after each rejected write. This closes that
 specific evidence gap; external-mutation and process-interruption coverage is
 still required by gate 5.
+
+Ordinary local storage-copy process termination is now covered after an actual
+destination write and after report materialization, before completion
+acknowledgement. Both cuts preserve copied data and unresolved history, and
+inspection does not resume copying. Remote-copy interruption still needs its
+own evidence; this local fixture does not close the phase audit.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |
