@@ -4678,3 +4678,31 @@ no runtime fixture skips (`/tmp/shardline-local-library-ownership-final.log`,
 omitted the released binary environment setting and skipped the two rollback
 fixtures; it is not the complete configured result. Optimized workload validation
 for this local ownership change remains pending.
+
+### Optimized workload and permission checks after local ownership
+
+The optimized build completes in 2 minutes 44 seconds
+(`/tmp/shardline-local-library-ownership-release.log`) and still reports 1.11.3.
+Its pinned SHA256 is
+`f66ee56e6c07669e9110efc3c35d00835f61f70aabf5b205c2598c8faf401ab4`.
+The existing released/current local benchmark verifier passes at concurrency
+1, 32 and 128, preserving every non-performance counter and setting, report
+structure, released reads and ordinary fsck stdout/stderr. Each current workload
+root records exactly the expected single fsck completion and no payload task
+directory (`/tmp/shardline-benchmark-compatibility.SfIQ2r`).
+
+| Concurrency | Released wall / peak RSS | Current wall / peak RSS |
+| --- | --- | --- |
+| 1 | 0.08 s / 35,180 KiB | 0.08 s / 35,444 KiB |
+| 32 | 0.43 s / 252,888 KiB | 0.46 s / 284,516 KiB |
+| 128 | 1.39 s / 633,824 KiB | 1.44 s / 638,588 KiB |
+
+These single local fixture measurements support compatible workload results,
+not a general speed improvement or production SLO. The existing permission
+verifier also passes on this executable: fsck, rebuild, both repair forms and GC
+preserve released output/status under a 0555 root without new root entries or
+permission changes. Fully read-only SQLite fsck preserves output/status and
+existing evidence while warning about unavailable optional recording
+(`/tmp/shardline-local-permissions.oNZN7H`). These checks cover CLI commands,
+not every embedded-library filesystem layout. The previous 23 deployment-fault
+results belong to the earlier executable, whose hash is recorded above.
