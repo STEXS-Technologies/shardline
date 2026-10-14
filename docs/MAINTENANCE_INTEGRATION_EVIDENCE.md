@@ -33,6 +33,38 @@ cancellation of the injected query is fixture cleanup, not a claim that process
 termination immediately cancels arbitrary database or storage calls. No
 production source or version changes are needed for these checks.
 
+## Public write-boundary inventory
+
+The final source review separates the high-level storage API from the existing
+metadata API. This is a contract review; it adds no production behavior or
+claim of physical-data certification for metadata-only callers.
+
+| Entry point | Protection and publication contract | Source |
+| --- | --- | --- |
+| `LocalBackend::upload_file`, `upload_xorb` | Acquire the shared filesystem maintenance barrier before upload work. The absolute metadata root identifies that barrier, including SQLite with remote payload storage. | `local_backend/files.rs`, `local_backend/xorbs.rs` |
+| `PostgresBackend::upload_file`, `upload_xorb` | Establish a request session automatically. A nested call with the matching backend identity reuses its existing session; detected connection loss fails without reacquiring an owner. Xorb bytes are validated before storage. | `postgres_backend/upload.rs`, `maintenance_barrier.rs` |
+| Public client `upload_file` | Delegates to the corresponding protected backend method. | `backend.rs` |
+| HTTP streamed file, xorb and native-shard uploads | The write middleware owns the local barrier or PostgreSQL request session through the handler. The streamed helpers are crate-private, rather than an unprotected public upload API. | `app.rs`, `backend.rs`, backend upload modules |
+| Server staged-file, native-shard and prepared-S3 publication | Uses the request connection and an outer transaction. File and S3 publication recheck staged backing objects before commit. Guarded native publication checks physical xorbs and shard bodies; logical chunks inside a xorb are not separate physical objects. Failure rolls back metadata. | `postgres_backend/publication.rs` |
+| `PostgresRecordStore::insert_version_record`; `RecordMutation::write_version_record`, `write_latest_record` | Write metadata through the store pool. They neither establish a caller's storage owner nor inspect backing bytes. | `postgres/record_store.rs` |
+| `commit_file_version_metadata` and its connection-bound variant | Atomically publish version and latest metadata. The pool variant acquires a connection; the connection-bound variant retains the supplied session. Both require caller-held protection and storage validation. | `postgres/record_store.rs` |
+| `commit_native_shard_metadata`, explicit-reference and connection-bound variants | The compatibility method supplies no additional physical keys. Explicit references coordinate pending deletes; they cannot establish reference completeness or storage presence. The connection-bound variant does not replace a lost connection. | `postgres/record_store.rs` |
+| `publish_s3_object_on_connection` | Publishes version, alias and listing metadata with its conditions/fence. Its caller must retain ownership and validate storage; the server wrapper adds that validation. | `postgres/record_store.rs`, `postgres_backend/publication.rs` |
+| Metadata deletion helpers and generic index mutations | Preserve their existing metadata-only responsibilities. A database mutation does not establish that storage work completed or that a deployment is healthy. | `postgres/record_store.rs`, `postgres/index_store.rs` |
+
+Source paths in this table are relative to `crates/shardline-server/src/` for
+server code and `crates/shardline-index/src/` for index code. Existing evidence
+sections cover automatic local and PostgreSQL upload ownership, cancellation,
+lost existing owners, publication rollback, missing backing objects and stale
+transaction snapshots. The current released-workload comparison additionally
+checks high-level upload behavior at concurrency 1, 32 and 128.
+
+The operator guide promises protection for protected writes, not arbitrary
+metadata callers. The index APIs already document these responsibilities in
+their Rust API comments. The reliability architecture now gives library users
+the same concise distinction. Older destructive GC and legacy references retain
+the rollout restrictions described separately; this review does not erase them.
+
 This branch adds automatic task history to existing startup and maintenance.
 It is **not ready to merge**. The version stays unchanged; a version bump belongs
 in a separate PR.
