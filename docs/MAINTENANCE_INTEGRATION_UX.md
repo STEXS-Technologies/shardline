@@ -119,8 +119,9 @@ start a fresh application-owned transaction as requested.
 Runtime accounts need no new grants. Older GC lacks the new delete protection;
 keep destructive GC paused during rollback until compatible job binaries are
 restored. Reconcile pending deletes before switching storage: copying does not
-settle them. See [rolling upgrades](ROLLING_UPGRADE.md) for role order, schema
-requirements and rollback limits.
+settle them. For a storage cutover, pause writers and GC as before; saved copy
+history does not coordinate the cutover. See [rolling upgrades](ROLLING_UPGRADE.md)
+for role order, schema requirements and rollback limits.
 
 Startup checks saved upload progress. Eligible file checksums are verified in
 the existing server process while requests are served. Failed or interrupted

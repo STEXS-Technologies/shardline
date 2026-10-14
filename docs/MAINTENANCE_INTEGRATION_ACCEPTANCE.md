@@ -357,6 +357,23 @@ open until their remaining compatibility, failure and cost evidence is complete.
 
 ## Ownership and recovery rules
 
+The operation audit must preserve these distinct ownership rules. The common
+receipt tests do not replace operation-specific mutation checks.
+
+| Ordinary operation | Effect and owner | Current interruption evidence |
+| --- | --- | --- |
+| Fsck | Diagnostics; no domain mutation to replay. | Native admission and native-completion/shared-acknowledgement cuts; five PostgreSQL receipt-publication cuts. |
+| Index rebuild | Exclusive local or PostgreSQL maintenance ownership; mutations remain in existing index transactions. | Partial latest-pointer and three derived-index mutation cuts; concurrent ordinary rebuilds; PostgreSQL session retention and receipt cuts. Remaining backend-specific mutation combinations need direct review. |
+| Repair, including explicit lifecycle repair | Shared maintenance ownership and existing operation-specific transactions. | Six actual local lifecycle mutation cuts; PostgreSQL partial-repair/session-retention cut; receipt cuts for both forms. Shared ownership does not serialize all repairs. |
+| GC mark/sweep | Exclusive scan ownership; protected remote deletes additionally retain attempt/fence state. | Local mutation/report cuts and fresh discovery; actual remote deletion with lost acknowledgement, saved-reply/database-outage recovery and takeover; real reboot cuts. Remaining physical-storage/reference layouts need review. |
+| Storage copy | Existing copy/cutover contract: callers coordinate writers and GC. Tracking does not add cluster-wide cutover ownership. | Local destination mutation/report cuts; actual accepted S3 PUT/report cuts for local and S3 sources; source-inventory interruption; retained native inspection without replay. |
+
+The current CLI source pins ordinary work to its admitted configuration and
+invokes the original handler once. Optional recording is observation, not
+authorization to repeat an interrupted mutation. The remaining gate audit must
+cover the listed backend/reference gaps without converting copy history or a
+metadata-only library API into a stronger ownership promise.
+
 Task history records an outcome. Transactions, locks and operation-specific
 fencing authorize changes. A separate PID does not provide exactly-once effects.
 A foreign PID does not prove that a remote job is alive or dead.
