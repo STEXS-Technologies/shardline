@@ -79,11 +79,17 @@ copy_objects() {
 }
 copy_objects "$current" "$fixture/current.log" --from local --from-root "$fixture/source" --to s3
 test ! -e "$fixture/source/.shardline-maintenance"
-archive=$(find "$fixture/task-state" -name metadata.sqlite3 -print -quit)
+archive=$(find "$fixture/task-state" -name tasks.sqlite -print -quit)
 test -n "$archive"
-test "$(sqlite3 "$archive" "SELECT count(*) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '%/records/%' AND json_type(CAST(payload AS TEXT), '$.event.Completed') IS NOT NULL;")" -gt 0
-sqlite3 "$archive" "SELECT CAST(payload AS TEXT) FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '%/manifests/%';" > "$fixture/manifest.json"
-test "$(sqlite3 "$archive" "SELECT json_extract(CAST(payload AS TEXT), '$.owner.pid') FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '%/manifests/%';")" = "$copy_pid"
+workspace=$(dirname "$archive")
+cp "$workspace/identity.json" "$fixture/manifest.json"
+sha256sum "$archive" "$workspace/identity.json" > "$fixture/archive-before.sha256"
+env -i "$current" --config "$fixture/local.toml" history --archive --root "$workspace" > "$fixture/native-history.json"
+jq -e --argjson pid "$copy_pid" '.native_journal == true and (.tasks | length) == 1
+    and .tasks[0].state == "completed" and .tasks[0].operation == "StorageMigration"
+    and .tasks[0].execution == "inline" and .tasks[0].owner.pid == $pid' "$fixture/native-history.json" >/dev/null
+sha256sum "$archive" "$workspace/identity.json" > "$fixture/archive-after.sha256"
+cmp "$fixture/archive-before.sha256" "$fixture/archive-after.sha256"
 mkdir -p "$fixture/current-recopy/chunks" "$fixture/rollback/chunks"
 copy_objects "$current" "$fixture/current-recopy.log" --from s3 --to local --to-root "$fixture/current-recopy"
 copy_objects "$released" "$fixture/rollback.log" --from s3 --to local --to-root "$fixture/rollback"
@@ -107,6 +113,22 @@ mc ls --recursive fixture/copy-target > "$fixture/inventory.log"
 test "$(wc -l < "$fixture/inventory.log")" = 1
 rg -q 'fixture/payload$' "$fixture/inventory.log"
 echo "PASS: restricted S3 copies preserve payload inventory and released rollback; history stays in the original process's private metadata; diagnostics: $fixture"
+copy_temp="$fixture/task-state"
+for revision in released current; do
+    binary=$released
+    if test "$revision" = current; then binary=$current; fi
+    mkdir -p "$fixture/deleted-cwd-$revision" "$fixture/deleted-copy-$revision/chunks"
+    (
+        cd "$fixture/deleted-cwd-$revision"
+        rmdir "$fixture/deleted-cwd-$revision"
+        copy_objects "$binary" "$fixture/deleted-cwd-$revision.log" --from s3 --to local --to-root "$fixture/deleted-copy-$revision"
+    )
+done
+cmp "$fixture/deleted-cwd-released.log" "$fixture/deleted-cwd-current.log"
+cmp "$fixture/deleted-cwd-released.log.stderr" "$fixture/deleted-cwd-current.log.stderr"
+test ! -e "$fixture/deleted-copy-current/metadata.sqlite3"
+test ! -e "$fixture/deleted-copy-current/.shardline-maintenance"
+echo 'PASS: S3 copying preserves released results when the working directory has been removed'
 if test -n "$reply_fixture"; then
     # Public evidence comes from the owned PostgreSQL integration fixture. This
     # tests recognition and copy only, not admission or remote-delete settlement.
