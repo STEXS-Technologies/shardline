@@ -1,8 +1,97 @@
 //! Actual PostgreSQL latest-pointer mutation followed by CLI termination.
 use super::super::*;
 use super::postgres_fixture;
+use shardline_index::{
+    AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, PostgresIndexStore,
+    ReconstructionTerm, StoredObjectId,
+};
 use shardline_index::{FileRecord, PostgresRecordStore, RecordMutation, StorageRepresentation};
+use shardline_protocol::{ChunkRange, ShardlineHash};
 use shardline_server::task_tracking::TaskRunIdentity;
+use shardline_storage::ObjectKey;
+
+#[derive(Clone, Copy, Debug)]
+enum Mutation {
+    Heads,
+    ReconstructionPrune,
+    DedupePrune,
+    DedupeRestore,
+}
+impl Mutation {
+    const fn table(self) -> &'static str {
+        match self {
+            Self::Heads => "shardline_file_records",
+            Self::ReconstructionPrune => "shardline_file_reconstructions",
+            Self::DedupePrune | Self::DedupeRestore => "shardline_dedupe_shards",
+        }
+    }
+    const fn predicate(self) -> &'static str {
+        if matches!(self, Self::Heads) {
+            "record_kind='latest' AND file_id LIKE 'owned-rebuild-%'"
+        } else {
+            "true"
+        }
+    }
+    const fn action(self) -> &'static str {
+        if matches!(self, Self::Heads | Self::DedupeRestore) {
+            "INSERT"
+        } else {
+            "DELETE"
+        }
+    }
+    async fn seed(self, root: &Path, admin: &sqlx::PgPool, ordinal: u8) -> Result<()> {
+        let hash = ShardlineHash::from_bytes([ordinal.saturating_add(17); 32]);
+        let store = PostgresIndexStore::new(admin.clone());
+        match self {
+            Self::Heads => {
+                PostgresRecordStore::new(admin.clone())
+                    .write_version_record(&FileRecord {
+                        file_id: format!("owned-rebuild-{ordinal}"),
+                        content_hash: hex::encode(Digest::of(b"").0),
+                        total_bytes: 0,
+                        chunk_size: 128,
+                        storage_repr: StorageRepresentation::FixedChunkV1,
+                        repository_scope: None,
+                        chunks: Vec::new(),
+                    })
+                    .await?;
+            }
+            Self::ReconstructionPrune => {
+                store
+                    .insert_reconstruction(
+                        &FileId::new(hash),
+                        &FileReconstruction::new(vec![ReconstructionTerm::new(
+                            StoredObjectId::new(hash),
+                            ChunkRange::new(0, 1)?,
+                            1,
+                        )]),
+                    )
+                    .await?
+            }
+            Self::DedupePrune => {
+                store
+                    .upsert_dedupe_shard_mapping(&DedupeShardMapping::new(
+                        hash,
+                        ObjectKey::parse(&format!("shards/not-retained-{ordinal}"))?,
+                    ))
+                    .await?
+            }
+            Self::DedupeRestore => {
+                super::rebuild_derived_interruptions::seed_retained_shard(root, ordinal)?
+            }
+        }
+        Ok(())
+    }
+    async fn count(self, admin: &sqlx::PgPool) -> Result<i64> {
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {} WHERE {}",
+            self.table(),
+            self.predicate()
+        )))
+        .fetch_one(admin)
+        .await?)
+    }
+}
 
 struct StopOnDrop(std::process::Child);
 impl Drop for StopOnDrop {
@@ -15,6 +104,23 @@ impl Drop for StopOnDrop {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the owned PostgreSQL process-cut verifier"]
 async fn postgres_rebuild_preserves_partial_heads_and_fresh_discovery() -> Result<()> {
+    verify_cut(Mutation::Heads).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires the owned PostgreSQL process-cut verifier"]
+async fn postgres_rebuild_preserves_partial_derived_indexes_and_fresh_discovery() -> Result<()> {
+    for mutation in [
+        Mutation::ReconstructionPrune,
+        Mutation::DedupePrune,
+        Mutation::DedupeRestore,
+    ] {
+        verify_cut(mutation).await?;
+    }
+    Ok(())
+}
+
+async fn verify_cut(mutation: Mutation) -> Result<()> {
     use std::os::unix::process::ExitStatusExt;
     let (url, admin) = postgres_fixture::connect_owned().await?;
     let root = tempfile::tempdir()?;
@@ -22,34 +128,44 @@ async fn postgres_rebuild_preserves_partial_heads_and_fresh_discovery() -> Resul
     fs::create_dir_all(root.path().join("chunks"))?;
     let payload = root.path().join("chunks/protected-rebuild-payload");
     fs::write(&payload, b"unchanged PostgreSQL rebuild payload")?;
-    let records = PostgresRecordStore::new(admin.clone());
-    let record = |ordinal: u32| FileRecord {
-        file_id: format!("owned-rebuild-{ordinal}"),
-        content_hash: hex::encode(Digest::of(b"").0),
-        total_bytes: 0,
-        chunk_size: 128,
-        storage_repr: StorageRepresentation::FixedChunkV1,
-        repository_scope: None,
-        chunks: Vec::new(),
-    };
     for ordinal in 0..=1 {
-        records.write_version_record(&record(ordinal)).await?;
+        mutation.seed(root.path(), &admin, ordinal).await?;
     }
+    let retained_before = if matches!(mutation, Mutation::DedupeRestore) {
+        (0..=1)
+            .map(|ordinal| {
+                let path = root
+                    .path()
+                    .join(format!("chunks/shards/retained-{ordinal}"));
+                Ok((path.clone(), fs::read(path)?))
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     let versions_before: Vec<(String, String)> = sqlx::query_as(
         "SELECT record_key, record::text FROM shardline_file_records WHERE record_kind='version' ORDER BY record_key",
     ).fetch_all(&admin).await?;
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
     let name = format!("owned_rebuild_{}", hex::encode(nonce));
+    let table = mutation.table();
+    let predicate = mutation.predicate();
+    let action = mutation.action();
+    let trigger_row = if action == "DELETE" { "OLD" } else { "NEW" };
+    let row_predicate = if matches!(mutation, Mutation::Heads) {
+        "NEW.record_kind='latest' AND NEW.file_id LIKE 'owned-rebuild-%'"
+    } else {
+        "true"
+    };
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN IF NEW.record_kind='latest' AND NEW.file_id LIKE 'owned-rebuild-%'
-           AND (SELECT count(*) FROM shardline_file_records WHERE record_kind='latest'
-             AND file_id LIKE 'owned-rebuild-%')=1 THEN
+         BEGIN IF {row_predicate}
+           AND (SELECT count(*) FROM {table} WHERE {predicate})=1 THEN
            PERFORM set_config('application_name','{name}',true);
            PERFORM pg_sleep(600);
-         END IF; RETURN NEW; END $$;
-         CREATE TRIGGER {name} BEFORE INSERT ON shardline_file_records
+         END IF; RETURN {trigger_row}; END $$;
+         CREATE TRIGGER {name} BEFORE {action} ON {table}
            FOR EACH ROW EXECUTE FUNCTION {name}();"
     )))
     .execute(&admin)
@@ -81,11 +197,7 @@ async fn postgres_rebuild_preserves_partial_heads_and_fresh_discovery() -> Resul
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }).await??;
-    let heads = || {
-        sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM shardline_file_records WHERE record_kind='latest' AND file_id LIKE 'owned-rebuild-%'",
-    ).fetch_one(&admin)
-    };
+    let heads = || mutation.count(&admin);
     assert_eq!(
         heads().await?,
         1,
@@ -145,7 +257,7 @@ async fn postgres_rebuild_preserves_partial_heads_and_fresh_discovery() -> Resul
     })
     .await??;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "DROP TRIGGER {name} ON shardline_file_records; DROP FUNCTION {name}();"
+        "DROP TRIGGER {name} ON {table}; DROP FUNCTION {name}();"
     )))
     .execute(&admin)
     .await?;
@@ -183,7 +295,7 @@ async fn postgres_rebuild_preserves_partial_heads_and_fresh_discovery() -> Resul
         1,
         "inspection does not resume the interrupted rebuild"
     );
-    records.write_version_record(&record(2)).await?;
+    mutation.seed(root.path(), &admin, 2).await?;
     let fresh_child = command()
         .args(["index", "rebuild", "--root"])
         .arg(root.path())
@@ -199,17 +311,43 @@ async fn postgres_rebuild_preserves_partial_heads_and_fresh_discovery() -> Resul
     );
     assert_eq!(
         heads().await?,
-        3,
+        if matches!(mutation, Mutation::Heads | Mutation::DedupeRestore) {
+            3
+        } else {
+            0
+        },
         "fresh rebuild also discovers the later version"
     );
     let retained_versions: Vec<(String, String)> = sqlx::query_as(
-        "SELECT record_key, record::text FROM shardline_file_records WHERE record_kind='version' AND file_id <> 'owned-rebuild-2' ORDER BY record_key",
-    ).fetch_all(&admin).await?;
+        "SELECT record_key, record::text FROM shardline_file_records WHERE record_kind='version' AND ($1 OR file_id <> 'owned-rebuild-2') ORDER BY record_key",
+    ).bind(!matches!(mutation, Mutation::Heads)).fetch_all(&admin).await?;
     assert_eq!(
         retained_versions, versions_before,
         "fresh rebuilding preserves earlier immutable versions"
     );
     assert_eq!(fs::read(&payload)?, b"unchanged PostgreSQL rebuild payload");
+    for (path, bytes) in retained_before {
+        assert_eq!(fs::read(path)?, bytes);
+    }
+    if matches!(mutation, Mutation::DedupeRestore) {
+        let store = PostgresIndexStore::new(admin.clone());
+        for ordinal in 0..=2 {
+            let hash = shardline_index::parse_xet_hash_hex(
+                &shardline_xet_core::merklehash::compute_data_hash(
+                    format!("retained shard chunk {ordinal}").as_bytes(),
+                )
+                .hex(),
+            )?;
+            let mapping = store
+                .dedupe_shard_mapping(&hash)
+                .await?
+                .ok_or("missing restored mapping")?;
+            assert_eq!(
+                mapping.shard_object_key().as_str(),
+                format!("shards/retained-{ordinal}")
+            );
+        }
+    }
     assert_eq!(fs::read(workspace.join("tasks.sqlite"))?, before);
     assert_eq!(
         fs::read(workspace.join("tasks.sqlite-wal")).ok(),
@@ -241,8 +379,14 @@ async fn postgres_rebuild_preserves_partial_heads_and_fresh_discovery() -> Resul
             && task["state"] == "completed"
     }));
     admin.close().await;
-    println!(
-        "PASS: PostgreSQL partial rebuild preserves heads, native evidence and fresh discovery"
-    );
+    if matches!(mutation, Mutation::Heads) {
+        println!(
+            "PASS: PostgreSQL partial rebuild preserves heads, native evidence and fresh discovery"
+        );
+    } else {
+        println!(
+            "PASS: PostgreSQL {mutation:?} preserves partial mutation, native evidence and fresh discovery"
+        );
+    }
     Ok(())
 }

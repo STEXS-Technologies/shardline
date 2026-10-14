@@ -59,22 +59,7 @@ impl Mutation {
                 ObjectKey::parse(&format!("shards/not-retained-{ordinal}"))?,
             ))?,
             Self::DedupeRestore => {
-                let body = format!("retained shard chunk {ordinal}");
-                let chunk = compute_data_hash(body.as_bytes());
-                let length = u64::try_from(body.len())?;
-                let xorb = xorb_hash(&[(chunk, length)]);
-                let mut shard = MDBInMemoryShard::default();
-                shard.add_xorb_block(MDBXorbInfo {
-                    metadata: XorbChunkSequenceHeader::new(xorb, 1, length),
-                    chunks: vec![
-                        XorbChunkSequenceEntry::new(chunk, length, 0).with_global_dedup_flag(true),
-                    ],
-                })?;
-                fs::create_dir_all(root.join("chunks/shards"))?;
-                fs::write(
-                    root.join(format!("chunks/shards/retained-{ordinal}")),
-                    shard.to_bytes()?,
-                )?;
+                seed_retained_shard(root, ordinal)?;
             }
         }
         Ok(())
@@ -93,6 +78,24 @@ impl Mutation {
             }
         }
     }
+}
+
+pub(super) fn seed_retained_shard(root: &Path, ordinal: u8) -> Result<()> {
+    let body = format!("retained shard chunk {ordinal}");
+    let chunk = compute_data_hash(body.as_bytes());
+    let length = u64::try_from(body.len())?;
+    let xorb = xorb_hash(&[(chunk, length)]);
+    let mut shard = MDBInMemoryShard::default();
+    shard.add_xorb_block(MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(xorb, 1, length),
+        chunks: vec![XorbChunkSequenceEntry::new(chunk, length, 0).with_global_dedup_flag(true)],
+    })?;
+    fs::create_dir_all(root.join("chunks/shards"))?;
+    fs::write(
+        root.join(format!("chunks/shards/retained-{ordinal}")),
+        shard.to_bytes()?,
+    )?;
+    Ok(())
 }
 
 #[test]
