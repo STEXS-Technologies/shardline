@@ -521,6 +521,12 @@ async fn maintenance_tracking_is_shared_across_postgres_s3_nodes_and_roles() {
     let mut routers = Vec::new();
     let mut deployment = None;
     let mut evidence = None;
+    let mut history_scope = None;
+    let inspection_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(pg_url)
+        .await
+        .unwrap();
     for (root, (role, frontend)) in roots.iter().zip([
         (ServerRole::Api, ServerFrontend::Lfs),
         (ServerRole::Transfer, ServerFrontend::Lfs),
@@ -546,8 +552,13 @@ async fn maintenance_tracking_is_shared_across_postgres_s3_nodes_and_roles() {
         .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config(&prefix)));
         let fingerprint = deployment_fingerprint(&config).unwrap();
         assert_eq!(*deployment.get_or_insert(fingerprint), fingerprint);
-        evidence = Some(TaskEvidenceStore::from_config(&config).unwrap());
-        routers.push(app::router(config).await.unwrap());
+        routers.push(app::router(config.clone()).await.unwrap());
+        let (reader, scope) = TaskEvidenceStore::for_inspection(&config, Some(&inspection_pool))
+            .await
+            .unwrap();
+        let scope = scope.expect("PostgreSQL startup resolves shared metadata history");
+        assert_eq!(*history_scope.get_or_insert(scope), scope);
+        evidence = Some(reader);
         assert!(
             !root
                 .path()
@@ -562,7 +573,7 @@ async fn maintenance_tracking_is_shared_across_postgres_s3_nodes_and_roles() {
     let summaries = tokio::task::spawn_blocking(move || {
         evidence
             .unwrap()
-            .summaries(deployment.unwrap(), None, 100)
+            .summaries_with_scope(deployment.unwrap(), history_scope, None, 100)
             .unwrap()
     })
     .await
@@ -601,7 +612,10 @@ async fn maintenance_tracking_is_shared_across_postgres_s3_nodes_and_roles() {
             serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
         assert_eq!(body["tasks"].as_array().unwrap().len(), 3);
         assert_eq!(body["supervision"], "embedded");
+        assert_eq!(body["history_grouping"], "shared_metadata");
+        assert!(body["history_notice"].is_null());
     }
+    inspection_pool.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

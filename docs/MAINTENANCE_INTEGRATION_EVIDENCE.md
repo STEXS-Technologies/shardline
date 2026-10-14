@@ -5565,3 +5565,61 @@ Logs: `.codex/validation/legacy-copy-http-final.log`,
 `.codex/validation/legacy-copy-release-build.log`,
 `.codex/validation/legacy-copy-release-compatibility.log` and
 `.codex/validation/legacy-copy-release-cli-all.log`.
+
+### Ordinary PostgreSQL/S3 startup across server roles
+
+The owned verifier bootstraps a fresh PostgreSQL 16 database with released
+1.11.3 migrations and runs the usual current owner upgrade. It starts real MinIO
+with a protected payload, then launches ordinary `serve --role all`, `api` and
+`transfer` processes using separate roots and the same metadata/payload targets.
+Each starts without worker configuration, reports readiness and its expected
+role, and removes a newly expired LFS session. Shared history retains previous
+IDs and exact artifact bytes, adds one distinct completed run and records that
+server's PID. No tracker child is present. The payload remains byte-identical,
+the bucket contains only that payload and no GC candidate is created.
+
+The database runtime role receives existing ordinary-metadata privileges and
+has no direct SELECT/INSERT/UPDATE/DELETE grant on the task-artifact table.
+The S3 runtime policy explicitly denies task-object writes and deletes. Positive
+payload writes/deletes and an actual rejected task PUT verify that policy before
+startup. All three roles still record and inspect shared PostgreSQL history.
+This proves the named grant model; it does not override tenant row policies or
+establish live cluster health.
+
+Run the reproducible process check with:
+
+```bash
+bash scripts/shardline/verify_maintenance_postgres_s3_startup.sh CURRENT RELEASED
+```
+
+An optional third argument accepts the compiled server library test harness.
+The final owned run also invokes the existing PostgreSQL/local role fixture
+against its released-ledger database, requiring the exact test and one non-skipped
+pass. Its three roles perform fresh same-process startup cleanup in 0.77 seconds.
+Only the verifier's own containers and server process are removed afterward.
+Final log: `.codex/validation/postgres-s3-startup-final.log`.
+Detailed diagnostics:
+`.codex/validation/shardline-postgres-s3-startup.wCXoTC/`.
+The first attempt failed on a wrong quarantine-table name in the verifier;
+the corrected, stricter runtime-account fixture passes all assertions.
+
+The existing Docker-backed PostgreSQL/S3 public-library test was stale: it read
+legacy object-backed history with `from_config` and found zero automatic runs.
+It now uses `for_inspection` with its caller-owned PostgreSQL pool and resolved
+scope, verifies consistent scope across roots and retains its shared-history and
+unauthorized-request assertions. The corrected test passes without skips in
+6.68 seconds. Logs: `.codex/validation/postgres-s3-library-current.log` and
+`.codex/validation/postgres-s3-library-final.log`.
+
+Current SQLite/S3 public-router startup also passes for all three roles against
+real MinIO in 2.45 seconds. Public local embedding passes all three roles and two
+fresh starts per role in 0.26 seconds, preserving the application's logging
+subscriber. Logs: `.codex/validation/postgres-s3-sqlite-profile-regression.log`
+and `.codex/validation/postgres-s3-embedding-regression.log`.
+Together these checks verify gate 1's ordinary startup, supported backend/role
+matrix and embedding requirements. Other compatibility, failure and cost gates
+retain their separate criteria. Strict all-feature server library/test Clippy,
+Rust formatting and shell syntax checks pass. Clippy log:
+`.codex/validation/postgres-s3-startup-clippy.log`.
+The tested optimized CLI remains version 1.11.3 with SHA-256
+`14eb3b53933caaa278a6dba901b914d9fd8f2ffe03badc75ba3febbf17f68ac3`.
