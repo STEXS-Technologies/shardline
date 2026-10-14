@@ -2,6 +2,7 @@ mod archive_inspection;
 mod gc_interruptions;
 mod local_history;
 mod native_interruptions;
+mod postgres_interruptions;
 mod rebuild_derived_interruptions;
 mod rebuild_interruptions;
 mod repair_interruptions;
