@@ -65,6 +65,60 @@ their Rust API comments. The reliability architecture now gives library users
 the same concise distinction. Older destructive GC and legacy references retain
 the rollout restrictions described separately; this review does not erase them.
 
+## Ordinary-command overhead review
+
+The source review follows `entry.rs` through private `maintenance/inline.rs`,
+the shared fallback in `maintenance/shared_inline.rs`, and the evidence store.
+Automatic preparation failure reaches the original handler. Private admission
+failure selects shared observation before work starts; shared admission failure
+logs a warning and executes the original handler without a receipt. After work
+starts, report or acknowledgement failure cannot dispatch it again. Retention
+and relocation follow its recorded exit result and do not change that result.
+
+Normal inline execution uses the original stdout/stderr streams, saves a small
+scalar exit receipt and sets CPU, execution timeout and deadline fields to their
+maximum values. The 64 KiB evidence-body limit is not a live-output limit.
+The actual released/current large-diagnostics comparison separately verifies
+exports larger than 1 MiB. Storage-copy history does not acquire an unrelated
+configured PostgreSQL connection.
+
+The bounds are explicit rather than a claim of negligible cost:
+
+- Private admission counts active and retired workspaces together, permits
+  4,096 retained workspaces and examines at most twice that many directory
+  entries. Its archive lease is nonblocking; evidence and operator files are
+  retained when admission fails.
+- Shared metadata admission permits 4,096 retained histories. Full or denied
+  recording cannot authorize a false completion or change the application
+  result. The current full-capacity drills verify both SQLite and PostgreSQL.
+- PostgreSQL scope resolution and individual evidence calls have five-second
+  timeouts. Multiple calls can add up; this is not a five-second total overhead
+  guarantee. Evidence uses at most one lazy CLI pool connection, separate from
+  the operation's lock-owning session.
+- Automatic retirement handles at most 64 finished runs and 256 run-artifact
+  keys per call. Manifest/binding/marker cleanup is separate. Legacy relocation
+  moves at most 64 artifacts and 16 MiB per invocation.
+- Inventory and active filesystem/storage calls are not bounded by those
+  counts. Unfinished and corrupt evidence is retained. These logical limits do
+  not establish a physical disk quota or constant command-exit latency.
+
+Ordinary server startup initializes the tracker in its own process and schedules
+retention on a blocking thread. Optional job receipt errors are logged while the
+existing sweep still runs. The startup and deployment fixtures verify original
+PIDs, fresh sweeps, no tracker child and preservation of payloads. The guide
+already explains retained evidence, full-capacity warnings and slower inspection
+or command exit with large archives. Existing optimized resource and released
+workload measurements remain the cost evidence; they establish no production
+latency SLO or throughput improvement.
+
+`cargo test --locked -p shardline --lib maintenance::` passes 42 tests in 39.86
+seconds, including corrupt private admission, rejected completion artifacts,
+denied shared recording, report/acknowledgement failure, cleanup failure and
+workspace admission limits. Log:
+`.codex/validation/maintenance-overhead-unit.log`. This local unit invocation
+does not replace the separately configured PostgreSQL process fixtures or
+establish that optional database-dependent tests exercised a live database.
+
 This branch adds automatic task history to existing startup and maintenance.
 It is **not ready to merge**. The version stays unchanged; a version bump belongs
 in a separate PR.
