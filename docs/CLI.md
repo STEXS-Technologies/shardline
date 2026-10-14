@@ -390,6 +390,11 @@ Copying buffers one object at a time and accepts objects up to 64 MiB, as in
 1.11.3. A larger object fails the copy rather than consuming unbounded memory.
 Dry-run inventory can include larger objects without reading their bodies.
 
+Copy history uses the local destination's SQLite metadata. For a local-to-S3
+copy, it uses the local source's SQLite metadata instead. Inspect that root with
+`shardline history --root /path/to/local/root`; inspection does not resume copying.
+These endpoint-only commands do not establish a PostgreSQL metadata association.
+
 Run garbage collection:
 
 ```bash

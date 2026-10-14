@@ -75,6 +75,13 @@ Reconcile pending deletes before switching storage. Copying storage does not
 settle them. History remains outside user payload inventory; see the
 [CLI reference](CLI.md#durable-maintenance-linux) for storage-copy history.
 
+For copy history, inspect the local destination root. If you copied from local
+storage to S3, inspect the local source root instead:
+
+```bash
+shardline history --root /path/to/local/root
+```
+
 ## Check the server or a previous result
 
 Check current readiness at your server address:

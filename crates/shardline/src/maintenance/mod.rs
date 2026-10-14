@@ -254,6 +254,25 @@ fn publication_config(
     if let MaintenanceOperation::StorageMigrate { to, to_root, .. } = operation {
         let destination =
             crate::storage_migration::endpoint(to.adapter(), to_root.as_deref(), "destination")?;
+        // Raw S3 endpoints provide no metadata association. When the copy has
+        // a local source, its existing metadata is the operator's inspection
+        // target; the task definition still binds both payload endpoints.
+        if matches!(
+            destination,
+            shardline_server::StorageMigrationEndpoint::S3(_)
+        ) && let MaintenanceOperation::StorageMigrate {
+            from, from_root, ..
+        } = operation
+        {
+            let source =
+                crate::storage_migration::endpoint(from.adapter(), from_root.as_deref(), "source")?;
+            if matches!(
+                source,
+                shardline_server::StorageMigrationEndpoint::LocalStateRoot(_)
+            ) {
+                return source_config(config.root_dir(), source);
+            }
+        }
         return source_config(config.root_dir(), destination);
     }
     Ok(config.clone())
