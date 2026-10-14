@@ -5710,3 +5710,34 @@ Log: `.codex/validation/command-compatibility-deployments-current.log`.
 Detailed results:
 `.codex/validation/shardline-maintenance-deployments.gSGP0N/test.log`.
 Reproduce with `verify_maintenance_deployments.sh CURRENT RELEASED`.
+
+### Current optimized local history resource checks
+
+The new `verify_maintenance_history_resources.sh SERVER_LIB_TEST_HARNESS`
+requires each exact resource test to exist and pass without skipping. The
+current all-feature server library harness builds in the optimized release
+profile and passes all three selected drills:
+
+| Drill | Result |
+| --- | --- |
+| Full SQLite history | All 4,096 slots are occupied; further admission is rejected and pagination returns each history once. Automatic cleanup retires 4,094 finished runs in 97 calls, preserving unfinished/corrupt evidence and payload bytes. Fresh recording succeeds. Complete fixture: 336.91 seconds; cleanup including before/after inventories: 163.03 seconds. |
+| Many legacy runs | Pagination returns 1,026 distinct entries. Finished history retires in 24 calls, preserving unresolved/corrupt history and user payload. Pagination: 1.20 seconds; cleanup: 13.85 seconds; slowest call: 0.66 seconds. |
+| Large legacy run | A 10,000-artifact finished run retires in 40 incremental calls, with reopening between calls and preserved unresolved evidence and user data. Cleanup: 11.02 seconds. |
+
+The SQLite test checks at most 256 run-artifact removals and 64 retired runs per
+call. These are current correctness and fixture-cost observations, not controlled
+benchmarks: the PostgreSQL capacity drill ran concurrently. The earlier faster
+SQLite fixture remains historical evidence, not a promise of current latency.
+Inventory cost and physical disk use remain separate from logical history limits.
+Source inspection also confirms that normal inline commands stream their output
+directly and impose no CPU/deadline limit; their small saved receipt does not
+truncate live output or diagnostic exports. Private admission counts active and
+retired workspaces together before accepting another workspace. Reaching its
+limit preserves evidence and falls back to existing command execution.
+
+Logs: `.codex/validation/history-resource-release-build.log` and
+`.codex/validation/history-resource-local-current.log`.
+Detailed assertions: `.codex/validation/shardline-history-resources.tEK07M/`.
+The verifier, shell checks and graph update pass. Gate 4 remains open for the
+remaining operation/deployment cost assessment; these measurements do not bound
+remote storage latency or establish a disk quota.
