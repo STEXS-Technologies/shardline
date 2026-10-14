@@ -1,5 +1,38 @@
 # Maintenance integration: detailed evidence
 
+## PostgreSQL derived-index interruption
+
+The owned PostgreSQL process-cut verifier now also passes three actual SIGTERM
+cuts against the current optimized CLI: reconstruction pruning, dedupe pruning
+and restoration from real retained Xet shards. A trigger pauses the second
+mutation after the first commits. Terminating the CLI preserves the committed
+change; the paused PostgreSQL backend retains its advisory owner until the
+fixture explicitly cancels that query. The second transaction rolls back.
+
+Read-only history inspection leaves the index unchanged. A later stale entry
+or retained shard is added before a fresh ordinary rebuild. That rebuild
+discovers the new work, preserves immutable file versions and protected payload
+bytes, and records a distinct completed run with its actual fresh PID. The old
+run remains unresolved; its native SQLite journal and WAL bytes stay unchanged.
+Restored mappings are checked against all three actual retained shard hashes
+and paths, and the earlier shard bytes remain unchanged.
+
+The final rebuilt harness passes the three cuts in 7.86 seconds. The same owned
+fixture also reruns all 25 receipt cuts (35.49 seconds), partial repair (2.81
+seconds) and latest-pointer rebuild (2.47 seconds), with no selected test skipped.
+All 34 ordinary CLI tests pass in 5.07 seconds; four owned PostgreSQL tests are
+excluded from that ordinary run and executed separately by the verifier.
+Strict CLI Clippy, formatting and shell syntax checks pass.
+Log: `.codex/validation/postgres-derived-owned-final.log`; detailed results:
+`.codex/validation/shardline-postgres-process-cuts.x3PJSm/`.
+Reproduce with `bash scripts/shardline/verify_maintenance_postgres_process_cuts.sh
+CURRENT RELEASED CLI_TEST_HARNESS`.
+
+These fixtures establish the named PostgreSQL mutation boundaries. Explicit
+cancellation of the injected query is fixture cleanup, not a claim that process
+termination immediately cancels arbitrary database or storage calls. No
+production source or version changes are needed for these checks.
+
 This branch adds automatic task history to existing startup and maintenance.
 It is **not ready to merge**. The version stays unchanged; a version bump belongs
 in a separate PR.
