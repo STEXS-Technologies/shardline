@@ -62,7 +62,7 @@ These results cover named fixtures. They do not certify every deployment.
 
 The optimized deployment evidence includes all 23 fault scenarios across two
 complementary runs of the same binary. After the native recovery correction,
-the optimized CLI suite passes all 22 scenarios, including destination-history
+the optimized CLI suite passes all 23 scenarios, including destination-history
 failure after successful copying and process termination during copying or
 after its report is saved.
 These counts supplement the behavior checks above and do not close a gate on
@@ -89,8 +89,10 @@ The following still need implementation or stronger evidence before merge:
   now use normal local project metadata; a cold-start MinIO fixture verifies
   ordinary history inspection without worker setup. Unsafe history paths warn
   while preserving successful copying. Existing host-private archives remain
-  preserved. Older archive inspection and remaining deployment/configuration
-  combinations still belong to the compatibility audit.
+  preserved. Explicit owner-only archive inspection now verifies completed and
+  interrupted metadata histories from the predecessor binary without rewriting
+  their files or replaying copying. Private journals awaiting export and
+  remaining deployment/configuration combinations still belong to the audit.
 
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.

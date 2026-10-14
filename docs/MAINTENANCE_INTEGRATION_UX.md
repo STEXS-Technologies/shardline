@@ -106,7 +106,18 @@ shardline --config /etc/shardline/shardline.toml history
 ```
 
 Read `state`, `next_step` and any `history_notice`. Inspection needs no admin
-token or worker setup and starts no maintenance. For a blocked write, inspect:
+token or worker setup and starts no maintenance.
+
+To inspect an older private copy archive, run this as its owner:
+
+```bash
+shardline history --archive --root /path/to/old/archive
+```
+
+This verifies saved results without rewriting the archive or repeating work.
+Keep the original files and command logs.
+
+For a blocked write, inspect:
 
 ```bash
 shardline history --pending-deletes

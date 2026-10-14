@@ -746,6 +746,9 @@ pub(crate) struct HistoryArgs {
     /// Override the deployment root for local metadata state.
     #[arg(long)]
     pub(crate) root: Option<PathBuf>,
+    /// Inspect a retained private archive as its owner, without a deployment filter.
+    #[arg(long, requires = "root", conflicts_with = "pending_deletes")]
+    pub(crate) archive: bool,
     /// Maximum records to show (1–100).
     #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=100))]
     pub(crate) limit: u16,

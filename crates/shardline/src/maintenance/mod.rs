@@ -244,7 +244,7 @@ fn source_config(
 
 // Construct the optional history target without touching its filesystem. A
 // denied or unsafe history root must fail recording, not the original copy.
-fn metadata_config(root: std::path::PathBuf) -> Result<shardline_server::ServerConfig> {
+pub(crate) fn metadata_config(root: std::path::PathBuf) -> Result<shardline_server::ServerConfig> {
     Ok(shardline_server::ServerConfig::new(
         "127.0.0.1:0".parse()?,
         "http://localhost".to_owned(),

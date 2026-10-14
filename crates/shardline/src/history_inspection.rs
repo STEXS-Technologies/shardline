@@ -2,6 +2,30 @@
 use shardline_server::task_tracking::{TaskEvidenceStore, deployment_fingerprint};
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+mod archive;
+
+pub(crate) async fn run_archive(
+    root: Option<&Path>,
+    after: Option<String>,
+    limit: usize,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "linux")]
+    {
+        archive::run(
+            root.ok_or("history --archive requires --root")?,
+            after,
+            limit,
+        )
+        .await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (root, after, limit);
+        Err("private maintenance archive inspection requires Linux".into())
+    }
+}
+
 pub(crate) fn failure_guidance(error: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
     let mut current = Some(error);
     while let Some(cause) = current {

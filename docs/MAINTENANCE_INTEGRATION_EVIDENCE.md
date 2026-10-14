@@ -4879,3 +4879,42 @@ build takes 2 minutes 34 seconds. Logs are under
 `/tmp/shardline-s3-only-release.3sL0eR`, with focused unit and Clippy logs named
 `/tmp/shardline-s3-only-history-*`. These cover the named raw-endpoint workflows;
 older archives, other configurations and remaining phase/cost gates remain open.
+
+## Explicit inspection of predecessor copy archives
+
+`shardline history --archive --root PATH` reads an explicitly selected private
+archive as its owner. It uses the existing read-only evidence backend and signed
+history verification. The archive page is labelled separately and does not
+apply a current deployment filter; normal history keeps its original scope and
+signed association checks. No task execution, evidence migration or private
+journal export is performed. Private journals awaiting export stay retained.
+
+Two real MinIO process tests generate completed and interrupted S3-to-S3
+archives using the predecessor branch binary SHA-256
+`b8d56cfd7169078f65a740efa42f13a84847d986ef7217cc60a703eef65e634b`.
+The current optimized binary SHA-256
+`9ed2ba71f2c7d91d9bc85549f0a0a537a891db97cfbbecbce92e9e05bd55e583`
+inspects them successfully. The recorded CLI PID and expected state are
+preserved. New source objects remain absent from the destination. Every
+pre-existing database, WAL, native journal, identity, signing key and artifact
+file remains byte-exact; SQLite SHM read-lock bookkeeping is excluded from that
+comparison. Both cases pass in 9.702 seconds. This predecessor is a prior
+integration-branch build, not the released 1.11.3 deployment comparison.
+
+Three SQLite inspection tests pass, including one-record pagination across
+original deployment identities, corrupt-record visibility and unchanged normal
+scope isolation. The real PostgreSQL inspection test passes against an owned
+PostgreSQL fixture and preserves its saved artifact rows. All 23 maintenance
+CLI tests pass in 2.398 seconds, including archive argument conflicts, private
+directory requirements and absence of initialization or permission changes.
+Strict CLI and server Clippy pass. The release build completes in 2 minutes
+47 seconds and still reports version 1.11.3.
+
+Logs: `/tmp/shardline-archive-release.fKvCzJ/legacy-evidence-immutable.log`,
+`maintenance-cli.log`, `/tmp/shardline-archive-inspection-unit.log` and
+`/tmp/shardline-batched-deletion.TGGfNo/test.log`. The first PostgreSQL attempt
+stopped at a linker bus error near the `/tmp` user quota, before executing the
+test. Moving an owned prior size fixture to workspace storage allowed the
+successful rerun. This was validation resource pressure, not a PostgreSQL
+runtime result. These checks cover saved metadata archives; other private
+journals, configurations and remaining merge gates still require their audit.
