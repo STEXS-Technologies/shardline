@@ -1,4 +1,4 @@
-use penelope_domain::ContentDigest as PenelopeDigest;
+use crate::PenelopeDigest;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -66,7 +66,7 @@ pub struct RepairEvidenceEvent {
     /// not persist this field and therefore decode as the original V1 format.
     #[serde(default = "default_repair_digest_encoding")]
     pub digest_encoding: DigestEncoding,
-    pub state_digest: statechronicle_core::digest::ContentDigest,
+    pub state_digest: crate::StateChronicleDigest,
     pub process_digest: PenelopeDigest,
 }
 

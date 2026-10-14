@@ -13,7 +13,7 @@ use shardline_reliability::{
     build_persisted_merkle_commit_with_previous, persisted_event_sequence, verify_lifecycle_chain,
     verify_persisted_event_merkle_chain_with_sequences, verify_state_transition_chain,
 };
-use statechronicle_domain::intent::KeyId;
+use statechronicle_domain_compat::intent::KeyId;
 
 #[derive(Deserialize)]
 struct HistoricalFixtures {

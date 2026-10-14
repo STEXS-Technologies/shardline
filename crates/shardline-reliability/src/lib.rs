@@ -5,6 +5,7 @@
 //! The implementation is split by responsibility; this root only declares
 //! modules and preserves the public compatibility surface through re-exports.
 
+mod compatibility;
 mod digest;
 mod durable;
 mod error;
@@ -25,6 +26,7 @@ mod provider_evidence;
 mod quarantine_evidence;
 mod repair_evidence;
 mod retention_evidence;
+mod runtime_merkle;
 mod s3_object_evidence;
 mod session_evidence;
 mod snapshot_event;
@@ -90,7 +92,7 @@ pub use operation::{
     OperationIdentity, OperationKind, ResumableSessionSnapshotDomain,
     resumable_session_snapshot_identity,
 };
-pub use penelope_domain::ContentDigest as PenelopeDigest;
+pub use penelope_domain_compat::ContentDigest as PenelopeDigest;
 #[cfg(feature = "task-journal")]
 pub use penelope_executor::task::TaskSupervisor;
 pub use persisted::{
@@ -132,7 +134,7 @@ pub use snapshot_log::{
     verify_snapshot_evidence,
 };
 pub use state_snapshot::DigestSnapshot;
-pub use statechronicle_core::digest::ContentDigest as StateChronicleDigest;
+pub use statechronicle_core_compat::digest::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};
 #[cfg(feature = "task-journal")]
 pub use task_artifact::{

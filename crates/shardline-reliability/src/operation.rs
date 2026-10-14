@@ -1,6 +1,6 @@
-use penelope_domain::ContentDigest as PenelopeDigest;
+use crate::PenelopeDigest;
+use crate::StateChronicleDigest as ContentDigest;
 use serde::{Deserialize, Serialize};
-use statechronicle_core::digest::ContentDigest;
 
 use crate::ReliabilityError;
 
@@ -132,8 +132,7 @@ impl OperationIdentity {
     /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn content_digest(&self) -> Result<ContentDigest, ReliabilityError> {
         self.validate()?;
-        statechronicle_core::canonicalize::canonicalize_and_digest(self)
-            .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))
+        crate::canonical_state_digest(self)
     }
 
     ///
@@ -144,7 +143,9 @@ impl OperationIdentity {
         self.validate()?;
         let bytes = statechronicle_core::canonicalize::canonicalize(self)
             .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))?;
-        Ok(PenelopeDigest::sha256(&bytes))
+        Ok(PenelopeDigest(
+            penelope_domain::ContentDigest::sha256(&bytes).0,
+        ))
     }
 
     fn validate(&self) -> Result<(), ReliabilityError> {

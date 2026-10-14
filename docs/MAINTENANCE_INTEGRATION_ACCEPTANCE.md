@@ -1,9 +1,9 @@
 # Maintenance integration: merge checklist
 
 **The integration and UX acceptance review is complete within the contracts
-below.** A subsequent [release upgrade audit](RELEASE_UPGRADE_AUDIT.md) found a
-downstream Rust type compatibility gap that must be resolved before claiming a
-universally compatible release. The branch has not been merged or deployed.
+below.** A subsequent [release upgrade audit](RELEASE_UPGRADE_AUDIT.md) found and
+addressed a downstream Rust type compatibility gap with a public API bridge.
+The branch has not been merged or deployed.
 The version remains 1.11.3; release numbering belongs in a separate PR.
 
 For operators, read [Maintenance without another service](MAINTENANCE_INTEGRATION_UX.md).
