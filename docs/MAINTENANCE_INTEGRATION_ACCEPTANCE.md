@@ -298,6 +298,11 @@ Ordinary history stays unresolved; explicit native inspection verifies completio
 without changing the journal. The next ordinary invocation exports the verified
 old result, retires its private scratch and records a separate completed run.
 User payload is preserved. Domain-specific mutation cuts remain in the phase audit.
+Lifecycle repair now also has six actual SIGTERM mutation cuts: expired holds,
+missing-object quarantine entries and stale webhook deliveries for both command
+forms. Each preserves the committed first change, rolls back the interrupted
+second transaction, verifies surviving evidence and starts fresh recovery without
+changing the old unresolved receipt. Other operation-specific cuts remain open.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |

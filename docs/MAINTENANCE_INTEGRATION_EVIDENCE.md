@@ -5326,3 +5326,29 @@ tests without skips in 5.06 seconds. Strict CLI integration-test Clippy passes.
 Logs: `.codex/validation/mounted-barrier-release-build.log`,
 `.codex/validation/ordinary-completion-release-cli-all.log` and
 `.codex/validation/ordinary-completion-clippy-final.log`.
+
+### Lifecycle repair interrupted during partial mutation
+
+The semantic `maintenance_support::repair_interruptions` module covers six actual
+SIGTERM cases against the current optimized CLI: expired retention holds,
+missing-object quarantine entries and stale webhook deliveries, each through
+`repair lifecycle` and default `repair`. A trigger in the owned SQLite fixture
+holds the second deletion. The test observes the committed first deletion and
+an active database writer before terminating the original CLI PID.
+
+The first mutation survives; the interrupted transaction rolls back. Public
+lifecycle readers verify the surviving domain records and reliability evidence.
+The native journal retains three records. Ordinary history reports unresolved
+work and changes neither domain rows nor user bytes. A new eligible record is
+then added; the next explicit repair handles both the remaining and new work,
+preserving a permanent hold and payload bytes. Shared history contains the old
+unresolved run and a distinct completed run. The original native database and
+WAL remain byte-identical, proving that fresh recovery does not rewrite the
+earlier task into completion.
+
+All six cases execute without skips in the single matrix test. Strict CLI
+integration-test Clippy and formatting pass. Logs:
+`.codex/validation/repair-mutation-final.log` and
+`.codex/validation/repair-mutation-clippy-final.log`.
+The binary is the current optimized build recorded above. These SQLite cases
+do not establish all PostgreSQL or remote mutation boundaries.
