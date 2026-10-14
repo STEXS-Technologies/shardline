@@ -5809,3 +5809,39 @@ The operator guide now states the existing storage-cutover rule explicitly:
 pause writers and GC; saved copy history does not coordinate cutover. The
 acceptance checklist maps ordinary operation effects, ownership and interruption
 evidence, retaining the remaining backend/reference review requirements.
+
+### PostgreSQL latest-pointer mutation interruption
+
+The owned process verifier now includes a semantic
+`postgres_rebuild_interruptions` module. It writes two immutable empty-file
+version records through the public PostgreSQL record API, then runs the real
+ordinary index-rebuild CLI. An owned trigger pauses the second latest-pointer
+insert after the first has committed. Actual SIGTERM terminates the original
+CLI; its paused server-side query still retains the maintenance advisory owner.
+The fixture explicitly cancels that query and waits for its backend to end
+before removing the trigger. It does not claim immediate cancellation of arbitrary
+remote I/O when a client exits.
+
+The committed first head survives and the interrupted second insert rolls back.
+Both immutable versions remain exact. Native history contains three records;
+read-only shared inspection does not resume rebuilding. A later third version
+is added, and a fresh ordinary rebuild discovers it and restores all three
+heads. Earlier immutable versions, protected payload bytes and interrupted native
+SQLite/WAL bytes remain unchanged. The original receipt stays in reconciliation;
+the new completed receipt must match the fresh CLI PID, so a prior completed
+rebuild cannot satisfy the assertion.
+
+The final owned wrapper passes the existing 25 receipt-publication cuts, partial
+repair cut and this new partial-rebuild cut. The new test passes in 2.49 seconds.
+This verifies PostgreSQL latest-pointer transactions and fresh discovery with
+metadata-only empty files; dedupe/reconstruction mutations and other physical
+reference layouts retain separate audit requirements. No production code or
+version changed. Strict CLI library/test Clippy, formatting, shell syntax and
+diff checks pass. The initial Clippy run identified two checked-JSON-access
+fixes in the new test; the corrected strict run passes.
+
+Logs: `.codex/validation/postgres-rebuild-owned-final.log`,
+`.codex/validation/postgres-rebuild-clippy-final.log` and
+`.codex/validation/postgres-rebuild-graph.log`.
+Reproduce with the extended
+`verify_maintenance_postgres_process_cuts.sh CURRENT RELEASED CLI_TEST_HARNESS`.
