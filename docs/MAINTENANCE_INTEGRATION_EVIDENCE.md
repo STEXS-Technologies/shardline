@@ -154,6 +154,50 @@ CLI SIGTERM. A saved receipt never authorizes a replacement to continue an
 unknown external effect. These rules match the main guide's shutdown and
 retryable-delete guidance and require no separate worker service.
 
+## Rollout evidence map and operator walkthrough
+
+The final review compares the integration checklist in `ROLLING_UPGRADE.md`
+with the backend/role fixtures and actual released/current deployment results.
+`Cargo.toml` still specifies 1.11.3; the dependency lock includes Penelope 0.2.0.
+No release/version bump is part of this branch.
+
+| Requirement | Evidence and supported action |
+| --- | --- |
+| Existing process and storage layouts | Startup covers SQLite/local, SQLite/S3, PostgreSQL/local and PostgreSQL/S3 with All, API and Transfer roles. No tracker service, mount or S3 task-write permission is added. |
+| Owner upgrade and runtime grants | The current deployment verifier uses actual released bootstrap and current owner setup, checks migration records and runtime grants, and exercises overlapping writers and rollback. Run the usual owner upgrade even when the ledger is current; do not bypass the protection functions. |
+| Existing evidence | Predecessor completed/interrupted archives and current native workspaces verify read-only with exact journal/identity bytes preserved. Domain checkpoints are tested against actual released startup; inspection does not rewrite or resume them. |
+| Restricted roots and unchanged service | Current released-command comparisons cover restricted roots, removed working directories and copy rollback. The byte-identical released GC unit passes with its existing restrictions and real VM reboot. |
+| Destructive GC across versions | Older GC does not create new delete markers. Pause it, finish old jobs and replace maintenance binaries before resuming. Keep it paused during rollback; retain unresolved protection state. |
+| Storage cutover | Reconcile pending deletes first, then coordinate writers and GC as required by the existing copy contract. Copy history does not coordinate cutover or settle unknown deletes. |
+| Restricted tenant inspection | Existing schema/reliability read grants and deny-all row-policy fixtures distinguish readable history from unavailable inspection. Keep access restrictions; unavailable history is inconclusive. |
+| Filesystem locking | Local restricted-root and actual read-only Linux mount fixtures cover the tested filesystem behavior. They do not certify network filesystems with different locking semantics. Shared PostgreSQL ownership remains the multi-node database boundary. |
+
+Re-inspected current results:
+`.codex/validation/command-compatibility-deployments-current.log`,
+`.codex/validation/command-compatibility-s3-final.log` and
+`.codex/validation/postgres-s3-startup-final.log`. Detailed archive, restricted
+inspection and released-intent fixtures retain their separate evidence sections.
+These are compatible named upgrade paths with explicit restrictions, not a
+claim that unrestricted older destructive GC is safe during overlap.
+
+An additional current local operator walkthrough starts ordinary `serve`,
+checks `/readyz`, then runs ordinary `fsck`, `repair`, `gc --mark --sweep`,
+`history` and `history --pending-deletes` against one owned empty root. Every
+command succeeds. History has at least three tasks, each completed with a string
+`next_step`; no admin API token or runner setup is used. Direct SIGTERM of the
+server PID exits successfully. Saved outputs:
+`.codex/validation/operator-walkthrough.UBnOeo/`.
+The initial harness signalled its background shell wrapper and returned 143;
+that wrapper attempt is not server-shutdown evidence. The corrected direct
+process invocation passes, and no walkthrough server is left running.
+
+The walkthrough's local pending-delete result is explicitly unsupported; it
+does not prove remote deletion is safe. PostgreSQL pending-delete pagination,
+503/Retry-After responses, saved-reply reconciliation and unknown-outcome
+preservation use the existing configured response and deployment fixtures.
+The operator guide matches those distinctions: readiness is current, history is
+past evidence, and uncertain effects require investigation before a fresh run.
+
 This branch adds automatic task history to existing startup and maintenance.
 It is **not ready to merge**. The version stays unchanged; a version bump belongs
 in a separate PR.
