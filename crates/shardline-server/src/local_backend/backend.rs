@@ -25,7 +25,7 @@ use super::records::read_record;
 /// Local filesystem backend for file chunk storage and reconstruction metadata.
 #[derive(Debug, Clone)]
 pub struct LocalBackend {
-    pub(super) metadata_root: PathBuf,
+    pub(crate) metadata_root: PathBuf,
     pub(super) public_base_url: String,
     pub(super) chunk_size: NonZeroUsize,
     pub(super) upload_max_in_flight_chunks: NonZeroUsize,

@@ -52,9 +52,7 @@ impl TaskEvidenceStore {
             })?;
             store.with_postgres_pool(config, pool, true).await
         } else {
-            if config.object_storage_adapter() == crate::ObjectStorageAdapter::Local
-                && config.root_dir().join("metadata.sqlite3").try_exists()?
-            {
+            if config.root_dir().join("metadata.sqlite3").try_exists()? {
                 store.local_metadata = Some(shardline_index::LocalIndexStore::open_read_only(
                     config.root_dir().to_owned(),
                 ));
@@ -112,7 +110,14 @@ impl TaskEvidenceStore {
         config: &ServerConfig,
         backend: &ServerBackend,
     ) -> Result<(Self, Option<Digest>), ServerError> {
-        let store = Self::from_backend_objects(config, backend.object_store());
+        let mut store = Self::from_backend_objects(config, backend.object_store());
+        if let ServerBackend::Local(local) = backend {
+            // Metadata ownership is independent of the payload adapter. Use
+            // the actual backend root, including SQLite with S3 payloads.
+            store.local_metadata = Some(shardline_index::LocalIndexStore::open(
+                local.metadata_root.clone(),
+            ));
+        }
         let ServerBackend::Postgres(postgres) = backend else {
             return Ok((store, None));
         };
