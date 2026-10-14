@@ -8,7 +8,7 @@ released=$(realpath "$2")
 test -x "$current"
 test -x "$released"
 umask 077
-fixture=$(mktemp -d /tmp/shardline-invalid-config.XXXXXX)
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-invalid-config.XXXXXX")
 echo "diagnostics: $fixture"
 cp -- "$current" "$fixture/current-shardline"
 cp -- "$released" "$fixture/released-shardline"
@@ -18,11 +18,12 @@ printf '[server\ninvalid' > "$fixture/invalid.toml"
 printf '' > "$fixture/valid.toml"
 printf 'original root bytes' > "$fixture/root-file"
 for problem in invalid-config missing-config missing-env-file root-file; do
-  for operation in fsck rebuild repair gc; do
+  for operation in fsck rebuild repair repair-lifecycle gc; do
     case "$operation" in
       fsck) arguments=(fsck);;
       rebuild) arguments=(index rebuild);;
-      repair) arguments=(repair lifecycle);;
+      repair) arguments=(repair);;
+      repair-lifecycle) arguments=(repair lifecycle);;
       gc) arguments=(gc --mark);;
     esac
     case "$problem" in

@@ -5623,3 +5623,37 @@ Rust formatting and shell syntax checks pass. Clippy log:
 `.codex/validation/postgres-s3-startup-clippy.log`.
 The tested optimized CLI remains version 1.11.3 with SHA-256
 `14eb3b53933caaa278a6dba901b914d9fd8f2ffe03badc75ba3febbf17f68ac3`.
+
+### Current ordinary-command compatibility checks
+
+The same optimized CLI passes twenty exact released/current configuration-failure
+comparisons: fsck, rebuild, GC and both repair forms, each with malformed TOML,
+missing configuration, a missing environment file and an unusable root file.
+The verifier compares stdout, stderr and exit status and preserves root-file
+contents without creating absent roots. Five command forms under a 0555 root
+also preserve released output and status without changing permissions or adding
+root entries. Fully read-only SQLite fsck preserves existing evidence and reports
+optional history failure without recording completion.
+
+The large-diagnostics fixture preserves released GC output and payload bytes,
+then discovers newly added work and records a distinct completion. The real
+MinIO fixture preserves restricted S3 copying and released rollback. Its retained
+inline archive uses the native journal: explicit archive inspection confirms the
+original copy PID and completed state, leaving journal and identity bytes exact.
+The verifier now checks that format instead of expecting the older private
+metadata layout. No runtime change was needed.
+
+An additional S3-to-local copy runs after removing its working directory. Current
+and released commands preserve identical stdout and stderr, successful status
+and destination payload bytes. The current destination contains no newly created
+history metadata. Optional preparation falls back to the original command;
+missing history does not prove that copying never occurred.
+
+All four verifiers pass against the current optimized CLI. Logs:
+`.codex/validation/command-compatibility-invalid.log`,
+`.codex/validation/command-compatibility-permissions.log`,
+`.codex/validation/command-compatibility-diagnostics.log` and
+`.codex/validation/command-compatibility-s3-final.log`.
+The optional signed-reply cases in the S3 verifier were not selected in this run.
+These checks strengthen gate 2; current-binary service/deployment revalidation
+remains separate from these command comparisons.
