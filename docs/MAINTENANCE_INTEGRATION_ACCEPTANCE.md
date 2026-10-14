@@ -85,10 +85,12 @@ for exact fixtures, historical measurements and their boundaries.
 
 The following still need implementation or stronger evidence before merge:
 
-- **S3-only copy inspection.** A copy with two raw S3 endpoints has no verified
-  deployment metadata association and retains host-private evidence. Normal
-  deployment history does not yet expose that archive through a simple operator
-  workflow. This remains part of the startup/embedding and operator audit.
+- **Legacy copy archives and configuration combinations.** New S3-to-S3 copies
+  now use normal local project metadata; a cold-start MinIO fixture verifies
+  ordinary history inspection without worker setup. Unsafe history paths warn
+  while preserving successful copying. Existing host-private archives remain
+  preserved. Older archive inspection and remaining deployment/configuration
+  combinations still belong to the compatibility audit.
 
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.
@@ -240,8 +242,8 @@ acknowledgement. Both cuts preserve copied data and unresolved history, and
 inspection does not resume copying. A separate MinIO fixture now proves the
 local-to-S3 cut after an accepted PUT but before its response: source-root
 inspection exposes unfinished history without replay. Other remote-copy phases
-and two-S3-endpoint inspection still need evidence; these fixtures do not close
-the phase audit.
+still need evidence. S3-to-S3 accepted-PUT interruption and cold-start inspection
+now also pass; these fixtures do not close the phase audit.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |

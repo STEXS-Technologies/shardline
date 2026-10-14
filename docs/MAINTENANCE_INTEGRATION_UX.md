@@ -82,6 +82,10 @@ storage to S3, inspect the local source root instead:
 shardline history --root /path/to/local/root
 ```
 
+For S3-to-S3 copies, run `shardline history` from the same project directory.
+Results use that host's local metadata; no worker setup is needed. If saving
+history fails, check the copy's output and destination before repeating it.
+
 ## Check the server or a previous result
 
 Check current readiness at your server address:

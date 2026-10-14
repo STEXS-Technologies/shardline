@@ -206,3 +206,75 @@ async fn unavailable_postgres_history_does_not_publish_into_payload_storage() {
     .await
     .unwrap();
 }
+
+#[test]
+fn s3_only_copy_history_uses_local_project_metadata_and_rejects_unsafe_paths() {
+    for unsafe_root in [false, true] {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        if unsafe_root {
+            std::os::unix::fs::symlink(outside.path(), project.path().join(".shardline")).unwrap();
+        }
+        let configured = config(project.path());
+        let copy = MaintenanceOperation::StorageMigrate {
+            root: project.path().to_path_buf(),
+            from: MaintenanceStorageAdapter::S3,
+            from_root: None,
+            to: MaintenanceStorageAdapter::S3,
+            to_root: None,
+            prefix: String::new(),
+            dry_run: false,
+        };
+        let endpoint = shardline_server::StorageMigrationEndpoint::S3(
+            configured.s3_object_store_config().unwrap().clone(),
+        );
+        let snapshot = crate::maintenance::configuration::Configuration {
+            config: configured.clone(),
+            command: crate::CliCommand::StorageMigrate {
+                from: ObjectStorageAdapter::S3,
+                from_root: None,
+                to: ObjectStorageAdapter::S3,
+                to_root: None,
+                prefix: String::new(),
+                dry_run: false,
+            },
+            config_path: None,
+            migration: Some((endpoint.clone(), endpoint)),
+        };
+        crate::maintenance::configuration::scope(snapshot, || {
+            // Resolving optional history must not fail the copy before work.
+            let publication = crate::maintenance::publication_config(&copy, &configured).unwrap();
+            assert!(publication.index_postgres_url().is_none());
+            assert_eq!(
+                publication.root_dir(),
+                project.path().join(".shardline/data")
+            );
+            let history = store(&copy, &publication, None);
+            if unsafe_root {
+                assert!(history.is_err());
+                assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+            } else {
+                let history = history.unwrap();
+                history
+                    .publish("manifests/s3-only", b"admitted copy")
+                    .unwrap();
+                history
+                    .publish("runs/s3-only/artifacts/report", b"saved outcome")
+                    .unwrap();
+                let reopened = TaskEvidenceStore::from_config(&publication).unwrap();
+                assert_eq!(
+                    reopened
+                        .read("runs/s3-only/artifacts/report", 1024)
+                        .unwrap(),
+                    Some(b"saved outcome".to_vec())
+                );
+                assert_eq!(
+                    std::fs::read_dir(publication.root_dir().join("chunks"))
+                        .unwrap()
+                        .count(),
+                    0
+                );
+            }
+        });
+    }
+}
