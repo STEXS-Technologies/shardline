@@ -61,6 +61,8 @@ setup and starts no maintenance. A failed or interrupted run may have made
 partial changes; check its logs and affected data before repeating it. Preserve
 corrupt evidence. If history is unavailable or full, check the original command
 output and logs instead of assuming the work failed or did not run.
+PostgreSQL row policies can make shared history unavailable. Keep those access
+restrictions in place; use the original command's logs to investigate the run.
 
 If a warning names a retained workspace, inspect that directory as its owner:
 

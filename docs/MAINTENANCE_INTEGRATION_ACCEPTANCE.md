@@ -219,7 +219,10 @@ The following still need implementation or stronger evidence before merge:
   now verifies a login with only existing schema usage and reliability-table
   SELECT: it reads completed history, cannot access the artifact table directly
   or another schema, and leaves saved evidence unchanged. This covers that
-  account configuration, not arbitrary row policies. Corrupt, unfinished or
+  account configuration. Enabling a deny-all row policy on ordinary metadata
+  then disables shared inspection, exposes the unavailable-history warning and
+  preserves evidence; arbitrary tenant policy combinations remain unverified.
+  Corrupt, unfinished or
   unrelated legacy objects can still enter an older raw storage copy.
 
 ## Eight merge gates
