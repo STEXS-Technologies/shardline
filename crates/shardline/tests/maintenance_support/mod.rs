@@ -1,3 +1,4 @@
+mod admission_interruptions;
 mod archive_inspection;
 mod local_history;
 mod storage_copy_faults;

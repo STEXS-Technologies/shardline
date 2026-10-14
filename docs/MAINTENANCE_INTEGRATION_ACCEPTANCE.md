@@ -279,8 +279,11 @@ unresolved history without copying either the original or a later source object.
 Actual local-copy SIGTERM cuts also cover zero, one and two committed starting
 records. Native archive inspection reports pending before execution is committed
 and needs reconciliation after the started record, preserves database/WAL and
-identity bytes, and performs no destination writes. These fixtures extend the
-copy phase audit; the remaining operations still need evidence.
+identity bytes, and performs no destination writes. The same zero/one/two-record
+process cuts now cover fsck, index rebuild, GC mark and both repair command forms.
+Each checks its operation identity, preserves native evidence and leaves user
+payload unchanged. Domain-mutation and external-effect coverage across remaining
+operations still belongs to the phase audit.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |

@@ -5219,3 +5219,41 @@ three server roles, application-owned logging, fresh cleanup on consecutive
 starts and history in the original server PID. Logs:
 `.codex/validation/restricted-directory-cli-all.log` and
 `.codex/validation/restricted-directory-embedded-startup.log`.
+
+### Ordinary-command admission interruption matrix
+
+The admission fixture now has its own semantic test module and covers fsck,
+index rebuild, GC mark, `repair lifecycle` and default `repair`, each at zero,
+one and two committed native records. Together with the three local-copy cuts,
+it verifies 18 actual SIGTERM interruptions. Each checks the saved operation
+identity and original PID, exact native database/WAL/identity preservation,
+pending versus unresolved guidance, unchanged user payload and no work during
+inspection. The four test functions pass without skips in 70.44 seconds with
+the debug CLI. Strict integration-test Clippy passes. Logs:
+`.codex/validation/ordinary-admission-interruptions.log` and
+`.codex/validation/ordinary-admission-clippy.log`.
+
+The complete 30-test CLI suite passes without skips in 95.73 seconds with Cargo's
+debug executable. A direct invocation of the compiled harness with
+`CARGO_BIN_EXE_shardline` selecting the current optimized binary also passes all 30
+tests, in 5.06 seconds. Direct invocation is necessary here: Cargo overrides that
+environment setting with its own debug executable when it launches the harness.
+All CLI launches in these fixtures use the runtime-selectable `binary()` helper.
+Logs: `.codex/validation/ordinary-admission-cli-debug-all.log` and
+`.codex/validation/current-release-cli-direct.log`.
+
+### Current optimized local compatibility benchmark
+
+The current optimized binary reports version 1.11.3 and has SHA-256
+`5bc30ebbbd0f3ab68857ecdb5231ff010fb8aa9d14243c71039a8e4982afdb84`.
+The existing local benchmark matrix at concurrency 1, 32 and 128 preserves every
+non-performance counter, setting and report field against released 1.11.3.
+Released fsck reads current data, and ordinary fsck preserves stdout/stderr and
+records its outcome outside payload storage.
+
+In this single fixture run, released/current wall times are 0.25/0.26, 0.94/0.97
+and 2.76/2.92 seconds at the three concurrency levels. Current times are slightly
+higher; these observations do not establish a production regression threshold
+or a distributed SLO. Raw timing, memory, report and binary-hash records are in
+`.codex/validation/shardline-benchmark-compatibility.OB15u2`; the executed
+verification output is `.codex/validation/current-release-benchmark-compatibility.log`.
