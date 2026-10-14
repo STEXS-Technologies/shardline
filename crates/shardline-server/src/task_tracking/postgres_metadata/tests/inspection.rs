@@ -104,6 +104,49 @@ async fn restricted_reader_inspects_history_without_new_grants_or_cross_schema_a
             .unwrap();
     assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
     assert_eq!(page["tasks"][0]["state"], "completed");
+    // A policy on ordinary metadata also prevents schema-wide grouping; the
+    // optional evidence adapter must not use its definer privileges to bypass it.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {}.shardline_reliability_events ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE {}.shardline_reliability_events FORCE ROW LEVEL SECURITY;
+         CREATE POLICY deny_inspection ON {}.shardline_reliability_events
+         USING (false) WITH CHECK (false)",
+        fixture.schema, fixture.schema, fixture.schema,
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    let protected_read = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {}.shardline_task_artifact_read_v1('{}', 'missing', 0)",
+        fixture.schema, fixture.schema,
+    )))
+    .fetch_all(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        protected_read
+            .as_database_error()
+            .unwrap()
+            .code()
+            .as_deref(),
+        Some("SLD04")
+    );
+    let (reader, scope) = TaskEvidenceStore::for_inspection(&config, Some(&pool))
+        .await
+        .unwrap();
+    assert!(scope.is_none());
+    let page =
+        tokio::task::spawn_blocking(move || reader.inspection_page(deployment, scope, None, 20))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(page["tasks"].as_array().unwrap().is_empty());
+    assert!(
+        page["history_notice"]
+            .as_str()
+            .unwrap()
+            .contains("an empty list does not prove maintenance did not run")
+    );
     let after: Vec<(String, Vec<u8>)> = sqlx::query_as(sqlx::AssertSqlSafe(snapshot))
         .fetch_all(&fixture.admin)
         .await

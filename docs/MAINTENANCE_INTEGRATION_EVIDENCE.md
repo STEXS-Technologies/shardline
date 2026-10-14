@@ -5108,3 +5108,16 @@ deployment layouts remain outside this result. Fixture output:
 `/tmp/shardline-batched-deletion.a7dE8h/test.log`.
 Strict server Clippy also passes; its output is
 `/tmp/shardline-restricted-inspection-clippy.log`.
+
+The same restricted-login fixture now enables and forces a deny-all row policy
+on the ordinary reliability-events table. Direct function reads reject the
+schema-wide evidence path with `SLD04`; configured inspection falls back without
+a shared scope and exposes no shared tasks. It includes the explicit warning
+that an empty history list does not prove maintenance did not run. Artifact keys
+and payload bytes remain unchanged across both inspections. This checks a policy
+on domain metadata rather than only the optional artifact table. The two-test
+run passes without skips in 0.96 seconds. After the environment restart cleared
+temporary files, a fresh build and PostgreSQL fixture reproduced that result.
+The retained test output is
+`.codex/validation/rls-inspection.jcH0BM/test.log`; strict server Clippy output is
+`.codex/validation/rls-inspection.jcH0BM/clippy.log`.
