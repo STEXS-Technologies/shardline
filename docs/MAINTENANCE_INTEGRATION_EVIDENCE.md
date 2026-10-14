@@ -5782,3 +5782,30 @@ when this comparison began; these are not isolated performance measurements.
 Log: `.codex/validation/history-resource-benchmark-current.log`.
 Reports, timings, binary hashes and fsck comparisons:
 `.codex/validation/shardline-benchmark-compatibility.wE2Khh/`.
+
+### Current protocol and backend interruption checks
+
+The remaining twelve deployment drills pass in 147.37 seconds against the
+current optimized CLI, with no selected runtime skip or panic. Together with
+the eleven restricted-deployment/rollback drills above, all 23 named deployment
+tests have current evidence using identical runtime bytes, SHA-256
+`14eb3b53933caaa278a6dba901b914d9fd8f2ffe03badc75ba3febbf17f68ac3`.
+The eleven skipped entries here are excluded tests selected by the complementary
+verifier. The supplied clock shim matches its saved verified-fixture hash,
+`ad7333813b54202579a4960b3635b67691f4810e9847a11607ef31b3445a8c8f`.
+It is copied into an owned fixture and is not installed system-wide.
+
+The executed cases cover deployment workload bursts; PostgreSQL loss during
+ordinary upload, LFS PATCH, OCI blob upload and S3 multipart upload; MinIO loss
+during ordinary upload and LFS staging; Redis loss during reads; MinIO partition
+and LFS repair; packet duplication/reordering and asymmetric network recovery;
+and live verifier clock skew. Each uses disposable Compose infrastructure and
+its operation-specific committed-data or recovered-byte assertions. This is
+evidence for the named fault cases, not cluster-wide exactly-once execution.
+
+Log: `.codex/validation/protocol-faults-current.log`.
+Detailed results: `.codex/validation/shardline-protocol-faults.V70ZW5/test.log`.
+The operator guide now states the existing storage-cutover rule explicitly:
+pause writers and GC; saved copy history does not coordinate cutover. The
+acceptance checklist maps ordinary operation effects, ownership and interruption
+evidence, retaining the remaining backend/reference review requirements.
