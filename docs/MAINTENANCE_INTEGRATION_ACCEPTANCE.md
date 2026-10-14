@@ -315,6 +315,11 @@ reconstruction pruning, stale dedupe pruning and dedupe restoration from retaine
 shards. They preserve partial progress and payloads, discover new work on the
 next rebuild and retain the old unresolved receipt. Other backend and remote
 mutation combinations remain in the operation-specific audit.
+An owned PostgreSQL process fixture now also covers five shared-recording cuts
+for each of those five ordinary command forms. It verifies exact native/shared
+progress, read-only inspection and a distinct fresh run after actual SIGTERM.
+The fixture explicitly cancels its injected server-side sleep; it does not
+establish immediate cancellation of arbitrary remote I/O when a client exits.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |

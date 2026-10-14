@@ -5424,3 +5424,42 @@ no dependency version changes. The generic runner's comment now matches its
 existing ownership contract: deployment entry points hold the exclusive barrier,
 and lower-level callers supply applicable ownership throughout scan and mutation.
 These cases cover local derived indexes, not every PostgreSQL or remote fault.
+
+### PostgreSQL ordinary CLI process cuts
+
+The semantic `maintenance_support::postgres_interruptions` fixture covers fsck,
+rebuild, GC mark and both repair forms at five shared-recording boundaries:
+intent, start, checkpoint, materialized outcome and completion record. These
+are 25 actual SIGTERM cuts against the optimized CLI in a fresh PostgreSQL 16
+container bootstrapped by released 1.11.3 and upgraded through the normal owner
+migration command.
+
+An owned trigger pauses the selected publication. The fixture identifies the
+exact paused PostgreSQL backend and original CLI identity/PID, terminates the
+CLI, then cancels only that backend's injected server-side sleep. Cancellation
+rolls back the uncommitted publication. This deliberately separates client
+termination from database-query cancellation; it does not establish immediate
+cancellation of arbitrary remote calls when their clients exit.
+
+The fixture verifies the precise durable record counts on both sides of the
+handoff. Shared inspection changes no saved artifacts or native journal bytes.
+A fresh command records a distinct run. Native intent remains pending; native
+start/checkpoint remains unresolved; durable native completion is verified and
+republished without replaying application work. Earlier shared artifact bytes
+and user payload remain intact. Unfinished private journal/WAL bytes remain
+unchanged; verified finished private scratch is retired after successful export.
+
+The ignored integration fixture requires an explicitly owned database marker;
+ordinary test invocation does not count its skip as proof. Run it through
+`scripts/shardline/verify_maintenance_postgres_process_cuts.sh CURRENT RELEASED CLI_TEST_HARNESS`
+after building the harness with
+`cargo test --locked -p shardline --test maintenance_e2e --no-run`.
+The wrapper directly invokes that compiled harness so Cargo cannot override the
+selected optimized CLI. It requires all 25 phase confirmations and one passed
+test with no skips, and removes only its owned container.
+The final owned run passes all 25 cases without skips in 36.49 seconds; strict
+CLI integration-test Clippy, Rust formatting and shell syntax checks pass.
+Logs: `.codex/validation/postgres-process-cuts-preservation.log` and
+`.codex/validation/postgres-process-cuts-clippy-preservation.log`.
+Detailed per-phase output is retained in
+`.codex/validation/shardline-postgres-process-cuts.aRWU88/test.log`.
