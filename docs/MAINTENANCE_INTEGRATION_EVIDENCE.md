@@ -5395,3 +5395,32 @@ rebuild mutation.
 The complete CLI harness also passes all 33 tests without skips against this
 optimized binary in 5.06 seconds, including the repair and fresh-GC additions.
 Log: `.codex/validation/rebuild-mutation-release-cli-all.log`.
+
+### Derived rebuild indexes interrupted during partial mutation
+
+The semantic `maintenance_support::rebuild_derived_interruptions` matrix adds
+three actual SIGTERM cuts: stale reconstruction pruning, stale dedupe mapping
+pruning and dedupe mapping restoration from structurally valid retained shards.
+Each owned SQLite trigger pauses the second mutation after the first committed;
+the test observes that progress and an active writer before terminating the
+original CLI PID. Surviving rows remain readable through their public APIs.
+
+Read-only history leaves partial indexes unchanged. A later eligible row or
+retained shard is added, and a fresh rebuild processes both remaining and newly
+discovered work. Restored mappings point to their expected retained shard keys.
+The protected SDK file still downloads, retained shard bytes stay unchanged,
+and the earlier native database/WAL retain their three records byte-for-byte.
+Shared history keeps the interrupted run unresolved alongside the new completed
+run. All three cuts pass against the optimized CLI without skips; strict CLI
+integration-test Clippy passes. Logs:
+`.codex/validation/rebuild-derived-final.log` and
+`.codex/validation/rebuild-derived-clippy-committed.log`.
+The complete CLI harness passes all 34 tests without skips against the optimized
+binary in 5.07 seconds. Log:
+`.codex/validation/rebuild-derived-release-cli-all.log`.
+
+The fixture adds only a dev-dependency on the existing workspace Xet core crate;
+no dependency version changes. The generic runner's comment now matches its
+existing ownership contract: deployment entry points hold the exclusive barrier,
+and lower-level callers supply applicable ownership throughout scan and mutation.
+These cases cover local derived indexes, not every PostgreSQL or remote fault.

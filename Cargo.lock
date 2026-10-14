@@ -3854,6 +3854,7 @@ dependencies = [
  "shardline-server-core",
  "shardline-storage",
  "shardline-test-support",
+ "shardline-xet-core",
  "sqlx",
  "statechronicle-domain",
  "tempfile",

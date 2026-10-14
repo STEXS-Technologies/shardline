@@ -74,6 +74,7 @@ rustix.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+shardline-xet-core.workspace = true
 shardline-server-core.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 shardline-test-support.workspace = true
