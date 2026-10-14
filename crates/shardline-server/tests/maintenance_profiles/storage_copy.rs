@@ -1,6 +1,6 @@
 use super::super::*;
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::{fs::MetadataExt, process::ExitStatusExt};
 use std::{fs, process::Command, thread, time::Instant};
 
 struct StopOnDrop(std::process::Child);
@@ -13,27 +13,75 @@ impl Drop for StopOnDrop {
 
 #[test]
 fn interrupted_local_to_s3_copy_is_inspectable_from_source_without_replay() {
-    verify_copy_history(CopyProfile::LocalSource);
+    verify_copy_history(CopyProfile::LocalSource, CopyInterruption::KillAcceptedPut);
 }
 
 #[test]
 fn interrupted_s3_to_s3_copy_is_inspectable_without_worker_setup_or_replay() {
-    verify_copy_history(CopyProfile::S3Source);
+    verify_copy_history(CopyProfile::S3Source, CopyInterruption::KillAcceptedPut);
 }
 
 #[test]
 fn s3_only_copy_preserves_work_when_local_history_path_is_unsafe() {
-    verify_copy_history(CopyProfile::UnsafeHistory);
+    verify_copy_history(
+        CopyProfile::UnsafeHistory,
+        CopyInterruption::KillAcceptedPut,
+    );
 }
 
 #[test]
 fn legacy_completed_copy_archive_is_read_without_rewriting_or_replay() {
-    verify_copy_history(CopyProfile::LegacyCompleted);
+    verify_copy_history(
+        CopyProfile::LegacyCompleted,
+        CopyInterruption::KillAcceptedPut,
+    );
 }
 
 #[test]
 fn legacy_interrupted_copy_archive_is_read_without_rewriting_or_replay() {
-    verify_copy_history(CopyProfile::LegacyInterrupted);
+    verify_copy_history(
+        CopyProfile::LegacyInterrupted,
+        CopyInterruption::KillAcceptedPut,
+    );
+}
+
+#[test]
+fn local_to_s3_sigterm_after_accepted_put_preserves_unresolved_history() {
+    verify_copy_history(
+        CopyProfile::LocalSource,
+        CopyInterruption::TerminateAcceptedPut,
+    );
+}
+
+#[test]
+fn s3_to_s3_sigterm_after_accepted_put_preserves_unresolved_history() {
+    verify_copy_history(
+        CopyProfile::S3Source,
+        CopyInterruption::TerminateAcceptedPut,
+    );
+}
+
+#[test]
+fn local_to_s3_sigterm_after_saved_report_preserves_unresolved_history() {
+    verify_copy_history(
+        CopyProfile::LocalSource,
+        CopyInterruption::TerminateSavedReport,
+    );
+}
+
+#[test]
+fn s3_to_s3_sigterm_after_saved_report_preserves_unresolved_history() {
+    verify_copy_history(
+        CopyProfile::S3Source,
+        CopyInterruption::TerminateSavedReport,
+    );
+}
+
+#[derive(Clone, Copy)]
+enum CopyInterruption {
+    KillAcceptedPut,
+    TerminateAcceptedPut,
+    TerminateSavedReport,
 }
 
 #[derive(Clone, Copy)]
@@ -45,7 +93,7 @@ enum CopyProfile {
     LegacyInterrupted,
 }
 
-fn verify_copy_history(profile: CopyProfile) {
+fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
     let local_source = matches!(profile, CopyProfile::LocalSource);
     let history_available = !matches!(profile, CopyProfile::UnsafeHistory);
     let legacy = matches!(
@@ -218,6 +266,38 @@ fn verify_copy_history(profile: CopyProfile) {
     }
     if completed {
         assert!(child.0.wait().unwrap().success());
+    } else if matches!(
+        interruption,
+        CopyInterruption::TerminateAcceptedPut | CopyInterruption::TerminateSavedReport
+    ) {
+        let _held_completion = if matches!(interruption, CopyInterruption::TerminateSavedReport) {
+            Some(hold_completion_until_report(&scratch, &mut child))
+        } else {
+            assert!(
+                !fs::read_to_string(scratch.path().join("cli.stdout"))
+                    .unwrap()
+                    .contains("inserted_objects:")
+            );
+            None
+        };
+        assert!(
+            Command::new("kill")
+                .arg("-TERM")
+                .arg(child.0.id().to_string())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(child.0.wait().unwrap().signal(), Some(15));
+        if let Some(connection) = &_held_completion {
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM penelope_records_v1", [], |row| row
+                        .get::<_, u32>(0))
+                    .unwrap(),
+                3
+            );
+        }
     } else {
         child.0.kill().unwrap();
         child.0.wait().unwrap();
@@ -368,6 +448,74 @@ fn verify_copy_history(profile: CopyProfile) {
                 .unwrap()
                 .contains("without a deployment filter")
         );
+    }
+}
+
+fn hold_completion_until_report(scratch: &TempDir, child: &mut StopOnDrop) -> rusqlite::Connection {
+    let state = fs::read_dir(scratch.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.is_dir()
+                && path.file_name().is_some_and(|name| {
+                    name.to_string_lossy().starts_with("shardline-maintenance-")
+                })
+        })
+        .expect("copy must retain its native state inside the owned TMPDIR");
+    let workspace = fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.join("tasks.sqlite").is_file())
+        .expect("copy must retain its admitted native workspace");
+    let connection = rusqlite::Connection::open_with_flags(
+        workspace.join("tasks.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    connection.busy_timeout(Duration::from_millis(100)).unwrap();
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM penelope_records_v1", [], |row| row
+                .get::<_, u32>(0))
+            .unwrap(),
+        3,
+        "report cut must precede the completion acknowledgement"
+    );
+    let started = Instant::now();
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "remote copy did not materialize its result"
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "copy exited before its report cut"
+        );
+        let saved_report = fs::read_dir(workspace.join("artifacts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+            })
+            .any(|path| {
+                fs::read(path)
+                    .unwrap()
+                    .starts_with(b"maintenance.success: true\n")
+            });
+        if saved_report {
+            assert!(
+                fs::read_to_string(scratch.path().join("cli.stdout"))
+                    .unwrap()
+                    .contains("inserted_objects: 1")
+            );
+            return connection;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
