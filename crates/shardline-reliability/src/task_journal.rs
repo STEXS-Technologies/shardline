@@ -6,7 +6,7 @@ use penelope_core::task::{
     TaskRecord, TaskScope, TaskSequence,
     runtime::{TaskJournal, TaskPortError},
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 const MAX_BLOB_BYTES: u32 = 64 * 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024;
@@ -77,6 +77,29 @@ impl SqliteTaskJournal {
         scope: TaskScope,
         definition: TaskDefinition,
     ) -> Result<Self, TaskPortError> {
+        Self::open_with_mode(path, scope, definition, false)
+    }
+
+    /// Opens existing evidence for inspection without creating tables or changing
+    /// journal settings. Commits through this handle fail without writing.
+    ///
+    /// # Errors
+    /// Rejects the same invalid definitions and bounds as [`Self::open`], and
+    /// missing or unreadable databases. Reads still verify records and blobs.
+    pub fn open_read_only(
+        path: &Path,
+        scope: TaskScope,
+        definition: TaskDefinition,
+    ) -> Result<Self, TaskPortError> {
+        Self::open_with_mode(path, scope, definition, true)
+    }
+
+    fn open_with_mode(
+        path: &Path,
+        scope: TaskScope,
+        definition: TaskDefinition,
+        read_only: bool,
+    ) -> Result<Self, TaskPortError> {
         TaskProjection::new(scope, definition).map_err(|_error| TaskPortError::Conflict)?;
         if definition.budget.max_input_bytes > MAX_BLOB_BYTES
             || definition.budget.max_output_bytes > MAX_BLOB_BYTES
@@ -85,13 +108,19 @@ impl SqliteTaskJournal {
         {
             return Err(TaskPortError::Exhausted);
         }
-        let connection = Connection::open(path).map_err(unavailable)?;
+        let connection = if read_only {
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        } else {
+            Connection::open(path)
+        }
+        .map_err(unavailable)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(unavailable)?;
-        connection
-            .execute_batch(
-                "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+        if !read_only {
+            connection
+                .execute_batch(
+                    "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
              CREATE TABLE IF NOT EXISTS penelope_records_v1 (
                 scope BLOB NOT NULL, sequence INTEGER NOT NULL,
                 record BLOB NOT NULL CHECK(length(record)<=16384),
@@ -101,8 +130,9 @@ impl SqliteTaskJournal {
                 scope BLOB NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32),
                 bytes BLOB NOT NULL CHECK(length(bytes)<=65536),
                 PRIMARY KEY(scope, digest));",
-            )
-            .map_err(unavailable)?;
+                )
+                .map_err(unavailable)?;
+        }
         let key = serde_json::to_vec(&scope).map_err(|_error| TaskPortError::Corrupt)?;
         Ok(Self {
             connection,
