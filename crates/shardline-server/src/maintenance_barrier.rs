@@ -385,7 +385,10 @@ async fn acquire_local(
         Ok(file) => files.push(file),
         #[cfg(target_os = "linux")]
         Err(ServerError::Io(error))
-            if error.kind() == std::io::ErrorKind::PermissionDenied && !path.try_exists()? => {}
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) && !path.try_exists()? => {}
         Err(error) => return Err(error),
     }
     Ok(MaintenanceBarrierGuard::Local { files })
