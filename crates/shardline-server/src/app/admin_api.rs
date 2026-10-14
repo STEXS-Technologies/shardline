@@ -1240,7 +1240,24 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_failure_is_reported_as_degraded_without_internal_details() {
-        let (app, temp) = app(Some(ADMIN_TOKEN)).await;
+        let temp = TempDir::new().expect("temp dir");
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().expect("bind address"),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .expect("frontends")
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .expect("admin token");
+        let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
+        // Disable optional cleanup before startup. Otherwise it may recreate
+        // metadata between removal and the deliberate invalid-directory fault.
+        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        let app = crate::app::router_with_housekeeping_guard(config, guard, stopped)
+            .await
+            .expect("router");
         tokio::fs::remove_file(temp.path().join("metadata.sqlite3"))
             .await
             .expect("remove metadata database");

@@ -1,15 +1,16 @@
 # Maintenance integration: merge checklist
 
-**The integration and UX acceptance review is complete.** The branch is ready
-for PR review under the upgrade and recovery rules below. It has not been merged
-or deployed. The version remains 1.11.3; the 1.11.4 version bump belongs in a
-separate PR.
+**The integration and UX acceptance review is complete within the contracts
+below.** A subsequent [release upgrade audit](RELEASE_UPGRADE_AUDIT.md) found a
+downstream Rust type compatibility gap that must be resolved before claiming a
+universally compatible release. The branch has not been merged or deployed.
+The version remains 1.11.3; release numbering belongs in a separate PR.
 
 For operators, read [Maintenance without another service](MAINTENANCE_INTEGRATION_UX.md).
 For source reviews, executed checks and reproduction commands, read the
 [evidence appendix](MAINTENANCE_INTEGRATION_EVIDENCE.md). The appendix preserves
 historical findings, including gaps subsequently resolved; this checklist is
-the final acceptance assessment.
+the integration acceptance assessment. The release audit records later findings.
 
 ## Experience that must remain simple
 
