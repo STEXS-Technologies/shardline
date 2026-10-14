@@ -5655,5 +5655,31 @@ All four verifiers pass against the current optimized CLI. Logs:
 `.codex/validation/command-compatibility-diagnostics.log` and
 `.codex/validation/command-compatibility-s3-final.log`.
 The optional signed-reply cases in the S3 verifier were not selected in this run.
-These checks strengthen gate 2; current-binary service/deployment revalidation
-remains separate from these command comparisons.
+These checks strengthen gate 2; service/deployment verification is separate
+from these command comparisons.
+
+### Current released-service and real reboot verification
+
+The current optimized binary also passes `verify_maintenance_vm.sh` against
+released 1.11.3 in an owned Debian 13 KVM guest. The cached cloud image's SHA-512
+matches both the saved checksum and Debian's freshly fetched published checksum.
+The released binary generates and runs the GC service. Replacing only the binary
+then runs that same service twice successfully; its file checksum is unchanged.
+The service retains `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`,
+`NoNewPrivileges=yes` and `ReadWritePaths=/var/lib/shardline`.
+
+Two real guest resets interrupt GC before mutation and after mutation/report
+materialization. Reboot changes the boot ID while preserving machine identity.
+Cold startup and inspection retain unresolved tasks and exact saved records;
+the second cut also retains the native checkpoint, report bytes, quarantine
+candidate and user payloads. Newly introduced objects are not marked by recovery.
+Only a fresh explicit GC marks the first later orphan and records a separate
+completion. The service's main PID matches the recorded inline owner.
+
+The verifier exits successfully and removes its owned guest. Log:
+`.codex/validation/command-compatibility-vm-current.log`.
+Detailed assertions and guest logs:
+`.codex/validation/shardline-maintenance-vm.BIIL89/`.
+The transient HTTP connection reset during readiness polling precedes a successful
+retry; all final assertions pass. This verifies the current Linux/systemd layout
+and the two specified reboot cuts, rather than every storage or filesystem layout.
