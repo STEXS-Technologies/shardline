@@ -1,6 +1,6 @@
-use penelope_domain::ContentDigest as PenelopeDigest;
+use crate::PenelopeDigest;
+use crate::StateChronicleDigest as ContentDigest;
 use serde::{Deserialize, Serialize};
-use statechronicle_core::digest::ContentDigest;
 
 use crate::ReliabilityError;
 
@@ -37,11 +37,13 @@ pub(crate) fn state_digest<T: Serialize>(
         DigestEncoding::LegacyJson => legacy_bytes(value)?,
         DigestEncoding::CanonicalBcsV1 | DigestEncoding::CanonicalBcsV2 => canonical_bytes(value)?,
     };
-    Ok(statechronicle_core::digest::hash_bytes(&bytes))
+    Ok(ContentDigest::new(
+        *statechronicle_core::digest::hash_bytes(&bytes).as_bytes(),
+    ))
 }
 
 pub(crate) fn legacy_state_label_digest(state: &str) -> ContentDigest {
-    statechronicle_core::digest::hash_bytes(state.as_bytes())
+    ContentDigest::new(*statechronicle_core::digest::hash_bytes(state.as_bytes()).as_bytes())
 }
 
 pub(crate) fn process_digest<O: Serialize, T: Serialize, U: Serialize>(
@@ -57,7 +59,9 @@ pub(crate) fn process_digest<O: Serialize, T: Serialize, U: Serialize>(
             canonical_bytes(&(operation, sequence, before, after))?
         }
     };
-    Ok(PenelopeDigest::sha256(&payload))
+    Ok(PenelopeDigest(
+        penelope_domain::ContentDigest::sha256(&payload).0,
+    ))
 }
 
 ///
@@ -102,5 +106,7 @@ pub(crate) fn canonical_payload_process_digest<T: Serialize>(
     payload: &T,
 ) -> Result<PenelopeDigest, ReliabilityError> {
     let bytes = canonical_bytes(payload)?;
-    Ok(PenelopeDigest::sha256(&bytes))
+    Ok(PenelopeDigest(
+        penelope_domain::ContentDigest::sha256(&bytes).0,
+    ))
 }

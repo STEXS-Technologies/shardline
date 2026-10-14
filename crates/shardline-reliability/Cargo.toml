@@ -16,6 +16,10 @@ process-runtime = ["task-journal", "dep:rustix", "dep:libc", "dep:hex"]
 chrono.workspace = true
 ed25519-dalek.workspace = true
 penelope-domain.workspace = true
+# Released public type identities; execution and canonicalization use 0.2.
+penelope-domain-compat = { package = "penelope-domain", version = "0.1.0" }
+statechronicle-core-compat = { package = "statechronicle-core", version = "0.1.0" }
+statechronicle-domain-compat = { package = "statechronicle-domain", version = "0.1.0" }
 penelope-core = { workspace = true, optional = true }
 penelope-executor = { workspace = true, optional = true }
 penelope-statechronicle = { workspace = true, optional = true }
@@ -36,6 +40,7 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+statechronicle-commit-compat = { package = "statechronicle-commit", version = "0.1.0" }
 proptest.workspace = true
 tempfile.workspace = true
 

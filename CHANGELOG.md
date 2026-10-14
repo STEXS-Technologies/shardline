@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   guards during initialization.
 - Adapt StateChronicle signing keys internally while retaining the existing
   public Ed25519 key API and zeroizing the temporary seed copy.
+- Retain released StateChronicle/Penelope digest, event, commit and signing
+  types through a checked compatibility bridge while the current protocol
+  engine and task runtime use 0.2.0. Existing Rust consumers need no type changes.
 
 ### Added
 
