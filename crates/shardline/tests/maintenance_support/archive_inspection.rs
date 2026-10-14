@@ -27,6 +27,15 @@ fn native_archive_cli_verifies_unexported_result_without_replaying_work() -> Res
         .find(|path| path.join("identity.json").exists())
         .ok_or("missing retained workspace")?;
     let path = workspace.join("tasks.sqlite");
+    let warnings = String::from_utf8_lossy(&completed.stderr);
+    let retained = warnings
+        .lines()
+        .find(|line| line.contains("shared task evidence unavailable; retaining local evidence"))
+        .ok_or("missing retained-evidence warning")?;
+    assert!(
+        retained.ends_with(&workspace.display().to_string()),
+        "the warning must name the directory accepted by history --archive: {retained}"
+    );
     let before = fs::read(&path)?;
     let inspect = || {
         Command::new(binary())

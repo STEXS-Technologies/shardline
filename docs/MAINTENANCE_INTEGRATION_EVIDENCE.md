@@ -5040,3 +5040,21 @@ All storage-copy scratch uses the owned TMPDIR. The fixture now finds that
 owned workspace and verifies the completion cut explicitly. The corrected
 four-case run and the complete nine-case run pass. These results establish the
 named shutdown/report cuts, not every remote call or remaining admission phase.
+
+## Operator guide and retained-workspace warning
+
+The operator guide now centers on normal commands, readiness, saved results,
+retryable writes and upgrade steps. Technical retry encodings and storage-copy
+routing details are left in their references. The existing admin API link to
+`#handle-a-retryable-write` now has a matching heading. Its CLI reference targets
+were checked against the current headings.
+
+The initial shared-export warning now names the retained workspace directory,
+matching `history --archive --root`, rather than naming `tasks.sqlite`. The real
+CLI denied-export fixture verifies that warning path and successfully inspects
+the same directory. Both archive CLI tests pass in 4.64 seconds; strict CLI
+Clippy passes. The initial assertion rejected ANSI formatting around log field
+names; the corrected assertion checks the actual directory value. No recording,
+execution or retry semantics change. Logs:
+`/tmp/shardline-archive-warning-directory-final.log` and
+`/tmp/shardline-archive-warning-clippy.log`.

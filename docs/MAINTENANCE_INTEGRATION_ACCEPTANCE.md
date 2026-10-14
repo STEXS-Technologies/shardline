@@ -95,7 +95,11 @@ The following still need implementation or stronger evidence before merge:
   inspected directly when shared export failed. Current completed/interrupted
   fixtures and the predecessor's interrupted MinIO copy preserve native evidence
   and expose verified state without export or replay. Remaining legacy layouts
-  and deployment/configuration combinations still belong to the audit.
+  and deployment/configuration combinations still belong to the audit. In
+  particular, inspect endpoint-only copy history from a project whose normal
+  server configuration selects PostgreSQL: copy recording and ordinary history
+  inspection currently resolve their metadata configurations separately, so this
+  combination still needs an actual CLI comparison.
 
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.
