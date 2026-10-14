@@ -58,7 +58,7 @@ arbitrary external deployments or remove the explicit limits below.
 | 1: automatic startup | SQLite/local, SQLite/S3, PostgreSQL/local and PostgreSQL/S3 cover All, API and Transfer roles. Public embedding preserves application logging. Ordinary nodes share PostgreSQL history across separate roots, record server PIDs, perform fresh sweeps and need no tracker child, mount or S3 task-write permission. |
 | 2: existing command behavior | Released/current comparisons cover twenty invalid-configuration cases, five restricted-root command forms, read-only SQLite fsck, diagnostics larger than 1 MiB, S3 copying/rollback and removed working directories. The unchanged released GC unit passes under its original systemd restrictions. Original output/result are preserved; optional recording warnings remain visible. |
 | 3: fresh work and ownership | Later orphans, expired holds, versions and retained shards are discovered by fresh invocations. Concurrent ordinary rebuilds serialize through maintenance ownership. Completed history is never execution authority. High-level upload and metadata-only ownership boundaries have a source-backed review. |
-| 4: capacity and cleanup | Current optimized SQLite/PostgreSQL drills fill all 4,096 slots and retire 4,094 finished runs in 97 bounded calls, preserving unresolved evidence and payloads. Legacy tests cover 1,026 runs and 10,000 artifacts. Workload comparisons at concurrency 1, 32 and 128 preserve stable counters/settings. Source review verifies fallback, live-output handling and documented limits. |
+| 4: capacity and cleanup | Earlier optimized SQLite/PostgreSQL drills fill all 4,096 slots and retire 4,094 finished runs in 97 bounded calls, preserving unresolved evidence and payloads. Legacy tests cover 1,026 runs and 10,000 artifacts. Workload comparisons at concurrency 1, 32 and 128 preserve stable counters/settings. Source review verifies fallback, live-output handling and documented limits. |
 | 5: interruption safety | Native admission/checkpoint and completion-before-shared-ack cuts cover tracked command forms. PostgreSQL adds 25 receipt cuts, partial repair, latest-pointer and three derived-index mutation cuts. Local mutations, accepted remote copy PUTs, source inventory and reports have process cuts. Delete acknowledgement loss, delayed takeover and saved-reply recovery preserve uncertainty without replay. Optional controller death terminates its child and retains unresolved effects. |
 | 6: replacement and shutdown | Current process cuts, container replacement, SIGTERM, real VM reboot and backend faults pass. Four earlier optimized two-machine drills cover partitions, node loss and rebuild/repair/GC connection loss while the source lives. Current source review verifies nonreplaceable ownership and cooperative history shutdown; active calls may finish. |
 | 7: mixed versions and rollback | Actual released/current overlap, owner setup and rollback preserve payloads, compatible writers, migration records and runtime grants. Released startup preserves all four unfinished file/native/xorb checkpoints across scoped/default identities and present/missing bytes. Predecessor archives verify read-only without rewriting. The destructive-GC pause remains mandatory. |
@@ -70,6 +70,15 @@ owned PostgreSQL tests run separately without selected skips. The maintenance
 unit selection passes 42 tests. Counts supplement operation-specific evidence.
 Historical two-machine runs are identified explicitly, rather than described as
 latest-binary executions.
+
+After the public type bridge and umbrella dependency switch, final-branch debug
+builds again pass all 23 deployment drills, the populated released/current
+upgrade, all three PostgreSQL/S3 startup roles, native Xet client flows, and the
+unchanged systemd sandbox with both real guest reboot cuts. The final library
+rerun passes 8,953 tests; the separate e2e workspace compiles with its updated
+lockfile. All four owned PostgreSQL tests pass through the complete verifier
+without selected skips. See the [release audit](RELEASE_UPGRADE_AUDIT.md) for
+exact scope.
 
 ## Completed focused reviews
 

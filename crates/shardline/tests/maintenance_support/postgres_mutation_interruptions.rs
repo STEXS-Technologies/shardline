@@ -55,10 +55,16 @@ async fn postgres_partial_repair_retains_ownership_until_database_session_ends()
     )))
     .execute(&admin)
     .await?;
+    // Configure a long disconnect interval at connection startup so this
+    // fixture exercises a retained backend owner even with slow debug startup.
+    let mut work_url = url::Url::parse(&url)?;
+    work_url
+        .query_pairs_mut()
+        .append_pair("options", "-c client_connection_check_interval=600000");
     let command = || {
         let mut cli = Command::new(binary());
         cli.env_clear()
-            .env("SHARDLINE_INDEX_POSTGRES_URL", &url)
+            .env("SHARDLINE_INDEX_POSTGRES_URL", work_url.as_str())
             .env("TMPDIR", scratch.path())
             .current_dir(root.path());
         cli
@@ -123,7 +129,16 @@ async fn postgres_partial_repair_retains_ownership_until_database_session_ends()
             let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid<>$1 AND wait_event='advisory' AND query LIKE '%pg_advisory_lock%')")
                 .bind(backend_pid).fetch_one(&admin).await?;
             if waiting { return Ok::<_, Box<dyn std::error::Error>>(()); }
-            if replacement.0.try_wait()?.is_some() { return Err("replacement bypassed the original owner".into()); }
+            if let Some(status) = replacement.0.try_wait()? {
+                let owner: Option<serde_json::Value> = sqlx::query_scalar(
+                    "SELECT jsonb_build_object('pid',pid,'state',state,'wait',wait_event,'query',query) FROM pg_stat_activity WHERE pid=$1",
+                ).bind(backend_pid).fetch_optional(&admin).await?;
+                return Err(format!(
+                    "replacement exited before observing the original owner: {status}; owner: {owner:?}; stdout: {}; stderr: {}",
+                    String::from_utf8_lossy(&fs::read(scratch.path().join("replacement.stdout"))?),
+                    String::from_utf8_lossy(&fs::read(scratch.path().join("replacement.stderr"))?),
+                ).into());
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }).await??;
