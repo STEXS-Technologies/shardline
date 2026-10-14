@@ -20,22 +20,30 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
-for version in released current; do
-    root="$fixture/$version"
-    "$released" index rebuild --root "$root" > "$fixture/$version-bootstrap.log" 2>&1
+for fixture_id in absent-released absent-current present-released present-current; do
+    version=${fixture_id##*-}
+    layout=${fixture_id%-*}
+    root="$fixture/$fixture_id"
+    "$released" index rebuild --root "$root" > "$fixture/$fixture_id-bootstrap.log" 2>&1
     mkdir -p "$root/chunks"
     # This owned fixture represents an SDK deployment predating the barrier file.
-    rm -f "$root/.gc-write-barrier.lock"
-    mkfifo "$fixture/$version-input"
-    sqlite3 "$root/metadata.sqlite3" < "$fixture/$version-input" > "$fixture/$version-keeper.log" 2>&1 &
+    case "$layout" in
+        absent) rm -f "$root/.gc-write-barrier.lock";;
+        present)
+            printf 'existing legacy ownership inode\n' > "$root/.gc-write-barrier.lock"
+            sha256sum "$root/.gc-write-barrier.lock" > "$fixture/$fixture_id-barrier-before.sha256"
+            ;;
+    esac
+    mkfifo "$fixture/$fixture_id-input"
+    sqlite3 "$root/metadata.sqlite3" < "$fixture/$fixture_id-input" > "$fixture/$fixture_id-keeper.log" 2>&1 &
     keeper=$!
-    exec 9> "$fixture/$version-input"
-    printf 'PRAGMA journal_mode=WAL;\nSELECT count(*) FROM sqlite_master;\n.shell touch %s/%s-ready\n' "$fixture" "$version" >&9
+    exec 9> "$fixture/$fixture_id-input"
+    printf 'PRAGMA journal_mode=WAL;\nSELECT count(*) FROM sqlite_master;\n.shell touch %s/%s-ready\n' "$fixture" "$fixture_id" >&9
     for attempt in $(seq 1 60); do
-        test ! -e "$fixture/$version-ready" || break
+        test ! -e "$fixture/$fixture_id-ready" || break
         sleep 0.1
     done
-    test -e "$fixture/$version-ready"
+    test -e "$fixture/$fixture_id-ready"
     test -f "$root/metadata.sqlite3-wal" && test -f "$root/metadata.sqlite3-shm"
     case "$version" in released) probe="$released_probe";; current) probe="$current_probe";; esac
     status=0
@@ -47,14 +55,21 @@ for version in released current; do
         --mount "type=bind,source=$root/metadata.sqlite3-shm,target=/state/metadata.sqlite3-shm" \
         --mount "type=bind,source=$probe,target=/probe,readonly" \
         --env SHARDLINE_MOUNT_FIXTURE=/state \
+        --env "SHARDLINE_MOUNT_BARRIER=$layout" \
         debian:13-slim /probe --ignored --exact mounted_sdk_upgrade --nocapture \
-        > "$fixture/$version-probe.log" 2>&1 || status=$?
-    cat "$fixture/$version-probe.log"
-    printf '%s\n' "$status" > "$fixture/$version-status"
+        > "$fixture/$fixture_id-probe.log" 2>&1 || status=$?
+    cat "$fixture/$fixture_id-probe.log"
+    printf '%s\n' "$status" > "$fixture/$fixture_id-status"
     cleanup
     keeper=''
     test "$status" = 0
-    rg -q '1 passed; 0 failed' "$fixture/$version-probe.log"
-    test ! -e "$root/.gc-write-barrier.lock"
-    echo "PASS: $version SDK uploads through a read-only root with writable existing metadata and chunks"
+    rg -q '1 passed; 0 failed' "$fixture/$fixture_id-probe.log"
+    case "$layout" in
+        absent) test ! -e "$root/.gc-write-barrier.lock";;
+        present)
+            sha256sum "$root/.gc-write-barrier.lock" > "$fixture/$fixture_id-barrier-after.sha256"
+            cmp "$fixture/$fixture_id-barrier-before.sha256" "$fixture/$fixture_id-barrier-after.sha256"
+            ;;
+    esac
+    echo "PASS: $version SDK uploads through a read-only root with $layout legacy barrier and writable existing metadata and chunks"
 done

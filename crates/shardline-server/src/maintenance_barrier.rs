@@ -434,12 +434,29 @@ async fn open_local_lock_file(path: PathBuf) -> Result<File, ServerError> {
             path.parent()
                 .ok_or_else(|| std::io::Error::other("maintenance lock has no parent"))?,
         )?;
-        File::options()
+        let opened = File::options()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(path)
+            .open(&path);
+        #[cfg(target_os = "linux")]
+        if let Err(error) = &opened
+            && matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            )
+            && path.try_exists()?
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Linux flock retains shared/exclusive ownership on a read-only
+            // descriptor. Keep coordinating with the existing legacy inode.
+            return File::options()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&path);
+        }
+        opened
     })
     .await
     .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
