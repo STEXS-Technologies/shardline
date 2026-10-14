@@ -5683,3 +5683,30 @@ Detailed assertions and guest logs:
 The transient HTTP connection reset during readiness polling precedes a successful
 retry; all final assertions pass. This verifies the current Linux/systemd layout
 and the two specified reboot cuts, rather than every storage or filesystem layout.
+
+### Current restricted deployment, replacement and rollback checks
+
+The current optimized CLI passes all eleven selected deployment drills in
+143.93 seconds using owned Compose stacks, real PostgreSQL and MinIO, and the
+actual released 1.11.3 binary. None of the selected tests skips or panics. Nextest's
+twelve skipped entries are the other tests excluded by the explicit filter.
+The verifier copies both binaries before running; the current copy has SHA-256
+`14eb3b53933caaa278a6dba901b914d9fd8f2ffe03badc75ba3febbf17f68ac3`.
+
+| Check | Verified result |
+| --- | --- |
+| Restricted PostgreSQL/S3 commands | Released/current fsck, rebuild and read-only GC succeed with matching stdout in a read-only container without a writable root or temporary directory. Before owner setup, commands do not install optional history. After setup, fsck and rebuild record completed inline outcomes. Read-only S3 credentials still permit metadata-backed history without S3 task writes. |
+| Concurrent ordinary rebuilds | One process holds shared deployment ownership while the second waits. Both remain unresolved until the held scan is released; the first removes stale metadata and the second sees fresh state. They finish with distinct completed runs. |
+| Container replacement and shutdown | Replacement after an actual killed process preserves the earlier unresolved run and records a new completed run with the replacement's PID namespace. The server is the only process, needs no tracker mount, exits successfully on normal SIGTERM and records another distinct run on fresh startup. |
+| Remote-delete faults | Lost acknowledgement preserves unresolved deletion without replay. A delayed former owner's delete rejects a conflicting hold after takeover. An acknowledged deletion settles its marker. Existing released runtime grants need no additional fence grant. |
+| Saved replies and recording faults | Recovery through repair and through a fresh GC sweep uses the saved reply after a real PostgreSQL outage without another user-object deletion. Denied optional receipt writes preserve the existing successful GC outcome. |
+| Mixed versions and rollback | Actual released/current overlap, ordinary owner setup and rollback preserve bytes, compatible writers and native task outcomes without new domain migrations. This retains the documented requirement to pause older destructive GC during rollout and rollback. |
+
+These source-backed assertions cover the named deployment paths. The restricted
+command fixture compares stdout and successful status; it does not assert
+byte-identical stderr across optional recording warnings. The source inventory
+and other operation-specific write/failure paths retain their separate audit.
+Log: `.codex/validation/command-compatibility-deployments-current.log`.
+Detailed results:
+`.codex/validation/shardline-maintenance-deployments.gSGP0N/test.log`.
+Reproduce with `verify_maintenance_deployments.sh CURRENT RELEASED`.
