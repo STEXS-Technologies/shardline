@@ -138,4 +138,6 @@ Cleanup needs no new timer. Verified finished history becomes eligible after
 produces a warning while work continues. Save reports separately for a permanent
 archive. History limits do not limit live output or diagnostic exports, and they
 are not disk quotas. Large archives can slow inspection and command exit.
+Shutdown stops optional history cleanup between storage calls. An active call
+may finish; a later normal startup can continue cleanup.
 See [history limits](CLI.md#maintenance-history-limits) for details.

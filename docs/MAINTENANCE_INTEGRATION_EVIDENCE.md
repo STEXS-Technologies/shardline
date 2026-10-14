@@ -5487,3 +5487,38 @@ mutation case in 2.88 seconds, without skips. Strict CLI integration Clippy pass
 Logs: `.codex/validation/postgres-mutation-owned.log`,
 `.codex/validation/postgres-mutation-clippy.log` and
 `.codex/validation/shardline-postgres-process-cuts.v8Dbm1/mutation-test.log`.
+
+### Remote history calls during shutdown
+
+The shutdown audit reproduced a real gap: optional legacy-history reads could
+start an S3 body download after shutdown occurred during their metadata lookup.
+The new regression test failed before the check was added. Housekeeping now
+checks its stop flag before the download and at additional remote-to-metadata
+publication, deletion and inventory boundaries. Stores used by ordinary
+application work have no housekeeping stop flag and retain their behavior.
+
+Four loopback HTTP fixtures use the actual S3 adapter. Their response handlers
+drop the housekeeping lifetime after a request arrives and before its response
+returns, avoiding timing assumptions. They verify that:
+
+- Shutdown during HEAD prevents the subsequent GET.
+- Shutdown during GET allows that active read to finish, but blocks a later read.
+- Shutdown during an absence check prevents subsequent SQLite publication.
+- Shutdown during an accepted history DeleteObjects request preserves the SQLite
+  copy; fresh cleanup can finish without requiring the earlier lifetime.
+
+Exact request counts and keys are checked. Fresh ordinary reads still succeed,
+and fresh publication/deletion produces the expected metadata state. The fixture
+models the runtime's SQLite/S3 history composition without starting unrelated
+upload recovery. It tests actual storage-client HTTP boundaries, not a production
+S3 service or immediate cancellation of active remote requests.
+
+All eight housekeeping tests pass without skips in 0.26 seconds.
+Logs: `.codex/validation/housekeeping-remote-red.log` and
+`.codex/validation/housekeeping-remote-final.log`.
+The six relocation tests and three SQLite retention tests also pass without
+skips, including interrupted cleanup and fresh resumption. Strict all-feature
+server library/test Clippy and Rust formatting checks pass.
+Logs: `.codex/validation/housekeeping-remote-relocation.log`,
+`.codex/validation/housekeeping-remote-retention.log` and
+`.codex/validation/housekeeping-remote-clippy.log`.
