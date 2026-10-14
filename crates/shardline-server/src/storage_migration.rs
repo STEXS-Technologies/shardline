@@ -1,7 +1,7 @@
 use std::{io::Cursor, path::PathBuf};
 
 mod evidence_inventory;
-use evidence_inventory::is_task_evidence;
+use evidence_inventory::EvidenceInventory;
 
 use serde::Serialize;
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
@@ -143,12 +143,13 @@ pub fn run_storage_migration(
     let destination = endpoint_store(&options.destination)?;
     let prefix = ObjectPrefix::parse(&options.prefix)?;
     let mut report = StorageMigrationReport::new(options);
+    let mut evidence = EvidenceInventory::new(&source);
     const MAX_BUFFERED_MIGRATION_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 
     visit_object_prefix(&source, &prefix, |metadata| {
         // Exclude recognized host evidence, while preserving older arbitrary
         // objects that happen to use the newly introduced namespace.
-        if is_task_evidence(&source, metadata.key()) {
+        if evidence.is_task_evidence(metadata.key()) {
             return Ok(());
         }
         report.scanned_objects = checked_add(report.scanned_objects, 1)?;

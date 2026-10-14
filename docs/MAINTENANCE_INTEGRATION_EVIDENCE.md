@@ -5522,3 +5522,46 @@ server library/test Clippy and Rust formatting checks pass.
 Logs: `.codex/validation/housekeeping-remote-relocation.log`,
 `.codex/validation/housekeeping-remote-retention.log` and
 `.codex/validation/housekeeping-remote-clippy.log`.
+
+### Bounded legacy-manifest reuse during remote copying
+
+An actual HTTP/S3 client fixture exposed repeated reads of the same immutable
+legacy task manifest: one unfinished run with 64 additional saved artifacts
+caused 136 manifest requests during inventory. Recognition now retains only the
+most recent recognized run's manifest and parsed identity within one migration.
+The manifest read remains bounded to 64 KiB; the cache does not grow with the
+inventory and is discarded after the command. Failed recognition is not cached.
+Signed scope bindings and delete replies keep their individual verification.
+
+The fixture runs both dry-run and actual S3-to-local migration. Each now uses
+one HEAD and one GET for that manifest, excludes its unfinished control evidence,
+and inventories the same four payload objects with exact byte counts. The real
+copy preserves user bytes, arbitrary objects in the reserved namespace, a
+malformed manifest and its unrecognized artifact. Source requests remain reads
+only and all original source bytes remain unchanged. A second invocation checks
+that recognition does not persist across copies.
+
+All 26 storage-migration tests pass without skips in 0.13 seconds. Existing tests
+also cover signed scope bindings, damaged bindings and partly retired histories.
+Strict all-feature server library/test Clippy and Rust formatting pass. This is
+a request-count improvement for the named inventory; unordered inventories,
+cloud latency and overall production cost retain their existing limits.
+Logs: `.codex/validation/legacy-copy-http-red.log`,
+`.codex/validation/legacy-copy-http-green.log` and
+`.codex/validation/legacy-copy-http-clippy-final.log`.
+
+The final focused HTTP test also passes after the lint adjustment. The rebuilt
+optimized CLI passes the released 1.11.3 copy/rollback verifier: payload inventory
+and output match, completed legacy history relocates byte-for-byte, and an
+execute-only binary preserves copying when optional tracking cannot initialize.
+All 34 ordinary CLI integration tests pass against that optimized executable in
+5.07 seconds. The two owned PostgreSQL process fixtures are ignored by this
+ordinary invocation and are not counted as proof here; their separate runs are
+recorded above.
+
+The binary still reports version 1.11.3. SHA-256:
+`14eb3b53933caaa278a6dba901b914d9fd8f2ffe03badc75ba3febbf17f68ac3`.
+Logs: `.codex/validation/legacy-copy-http-final.log`,
+`.codex/validation/legacy-copy-release-build.log`,
+`.codex/validation/legacy-copy-release-compatibility.log` and
+`.codex/validation/legacy-copy-release-cli-all.log`.

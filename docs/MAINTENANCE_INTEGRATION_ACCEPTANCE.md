@@ -102,6 +102,13 @@ The following still need implementation or stronger evidence before merge:
   mode without initialization or replay; remote-copy coverage is recorded in
   the evidence appendix.
 
+  Remote legacy-history recognition now reuses one immutable manifest within a
+  copy rather than rereading it for every run artifact. An actual HTTP/S3 client
+  fixture preserves dry-run counts, payload bytes and arbitrary malformed legacy
+  objects while reducing manifest requests from 136 to 2 for its unfinished run.
+  The cache retains only one recognized run and is discarded after each copy;
+  it does not add a limit to the copied inventory or establish cloud latency.
+
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.
   Direct Postgres file, dedupe, reconstruction and stored-object reference
