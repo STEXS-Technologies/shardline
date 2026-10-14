@@ -49,3 +49,11 @@ if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/mutation-test.log"; then ex
 rg -Fx "test $mutation_test ... ok" "$fixture/mutation-test.log"
 rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/mutation-test.log"
 rg -Fx 'PASS: PostgreSQL partial repair retains server-side ownership and fresh recovery' "$fixture/mutation-test.log"
+rebuild_test=maintenance_support::postgres_rebuild_interruptions::postgres_rebuild_preserves_partial_heads_and_fresh_discovery
+env -i CARGO_BIN_EXE_shardline="$current" SHARDLINE_OWNED_PG_FIXTURE_URL="$url" \
+    SHARDLINE_OWNED_PG_FIXTURE_TOKEN="$token" "$harness" --ignored --exact "$rebuild_test" --nocapture \
+    > "$fixture/rebuild-test.log" 2>&1
+if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/rebuild-test.log"; then exit 1; fi
+rg -Fx "test $rebuild_test ... ok" "$fixture/rebuild-test.log"
+rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/rebuild-test.log"
+rg -Fx 'PASS: PostgreSQL partial rebuild preserves heads, native evidence and fresh discovery' "$fixture/rebuild-test.log"

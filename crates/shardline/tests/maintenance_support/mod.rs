@@ -5,6 +5,7 @@ mod native_interruptions;
 mod postgres_fixture;
 mod postgres_interruptions;
 mod postgres_mutation_interruptions;
+mod postgres_rebuild_interruptions;
 mod rebuild_derived_interruptions;
 mod rebuild_interruptions;
 mod repair_interruptions;
