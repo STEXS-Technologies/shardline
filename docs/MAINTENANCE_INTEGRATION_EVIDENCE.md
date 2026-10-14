@@ -5144,3 +5144,24 @@ after the native-workspace helper is shared, in 10.91 seconds without skips.
 Strict Clippy for the integration-test target passes. Logs:
 `.codex/validation/source-inventory-report-regression.log` and
 `.codex/validation/source-inventory-clippy.log`.
+
+### Storage-copy admission process interruptions
+
+Three ordinary local-to-local CLI fixtures send SIGTERM at exactly zero, one or
+two committed native records. The zero-record cut holds the existing destination
+metadata writer while the manifest is being published. The later cuts use a
+fixture-only SQLite trigger to hold export after the native intent or started
+record; terminating the owned CLI also stops that query. No production pause
+hook or extra worker is introduced.
+
+Each fixture verifies the original PID, signal 15, absent destination bytes and
+no completed report. Owner-selected native archive inspection reports `pending`
+for the zero/one-record cuts and `needs_reconciliation` for the two-record cut.
+It preserves the native database, WAL and identity bytes exactly, leaves the
+record count unchanged, and copies neither the original source object nor an
+object added after termination. All three tests pass without skips in 4.59
+seconds. Log: `.codex/validation/copy-admission-all-sigterm.log`. These are actual
+process interruptions for copying; they do not establish every operation's
+admission or mutation behavior.
+Strict CLI integration-test Clippy also passes:
+`.codex/validation/copy-admission-clippy.log`.
