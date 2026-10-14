@@ -4976,3 +4976,35 @@ Logs: `/tmp/shardline-native-archive-tests-final.log`,
 `/tmp/shardline-native-archive-journal.log`,
 `/tmp/shardline-native-archive-cli-focused.log` and
 `/tmp/shardline-native-archive-predecessor.log`.
+
+## Prepare embedded upload ownership during initialization
+
+A new unprivileged fixture reproduced a public-upload failure when a local
+backend initialized normally, then its metadata root was changed to mode 0555
+before the first GC barrier acquisition. Initialization now opens the existing
+barrier file while root entries can still be created. It does not acquire a
+lock, change directory permissions or wait for active GC. Uploads still acquire
+their shared barrier before writing.
+
+All seven local library ownership tests pass in 0.37 seconds, with no skipped
+tests. They cover file and xorb uploads after restriction without a manual GC
+call, existing barriers, cancellation and ownership waits. A root already
+restricted without a barrier still initializes and reads existing data; its
+uploads reject the unavailable lock. That preserves read-only initialization
+and prevents unguarded writes, but does not prove writable compatibility for
+that legacy library layout. Four local barrier tests pass in 0.08 seconds,
+including preparation during an existing exclusive owner without waiting,
+altering its file bytes or releasing ownership. Strict server Clippy passes.
+
+The current debug CLI also passes the actual released-1.11.3 permission
+comparison for fsck, rebuild, both repair forms and GC under a 0555 root, with
+unchanged output/status and permissions. Fully read-only SQLite fsck preserves
+released output/status and evidence; unavailable optional history warns without
+recording completion. This is a correctness comparison, not a performance claim.
+
+Logs: `/tmp/shardline-embedded-barrier-library-final.log`,
+`/tmp/shardline-embedded-barrier-locks.log`,
+`/tmp/shardline-embedded-barrier-clippy.log` and
+`/tmp/shardline-local-permissions.9vut8b`. The first build stopped at a linker
+bus error before executing the regression test. Moving owned completed release
+fixtures to workspace storage allowed the red fixture and successful reruns.

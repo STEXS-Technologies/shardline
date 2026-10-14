@@ -56,6 +56,111 @@ async fn cancelled_public_local_uploads_do_not_leave_gc_waiters() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn local_backend_prepares_upload_barrier_before_root_is_restricted() {
+    use std::os::unix::fs::PermissionsExt;
+    struct RestorePermissions(std::path::PathBuf);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let backend = LocalBackend::new(
+        root.path().to_path_buf(),
+        "http://localhost:8080".to_owned(),
+        NonZeroUsize::new(128).unwrap(),
+    )
+    .await
+    .unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    connection
+        .execute_batch("PRAGMA journal_mode=WAL; SELECT count(*) FROM sqlite_master;")
+        .unwrap();
+    let _restore = RestorePermissions(root.path().to_path_buf());
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert!(std::fs::create_dir(root.path().join("permission-probe")).is_err());
+    backend
+        .upload_file("prepared-file", Bytes::from_static(b"body"), None)
+        .await
+        .unwrap();
+    let (_, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
+    backend.upload_xorb(&hash, canonical).await.unwrap();
+    assert_eq!(
+        backend
+            .download_file("prepared-file", None, None)
+            .await
+            .unwrap(),
+        b"body"
+    );
+    assert_eq!(
+        std::fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    drop(connection);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn missing_barrier_preserves_read_only_initialization_and_rejects_unguarded_upload() {
+    use std::os::unix::fs::PermissionsExt;
+    struct RestorePermissions(std::path::PathBuf);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let backend = LocalBackend::new(
+        root.path().to_path_buf(),
+        "http://localhost:8080".to_owned(),
+        NonZeroUsize::new(128).unwrap(),
+    )
+    .await
+    .unwrap();
+    backend
+        .upload_file("existing-file", Bytes::from_static(b"existing body"), None)
+        .await
+        .unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    connection
+        .execute_batch("PRAGMA journal_mode=WAL; SELECT count(*) FROM sqlite_master;")
+        .unwrap();
+    std::fs::remove_file(root.path().join(".gc-write-barrier.lock")).unwrap();
+    let _restore = RestorePermissions(root.path().to_path_buf());
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert!(std::fs::create_dir(root.path().join("permission-probe")).is_err());
+    let reopened = LocalBackend::new(
+        root.path().to_path_buf(),
+        "http://localhost:8080".to_owned(),
+        NonZeroUsize::new(128).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened
+            .download_file("existing-file", None, None)
+            .await
+            .unwrap(),
+        b"existing body"
+    );
+    assert!(
+        matches!(reopened.upload_file("must-not-publish", Bytes::from_static(b"new body"), None).await,
+        Err(crate::ServerError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+    );
+    assert!(!root.path().join(".gc-write-barrier.lock").exists());
+    assert!(matches!(
+        reopened.download_file("must-not-publish", None, None).await,
+        Err(crate::ServerError::NotFound)
+    ));
+    assert_eq!(
+        std::fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    drop(connection);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn public_local_uploads_use_existing_barrier_under_read_only_root() {
     use std::os::unix::fs::PermissionsExt;
 
