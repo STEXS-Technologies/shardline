@@ -12,7 +12,9 @@ async fn mounted_sdk_upgrade() {
     let root = std::path::PathBuf::from(std::env::var_os("SHARDLINE_MOUNT_FIXTURE").unwrap());
     let error = std::fs::create_dir(root.join("mount-write-probe")).unwrap_err();
     assert_eq!(error.raw_os_error(), Some(30), "fixture must enforce EROFS");
-    assert!(!root.join(".gc-write-barrier.lock").exists());
+    let barrier_path = root.join(".gc-write-barrier.lock");
+    let existing_barrier = std::env::var("SHARDLINE_MOUNT_BARRIER").unwrap() == "present";
+    assert_eq!(barrier_path.exists(), existing_barrier);
     let backend = LocalBackend::new(
         root.clone(),
         "http://localhost:8080".into(),
@@ -36,6 +38,21 @@ async fn mounted_sdk_upgrade() {
     );
     assert_eq!(std::fs::read_dir(root.join("chunks")).unwrap().count(), 0);
     drop(gc_owner);
+    // Existing file owners must remain authoritative even on a read-only mount.
+    let legacy_owner = existing_barrier.then(|| {
+        let file = std::fs::File::open(&barrier_path).unwrap();
+        file.lock().unwrap();
+        file
+    });
+    if existing_barrier {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut upload)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(root.join("chunks")).unwrap().count(), 0);
+    }
+    drop(legacy_owner);
     tokio::time::timeout(std::time::Duration::from_secs(2), upload)
         .await
         .unwrap()
@@ -47,5 +64,5 @@ async fn mounted_sdk_upgrade() {
             .unwrap(),
         b"mounted upload"
     );
-    assert!(!root.join(".gc-write-barrier.lock").exists());
+    assert_eq!(barrier_path.exists(), existing_barrier);
 }

@@ -5286,3 +5286,19 @@ and test Clippy. Logs are `.codex/validation/mounted-sdk-red.log`,
 `.codex/validation/mounted-sdk-probe-clippy.log`.
 This establishes the named Linux mount layout; it does not establish behavior
 on every network filesystem or upgrade layout.
+
+The comparison now also covers an existing legacy barrier file, still on the
+read-only mount. Released 1.11.3 succeeds, while the earlier current build failed
+before taking legacy ownership. The Linux fallback now opens the existing inode
+read-only and takes its original shared or exclusive flock. The current mounted
+probe waits for both directory and legacy-file owners before writing chunks.
+All four released/current, absent/present cases pass without skips; logs:
+`.codex/validation/mounted-existing-red.log` and
+`.codex/validation/mounted-existing-fixed.log`.
+The final verifier also compares the existing barrier's bytes before and after
+both SDK runs (`.codex/validation/mounted-existing-preservation.log`). All five
+focused directory-barrier tests pass without skips, including exclusive GC
+ownership through a read-only legacy descriptor. Strict all-feature server
+library/test Clippy passes. Logs:
+`.codex/validation/mounted-existing-local-final.log` and
+`.codex/validation/mounted-existing-clippy-final.log`.

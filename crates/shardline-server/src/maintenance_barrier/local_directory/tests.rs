@@ -70,6 +70,28 @@ async fn cancelled_restricted_directory_waiter_does_not_retain_ownership() {
 }
 
 #[tokio::test]
+async fn read_only_legacy_file_retains_exclusive_gc_ownership() {
+    let root = tempfile::tempdir().unwrap();
+    prepare_local_barrier(root.path()).await.unwrap();
+    let path = root.path().join(super::super::LOCAL_BARRIER_FILE_NAME);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(File::options().write(true).open(&path).is_err());
+    let gc = acquire_local_exclusive(root.path()).await.unwrap();
+    let legacy = File::open(&path).unwrap();
+    assert!(matches!(
+        legacy.try_lock_shared(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    drop(gc);
+    legacy.try_lock_shared().unwrap();
+    legacy.unlock().unwrap();
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+}
+
+#[tokio::test]
 async fn existing_legacy_file_owner_is_not_bypassed_by_directory_ownership() {
     let root = tempfile::tempdir().unwrap();
     prepare_local_barrier(root.path()).await.unwrap();

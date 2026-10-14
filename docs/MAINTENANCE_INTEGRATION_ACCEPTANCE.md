@@ -149,6 +149,9 @@ The following still need implementation or stronger evidence before merge:
   mount also preserves released SDK file uploads when existing SQLite/WAL/SHM
   files and chunks are mounted writable beneath it, with no legacy barrier file.
   The current directory guard remains held when file creation returns EROFS.
+  The mounted comparison also covers an existing legacy lock file. Linux owners
+  open that file read-only when required and still wait for its owners; they
+  do not bypass it or require a writable mount.
   Other permission and
   filesystem layouts remain part of the compatibility audit.
   Plain file requests without upload intents also check their original session
