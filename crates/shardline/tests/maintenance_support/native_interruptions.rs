@@ -11,18 +11,18 @@ impl Drop for StopOnDrop {
 
 #[test]
 fn sigterm_before_copy_intent_preserves_pending_archive_without_destination_writes() -> Result<()> {
-    verify_admission_cut(0, AdmissionOperation::Copy)
+    verify_native_export_cut(0, AdmissionOperation::Copy)
 }
 
 #[test]
 fn sigterm_after_copy_intent_preserves_pending_archive_without_destination_writes() -> Result<()> {
-    verify_admission_cut(1, AdmissionOperation::Copy)
+    verify_native_export_cut(1, AdmissionOperation::Copy)
 }
 
 #[test]
 fn sigterm_after_copy_started_preserves_unresolved_archive_without_destination_writes() -> Result<()>
 {
-    verify_admission_cut(2, AdmissionOperation::Copy)
+    verify_native_export_cut(2, AdmissionOperation::Copy)
 }
 
 #[derive(Clone, Copy)]
@@ -67,13 +67,27 @@ fn ordinary_commands_preserve_native_admission_cuts_without_application_replay()
         AdmissionOperation::DefaultRepair,
     ] {
         for records in 0..=2 {
-            verify_admission_cut(records, operation)?;
+            verify_native_export_cut(records, operation)?;
         }
     }
     Ok(())
 }
 
-fn verify_admission_cut(records: u32, operation: AdmissionOperation) -> Result<()> {
+#[test]
+fn ordinary_commands_preserve_native_completion_before_shared_acknowledgement() -> Result<()> {
+    for operation in [
+        AdmissionOperation::Fsck,
+        AdmissionOperation::Rebuild,
+        AdmissionOperation::GcMark,
+        AdmissionOperation::LifecycleRepair,
+        AdmissionOperation::DefaultRepair,
+    ] {
+        verify_native_export_cut(4, operation)?;
+    }
+    Ok(())
+}
+
+fn verify_native_export_cut(records: u32, operation: AdmissionOperation) -> Result<()> {
     use std::os::unix::process::ExitStatusExt;
     let source = tempfile::tempdir()?;
     let destination = tempfile::tempdir()?;
@@ -94,10 +108,11 @@ fn verify_admission_cut(records: u32, operation: AdmissionOperation) -> Result<(
     if records == 0 {
         metadata.execute_batch("BEGIN IMMEDIATE")?;
     } else {
-        let pattern = if records == 1 {
-            "*/blobs/*"
-        } else {
-            "*/records/0000000001"
+        let pattern = match records {
+            1 => "*/blobs/*",
+            2 => "*/records/0000000001",
+            4 => "*/records/0000000003",
+            _ => return Err("unsupported native export cut".into()),
         };
         // Hold the evidence export after the selected native commit. The large
         // query runs only in the owned CLI and is terminated with that process;
@@ -197,6 +212,30 @@ fn verify_admission_cut(records: u32, operation: AdmissionOperation) -> Result<(
     }
     let database_before = fs::read(workspace.join("tasks.sqlite"))?;
     let wal_before = fs::read(workspace.join("tasks.sqlite-wal")).ok();
+    if records == 4 {
+        // Native completion is durable, but its shared record was not exported.
+        // Ordinary history must not infer that acknowledgement from command output.
+        let shared = Command::new(binary())
+            .env_clear()
+            .current_dir(work_root)
+            .args(["history", "--root"])
+            .arg(work_root)
+            .output()?;
+        assert!(shared.status.success());
+        let shared_page: serde_json::Value = serde_json::from_slice(&shared.stdout)?;
+        assert_eq!(
+            shared_page
+                .pointer("/tasks/0/id")
+                .and_then(serde_json::Value::as_str),
+            Some(identity.id.as_str())
+        );
+        assert_eq!(
+            shared_page
+                .pointer("/tasks/0/state")
+                .and_then(serde_json::Value::as_str),
+            Some("needs_reconciliation")
+        );
+    }
     fs::write(
         source.path().join("chunks/admission-cut/later"),
         b"inspection must not copy",
@@ -223,7 +262,9 @@ fn verify_admission_cut(records: u32, operation: AdmissionOperation) -> Result<(
     assert_eq!(
         page.pointer("/tasks/0/state")
             .and_then(serde_json::Value::as_str),
-        Some(if records < 2 {
+        Some(if records == 4 {
+            "completed"
+        } else if records < 2 {
             "pending"
         } else {
             "needs_reconciliation"
@@ -271,10 +312,59 @@ fn verify_admission_cut(records: u32, operation: AdmissionOperation) -> Result<(
             .join("chunks/admission-cut/later")
             .exists()
     );
-    assert!(fs::read(scratch.path().join("cli.stdout"))?.is_empty());
+    if records < 3 {
+        assert!(fs::read(scratch.path().join("cli.stdout"))?.is_empty());
+    }
     assert_eq!(
         fs::read(destination.path().join("chunks/admission-cut/sentinel"))?,
         b"preserve existing payload"
     );
+    if records == 4 {
+        let fresh = Command::new(binary())
+            .env_clear()
+            .current_dir(work_root)
+            .args(operation.arguments())
+            .arg(work_root)
+            .output()?;
+        assert!(
+            fresh.status.success(),
+            "{}",
+            String::from_utf8_lossy(&fresh.stderr)
+        );
+        let refreshed_history = Command::new(binary())
+            .env_clear()
+            .current_dir(work_root)
+            .args(["history", "--root"])
+            .arg(work_root)
+            .output()?;
+        assert!(refreshed_history.status.success());
+        let refreshed_page: serde_json::Value = serde_json::from_slice(&refreshed_history.stdout)?;
+        let tasks = refreshed_page
+            .get("tasks")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("missing refreshed tasks")?;
+        assert_eq!(tasks.len(), 2);
+        assert!(
+            tasks
+                .iter()
+                .all(|task| task.get("state").and_then(serde_json::Value::as_str)
+                    == Some("completed"))
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.get("id").and_then(serde_json::Value::as_str)
+                    == Some(identity.id.as_str()))
+                .count(),
+            1
+        );
+        // Verified completion has now been exported. Automatic retirement may
+        // remove its private scratch, while shared evidence keeps the result.
+        assert!(!workspace.exists());
+        assert_eq!(
+            fs::read(destination.path().join("chunks/admission-cut/sentinel"))?,
+            b"preserve existing payload"
+        );
+    }
     Ok(())
 }

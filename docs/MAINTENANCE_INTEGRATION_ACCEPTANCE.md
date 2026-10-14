@@ -292,6 +292,13 @@ Each checks its operation identity, preserves native evidence and leaves user
 payload unchanged. Domain-mutation and external-effect coverage across remaining
 operations still belongs to the phase audit.
 
+An additional actual-process cut covers fsck, rebuild, GC mark and both repair
+forms after durable native completion but before shared publication acknowledgement.
+Ordinary history stays unresolved; explicit native inspection verifies completion
+without changing the journal. The next ordinary invocation exports the verified
+old result, retires its private scratch and records a separate completed run.
+User payload is preserved. Domain-specific mutation cuts remain in the phase audit.
+
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |
 | 1: automatic startup | Process model and default initialization verified; deployment coverage remains open. | Current public-router startup covers all three roles locally and with PostgreSQL, including fresh sweeps, readiness and same-PID shared history. Local embedding preserves application-owned logging. Restricted schema routing and actual-process drills extend the shared-backend evidence. Remaining deployment layouts in the known gaps still need review. |
