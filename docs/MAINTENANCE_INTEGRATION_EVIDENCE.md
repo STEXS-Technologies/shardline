@@ -4,6 +4,9 @@ The [acceptance checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) records the
 completed integration review. This appendix retains the investigation history;
 older sections describing open work are dated evidence, not the final status.
 Use the concise [operator guide](MAINTENANCE_INTEGRATION_UX.md) for normal use.
+The later [release upgrade audit](RELEASE_UPGRADE_AUDIT.md) records the public
+type bridge, umbrella dependencies and final-branch validation. Binary-specific
+results below remain evidence from their original executions.
 
 ## PostgreSQL derived-index interruption
 
