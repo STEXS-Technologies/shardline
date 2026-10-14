@@ -90,6 +90,15 @@ enum CopyInterruption {
     KillAcceptedPut,
     TerminateAcceptedPut,
     TerminateSavedReport,
+    TerminateSourceInventory,
+}
+
+#[test]
+fn s3_to_s3_sigterm_during_source_inventory_preserves_checkpoint_without_writes() {
+    verify_copy_history(
+        CopyProfile::S3Source,
+        CopyInterruption::TerminateSourceInventory,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +112,7 @@ enum CopyProfile {
 }
 
 fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
+    let before_writes = matches!(interruption, CopyInterruption::TerminateSourceInventory);
     let local_source = matches!(profile, CopyProfile::LocalSource);
     let history_available = !matches!(profile, CopyProfile::UnsafeHistory);
     let legacy = matches!(
@@ -137,7 +147,11 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         .with_allow_http(raw.allow_http);
     let proxy = S3FaultProxy::start(
         raw.endpoint.as_deref().unwrap(),
-        S3ProxyFault::DelaySuccessfulPutResponse(Duration::from_secs(3)),
+        if before_writes {
+            S3ProxyFault::DelaySuccessfulGetBody(Duration::from_secs(3))
+        } else {
+            S3ProxyFault::DelaySuccessfulPutResponse(Duration::from_secs(3))
+        },
     )
     .unwrap();
     let source = TempDir::new().unwrap();
@@ -186,7 +200,14 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         .env("TMPDIR", scratch.path())
         .env("SHARDLINE_MIGRATE_TO_S3_BUCKET", &raw.bucket)
         .env("SHARDLINE_MIGRATE_TO_S3_REGION", &raw.region)
-        .env("SHARDLINE_MIGRATE_TO_S3_ENDPOINT", proxy.endpoint())
+        .env(
+            "SHARDLINE_MIGRATE_TO_S3_ENDPOINT",
+            if before_writes {
+                raw.endpoint.as_deref().unwrap()
+            } else {
+                proxy.endpoint()
+            },
+        )
         .env("SHARDLINE_MIGRATE_TO_S3_KEY_PREFIX", &prefix)
         .env("SHARDLINE_MIGRATE_TO_S3_ALLOW_HTTP", "true")
         .env(
@@ -212,7 +233,11 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
             .env("SHARDLINE_MIGRATE_FROM_S3_REGION", &raw.region)
             .env(
                 "SHARDLINE_MIGRATE_FROM_S3_ENDPOINT",
-                raw.endpoint.as_deref().unwrap(),
+                if before_writes {
+                    proxy.endpoint()
+                } else {
+                    raw.endpoint.as_deref().unwrap()
+                },
             )
             .env("SHARDLINE_MIGRATE_FROM_S3_KEY_PREFIX", &source_prefix)
             .env("SHARDLINE_MIGRATE_FROM_S3_ALLOW_HTTP", "true")
@@ -247,12 +272,17 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
     }
     let key = ObjectKey::parse("copy-cut/first").unwrap();
     let end = u64::try_from(bytes.len()).unwrap().checked_sub(1).unwrap();
-    assert_eq!(
-        remote
-            .read_range(&key, shardline_protocol::ByteRange::new(0, end).unwrap())
-            .unwrap(),
-        bytes
-    );
+    if before_writes {
+        assert!(remote.metadata(&key).unwrap().is_none());
+        assert_checkpoint_saved(&scratch);
+    } else {
+        assert_eq!(
+            remote
+                .read_range(&key, shardline_protocol::ByteRange::new(0, end).unwrap())
+                .unwrap(),
+            bytes
+        );
+    }
     if !history_available {
         assert!(child.0.wait().unwrap().success());
         assert!(
@@ -284,7 +314,9 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         assert!(child.0.wait().unwrap().success());
     } else if matches!(
         interruption,
-        CopyInterruption::TerminateAcceptedPut | CopyInterruption::TerminateSavedReport
+        CopyInterruption::TerminateAcceptedPut
+            | CopyInterruption::TerminateSavedReport
+            | CopyInterruption::TerminateSourceInventory
     ) {
         let _held_completion = if matches!(interruption, CopyInterruption::TerminateSavedReport) {
             Some(hold_completion_until_report(&scratch, &mut child))
@@ -416,12 +448,17 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
-        remote
-            .read_range(&key, shardline_protocol::ByteRange::new(0, end).unwrap())
-            .unwrap(),
-        bytes
-    );
+    if before_writes {
+        assert!(remote.metadata(&key).unwrap().is_none());
+        assert_checkpoint_saved(&scratch);
+    } else {
+        assert_eq!(
+            remote
+                .read_range(&key, shardline_protocol::ByteRange::new(0, end).unwrap())
+                .unwrap(),
+            bytes
+        );
+    }
     if let Some(before) = archive_before {
         if !completed {
             let workspace = before
@@ -482,7 +519,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
     }
 }
 
-fn hold_completion_until_report(scratch: &TempDir, child: &mut StopOnDrop) -> rusqlite::Connection {
+fn native_workspace(scratch: &TempDir) -> std::path::PathBuf {
     let state = fs::read_dir(scratch.path())
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -493,11 +530,30 @@ fn hold_completion_until_report(scratch: &TempDir, child: &mut StopOnDrop) -> ru
                 })
         })
         .expect("copy must retain its native state inside the owned TMPDIR");
-    let workspace = fs::read_dir(&state)
+    fs::read_dir(&state)
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .find(|path| path.join("tasks.sqlite").is_file())
-        .expect("copy must retain its admitted native workspace");
+        .expect("copy must retain its admitted native workspace")
+}
+
+fn assert_checkpoint_saved(scratch: &TempDir) {
+    let connection = rusqlite::Connection::open_with_flags(
+        native_workspace(scratch).join("tasks.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM penelope_records_v1", [], |row| row
+                .get::<_, u32>(0))
+            .unwrap(),
+        3
+    );
+}
+
+fn hold_completion_until_report(scratch: &TempDir, child: &mut StopOnDrop) -> rusqlite::Connection {
+    let workspace = native_workspace(scratch);
     let connection = rusqlite::Connection::open_with_flags(
         workspace.join("tasks.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,

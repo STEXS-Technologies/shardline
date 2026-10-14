@@ -267,8 +267,12 @@ inspection exposes unfinished history without replay. S3-to-S3 accepted-PUT
 interruption and cold-start inspection also pass. Actual SIGTERM cuts now cover
 both source types after the accepted PUT and after report materialization but
 before completion acknowledgement. The report cuts retain exactly three native
-records and unresolved shared history. These fixtures extend the phase audit;
-admission/checkpoint process cuts and remaining operations still need evidence.
+records and unresolved shared history. A separate S3-to-S3 SIGTERM cut now holds
+the source inventory response after the three starting records are committed,
+before any destination write. Inspection preserves that checkpoint and exposes
+unresolved history without copying either the original or a later source object.
+These fixtures extend the phase audit; earlier admission cuts and remaining
+operations still need evidence.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |

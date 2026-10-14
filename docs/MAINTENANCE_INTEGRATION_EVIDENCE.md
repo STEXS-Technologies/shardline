@@ -5121,3 +5121,26 @@ temporary files, a fresh build and PostgreSQL fixture reproduced that result.
 The retained test output is
 `.codex/validation/rls-inspection.jcH0BM/test.log`; strict server Clippy output is
 `.codex/validation/rls-inspection.jcH0BM/clippy.log`.
+
+### Storage-copy termination before destination writes
+
+A real MinIO S3-to-S3 fixture delays the successful source inventory response
+body while the ordinary CLI is running. The source alone uses that proxy; the
+destination uses MinIO directly. Before SIGTERM, the native journal contains
+exactly three starting records and the destination object is absent. The CLI
+terminates from signal 15 without printing a completed copy report.
+
+Ordinary history inspection identifies the original PID and reports
+`needs_reconciliation`. The journal still contains exactly three records after
+inspection, the original destination object remains absent, and a source object
+added after termination is also not copied. No task evidence enters S3 payload
+storage. The current debug binary passes this test in 9.96 seconds with no skips:
+`.codex/validation/source-inventory-test.log`. This covers the saved starting
+checkpoint and an active source inventory request, not earlier admission cuts
+or every maintenance operation.
+
+Both existing local-to-S3 and S3-to-S3 saved-report SIGTERM fixtures also pass
+after the native-workspace helper is shared, in 10.91 seconds without skips.
+Strict Clippy for the integration-test target passes. Logs:
+`.codex/validation/source-inventory-report-regression.log` and
+`.codex/validation/source-inventory-clippy.log`.
