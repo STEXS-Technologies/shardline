@@ -1,6 +1,6 @@
 # Maintenance without another service
 
-Keep starting Shardline and running maintenance as you do today:
+Start Shardline and run maintenance as before:
 
 ```bash
 shardline serve
@@ -9,82 +9,30 @@ shardline gc --mark --sweep
 shardline repair
 ```
 
-Tracking runs in the existing process and saves results in existing metadata.
-There is no tracker service, extra port, new mount or new configuration.
-Commands keep their live output and exit status. Your existing timer still
-starts GC; starting the server does not start GC.
+Tracking runs inside these processes. You need no tracker service, extra port,
+new mount, schedule or configuration. Commands keep their live output and exit
+status. Your existing timer starts GC; starting the server does not start GC.
 
-History follows your metadata database: SQLite deployments keep it in SQLite,
-including when payloads are stored in S3. PostgreSQL deployments keep it in
-PostgreSQL so nodes using the same database and schema can inspect it.
-
-Startup checks saved upload progress. Eligible file checksums are verified in
-the same process while requests are served, so that verification does not hold
-up readiness. If verification fails or shutdown interrupts it, the upload's
-unfinished progress is preserved.
-
-**This branch is not ready to merge.** The version remains 1.11.3; the version
-bump belongs in a separate PR. See the [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md)
-for the remaining checks.
+**This branch is not ready to merge.** The version remains 1.11.3, with the version
+bump planned separately. See the [remaining checks](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
 
 ## What users gain
 
-- Maintenance results survive restarts when recording succeeds. Inspect them
-  without rerunning the work.
+- Inspect a saved maintenance result after a restart without repeating the work.
 - Nodes sharing the same PostgreSQL database, schema and storage can inspect
   the same history.
-- Protected writes return a retryable error when database ownership is lost.
-  An uncertain earlier delete blocks its affected objects until reconciliation.
-- Identical native content can be published to different repositories without
-  conflicting upload progress. Valid footerless xorb uploads can be retried with
-  their canonical encoding.
+- Protected writes return a retryable error when ownership is lost or an earlier
+  delete remains uncertain, rather than continuing without the required protection.
 
-History covers fsck, index rebuild, lifecycle repair, GC mark/sweep and storage
-copies. Dry runs do not save shared task history. Specialized Hub-tree and
-LFS-evidence repairs, backups and retention-hold commands keep their existing
-diagnostics. Request/upload progress is separate from maintenance history.
+History covers fsck, index rebuild, lifecycle repair, GC and storage copies.
+Dry runs do not save shared history. Specialized repairs, backups and retention
+holds keep their existing diagnostics. SQLite deployments save history in SQLite,
+even with S3 payloads; PostgreSQL deployments save it in PostgreSQL. Storage-copy
+locations are described in the [CLI reference](CLI.md#durable-maintenance-linux).
 
-If recording fails, work keeps its original result and emits a warning. An
-empty history therefore does not prove that work never ran. Saved completion
-does not establish current deployment health or cluster-wide exactly-once
-execution. The [coverage and limits](MAINTENANCE_INTEGRATION_ACCEPTANCE.md)
-describe which write paths are protected.
-
-## Upgrade using the existing workflow
-
-1. Pause destructive GC and let existing GC commands finish.
-2. For PostgreSQL, run the usual owner-run `shardline db migrate up` with the
-   upgraded binary and your existing database/schema configuration. Do this
-   before starting upgraded servers, even if no migrations are pending.
-   Finish pending migrations using the migration guide's maintenance-window
-   requirements. SQLite installs tracking and upgrade protection during normal
-   startup; it needs no separate database command.
-3. Replace server roles using your normal drain and restart procedure. Replace
-   the binaries or images used by existing maintenance jobs too.
-4. Inspect `shardline history --pending-deletes` and investigate interrupted
-   work, then resume your existing GC schedule.
-
-Runtime accounts need no new grants. Owner setup also protects new upload
-history from older recovery code during rollback. Local startup installs that
-protection automatically. An old GC binary cannot provide the new delete
-protection: keep destructive GC paused during rollback until compatible job
-binaries are restored. See [rolling upgrades](ROLLING_UPGRADE.md) for role order
-and rollback limits.
-
-Reconcile pending deletes before switching storage. Copying storage does not
-settle them. History remains outside user payload inventory; see the
-[CLI reference](CLI.md#durable-maintenance-linux) for storage-copy history.
-
-For copy history, inspect the local destination root. If you copied from local
-storage to S3, inspect the local source root instead:
-
-```bash
-shardline history --root /path/to/local/root
-```
-
-For S3-to-S3 copies, run `shardline history` from the same project directory.
-Results use that host's local metadata; no worker setup is needed. If saving
-history fails, check the copy's output and destination before repeating it.
+If saving history fails, work keeps its original result and emits a warning.
+Empty history does not prove that work never ran. Tracking does not make every
+job execute exactly once across nodes.
 
 ## Check the server or a previous result
 
@@ -94,76 +42,91 @@ Check current readiness at your server address:
 curl -f https://cas.example.com/readyz
 ```
 
-`shardline health` checks process liveness through `/healthz`; it does not check
-readiness. Maintenance history cannot replace either check.
+`shardline health` checks process liveness, not readiness. A completed maintenance
+run does not prove that the server or cluster is healthy now.
 
-Inspect saved results using the same configuration and root as your server:
+Inspect saved results with the same configuration and root as your server:
 
 ```bash
 shardline history
-# With an explicit deployment configuration:
+# If you normally use an explicit configuration:
 shardline --config /etc/shardline/shardline.toml history
 ```
 
-Read `state`, `next_step` and any `history_notice`. Inspection needs no admin
-token or worker setup and starts no maintenance.
+Read `state` and follow `next_step`. Inspection needs no admin token or worker
+setup and starts no maintenance. A failed or interrupted run may have made
+partial changes; check its logs and affected data before repeating it. Preserve
+corrupt evidence. If history is unavailable or full, check the original command
+output and logs instead of assuming the work failed or did not run.
 
-To inspect an older private copy archive, run this as its owner:
+If a warning names a retained workspace, inspect that directory as its owner:
 
 ```bash
-shardline history --archive --root /path/to/old/archive
+shardline history --archive --root /path/from/the/workspace/warning
 ```
 
-This verifies saved results without rewriting the archive or repeating work.
-If saving shared history failed, point `--root` at the retained task workspace
-named in the warning to inspect its local journal directly.
-Keep the original files and command logs.
+This also reads older private copy archives. It verifies saved evidence without
+rewriting files, exporting history or repeating work. Keep the original files
+and logs. See the [inspection reference](CLI.md#inspect-maintenance-history)
+for pagination and read-only SQLite requirements.
 
-For a blocked write, inspect:
+## Handle a retryable write
+
+An upload that loses database ownership returns `503` with `Retry-After: 1`.
+Send a fresh request after that delay. If failures continue, check database
+connectivity and server logs.
+
+For a write blocked by an uncertain earlier delete, let the original GC stop,
+then use the same deployment configuration to inspect and repair its history:
 
 ```bash
 shardline history --pending-deletes
+shardline repair
+shardline history --pending-deletes
 ```
 
-Read each attempt's `next_step`. An unavailable inspection result is inconclusive;
-it does not mean writes are safe. See the [CLI reference](CLI.md#inspect-maintenance-history)
-for pagination and read-only SQLite requirements. HTTP inspection is also
-available through the optional [admin read API](ADMIN_READ_API.md#get-apiv1tasksmaintenance).
-
-## What to do when something goes wrong
-
-| What you see | Next action |
-| --- | --- |
-| Readiness fails | Check server logs and database/storage availability. |
-| History is unavailable or recording warns | Check configuration, dependencies and original command logs. Work may have run; inspect its effects before repeating it. |
-| A storage copy succeeds but saving its history warns | Check the copy output and destination data. Inspect history without rerunning the copy; the warning does not undo copied objects. |
-| A storage copy is interrupted | Inspect destination data and pending deletes before deciding whether to repeat the copy. History inspection never resumes it. |
-| A run completed | Read its saved result. Check `/readyz` separately for current readiness. |
-| A run failed, was interrupted, is unresolved or is corrupt | Follow `next_step` and inspect partial effects before retrying. Preserve corrupt evidence. |
-| A write returns `503` for an uncertain delete | Check the original GC and its logs. After it stops, run `shardline repair` with the same configuration, inspect pending deletes again, then retry after reconciliation. |
-| An upload returns `503` after losing ownership | Send a fresh request after the retry delay. If failures continue, check database connectivity and server logs. |
-| Repair leaves deletes pending | A backlog can need more runs. Investigate missing or invalid replies; object absence alone cannot settle an uncertain delete. |
+Follow each attempt's `next_step`. Repair checks saved replies without deleting
+the user object again. A backlog can need more repair runs. Missing or invalid
+replies remain blocked; object absence alone cannot settle the attempt.
+Unavailable inspection does not establish that retrying is safe.
 
 `Retry-After: 1` suggests when to retry; it does not promise recovery in one
-second. Repair checks saved replies without sending another user-object delete.
-See [pending-delete repair](CLI.md#reconcile-pending-remote-deletes) for backlog
-handling. If an earlier file upload cannot be verified, retry with validated
-content; a newer file with the same name does not prove that attempt succeeded.
-For other retryable errors, follow the response: supply missing content before
-retrying, or roll back an application-owned transaction and start a fresh one.
+second. See [pending-delete repair](CLI.md#reconcile-pending-remote-deletes).
+For other retryable errors, follow the response: provide missing content or
+start a fresh application-owned transaction as requested.
+
+## Upgrade using the existing workflow
+
+1. Pause destructive GC and let existing GC commands finish.
+2. For PostgreSQL, run the usual owner-run `shardline db migrate up` with the
+   upgraded binary and existing database/schema configuration, even if no
+   migrations are pending. Apply any pending migrations using their maintenance
+   window requirements. SQLite installs protection during normal startup.
+3. Drain and replace server roles using your normal restart procedure. Replace
+   the binaries or images used by existing maintenance jobs too.
+4. Inspect pending deletes and investigate interrupted work, then resume your
+   existing GC schedule.
+
+Runtime accounts need no new grants. Older GC lacks the new delete protection;
+keep destructive GC paused during rollback until compatible job binaries are
+restored. Reconcile pending deletes before switching storage: copying does not
+settle them. See [rolling upgrades](ROLLING_UPGRADE.md) for role order, schema
+requirements and rollback limits.
+
+Startup checks saved upload progress. Eligible file checksums are verified in
+the existing server process while requests are served. Failed or interrupted
+verification preserves unfinished progress.
 
 ## Optional isolation and history retention
 
-Use `shardline maintenance ...` only when you explicitly want a deadline or
-CPU limit. Its Linux child lets the controller enforce those limits, including
-when work is blocked. The child stops when its controller exits or dies.
-Database ownership and delete protection still provide write safety. Normal
-startup and ordinary maintenance need no child process or operator task ID.
+Use `shardline maintenance ...` only when you want an enforced deadline or CPU
+limit. Its Linux child lets the controller stop blocked work and dies with its
+controller. Ownership checks and delete protection provide write safety.
+Ordinary startup and maintenance need no child process or operator task ID.
 
-History cleanup runs automatically, without a new timer. Verified finished runs
-become eligible after 30 days; unfinished and corrupt evidence is retained.
-When recording capacity is full, work continues with a warning. Save reports
-separately for a permanent archive. Recording limits do not limit live output
-or diagnostic exports, and they are not physical disk quotas. Large archives
-can slow inspection and command exit. See [history limits](CLI.md#maintenance-history-limits)
-for the budgets and cleanup behavior.
+Cleanup needs no new timer. Verified finished history becomes eligible after
+30 days; unfinished and corrupt evidence is retained. Full recording capacity
+produces a warning while work continues. Save reports separately for a permanent
+archive. History limits do not limit live output or diagnostic exports, and they
+are not disk quotas. Large archives can slow inspection and command exit.
+See [history limits](CLI.md#maintenance-history-limits) for details.

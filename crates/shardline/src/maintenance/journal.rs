@@ -35,19 +35,20 @@ impl PublishedJournal {
         let local = SqliteTaskJournal::open(path, scope, definition)?;
         let mut publication_confirmed = true;
         let publication = if let Some((store, identity)) = identity {
+            let directory = path.parent().ok_or("missing task workspace")?.to_path_buf();
             let id = identity.id.clone();
             let bytes = serde_json::to_vec(&identity)?;
             crate::write_output_bytes(&path.with_file_name("identity.json"), &bytes, false)?;
             if let Err(error) = store.publish(&format!("manifests/{id}"), &bytes) {
                 publication_confirmed = false;
-                tracing::warn!(run = %id, workspace = %path.display(), "shared task evidence unavailable; retaining local evidence: {error}");
+                tracing::warn!(run = %id, workspace = %directory.display(), "shared task evidence unavailable; retaining local evidence: {error}");
             }
             Some(Publication {
                 capture: identity.execution
                     == shardline_server::task_tracking::TaskExecutionMode::Isolated,
                 store,
                 id,
-                directory: path.parent().ok_or("missing task workspace")?.to_path_buf(),
+                directory,
             })
         } else {
             None
