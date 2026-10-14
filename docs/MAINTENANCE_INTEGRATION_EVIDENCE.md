@@ -5741,3 +5741,44 @@ Detailed assertions: `.codex/validation/shardline-history-resources.tEK07M/`.
 The verifier, shell checks and graph update pass. Gate 4 remains open for the
 remaining operation/deployment cost assessment; these measurements do not bound
 remote storage latency or establish a disk quota.
+
+### Current optimized PostgreSQL history resource check
+
+The owned PostgreSQL incremental-capacity verifier also passes against the same
+optimized all-feature library harness: one exact test, no failure or skip,
+516.91 seconds. It fills all 4,096 slots, rejects excess admission, paginates
+all distinct histories and retires 4,094 finished runs in 97 cleanup calls.
+Every call stays within 256 run-artifact removals and 64 finished runs. Retirement
+markers settle; unfinished/corrupt evidence, corrupt bytes and user payload stay
+unchanged. No task objects are written to payload storage, and fresh recording
+succeeds after cleanup.
+
+Creation takes 140.83 seconds, inspection 35.22 seconds and cleanup 340.24 seconds;
+the slowest measured cleanup call takes 4.90 seconds including the fixture's
+before/after inventories. Local resource drills ran concurrently, so these
+measurements establish neither an isolated benchmark nor a production SLO.
+Log: `.codex/validation/history-resource-postgres-current.log`.
+Detailed result: `.codex/validation/shardline-postgres-capacity.EwoRQN/test.log`.
+The verifier removes only its owned disposable database container.
+
+### Current released workload and diagnostic comparison
+
+The existing local full-workload verifier passes at concurrency 1, 32 and 128
+against actual released 1.11.3. Every non-performance counter, setting and report
+schema matches. Released/current fsck also produces identical stdout and stderr
+for all nine current workload roots, records one completed ordinary run per root
+and creates no task history under payload chunks.
+
+| Concurrency | Released wall time / peak RSS | Current wall time / peak RSS |
+| --- | --- | --- |
+| 1 | 0.25 s / 36,436 KiB | 0.26 s / 40,080 KiB |
+| 32 | 1.00 s / 393,088 KiB | 1.03 s / 406,988 KiB |
+| 128 | 2.82 s / 725,264 KiB | 2.89 s / 725,408 KiB |
+
+These are single fixture observations. They show preserved workload behavior
+with small observed wall-time differences, not a throughput improvement or
+production capacity guarantee. The PostgreSQL resource fixture was finishing
+when this comparison began; these are not isolated performance measurements.
+Log: `.codex/validation/history-resource-benchmark-current.log`.
+Reports, timings, binary hashes and fsck comparisons:
+`.codex/validation/shardline-benchmark-compatibility.wE2Khh/`.
