@@ -1,4 +1,5 @@
 use super::super::*;
+use super::postgres_fixture;
 use shardline_server::task_tracking::TaskRunIdentity;
 
 struct StopOnDrop(std::process::Child);
@@ -12,13 +13,7 @@ impl Drop for StopOnDrop {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the owned PostgreSQL process-cut verifier"]
 async fn postgres_commands_preserve_actual_process_receipt_cuts() -> Result<()> {
-    let url = std::env::var("SHARDLINE_OWNED_PG_FIXTURE_URL")?;
-    let token = std::env::var("SHARDLINE_OWNED_PG_FIXTURE_TOKEN")?;
-    let admin = sqlx::PgPool::connect(&url).await?;
-    let saved: String = sqlx::query_scalar("SELECT token FROM shardline_validation_owner")
-        .fetch_one(&admin)
-        .await?;
-    assert_eq!(saved, token, "test must run only in its owned fixture");
+    let (url, admin) = postgres_fixture::connect_owned().await?;
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
     let nonce = hex::encode(nonce);

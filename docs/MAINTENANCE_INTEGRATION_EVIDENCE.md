@@ -5463,3 +5463,27 @@ Logs: `.codex/validation/postgres-process-cuts-preservation.log` and
 `.codex/validation/postgres-process-cuts-clippy-preservation.log`.
 Detailed per-phase output is retained in
 `.codex/validation/shardline-postgres-process-cuts.aRWU88/test.log`.
+
+### PostgreSQL partial repair and competing ownership
+
+The owned process verifier additionally interrupts ordinary lifecycle repair
+after one expired hold is deleted and the next deletion is paused in PostgreSQL.
+SIGTERM ends the CLI; the paused server session retains its maintenance lock.
+A competing ordinary index rebuild demonstrably waits on that lock. The fixture
+then explicitly cancels its injected query, permitting the session to release
+ownership and the rebuild to finish. This tests safe waiting, not immediate
+cancellation of server work after client exit.
+
+The first deletion survives and the interrupted next deletion rolls back.
+History inspection leaves the remaining holds unchanged. A newly expired hold
+is added, and fresh lifecycle repair handles both remaining and new work.
+The permanent hold, protected payload and interrupted native journal/WAL bytes
+are preserved. The old receipt remains unresolved; fresh commands complete as
+distinct runs. This establishes the named shared-repair/exclusive-rebuild
+handoff, not serialization of every maintenance command or exactly-once effects.
+
+The extended owned wrapper passes the 25 receipt cuts in 37.48 seconds and this
+mutation case in 2.88 seconds, without skips. Strict CLI integration Clippy passes.
+Logs: `.codex/validation/postgres-mutation-owned.log`,
+`.codex/validation/postgres-mutation-clippy.log` and
+`.codex/validation/shardline-postgres-process-cuts.v8Dbm1/mutation-test.log`.

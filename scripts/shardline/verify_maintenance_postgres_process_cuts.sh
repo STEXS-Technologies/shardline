@@ -41,3 +41,11 @@ test "$(rg -c '^PASS: PostgreSQL ' "$fixture/test.log")" = 25
 rg -Fx "test $test_name ... ok" "$fixture/test.log"
 rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/test.log"
 echo 'PASS: 25 actual PostgreSQL CLI termination cuts preserve receipts and fresh work'
+mutation_test=maintenance_support::postgres_mutation_interruptions::postgres_partial_repair_retains_ownership_until_database_session_ends
+env -i CARGO_BIN_EXE_shardline="$current" SHARDLINE_OWNED_PG_FIXTURE_URL="$url" \
+    SHARDLINE_OWNED_PG_FIXTURE_TOKEN="$token" "$harness" --ignored --exact "$mutation_test" --nocapture \
+    > "$fixture/mutation-test.log" 2>&1
+if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/mutation-test.log"; then exit 1; fi
+rg -Fx "test $mutation_test ... ok" "$fixture/mutation-test.log"
+rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/mutation-test.log"
+rg -Fx 'PASS: PostgreSQL partial repair retains server-side ownership and fresh recovery' "$fixture/mutation-test.log"
