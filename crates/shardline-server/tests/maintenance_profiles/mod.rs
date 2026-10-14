@@ -1,4 +1,5 @@
 use super::*;
+mod storage_copy;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_s3_startup_records_history_in_metadata_for_every_role() {

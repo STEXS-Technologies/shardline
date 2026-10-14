@@ -4811,3 +4811,38 @@ the same optimized SHA-256 `2b13ae613c9acdd6546fba9d77ab9e035b98355e8559fe4c01a1
 passes all 22 tests in 2.336 seconds with zero skips
 (`/tmp/shardline-storage-copy-interruptions-full-cli.log`). This is local-copy
 evidence; remote-copy and remaining phase requirements still need review.
+
+## Interrupted local-to-S3 copy: ordinary source-root inspection
+
+A real MinIO fixture reproduced an operator gap: an ordinary local-to-S3 copy
+applied its PUT, but after process termination `history --root` on the local
+source returned zero tasks. The source had existing SQLite metadata. Task
+history instead lived in host-private scratch with the raw destination scope.
+Diagnostics: `/tmp/shardline-remote-copy-history-red-final.log`.
+
+Publication now selects the actual local source's metadata when the destination
+is a raw S3 endpoint. The task definition still binds both copy endpoints.
+Local destinations keep their existing history selection. An unrelated server
+PostgreSQL configuration is not inherited, and two-S3-endpoint copies retain
+their existing private archive pending the separate inspection improvement.
+No payload migration, new command flag or worker configuration is required.
+
+`maintenance_profiles::storage_copy::interrupted_local_to_s3_copy_is_inspectable_from_source_without_replay`
+owns a disposable MinIO container and response proxy. The proxy forwards an
+accepted PUT, then delays its reply. The test independently reads the exact
+bytes from MinIO, kills the ordinary CLI PID and adds another source object.
+Normal source-root history reports one `needs_reconciliation` task owned by
+that PID. Inspection copies no new object, preserves the original bytes and
+creates no `_shardline_tasks/` payload objects.
+
+The optimized binary SHA-256
+`b8d56cfd7169078f65a740efa42f13a84847d986ef7217cc60a703eef65e634b`
+reports version 1.11.3. The MinIO scenario passes in 4.888 seconds and all 22
+maintenance CLI scenarios pass in 2.314 seconds with zero runtime skips.
+Logs are in `/tmp/shardline-remote-copy-release.hPAGKM/remote-copy.log` and
+`maintenance-cli.log`. All five focused history tests pass, including an
+unreachable unrelated PostgreSQL endpoint and metadata reopening. Strict server
+Clippy with all features, library and tests, and strict CLI library/integration
+Clippy pass. The release build passes in 2 minutes 28 seconds. These checks
+prove this accepted-PUT interruption and history workflow, not every remote-copy
+phase or closure of the remaining merge gates.

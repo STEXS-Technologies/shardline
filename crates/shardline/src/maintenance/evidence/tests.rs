@@ -130,6 +130,61 @@ fn local_copy_history_does_not_inherit_an_unrelated_server_database() {
     );
 }
 
+#[test]
+fn local_to_s3_history_is_inspectable_in_source_without_unrelated_database_access() {
+    let source = tempfile::tempdir().unwrap();
+    let configured = config(source.path());
+    let copy = operation(source.path(), MaintenanceStorageAdapter::S3, None);
+    let snapshot = crate::maintenance::configuration::Configuration {
+        config: configured.clone(),
+        command: crate::CliCommand::StorageMigrate {
+            from: ObjectStorageAdapter::Local,
+            from_root: Some(source.path().to_path_buf()),
+            to: ObjectStorageAdapter::S3,
+            to_root: None,
+            prefix: String::new(),
+            dry_run: false,
+        },
+        config_path: None,
+        migration: Some((
+            shardline_server::StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
+            shardline_server::StorageMigrationEndpoint::S3(
+                configured.s3_object_store_config().unwrap().clone(),
+            ),
+        )),
+    };
+    crate::maintenance::configuration::scope(snapshot, || {
+        let publication = crate::maintenance::publication_config(&copy, &configured).unwrap();
+        assert!(publication.index_postgres_url().is_none());
+        assert_eq!(publication.root_dir(), source.path());
+        assert_eq!(
+            publication.object_storage_adapter(),
+            ObjectStorageAdapter::Local
+        );
+        let history = store(&copy, &publication, None).unwrap();
+        history
+            .publish("manifests/local-to-s3", b"admitted copy")
+            .unwrap();
+        history
+            .publish("runs/local-to-s3/artifacts/report", b"saved outcome")
+            .unwrap();
+        let reopened = TaskEvidenceStore::from_config(&publication).unwrap();
+        assert_eq!(
+            reopened
+                .read("runs/local-to-s3/artifacts/report", 1024)
+                .unwrap(),
+            Some(b"saved outcome".to_vec())
+        );
+        assert!(source.path().join("metadata.sqlite3").is_file());
+        assert_eq!(
+            std::fs::read_dir(source.path().join("chunks"))
+                .unwrap()
+                .count(),
+            0
+        );
+    });
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unavailable_postgres_history_does_not_publish_into_payload_storage() {
     let root = tempfile::tempdir().unwrap();
