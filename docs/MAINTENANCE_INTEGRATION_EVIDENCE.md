@@ -5302,3 +5302,27 @@ ownership through a read-only legacy descriptor. Strict all-feature server
 library/test Clippy passes. Logs:
 `.codex/validation/mounted-existing-local-final.log` and
 `.codex/validation/mounted-existing-clippy-final.log`.
+
+### Ordinary completion interrupted before shared acknowledgement
+
+The semantic `maintenance_support::native_interruptions` module now covers five
+additional actual SIGTERM cuts: fsck, rebuild, GC mark, lifecycle repair and
+default repair. Each fixture blocks export of the completion record using a
+trigger on its owned metadata database, after native record four is durable.
+This distinguishes incomplete shared recording from completed native evidence.
+
+Shared inspection reports `needs_reconciliation`. Explicit native inspection
+verifies `completed` while preserving the journal/WAL/identity bytes. A later
+ordinary invocation exports the old verified result without replaying its work,
+retires its private scratch and records a distinct completed run. Shared history
+then contains both results; the existing user payload remains unchanged.
+These cuts do not stand in for operation-specific external mutation faults.
+
+The newly built optimized binary includes both mounted-root fixes and reports
+version 1.11.3. SHA-256:
+`467c7ce20ecbd8806e5095cf9ded13afd8d0debb8c45a7314e65a6a027de2f99`.
+Direct execution of the compiled CLI harness against that binary passes all 31
+tests without skips in 5.06 seconds. Strict CLI integration-test Clippy passes.
+Logs: `.codex/validation/mounted-barrier-release-build.log`,
+`.codex/validation/ordinary-completion-release-cli-all.log` and
+`.codex/validation/ordinary-completion-clippy-final.log`.

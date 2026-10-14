@@ -75,6 +75,10 @@ rewriting files, exporting history or repeating work. Keep the original files
 and logs. See the [inspection reference](CLI.md#inspect-maintenance-history)
 for pagination and read-only SQLite requirements.
 
+If the command finished but saving shared history was interrupted, a later
+maintenance command can publish its verified saved result. It starts fresh work
+of its own; it does not repeat the earlier job to repair its history.
+
 ## Handle a retryable write
 
 An upload that loses database ownership returns `503` with `Retry-After: 1`.
