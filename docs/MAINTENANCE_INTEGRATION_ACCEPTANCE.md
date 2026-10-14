@@ -310,8 +310,11 @@ and records a separate completed run while the old run remains unresolved.
 An actual SIGTERM during latest-pointer rebuild now preserves a committed
 pointer and rolls back the interrupted next write. Immutable versions and
 payload remain readable; fresh rebuild also discovers a later version. The
-earlier receipt remains unresolved. Reconstruction and dedupe rebuild cuts
-still belong to the operation-specific audit.
+earlier receipt remains unresolved. Three more actual SIGTERM cuts cover stale
+reconstruction pruning, stale dedupe pruning and dedupe restoration from retained
+shards. They preserve partial progress and payloads, discover new work on the
+next rebuild and retain the old unresolved receipt. Other backend and remote
+mutation combinations remain in the operation-specific audit.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |
