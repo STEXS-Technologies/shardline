@@ -609,3 +609,25 @@ atomic journal write, and chain verification. It must not hash an ad-hoc JSON
 shape or persist a parallel interpretation of lifecycle state. New recovery
 formats may be added only as data-plane materializations with an explicit
 reconciliation path.
+
+## Library upload guarantees
+
+Use `LocalBackend::upload_file` / `upload_xorb` or
+`PostgresBackend::upload_file` / `upload_xorb` for storage-backed uploads. These
+methods acquire maintenance protection automatically; callers need no separate
+tracker or GC lock. PostgreSQL calls reuse a matching existing request owner and
+reject detected ownership loss. Make a fresh request after that error.
+
+Lower-level index and record-store methods operate on metadata. They cannot
+check backing bytes without an object store. Their caller must hold the
+appropriate ownership, validate physical references and retain protection
+through publication. Supplying physical keys to a pending-delete check does
+not prove that the keys are complete or that their bytes exist. Connection-bound
+methods retain the supplied session; pool-based methods do not preserve a
+separate owner held by the caller.
+
+Shardline's HTTP upload path supplies that owner and performs its storage checks
+before committing PostgreSQL publication. A successful saved maintenance result
+does not certify current object presence or deployment health. See the
+[write-boundary inventory](MAINTENANCE_INTEGRATION_EVIDENCE.md#public-write-boundary-inventory)
+for the reviewed entry points and evidence.
