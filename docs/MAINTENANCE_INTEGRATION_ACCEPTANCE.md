@@ -110,6 +110,10 @@ The following still need implementation or stronger evidence before merge:
   session and reject its loss rather than acquiring a replacement. Lower-level
   metadata APIs and startup reconciliation retain their existing pool-based
   APIs and require the caller's applicable ownership checks.
+  Public local file and xorb uploads also acquire the existing shared filesystem
+  GC barrier automatically, before payload writes. Local embedding therefore
+  needs no caller-managed lock for those upload methods. Lower-level metadata
+  methods remain outside this high-level upload boundary.
   Plain file requests without upload intents also check their original session
   before body ingestion and after ingestion. Publication failures check that
   same session to return retryable ownership loss without reacquiring it.

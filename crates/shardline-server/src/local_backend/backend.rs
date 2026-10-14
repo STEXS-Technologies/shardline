@@ -25,6 +25,7 @@ use super::records::read_record;
 /// Local filesystem backend for file chunk storage and reconstruction metadata.
 #[derive(Debug, Clone)]
 pub struct LocalBackend {
+    pub(super) metadata_root: PathBuf,
     pub(super) public_base_url: String,
     pub(super) chunk_size: NonZeroUsize,
     pub(super) upload_max_in_flight_chunks: NonZeroUsize,
@@ -125,6 +126,7 @@ impl LocalBackend {
             // concurrent protocol requests. Lazy first-use initialization lets
             // simultaneous uploads race while creating the schema/import marker.
             index_store: LocalIndexStore::new(root.clone())?,
+            metadata_root: std::path::absolute(&root)?,
             record_store: LocalRecordStore::open(root),
             public_base_url,
             chunk_size,
