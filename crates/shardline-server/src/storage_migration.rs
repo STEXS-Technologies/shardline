@@ -290,9 +290,9 @@ mod tests {
         let objects = endpoint_store(&source_endpoint).unwrap();
         let tracker = crate::task_tracking::EmbeddedTaskTracker::new(
             objects.clone(),
-            penelope_core::task::Digest::of(b"copy-source-deployment"),
+            penelope::core::task::Digest::of(b"copy-source-deployment"),
         )
-        .with_history_scope(penelope_core::task::Digest::of(b"shared-copy-history"));
+        .with_history_scope(penelope::core::task::Digest::of(b"shared-copy-history"));
         let unfinished = tracker
             .begin(
                 "unfinished-copy-fixture",

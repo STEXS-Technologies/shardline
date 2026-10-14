@@ -1,5 +1,5 @@
 use super::{Result, artifact, capture};
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, TaskDefinition, TaskExecutionEvent, TaskRecord, TaskScope, TaskSequence,
     runtime::{TaskJournal, TaskPortError},
 };
@@ -69,7 +69,7 @@ impl Publication {
     fn publish(&self, record: &TaskRecord, blob: Option<&[u8]>) -> Result<()> {
         let prefix = format!("runs/{}", self.id);
         if let Some(bytes) = blob {
-            let digest = penelope_core::task::Digest::of(bytes);
+            let digest = penelope::core::task::Digest::of(bytes);
             self.store
                 .publish(&format!("{prefix}/blobs/{}", hex::encode(digest.0)), bytes)?;
             if matches!(
@@ -77,7 +77,7 @@ impl Publication {
                 TaskExecutionEvent::CheckpointCommitted { .. }
                     | TaskExecutionEvent::Completed { .. }
                     | TaskExecutionEvent::Reconciled {
-                        result: penelope_core::task::Reconciliation::Completed { .. }
+                        result: penelope::core::task::Reconciliation::Completed { .. }
                     }
             ) {
                 let proof = MaintenanceArtifactProof::from_json(bytes)?;
@@ -148,7 +148,7 @@ impl Publication {
 pub(super) fn retry_exports(
     state: &Path,
     store: &TaskEvidenceStore,
-    deployment: penelope_core::task::Digest,
+    deployment: penelope::core::task::Digest,
 ) -> Result<()> {
     if !state.exists() {
         return Ok(());
@@ -183,13 +183,13 @@ pub(super) fn retry_exports(
         let mut journal =
             SqliteTaskJournal::open_read_only(&path, identity.scope, identity.definition)?;
         let mut projection =
-            penelope_core::task::TaskProjection::new(identity.scope, identity.definition)?;
+            penelope::core::task::TaskProjection::new(identity.scope, identity.definition)?;
         let mut records = Vec::new();
         while let Some(record) = journal.read(identity.scope, projection.next_sequence())? {
             projection.apply(&record)?;
             records.push(record);
         }
-        let completed = projection.status() == penelope_core::task::TaskStatus::Completed;
+        let completed = projection.status() == penelope::core::task::TaskStatus::Completed;
         if !completed {
             tracing::warn!(run = %identity.id, workspace = %directory.display(), "unfinished maintenance evidence retained; inspect domain effects before any recovery; no automatic retry");
         }
@@ -212,7 +212,7 @@ pub(super) fn retry_exports(
                     | TaskExecutionEvent::CheckpointMigrated { checkpoint, .. } => Some(checkpoint),
                     TaskExecutionEvent::Completed { output }
                     | TaskExecutionEvent::Reconciled {
-                        result: penelope_core::task::Reconciliation::Completed { output, .. },
+                        result: penelope::core::task::Reconciliation::Completed { output, .. },
                     } => Some(output),
                     TaskExecutionEvent::Started
                     | TaskExecutionEvent::FaultObserved { .. }

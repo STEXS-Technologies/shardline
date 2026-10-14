@@ -179,7 +179,7 @@ fn run_inner(
     }
     let id = hex::encode(nonce);
     let directory = state.join(hex::encode(
-        penelope_core::task::Digest::of(id.as_bytes()).0,
+        penelope::core::task::Digest::of(id.as_bytes()).0,
     ));
     let writable = super::workspace_admission::ensure(&state, &directory);
     if let Err(error) = writable {
@@ -214,7 +214,7 @@ fn run_inner(
     {
         // Evidence and streamed output are confirmed in the selected history
         // store. Open capture descriptors survive removal of the scratch files.
-        let digest = penelope_core::task::Digest::of(id.as_bytes());
+        let digest = penelope::core::task::Digest::of(id.as_bytes());
         if let Err(error) = super::cleanup::completed(&state.join(hex::encode(digest.0))) {
             // Work and its receipt are already complete. A scratch-cleanup
             // error must not change the handler's result or authorize a retry.

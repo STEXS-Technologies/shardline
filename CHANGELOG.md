@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
+- Use the `statechronicle` and `penelope` 0.2.0 umbrella crates and their
+  re-exports throughout Shardline, keeping the released-type compatibility bridge.
 - Upgrade StateChronicle and Penelope integration dependencies to 0.2.0 while
   preserving existing reliability evidence encodings, Merkle envelopes, database
   domain records and compatible upload/session recovery behavior. The normal

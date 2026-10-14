@@ -1,5 +1,5 @@
 use ed25519_dalek::VerifyingKey;
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, TaskGeneration, TaskScope,
     runtime::{RuntimeProgress, TaskObservation, TaskPortError, TaskRuntime, TaskStart},
 };

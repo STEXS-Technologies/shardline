@@ -1086,7 +1086,7 @@ mod tests {
                 .join(&id)
                 .join("artifacts")
                 .join(hex::encode(
-                    penelope_core::task::Digest::of(b"inspected: 3\nupgraded: 2\nfailures: 1").0,
+                    penelope::core::task::Digest::of(b"inspected: 3\nupgraded: 2\nfailures: 1").0,
                 )),
             b"edited-report",
         )

@@ -1,7 +1,7 @@
 //! Read-only inspection of one owner-selected native workspace.
 use super::{Result, artifact, capture};
 use ed25519_dalek::VerifyingKey;
-use penelope_core::task::{
+use penelope::core::task::{
     Reconciliation, TaskExecutionEvent, TaskProjection, TaskStatus, runtime::TaskJournal,
 };
 use shardline_reliability::{MaintenanceArtifactKind, SqliteTaskJournal};
@@ -134,7 +134,7 @@ pub(crate) fn run(directory: &Path, after: Option<&str>) -> Result<serde_json::V
     }))
 }
 
-fn inline_success(directory: &Path, digest: penelope_core::task::Digest) -> Result<bool> {
+fn inline_success(directory: &Path, digest: penelope::core::task::Digest) -> Result<bool> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Outcome {

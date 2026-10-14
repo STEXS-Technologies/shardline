@@ -1,7 +1,7 @@
 //! Track the existing CLI process without adding a second process or buffering
 //! its output. Domain transactions and fences remain the effect authority.
 use super::{Input, MaintenanceOperation, Result, artifact, target};
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, Digest, EffectContract, ExecutionBudget, RecoveryMode, TaskDefinition,
     TaskExecutionEvent, TaskGeneration, TaskId, TaskInputDigest, TaskProjection,
     TaskRecoveryPolicy, TaskScope, TaskTenantId, TaskTick, runtime::TaskJournal,

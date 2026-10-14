@@ -102,11 +102,11 @@ async fn startup_sweep_preserves_work_and_readiness_when_final_recording_fails()
             if denied_suffix.starts_with("records/") {
                 assert!(record.is_none());
             } else if let Some(bytes) = record {
-                let record: penelope_core::task::TaskRecord =
+                let record: penelope::core::task::TaskRecord =
                     serde_json::from_slice(&bytes).unwrap();
                 assert!(matches!(
                     record.event,
-                    penelope_core::task::TaskExecutionEvent::FaultObserved { .. }
+                    penelope::core::task::TaskExecutionEvent::FaultObserved { .. }
                 ));
             }
             assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 0);

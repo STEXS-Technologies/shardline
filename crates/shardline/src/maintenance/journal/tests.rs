@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 use super::*;
-use penelope_core::task::{
+use penelope::core::task::{
     Digest, EffectContract, ExecutionBudget, RecoveryMode, TaskGeneration, TaskId, TaskInputDigest,
     TaskProjection, TaskRecoveryPolicy, TaskTenantId, TaskTick,
 };

@@ -10,9 +10,9 @@ use shardline_reliability::{
     UploadLifecycleProfile, UploadLifecycleState as Upload, native_lifecycle_registry,
     native_resumable_profile, native_upload_profile,
 };
-use statechronicle_domain::{intent::Operation, resource_state::ResourceState};
-use statechronicle_profile::StateProfile;
-use statechronicle_profiles::registry::ProfileRules;
+use statechronicle::domain::{intent::Operation, resource_state::ResourceState};
+use statechronicle::profile::StateProfile;
+use statechronicle::profiles::registry::ProfileRules;
 
 #[test]
 fn native_upload_semantics_preserve_every_existing_edge() {
@@ -149,7 +149,7 @@ fn standard_adapter_enforces_domain_schema_operation_and_bounds() {
     let profile = native_upload_profile();
     let operation = Operation("shardline.upload.initialize".to_owned());
     let command =
-        statechronicle_core::canonicalize::canonicalize(&LifecycleCommand::<Upload>::Initialize)
+        statechronicle::core::canonicalize::canonicalize(&LifecycleCommand::<Upload>::Initialize)
             .unwrap();
     let mut inputs = BTreeMap::from([
         (
@@ -193,7 +193,7 @@ fn standard_adapter_enforces_domain_schema_operation_and_bounds() {
 #[test]
 fn native_schema_one_commands_keep_their_canonical_wire_tags() {
     let encode = |command: LifecycleCommand<Upload>| {
-        statechronicle_core::canonicalize::canonicalize(&command).unwrap()
+        statechronicle::core::canonicalize::canonicalize(&command).unwrap()
     };
     assert_eq!(encode(LifecycleCommand::Initialize), vec![0]);
     assert_eq!(
@@ -204,7 +204,7 @@ fn native_schema_one_commands_keep_their_canonical_wire_tags() {
         vec![1, 1, 2]
     );
     assert_eq!(
-        statechronicle_core::canonicalize::canonicalize(&LifecycleCommand::Transition {
+        statechronicle::core::canonicalize::canonicalize(&LifecycleCommand::Transition {
             expected: Session::Completed,
             next: Session::Active
         })

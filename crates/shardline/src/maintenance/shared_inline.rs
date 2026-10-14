@@ -2,7 +2,7 @@
 //! Deployment-backed receipts are evidence; domain fences authorize effects.
 use super::{MaintenanceOperation, Result};
 use ed25519_dalek::SigningKey;
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, Digest, TaskDefinition, TaskExecutionEvent, TaskGeneration, TaskProjection, TaskScope,
 };
 use shardline_reliability::{

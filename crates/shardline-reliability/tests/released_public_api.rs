@@ -37,12 +37,12 @@ fn released_types_compile_and_current_engine_signatures_verify_with_released_ver
         .unwrap();
     statechronicle_commit_compat::sign::verify_commit(&signed, &key.verifying_key()).unwrap();
 
-    let runtime_signed: statechronicle_domain::signed::Signed<
-        statechronicle_domain::commit::Commit,
+    let runtime_signed: statechronicle::domain::signed::Signed<
+        statechronicle::domain::commit::Commit,
     > = serde_json::from_value(serde_json::to_value(&signed).unwrap()).unwrap();
     let runtime_key =
         statechronicle_ed25519::VerifyingKey::from_bytes(&key.verifying_key().to_bytes()).unwrap();
-    statechronicle_commit::sign::verify_commit(&runtime_signed, &runtime_key).unwrap();
+    statechronicle::commit::sign::verify_commit(&runtime_signed, &runtime_key).unwrap();
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn digest_bridge_preserves_current_canonical_bytes_and_released_return_types() {
         OperationIdentity::new("tenant", "repo", "operation", OperationKind::Upload).unwrap();
     let released: statechronicle_core_compat::digest::ContentDigest =
         canonical_state_digest(&operation).unwrap();
-    let current = statechronicle_core::canonicalize::canonicalize_and_digest(&operation).unwrap();
+    let current = statechronicle::core::canonicalize::canonicalize_and_digest(&operation).unwrap();
     assert_eq!(released.as_str(), current.as_str());
     let _: statechronicle_core_compat::digest::ContentDigest = operation.content_digest().unwrap();
     let _: penelope_domain_compat::ContentDigest = operation.penelope_digest().unwrap();

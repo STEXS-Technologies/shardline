@@ -1,4 +1,4 @@
-use penelope_core::task::{TaskTick, runtime::TaskPortError};
+use penelope::core::task::{TaskTick, runtime::TaskPortError};
 use rustix::{
     process::{Signal, getpid, kill_process},
     time::{

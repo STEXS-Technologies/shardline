@@ -1,4 +1,4 @@
-use penelope_core::task::{Digest, TaskGeneration, TaskScope, runtime::TaskPortError};
+use penelope::core::task::{Digest, TaskGeneration, TaskScope, runtime::TaskPortError};
 use rustix::{
     fd::OwnedFd,
     process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},

@@ -63,9 +63,8 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 shardline-reliability = { workspace = true, features = ["process-runtime"] }
-penelope-core.workspace = true
-penelope-statechronicle.workspace = true
-statechronicle-domain.workspace = true
+penelope.workspace = true
+statechronicle.workspace = true
 ed25519-dalek.workspace = true
 chrono.workspace = true
 getrandom.workspace = true

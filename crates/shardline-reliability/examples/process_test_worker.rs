@@ -1,7 +1,7 @@
 //! Child-process fixture for the runtime contract suite, not a maintenance worker.
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use penelope_core::task::{TaskGeneration, TaskScope};
+    use penelope::core::task::{TaskGeneration, TaskScope};
     use shardline_reliability::ProcessWorker;
     use std::{env, path::PathBuf, thread, time::Duration};
 

@@ -109,7 +109,7 @@ fn historical_deployment_evidence_preserves_commitments_and_signatures() {
             );
             // Also verify with the public v2 key implementation, independently
             // of StateChronicle's v3 verifier.
-            let bytes = statechronicle_core::canonicalize::canonicalize(&signed.body).unwrap();
+            let bytes = statechronicle::core::canonicalize::canonicalize(&signed.body).unwrap();
             let detached_signature = Signature::from_bytes(signed.signature.sig.as_bytes());
             key.verifying_key()
                 .verify(&bytes, &detached_signature)

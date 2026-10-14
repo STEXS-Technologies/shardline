@@ -1,7 +1,7 @@
 //! Opt-in local durable storage for Penelope's synchronous task port.
 use std::{path::Path, time::Duration};
 
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, Digest, Reconciliation, TaskDefinition, TaskExecutionEvent, TaskProjection,
     TaskRecord, TaskScope, TaskSequence,
     runtime::{TaskJournal, TaskPortError},

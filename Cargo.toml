@@ -107,15 +107,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 zeroize = "1.8"
 proptest = "1"
-penelope-domain = "0.2.0"
+penelope = "0.2.0"
 penelope-core = { version = "0.2.0", features = ["serde"] }
-penelope-executor = "0.2.0"
-penelope-statechronicle = "0.2.0"
-statechronicle-commit = "0.2.0"
-statechronicle-core = "0.2.0"
-statechronicle-domain = "0.2.0"
-statechronicle-profile = "0.2.0"
-statechronicle-profiles = "0.2.0"
+statechronicle = "0.2.0"
 
 [profile.release]
 opt-level = 3

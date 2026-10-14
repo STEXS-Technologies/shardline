@@ -289,7 +289,7 @@ async fn full_archive_still_exports_completed_history_and_restores_admission() {
         })
         .unwrap();
         assert!(output.success && output.evidence_published);
-        let name = hex::encode(penelope_core::task::Digest::of(id.as_bytes()).0);
+        let name = hex::encode(penelope::core::task::Digest::of(id.as_bytes()).0);
         let directory = work_state.join(&name);
         let identity_path = directory.join("identity.json");
         let mut identity: shardline_server::task_tracking::TaskRunIdentity =

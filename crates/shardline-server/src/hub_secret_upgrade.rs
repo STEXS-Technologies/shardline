@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use penelope_core::task::Digest;
+use penelope::core::task::Digest;
 use shardline_hub_api::secrets::{WebhookSecretCipher, WebhookSecretUpgradeReport};
 use shardline_index::{PostgresIndexStore, hub::BoxedHubStore};
 use sqlx::PgPool;

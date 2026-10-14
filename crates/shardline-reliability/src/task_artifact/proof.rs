@@ -2,19 +2,19 @@ use super::profile::{ArtifactProfile, MaintenanceArtifact};
 use crate::ReliabilityError;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use penelope_core::task::{TaskGeneration, TaskScope};
+use penelope::core::task::{TaskGeneration, TaskScope};
 use serde::{Deserialize, Serialize};
-use statechronicle_commit::{
+use statechronicle::commit::{
     batch::CommitBatch,
     builder::CommitBuilder,
     roots::compute_state_root,
     sign::{sign_commit, verify_commit},
 };
-use statechronicle_core::{
+use statechronicle::core::{
     canonicalize::{canonicalize, canonicalize_and_digest},
     digest::ContentDigest,
 };
-use statechronicle_domain::{
+use statechronicle::domain::{
     commit::{Commit, CommitScope, ProfileId},
     event::{Event, StateCommitment},
     ids::{CommitId, EventId, IntentId},
@@ -26,8 +26,8 @@ use statechronicle_domain::{
     subject::SubjectId,
     tenant::TenantId,
 };
-use statechronicle_profile::StateProfile;
-use statechronicle_profiles::{custom::TypedProfile, registry::ProfileRules};
+use statechronicle::profile::StateProfile;
+use statechronicle::profiles::{custom::TypedProfile, registry::ProfileRules};
 use std::{collections::BTreeMap, sync::LazyLock};
 
 const PROOF_SCHEMA: &str = "shardline.maintenance-artifact-proof.v1";

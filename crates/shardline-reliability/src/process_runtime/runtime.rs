@@ -7,7 +7,7 @@ use super::{
     storage::{Authorization, connect, prepare, projection},
 };
 use crate::task_journal::unavailable;
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, Digest, TaskDefinition, TaskExecutionEvent, TaskFault, TaskGeneration, TaskScope,
     TaskStatus,
     runtime::{RuntimeProgress, TaskObservation, TaskPortError, TaskRuntime, TaskStart},
@@ -84,8 +84,8 @@ impl ProcessTaskRuntime {
     /// Rejects foreign host/namespace storage and invalid pinned metadata.
     pub fn pinned_task(
         path: &Path,
-        tenant: penelope_core::task::TaskTenantId,
-        task: penelope_core::task::TaskId,
+        tenant: penelope::core::task::TaskTenantId,
+        task: penelope::core::task::TaskId,
     ) -> Result<Option<(TaskScope, TaskDefinition)>, TaskPortError> {
         if !path.exists() {
             return Ok(None);
@@ -106,7 +106,7 @@ impl ProcessTaskRuntime {
                     serde_json::from_slice(&scope).map_err(|_error| TaskPortError::Corrupt)?;
                 let definition: TaskDefinition =
                     serde_json::from_slice(&definition).map_err(|_error| TaskPortError::Corrupt)?;
-                penelope_core::task::TaskProjection::new(scope, definition)
+                penelope::core::task::TaskProjection::new(scope, definition)
                     .map_err(|_error| TaskPortError::Corrupt)?;
                 if scope.tenant != tenant || scope.task != task {
                     return Err(TaskPortError::Corrupt);

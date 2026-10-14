@@ -92,9 +92,9 @@ pub use operation::{
     OperationIdentity, OperationKind, ResumableSessionSnapshotDomain,
     resumable_session_snapshot_identity,
 };
-pub use penelope_domain_compat::ContentDigest as PenelopeDigest;
 #[cfg(feature = "task-journal")]
-pub use penelope_executor::task::TaskSupervisor;
+pub use penelope::executor::task::TaskSupervisor;
+pub use penelope_domain_compat::ContentDigest as PenelopeDigest;
 pub use persisted::{
     build_persisted_merkle_commit, build_persisted_merkle_commit_with_previous,
     persisted_event_identity, persisted_event_sequence, verify_persisted_event,

@@ -1,7 +1,7 @@
 //! Move finished legacy evidence without rewriting its signed bytes.
 use super::{TASK_EVIDENCE_PREFIX, TaskEvidenceStore, TaskRunIdentity, TaskRunState};
 use crate::{ServerError, object_store::ServerObjectStoreError};
-use penelope_core::task::Digest;
+use penelope::core::task::Digest;
 use shardline_storage::{ObjectMetadata, ObjectPrefix, ObjectStore};
 
 enum VisitError {

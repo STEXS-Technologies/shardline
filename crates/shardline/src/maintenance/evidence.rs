@@ -6,7 +6,7 @@ use shardline_server::{ServerConfig, task_tracking::TaskEvidenceStore};
 /// This never executes application work or changes the command's result.
 pub(super) fn retire_finished_history(
     store: &TaskEvidenceStore,
-    deployment: penelope_core::task::Digest,
+    deployment: penelope::core::task::Digest,
 ) {
     if let Err(error) = store
         .prune_completed_incrementally(deployment, shardline_protocol::unix_now_seconds_lossy())

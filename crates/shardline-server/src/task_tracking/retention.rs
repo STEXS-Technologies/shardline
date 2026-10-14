@@ -2,7 +2,7 @@
 
 use super::{TaskEvidenceStore, TaskRunIdentity, TaskRunState};
 use crate::ServerError;
-use penelope_core::task::Digest;
+use penelope::core::task::Digest;
 use shardline_storage::{ObjectPrefix, ObjectStore};
 use std::{
     collections::BTreeMap,

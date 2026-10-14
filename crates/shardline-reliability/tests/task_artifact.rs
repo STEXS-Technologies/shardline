@@ -6,16 +6,16 @@
 )]
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, Digest, TaskDefinitionFingerprint, TaskExecutionEvent, TaskGeneration, TaskId,
     TaskInputDigest, TaskRecord, TaskScope, TaskSequence, TaskTenantId, TaskTick,
 };
-use penelope_statechronicle::task::{CheckpointStateError, CheckpointStateVerifier};
+use penelope::statechronicle::task::{CheckpointStateError, CheckpointStateVerifier};
 use shardline_reliability::{
     CheckpointArtifactVerifier, MaintenanceArtifact, MaintenanceArtifactKind,
     MaintenanceArtifactProof, sign_maintenance_artifact, verify_maintenance_artifact,
 };
-use statechronicle_domain::{intent::KeyId, resource_state::ResourceState};
+use statechronicle::domain::{intent::KeyId, resource_state::ResourceState};
 
 fn fixture(kind: MaintenanceArtifactKind) -> (MaintenanceArtifact, SigningKey, KeyId) {
     (
@@ -106,12 +106,15 @@ fn native_publication_contains_real_custom_state_and_verified_event_state_roots(
 #[test]
 fn forged_roots_are_rejected_even_with_a_genuine_signature_over_the_forged_commit() {
     let (mut proof, key, key_id) = signed(MaintenanceArtifactKind::Fsck);
-    proof.commit.body.next_state_root = statechronicle_core::digest::hash_bytes(b"forged state");
+    proof.commit.body.next_state_root = statechronicle::core::digest::hash_bytes(b"forged state");
     let seed = zeroize::Zeroizing::new(key.to_bytes());
     let protocol_key = statechronicle_ed25519::SigningKey::from_bytes(&seed);
-    proof.commit =
-        statechronicle_commit::sign::sign_commit(&proof.commit.body, &protocol_key, key_id.clone())
-            .unwrap();
+    proof.commit = statechronicle::commit::sign::sign_commit(
+        &proof.commit.body,
+        &protocol_key,
+        key_id.clone(),
+    )
+    .unwrap();
     assert!(
         verify_maintenance_artifact(
             &proof,

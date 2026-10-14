@@ -2,7 +2,7 @@ use super::{TaskEvidenceStore, TaskExecutionMode, TaskRunIdentity};
 #[cfg(test)]
 use crate::ServerObjectStore;
 use ed25519_dalek::SigningKey;
-use penelope_core::task::{
+use penelope::core::task::{
     BlobRef, Digest, EffectContract, ExecutionBudget, RecoveryMode, TaskDefinition,
     TaskExecutionEvent, TaskFault, TaskGeneration, TaskId, TaskInputDigest, TaskProjection,
     TaskRecoveryPolicy, TaskScope, TaskTenantId, TaskTick,
@@ -310,7 +310,7 @@ impl TaskReceipt {
             artifact,
             chrono::Utc::now(),
             &self.key,
-            statechronicle_domain::intent::KeyId(format!(
+            statechronicle::domain::intent::KeyId(format!(
                 "shardline-maintenance:{}",
                 hex::encode(self.identity.public_key)
             )),
@@ -330,7 +330,7 @@ impl TaskReceipt {
 
 impl Drop for TaskReceipt {
     fn drop(&mut self) {
-        use penelope_core::task::TaskStatus;
+        use penelope::core::task::TaskStatus;
         if !matches!(
             self.projection.status(),
             TaskStatus::Running | TaskStatus::Faulted

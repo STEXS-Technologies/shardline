@@ -1,6 +1,6 @@
 #![cfg(all(feature = "process-runtime", target_os = "linux"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-use penelope_core::task::{
+use penelope::core::task::{
     Digest, EffectContract, ExecutionBudget, RecoveryMode, TaskDefinition, TaskGeneration, TaskId,
     TaskInputDigest, TaskRecoveryPolicy, TaskScope, TaskStatus, TaskTenantId,
     runtime::{TaskClock, TaskJournal, TaskPortError, TaskRuntime, TaskStart},
@@ -334,7 +334,7 @@ fn uncommitted_start_cannot_authorize_a_child() {
     let mut journal = SqliteTaskJournal::open(&path, scope, definition).unwrap();
     assert_eq!(
         journal
-            .read(scope, penelope_core::task::TaskSequence::ZERO)
+            .read(scope, penelope::core::task::TaskSequence::ZERO)
             .unwrap(),
         None
     );
