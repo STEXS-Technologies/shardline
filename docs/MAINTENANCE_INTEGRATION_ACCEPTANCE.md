@@ -47,7 +47,7 @@ These results cover named fixtures. They do not certify every deployment.
 
 | Area | Verified behavior | Limit |
 | --- | --- | --- |
-| Startup | Normal commands initialize tracking in the existing process. Local and PostgreSQL router fixtures cover all three roles, application-owned logging and fresh startup sweeps. | Remaining deployment combinations still need review. |
+| Startup | Normal commands initialize tracking in the existing process. Local, SQLite/S3 and PostgreSQL router fixtures cover all three roles, application-owned logging and fresh startup sweeps. SQLite/S3 stores history in SQLite rather than payload objects. | Remaining deployment combinations still need review. |
 | Existing commands | Released/current comparisons preserve output, status, configuration errors, diagnostic exports and restricted-root behavior. Both ordinary repair forms pass. The released systemd GC service runs with its original restrictions. | Comparisons cover the named commands and configurations. |
 | Fresh work | Consecutive invocations discover new work and produce distinct results. Completed history does not replace a scan. | An explicit retry still requires investigation of uncertain effects. |
 | Optional recording failures | Admission and final-recording faults preserve tested CLI work, startup LFS/S3 cleanup and Hub secret upgrades. Destination-history failure preserves a local storage copy. | These are specific fault points, not every external-mutation phase. |
@@ -62,8 +62,8 @@ These results cover named fixtures. They do not certify every deployment.
 
 The optimized deployment evidence includes all 23 fault scenarios across two
 complementary runs of the same binary. After the native recovery correction,
-the optimized CLI suite passes all 20 scenarios, including destination-history
-failure.
+the optimized CLI suite passes all 21 scenarios, including destination-history
+failure after successful copying.
 These counts supplement the behavior checks above and do not close a gate on
 their own.
 
@@ -114,6 +114,11 @@ The following still need implementation or stronger evidence before merge:
   GC barrier automatically, before payload writes. Local embedding therefore
   needs no caller-managed lock for those upload methods. Lower-level metadata
   methods remain outside this high-level upload boundary.
+  Both public upload methods cancel while waiting for GC without leaving a
+  waiter or writing payloads. A subsequent exclusive GC and file upload succeed.
+  With a pre-existing writable barrier and live SQLite WAL/SHM files, both
+  methods also succeed under a 0555 metadata root without changing its mode.
+  This does not cover a restricted root lacking the existing barrier file.
   Plain file requests without upload intents also check their original session
   before body ingestion and after ingestion. Publication failures check that
   same session to return retryable ownership loss without reacquiring it.

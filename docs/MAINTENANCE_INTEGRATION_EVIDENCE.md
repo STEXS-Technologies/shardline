@@ -4739,3 +4739,19 @@ The preceding optimized executable, SHA-256
 also passed all 23 deployment scenarios: 11 in 143.744 seconds and 12 protocol
 fault scenarios in 139.711 seconds, with no runtime skips. These runs precede
 the SQLite/S3 fix and do not establish full deployment coverage for that fix.
+
+## Embedded local upload cancellation and restricted directories
+
+The five `local_backend::tests::library_ownership` tests pass in 0.36 seconds.
+The new queued-cancellation fixture holds real exclusive filesystem ownership,
+starts both public upload methods, confirms they remain pending and cancels
+them. Neither writes a payload. After releasing the original owner, another
+exclusive GC acquisition and a fresh file upload succeed.
+
+The restricted-directory fixture runs as UID 1000, keeps SQLite WAL/SHM files
+alive and creates the normal barrier before restricting the metadata root to
+0555. A real attempt to create a new root entry fails. Public file and xorb
+uploads still succeed, file download returns the original bytes and root
+permissions remain 0555. Cleanup restores permissions. This proves the layout
+with an existing writable barrier; it does not prove compatibility when that
+barrier is absent or itself read-only.
