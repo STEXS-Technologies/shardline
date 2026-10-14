@@ -95,11 +95,12 @@ The following still need implementation or stronger evidence before merge:
   inspected directly when shared export failed. Current completed/interrupted
   fixtures and the predecessor's interrupted MinIO copy preserve native evidence
   and expose verified state without export or replay. Remaining legacy layouts
-  and deployment/configuration combinations still belong to the audit. In
-  particular, inspect endpoint-only copy history from a project whose normal
-  server configuration selects PostgreSQL: copy recording and ordinary history
-  inspection currently resolve their metadata configurations separately, so this
-  combination still needs an actual CLI comparison.
+  and deployment/configuration combinations still belong to the audit.
+  Endpoint-only copy history now has an explicit `history --local` inspection
+  mode, independent of server PostgreSQL settings. The local-copy CLI comparison
+  preserves normal history's configured database scope and checks the local
+  mode without initialization or replay; remote-copy coverage is recorded in
+  the evidence appendix.
 
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.

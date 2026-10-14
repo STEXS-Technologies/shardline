@@ -54,6 +54,48 @@ pub(crate) async fn run(
     after: Option<String>,
     limit: usize,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_page(after.as_deref(), limit)?;
+    let config = crate::config::load_server_config(root, None)?;
+    inspect_config(config, after, limit).await
+}
+
+pub(crate) async fn run_local(
+    root: Option<&Path>,
+    after: Option<String>,
+    limit: usize,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_page(after.as_deref(), limit)?;
+    #[cfg(target_os = "linux")]
+    {
+        let root = match root {
+            Some(root) => root.to_path_buf(),
+            None => crate::config::project_state_root(&std::env::current_dir()?),
+        };
+        let root = crate::local_output::resolved_output_path(&root)?;
+        if !root.join("metadata.sqlite3").try_exists()? {
+            return Err(
+                "No local SQLite metadata exists at this root; inspection did not initialize it."
+                    .into(),
+            );
+        }
+        let mut page =
+            inspect_config(crate::maintenance::metadata_config(root)?, after, limit).await?;
+        let object = page.as_object_mut().ok_or("invalid history page")?;
+        object.insert("history_source".into(), serde_json::json!("local_sqlite"));
+        object.insert("inspection_notice".into(), serde_json::json!("Local SQLite history only; configured PostgreSQL history is not included. Inspection starts no maintenance."));
+        Ok(page)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (root, after);
+        Err("host-local history inspection requires Linux".into())
+    }
+}
+
+fn validate_page(
+    after: Option<&str>,
+    limit: usize,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if after.as_ref().is_some_and(|cursor| cursor.len() > 128) {
         return Err(
             "history --after must be a next_after value of at most 128 bytes from the history page"
@@ -63,7 +105,14 @@ pub(crate) async fn run(
     if !(1..=100).contains(&limit) {
         return Err("history --limit must be between 1 and 100".into());
     }
-    let config = crate::config::load_server_config(root, None)?;
+    Ok(())
+}
+
+async fn inspect_config(
+    config: shardline_server::ServerConfig,
+    after: Option<String>,
+    limit: usize,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let deployment = deployment_fingerprint(&config)?;
     // Inspection never creates a server backend or runs its startup sweeps.
     let pool = config

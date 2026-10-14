@@ -24,9 +24,19 @@ shardline bench --help
 
 Run `shardline history` with your existing configuration to inspect saved
 maintenance outcomes without enabling the admin API or starting a worker.
-Use `--root PATH` for a local root override. Output is JSON with `tasks`,
+Use `--root PATH` for a root override; it keeps the configured metadata backend.
+Output is JSON with `tasks`,
 `history_notice` and `next_after`. Read each task's `next_step`; saved history
 does not establish current server readiness or authorize retries.
+
+On Linux, use `shardline history --local` to inspect the host's local SQLite
+history independently of server configuration. This is useful for endpoint-only
+storage copies when the project normally selects PostgreSQL. It reads the usual
+project `.shardline/data` root, or `--root PATH` when supplied, without contacting
+PostgreSQL or initializing a database. Its `history_source` and `inspection_notice`
+make that scope explicit; PostgreSQL history is not included. Missing local
+metadata is an error. `--local` cannot be combined with `--archive` or
+`--pending-deletes`.
 
 The page size defaults to 20 (`--limit 1` through `--limit 100`). Continue with
 `shardline history --after RUN_ID`, using the preceding page's `next_after`
@@ -411,8 +421,8 @@ Dry-run inventory can include larger objects without reading their bodies.
 
 Copy history uses the local destination's SQLite metadata. For a local-to-S3
 copy, it uses the local source's SQLite metadata instead. Inspect that root with
-`shardline history --root /path/to/local/root`; inspection does not resume copying.
-With two S3 endpoints, run `shardline history` from the same project working
+`shardline history --local --root /path/to/local/root`; inspection does not resume copying.
+With two S3 endpoints, run `shardline history --local` from the same project working
 directory. Its copy history is local to that host, not shared S3 payload data.
 These endpoint-only commands do not establish a PostgreSQL metadata association.
 

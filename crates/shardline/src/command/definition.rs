@@ -749,6 +749,9 @@ pub(crate) struct HistoryArgs {
     /// Inspect a retained private archive as its owner, without a deployment filter.
     #[arg(long, requires = "root", conflicts_with = "pending_deletes")]
     pub(crate) archive: bool,
+    /// Inspect host-local SQLite history, ignoring server database settings (Linux).
+    #[arg(long, conflicts_with_all = ["archive", "pending_deletes"])]
+    pub(crate) local: bool,
     /// Maximum records to show (1–100).
     #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=100))]
     pub(crate) limit: u16,

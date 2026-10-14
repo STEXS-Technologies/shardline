@@ -22,6 +22,14 @@ fn interrupted_s3_to_s3_copy_is_inspectable_without_worker_setup_or_replay() {
 }
 
 #[test]
+fn s3_to_s3_copy_history_is_inspectable_with_unrelated_postgres_settings() {
+    verify_copy_history(
+        CopyProfile::ConfiguredDatabaseS3Source,
+        CopyInterruption::KillAcceptedPut,
+    );
+}
+
+#[test]
 fn s3_only_copy_preserves_work_when_local_history_path_is_unsafe() {
     verify_copy_history(
         CopyProfile::UnsafeHistory,
@@ -88,6 +96,7 @@ enum CopyInterruption {
 enum CopyProfile {
     LocalSource,
     S3Source,
+    ConfiguredDatabaseS3Source,
     UnsafeHistory,
     LegacyCompleted,
     LegacyInterrupted,
@@ -101,6 +110,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         CopyProfile::LegacyCompleted | CopyProfile::LegacyInterrupted
     );
     let completed = matches!(profile, CopyProfile::LegacyCompleted);
+    let unrelated_database = matches!(profile, CopyProfile::ConfiguredDatabaseS3Source);
     let binary = std::env::var_os("CARGO_BIN_EXE_shardline")
         .expect("set CARGO_BIN_EXE_shardline to the current optimized binary");
     let producer = if legacy {
@@ -215,6 +225,12 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
                 raw.secret_key.as_deref().unwrap(),
             );
     }
+    if unrelated_database {
+        command.env(
+            "SHARDLINE_INDEX_POSTGRES_URL",
+            "postgres://unused:unused@127.0.0.1:1/unused",
+        );
+    }
     let mut child = StopOnDrop(command.spawn().unwrap());
     let started = Instant::now();
     while !proxy.fault_was_injected() {
@@ -313,6 +329,14 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         .env("TMPDIR", scratch.path())
         .current_dir(source.path())
         .arg("history");
+    if unrelated_database {
+        history_command
+            .env(
+                "SHARDLINE_INDEX_POSTGRES_URL",
+                "postgres://unused:unused@127.0.0.1:1/unused",
+            )
+            .arg("--local");
+    }
     let archive_root = scratch.path().join(format!(
         "shardline-maintenance-{}-{}",
         fs::metadata(source.path()).unwrap().uid(),
@@ -349,6 +373,13 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         String::from_utf8_lossy(&history.stderr)
     );
     let page: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    if unrelated_database {
+        assert_eq!(
+            page.get("history_source")
+                .and_then(serde_json::Value::as_str),
+            Some("local_sqlite")
+        );
+    }
     let tasks = page
         .get("tasks")
         .and_then(serde_json::Value::as_array)

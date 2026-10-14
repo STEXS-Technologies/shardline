@@ -29,6 +29,9 @@ Dry runs do not save shared history. Specialized repairs, backups and retention
 holds keep their existing diagnostics. SQLite deployments save history in SQLite,
 even with S3 payloads; PostgreSQL deployments save it in PostgreSQL. Storage-copy
 locations are described in the [CLI reference](CLI.md#durable-maintenance-linux).
+For host-local copy history, use `shardline history --local`; this works even
+when your normal server configuration selects PostgreSQL. Use `--root` for a
+copy's local destination, or its local source when the destination is S3.
 
 If saving history fails, work keeps its original result and emits a warning.
 Empty history does not prove that work never ran. Tracking does not make every
