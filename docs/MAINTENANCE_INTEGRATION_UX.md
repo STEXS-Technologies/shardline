@@ -14,6 +14,10 @@ There is no tracker service, extra port, new mount or new configuration.
 Commands keep their live output and exit status. Your existing timer still
 starts GC; starting the server does not start GC.
 
+History follows your metadata database: SQLite deployments keep it in SQLite,
+including when payloads are stored in S3. PostgreSQL deployments keep it in
+PostgreSQL so nodes using the same database and schema can inspect it.
+
 Startup checks saved upload progress. Eligible file checksums are verified in
 the same process while requests are served, so that verification does not hold
 up readiness. If verification fails or shutdown interrupts it, the upload's

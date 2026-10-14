@@ -386,6 +386,10 @@ copies them into the destination. Use `--dry-run` to inventory without writing
 destination payloads. `--from-root` / `--to-root` supply the local state root when the
 corresponding adapter is `local`.
 
+Copying buffers one object at a time and accepts objects up to 64 MiB, as in
+1.11.3. A larger object fails the copy rather than consuming unbounded memory.
+Dry-run inventory can include larger objects without reading their bodies.
+
 Run garbage collection:
 
 ```bash
