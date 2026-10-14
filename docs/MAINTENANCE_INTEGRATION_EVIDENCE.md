@@ -5165,3 +5165,44 @@ process interruptions for copying; they do not establish every operation's
 admission or mutation behavior.
 Strict CLI integration-test Clippy also passes:
 `.codex/validation/copy-admission-clippy.log`.
+
+### Restricted legacy SDK roots without a barrier file
+
+A source build of tag `v1.11.3` verifies that the public local SDK can initialize
+and upload under an already restricted 0555 metadata root with no barrier file,
+when existing SQLite WAL/SHM files and payload directories remain writable. Its
+file upload and download pass in 0.02 seconds. The corresponding current test
+initially fails with permission denied before publication, confirming a
+compatibility regression rather than an unsupported legacy assumption.
+
+On Linux, current local upload and GC guards now also share the existing root
+directory inode. They acquire the legacy file lock when available; when its
+creation is denied and the file is absent, the directory guard protects the
+operation without creating an entry or changing permissions. Every current
+owner acquires the directory guard, including owners that can create the file,
+so a permission change and later file creation cannot bypass an existing owner.
+Other platforms retain the original file-lock path.
+
+The corrected SDK fixture preserves existing reads, verifies both file and xorb
+uploads, and leaves the root mode and missing barrier file unchanged. Four
+directory-lock fixtures check permission changes followed by file creation,
+cancelled ownership waits, blocking by an existing legacy file owner, and
+rejection of a symlinked root without outside changes. Logs:
+`.codex/validation/released-sdk-restricted-upload.log`,
+`.codex/validation/restricted-upload-current-red.log`,
+`.codex/validation/restricted-directory-tests.log` and
+`.codex/validation/restricted-upload-library-final.log`.
+
+All seven public-library ownership tests pass in 0.38 seconds, including the
+restricted-root file and xorb calls waiting for GC before any new payload write.
+The four existing local barrier tests and the cancellation/runtime-shutdown
+fixture also pass. Strict server Clippy passes. A fresh current CLI comparison
+against the released 1.11.3 executable preserves output and exit status for fsck,
+rebuild, both repair forms and GC mark under a 0555 root, plus fsck with fully
+read-only SQLite files. Logs:
+`.codex/validation/restricted-barrier-regression.log`,
+`.codex/validation/restricted-barrier-shutdown.log`,
+`.codex/validation/restricted-directory-clippy-final.log` and
+`.codex/validation/restricted-directory-cli-permissions.log`.
+The local GC suite also passes with the new barrier path; its executed cases
+and timing are recorded in `.codex/validation/restricted-directory-gc-tests.log`.
