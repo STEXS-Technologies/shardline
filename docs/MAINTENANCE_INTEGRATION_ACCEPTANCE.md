@@ -345,7 +345,7 @@ These cases do not establish cancellation of arbitrary active storage I/O.
 | 1: automatic startup | Verified for ordinary startup, the backend/role matrix and public embedding. | Current fixtures cover SQLite/local, SQLite/S3, PostgreSQL/local and PostgreSQL/S3 across All, API and Transfer roles. Ordinary PostgreSQL/S3 processes share history across separate roots, record their server PIDs, perform fresh sweeps, preserve payloads and start no tracker child or GC. The runtime role lacks direct task-table grants and cannot write S3 task objects. Public-library startup preserves application logging and needs no worker setup or new mount. Unusual filesystem layouts and tenant policies remain in the separate compatibility audit; startup cost remains in gate 4. |
 | 2: existing command behavior | Named released/current comparisons pass; full compatibility audit remains open. | Current optimized comparisons preserve stdout, stderr and status for twenty configuration failures across fsck, rebuild, GC and both repair forms. Five restricted-root forms, fully read-only SQLite fsck, large diagnostic exports and actual S3 copy/rollback pass. S3 copying also preserves released behavior when the working directory has been removed. Native archive inspection leaves journal and identity bytes unchanged. Current-binary revalidation passes with the byte-identical released GC service and its original systemd restrictions, including real guest reboot cuts. Remaining supported deployment combinations retain their separate audit. |
 | 3: fresh work and ownership | Fresh discovery verified; concurrency evidence covers named workflows. | The optimized ordinary GC fixture discovers an orphan added after its previous completion, marks it and records a distinct result. Current configuration tests preserve admitted targets and isolate parallel invocations. PostgreSQL rebuild and takeover drills establish ownership for their named paths; the remaining write-path audit still limits broader claims. |
-| 4: capacity and cleanup | Full SQLite/PostgreSQL capacity and bounded atomic cleanup pass; broader cost remains open. | Both current 4,096-slot release drills preserve unresolved evidence and payload bytes, including PostgreSQL after publication locking. SQLite and PostgreSQL second-batch failures preserve resumable retirement. Larger legacy archives, long operations and deployment cost still need assessment. |
+| 4: capacity and cleanup | Full SQLite/PostgreSQL capacity, legacy archives and bounded atomic cleanup pass; cost review remains open. | Both current 4,096-slot release drills preserve unresolved evidence and payload bytes, including PostgreSQL after publication locking. SQLite and PostgreSQL second-batch failures preserve resumable retirement. Current optimized checks also cover 1,026 legacy runs and a 10,000-artifact legacy run. Released/current workload comparisons pass at concurrency 1, 32 and 128. These observations do not establish a latency bound or physical disk quota; the remaining review must identify any integration overhead that can block ordinary work. |
 | 5: interruption safety | Named interruption and remote-delete faults pass; the phase-by-phase audit remains open. | Lost acknowledgements, denied saved replies, interrupted history retirement and process termination have passing fixtures. Remaining work must account for admission, checkpoint, mutation, report proposal and completion acknowledgement across supported operations, including the remaining library write paths. |
 | 6: replacement and shutdown | Named node-loss, ownership-loss and replacement drills pass; coverage remains open. | Container replacement, SIGTERM, native reboot and cross-host/connection-loss fixtures distinguish unfinished work from completion. Cooperative history shutdown and fresh cleanup resumption pass. Remaining layouts and active storage-call shutdown behavior still need review. |
 | 7: mixed versions and rollback | Named rollout and rollback fixtures pass; the remaining compatibility audit stays open. | Existing domain formats, migration records and runtime grants survive the tested upgrades and rollback. Older GC must remain paused until job binaries are replaced; it does not create the new delete markers. Remaining legacy histories and deployment layouts still need review. |
@@ -354,6 +354,28 @@ These cases do not establish cancellation of arbitrary active storage I/O.
 The [gate-audit evidence](MAINTENANCE_INTEGRATION_EVIDENCE.md#startup-and-operator-gate-audit)
 records the executed checks. Gates 2–7 retain their requirements above and remain
 open until their remaining compatibility, failure and cost evidence is complete.
+
+### Remaining merge assessment
+
+The remaining review is bounded to the integration's existing contracts. Each
+item below must produce a source-backed finding and a link to the relevant
+evidence before its gate can close. Passing another general deployment drill
+does not replace these findings.
+
+| Item | Required finding | Gates |
+| --- | --- | --- |
+| PostgreSQL derived-index interruption | Exercise partial reconstruction pruning, dedupe pruning and dedupe restoration with actual process termination. Verify preserved payloads, unresolved old history and fresh discovery on the next ordinary rebuild. The existing PostgreSQL latest-pointer cut does not cover these mutations. | 3, 5 |
+| Public write boundaries | Enumerate public file, xorb and metadata publication entry points. Identify which enforce ownership and physical-object checks and which retain caller responsibilities. Ensure the operator and library documentation promise only those guarantees. | 3, 5 |
+| Ordinary-command overhead | Trace startup, admission, recording and cleanup on success, unavailable history and full history. Check that optional tracking cannot prevent the original operation, truncate its output or introduce a new deadline. Reuse the measured capacity, legacy and workload evidence above. | 2, 4 |
+| Shutdown and ownership loss | Map process termination, container replacement, reboot and connection loss to the existing fixtures. Verify that active database/storage calls retain the documented ownership rules and that replacement performs fresh work rather than replaying an old receipt. | 5, 6 |
+| Upgrade and rollback inventory | Map supported backend layouts, existing history formats and grants to released/current evidence. Document the existing writer/GC coordination requirements and any filesystem or tenant-policy limitation explicitly. | 2, 7 |
+| Final operator walkthrough | Verify the ordinary startup, readiness, retryable-write error, history inspection and recovery instructions against actual commands and response fields. Keep the main guide concise; retain detailed test results in the evidence document. | 2, 8 |
+
+Cluster-wide exactly-once execution, cancellation of arbitrary active remote
+I/O, a physical history disk quota and certification of a user's deployment
+health are not established by this integration. They must not appear as product
+guarantees. Any finding that weakens an existing supported contract requires a
+fix and appropriate verification before merge.
 
 ## Ownership and recovery rules
 
