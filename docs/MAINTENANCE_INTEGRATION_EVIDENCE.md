@@ -5091,3 +5091,20 @@ Strict CLI and server Clippy pass. Logs:
 `/tmp/shardline-local-history-cli-all.log`,
 `/tmp/shardline-local-history-clippy-final.log` and
 `/tmp/shardline-local-history-server-clippy.log`.
+
+### Restricted PostgreSQL history inspection
+
+The configured PostgreSQL 16 fixture uses a real separate login with only schema
+usage and SELECT on the existing reliability-events table. Owner setup seeds a
+completed run in each of two independent schemas. The restricted login resolves
+its owner's history scope and verifies exactly one completed run. Direct reads
+of the artifact table and access to the other schema both fail with permission
+denied. Inspection leaves the artifact keys and payload bytes unchanged. No
+artifact-table grant or runtime schema-creation permission is added.
+
+Both PostgreSQL inspection tests pass without skips in 0.93 seconds. This proves
+the tested read-only account configuration; arbitrary RLS policies and other
+deployment layouts remain outside this result. Fixture output:
+`/tmp/shardline-batched-deletion.a7dE8h/test.log`.
+Strict server Clippy also passes; its output is
+`/tmp/shardline-restricted-inspection-clippy.log`.

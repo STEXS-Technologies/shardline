@@ -215,8 +215,12 @@ The following still need implementation or stronger evidence before merge:
   These request counts do not establish cloud latency or a production SLO.
 - **Remaining deployment layouts.** Work-specific database/schema routing,
   row policies, narrower accounts, library embedding and legacy history need
-  coverage beyond the passing fixtures. Corrupt, unfinished or unrelated legacy
-  objects can still enter an older raw storage copy.
+  coverage beyond the passing fixtures. A configured PostgreSQL inspection test
+  now verifies a login with only existing schema usage and reliability-table
+  SELECT: it reads completed history, cannot access the artifact table directly
+  or another schema, and leaves saved evidence unchanged. This covers that
+  account configuration, not arbitrary row policies. Corrupt, unfinished or
+  unrelated legacy objects can still enter an older raw storage copy.
 
 ## Eight merge gates
 
