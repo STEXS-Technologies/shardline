@@ -115,6 +115,8 @@ shardline history --archive --root /path/to/old/archive
 ```
 
 This verifies saved results without rewriting the archive or repeating work.
+If saving shared history failed, point `--root` at the retained task workspace
+named in the warning to inspect its local journal directly.
 Keep the original files and command logs.
 
 For a blocked write, inspect:

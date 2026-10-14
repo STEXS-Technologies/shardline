@@ -109,7 +109,10 @@ impl SqliteTaskJournal {
             return Err(TaskPortError::Exhausted);
         }
         let connection = if read_only {
-            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
         } else {
             Connection::open(path)
         }

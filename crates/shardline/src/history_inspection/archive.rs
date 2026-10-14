@@ -25,6 +25,12 @@ pub(super) async fn run(
             "inspect a private archive as its owner; preserve its existing permissions".into(),
         );
     }
+    if root.join("identity.json").exists() || root.join("tasks.sqlite").exists() {
+        return tokio::task::spawn_blocking(move || {
+            crate::maintenance::inspection::run(&root, after.as_deref())
+        })
+        .await?;
+    }
     let config = crate::maintenance::metadata_config(root)?;
     let (store, _) = TaskEvidenceStore::for_inspection(&config, None).await?;
     Ok(

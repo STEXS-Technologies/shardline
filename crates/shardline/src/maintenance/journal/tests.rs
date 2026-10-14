@@ -215,6 +215,115 @@ fn unfinished_and_corrupt_backlogs_do_not_starve_completed_export() {
 }
 
 #[test]
+fn native_archive_inspection_checks_isolated_output_against_signed_result() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = retained(root.path(), "captured", false);
+    let identity_path = directory.join("identity.json");
+    let mut identity: TaskRunIdentity =
+        serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
+    identity.execution = TaskExecutionMode::Isolated;
+    fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    for (name, bytes) in [
+        ("stdout-1", b"verified output".as_slice()),
+        ("stderr-1", b"".as_slice()),
+    ] {
+        crate::write_output_bytes(&directory.join(name), bytes, false).unwrap();
+    }
+    let mut report = Vec::new();
+    capture::publish(
+        &directory,
+        TaskGeneration::new(1),
+        std::process::ExitCode::SUCCESS,
+        &mut report,
+    )
+    .unwrap();
+    let proof = artifact::publish(
+        &directory,
+        identity.scope,
+        TaskGeneration::new(1),
+        MaintenanceArtifactKind::Fsck,
+        2,
+        &report,
+    )
+    .unwrap();
+    let mut journal = SqliteTaskJournal::open(
+        &directory.join("tasks.sqlite"),
+        identity.scope,
+        identity.definition,
+    )
+    .unwrap();
+    let mut projection = TaskProjection::new(identity.scope, identity.definition).unwrap();
+    while let Some(record) = journal
+        .read(identity.scope, projection.next_sequence())
+        .unwrap()
+    {
+        projection.apply(&record).unwrap();
+    }
+    let record = projection
+        .propose(
+            TaskExecutionEvent::Completed {
+                output: BlobRef {
+                    digest: Digest::of(&proof),
+                    bytes: u32::try_from(proof.len()).unwrap(),
+                    schema: 1,
+                },
+            },
+            TaskGeneration::new(1),
+            TaskTick::new(3),
+        )
+        .unwrap();
+    journal.commit(&record, Some(&proof)).unwrap();
+    drop(journal);
+    let page = super::super::inspection::run(&directory, None).unwrap();
+    assert_eq!(page["tasks"][0]["state"], "completed");
+    assert_eq!(page["tasks"][0]["output_verified"], true);
+    fs::write(directory.join("stdout-1"), b"damaged output").unwrap();
+    assert!(super::super::inspection::run(&directory, None).is_err());
+    assert_eq!(
+        fs::read(directory.join("stdout-1")).unwrap(),
+        b"damaged output"
+    );
+}
+
+#[test]
+fn native_archive_inspection_verifies_unexported_results_and_preserves_files() {
+    let root = tempfile::tempdir().unwrap();
+    let blocked = root.path().join("chunks/_shardline_tasks/v1/manifests");
+    fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+    fs::write(&blocked, b"publication denied").unwrap();
+    for (id, completed, expected) in [
+        ("native-completed", true, "completed"),
+        ("native-interrupted", false, "needs_reconciliation"),
+    ] {
+        let directory = retained(root.path(), id, completed);
+        let path = directory.join("tasks.sqlite");
+        let before = fs::read(&path).unwrap();
+        let page = super::super::inspection::run(&directory, None).unwrap();
+        assert_eq!(page["tasks"][0]["id"], id);
+        assert_eq!(page["tasks"][0]["state"], expected);
+        assert_eq!(page["native_journal"], true);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let next = super::super::inspection::run(&directory, Some(id)).unwrap();
+        assert_eq!(next["tasks"].as_array().unwrap().len(), 0);
+        // Signed proof alone is insufficient: physical result bytes must match.
+        let artifact = fs::read_dir(directory.join("artifacts"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(&artifact, b"damaged materialized evidence").unwrap();
+        assert!(super::super::inspection::run(&directory, None).is_err());
+        assert_eq!(
+            fs::read(&artifact).unwrap(),
+            b"damaged materialized evidence"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    assert_eq!(fs::read(blocked).unwrap(), b"publication denied");
+}
+
+#[test]
 fn unfinished_export_reads_native_journal_without_rewriting_or_restarting_it() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());

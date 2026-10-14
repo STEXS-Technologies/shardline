@@ -9,6 +9,7 @@ mod controller;
 mod evidence;
 mod history;
 mod inline;
+pub(crate) mod inspection;
 mod journal;
 mod outbox;
 mod path_codec;

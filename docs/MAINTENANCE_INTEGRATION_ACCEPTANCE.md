@@ -91,8 +91,11 @@ The following still need implementation or stronger evidence before merge:
   while preserving successful copying. Existing host-private archives remain
   preserved. Explicit owner-only archive inspection now verifies completed and
   interrupted metadata histories from the predecessor binary without rewriting
-  their files or replaying copying. Private journals awaiting export and
-  remaining deployment/configuration combinations still belong to the audit.
+  their files or replaying copying. An individual native workspace can also be
+  inspected directly when shared export failed. Current completed/interrupted
+  fixtures and the predecessor's interrupted MinIO copy preserve native evidence
+  and expose verified state without export or replay. Remaining legacy layouts
+  and deployment/configuration combinations still belong to the audit.
 
 - **Remaining write paths and older GC.** Some library callers and references
   hidden inside legacy payloads do not use the covered ownership checks.
