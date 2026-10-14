@@ -7,6 +7,8 @@ use crate::{
 use shardline_storage::ObjectPrefix;
 use std::num::NonZeroUsize;
 
+mod remote_storage;
+
 #[test]
 fn shutdown_allows_an_inflight_sqlite_call_but_stops_subsequent_housekeeping() {
     let root = tempfile::tempdir().unwrap();

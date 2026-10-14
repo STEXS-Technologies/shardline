@@ -325,6 +325,13 @@ waits while the interrupted command's database session still owns maintenance.
 After the fixture cancels that session's paused query, rebuild succeeds. A fresh
 repair handles remaining and newly expired holds, preserves protected payloads
 and leaves the interrupted receipt unresolved. Other mutation paths remain open.
+The shutdown audit found and fixed a legacy-history boundary: shutdown during
+an S3 metadata lookup previously allowed a subsequent body download. Four real
+HTTP/S3 client cases now cover metadata lookup, active body download, absence
+checking before publication and deletion before metadata cleanup. They verify
+stopping before subsequent calls while permitting an active call to finish,
+preserving metadata for fresh cleanup and leaving ordinary reads available.
+These cases do not establish cancellation of arbitrary active storage I/O.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |

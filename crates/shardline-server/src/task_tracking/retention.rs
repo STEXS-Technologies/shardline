@@ -207,6 +207,7 @@ impl TaskEvidenceStore {
             identity.id
         ))?;
         let mut legacy_artifacts = false;
+        self.check_housekeeping()?;
         self.objects.visit_prefix(&prefix, |_| {
             self.check_housekeeping()?;
             legacy_artifacts = true;

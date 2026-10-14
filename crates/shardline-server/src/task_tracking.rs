@@ -255,6 +255,7 @@ impl TaskEvidenceStore {
                     return Ok(());
                 }
             }
+            self.check_housekeeping()?;
             if self.metadata_only_publication {
                 return automatic_publication_result(metadata.publish_bounded(
                     key.as_str(),
@@ -278,6 +279,7 @@ impl TaskEvidenceStore {
                     return Ok(());
                 }
             }
+            self.check_housekeeping()?;
             if self.metadata_only_publication {
                 return automatic_publication_result(metadata.publish_task_artifact_bounded(
                     key.as_str(),
@@ -360,6 +362,7 @@ impl TaskEvidenceStore {
         if length == 0 {
             return Ok(Some(Vec::new()));
         }
+        self.check_housekeeping()?;
         let bytes = self.objects.read_range(
             &key,
             ByteRange::new(0, length.saturating_sub(1))
@@ -471,6 +474,7 @@ impl TaskEvidenceStore {
                 return Ok(());
             }
         }
+        self.check_housekeeping()?;
         let result = self.objects.visit_prefix(prefix, |object| {
             self.check_housekeeping()?;
             if after.is_some_and(|after| object.key().as_str() <= after) {
@@ -490,6 +494,7 @@ impl TaskEvidenceStore {
                     return Ok(());
                 }
             }
+            self.check_housekeeping()?;
             if visit(&object)?.is_break() && purpose == ScanPurpose::Retirement {
                 return Err(InventoryError::Stopped);
             }
@@ -506,6 +511,7 @@ impl TaskEvidenceStore {
         // Remove the legacy copy first so a partially completed cleanup cannot
         // reveal it again after the metadata copy disappears.
         self.objects.delete_if_present(key)?;
+        self.check_housekeeping()?;
         if let Some(metadata) = &self.postgres_metadata {
             metadata.delete(key.as_str())?;
         }
