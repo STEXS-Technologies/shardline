@@ -14,6 +14,8 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection, qu
 
 use crate::ServerError;
 
+#[cfg(target_os = "linux")]
+mod local_directory;
 mod work_pool;
 pub(crate) use work_pool::{WorkPoolCleanup, close_work_pool};
 
@@ -116,7 +118,7 @@ impl RequestSession {
 /// transaction rolls it back and releases its transaction-scoped advisory lock.
 pub(crate) enum MaintenanceBarrierGuard {
     Local {
-        file: File,
+        files: Vec<File>,
     },
     Postgres {
         _transaction: Transaction<'static, Postgres>,
@@ -134,8 +136,10 @@ impl std::fmt::Debug for MaintenanceBarrierGuard {
 
 impl Drop for MaintenanceBarrierGuard {
     fn drop(&mut self) {
-        if let Self::Local { file } = self {
-            let _ignored = file.unlock();
+        if let Self::Local { files } = self {
+            for file in files {
+                let _ignored = file.unlock();
+            }
         }
     }
 }
@@ -371,8 +375,20 @@ async fn acquire_local(
     exclusive: bool,
 ) -> Result<MaintenanceBarrierGuard, ServerError> {
     let path = root.join(LOCAL_BARRIER_FILE_NAME);
-    let file = acquire_local_file_lock(path, exclusive).await?;
-    Ok(MaintenanceBarrierGuard::Local { file })
+    let mut files = Vec::new();
+    // Every current Linux owner uses the directory, including owners that can
+    // also create the legacy file. Changing root permissions cannot split the
+    // barrier into two independent lock namespaces.
+    #[cfg(target_os = "linux")]
+    files.push(local_directory::acquire(root, exclusive).await?);
+    match acquire_local_file_lock(path.clone(), exclusive).await {
+        Ok(file) => files.push(file),
+        #[cfg(target_os = "linux")]
+        Err(ServerError::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied && !path.try_exists()? => {}
+        Err(error) => return Err(error),
+    }
+    Ok(MaintenanceBarrierGuard::Local { files })
 }
 
 /// Prepare the existing lock file while initialization can still create root
@@ -387,6 +403,10 @@ pub(crate) async fn prepare_local_barrier(root: &Path) -> Result<(), ServerError
 /// release its lock, or exhaust the blocking pool and prevent runtime shutdown.
 async fn acquire_local_file_lock(path: PathBuf, exclusive: bool) -> Result<File, ServerError> {
     let file = open_local_lock_file(path).await?;
+    lock_local_file(file, exclusive).await
+}
+
+async fn lock_local_file(file: File, exclusive: bool) -> Result<File, ServerError> {
     let mut retry_delay = Duration::from_millis(10);
     loop {
         let result = if exclusive {

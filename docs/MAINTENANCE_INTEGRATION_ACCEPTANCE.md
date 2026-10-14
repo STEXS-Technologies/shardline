@@ -139,9 +139,14 @@ The following still need implementation or stronger evidence before merge:
   Initialization now prepares the existing barrier automatically before a root
   is restricted; both public upload methods remain usable afterward. Preparation
   does not wait for or release an existing GC owner. A legacy root already
-  restricted without its barrier still initializes for reads, but uploads reject
-  the unavailable lock before writing. This preserves ownership; it does not
-  establish writable compatibility for that legacy library layout.
+  restricted without its barrier also retains guarded file and xorb uploads on
+  Linux when its SQLite files and payload directories remain writable. A
+  released 1.11.3 SDK fixture confirms that layout supported uploads. Current
+  owners additionally lock the existing root directory, retaining the legacy
+  file lock when available. This creates no root entry or permission change and
+  prevents a later lock-file creation from splitting current ownership. Existing
+  legacy file owners still block current writers. Other permission and
+  filesystem layouts remain part of the compatibility audit.
   Plain file requests without upload intents also check their original session
   before body ingestion and after ingestion. Publication failures check that
   same session to return retryable ownership loss without reacquiring it.

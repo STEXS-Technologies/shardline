@@ -99,9 +99,9 @@ async fn local_backend_prepares_upload_barrier_before_root_is_restricted() {
     drop(connection);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
-async fn missing_barrier_preserves_read_only_initialization_and_rejects_unguarded_upload() {
+async fn legacy_restricted_root_without_barrier_preserves_guarded_uploads() {
     use std::os::unix::fs::PermissionsExt;
     struct RestorePermissions(std::path::PathBuf);
     impl Drop for RestorePermissions {
@@ -143,15 +143,49 @@ async fn missing_barrier_preserves_read_only_initialization_and_rejects_unguarde
             .unwrap(),
         b"existing body"
     );
+    let gc = crate::maintenance_barrier::acquire_local_exclusive(root.path())
+        .await
+        .unwrap();
+    let before = shardline_storage::ObjectStore::list_prefix(
+        &reopened.object_store(),
+        &shardline_storage::ObjectPrefix::parse("").unwrap(),
+    )
+    .unwrap()
+    .len();
+    let file = reopened.upload_file("upgrade-file", Bytes::from_static(b"new body"), None);
+    let (_, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
+    let xorb = reopened.upload_xorb(&hash, canonical);
+    tokio::pin!(file, xorb);
     assert!(
-        matches!(reopened.upload_file("must-not-publish", Bytes::from_static(b"new body"), None).await,
-        Err(crate::ServerError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        tokio::time::timeout(Duration::from_millis(50), &mut file)
+            .await
+            .is_err()
     );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut xorb)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        shardline_storage::ObjectStore::list_prefix(
+            &reopened.object_store(),
+            &shardline_storage::ObjectPrefix::parse("").unwrap()
+        )
+        .unwrap()
+        .len(),
+        before
+    );
+    drop(gc);
+    file.await.unwrap();
+    xorb.await.unwrap();
     assert!(!root.path().join(".gc-write-barrier.lock").exists());
-    assert!(matches!(
-        reopened.download_file("must-not-publish", None, None).await,
-        Err(crate::ServerError::NotFound)
-    ));
+    assert_eq!(
+        reopened
+            .download_file("upgrade-file", None, None)
+            .await
+            .unwrap(),
+        b"new body"
+    );
     assert_eq!(
         std::fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
         0o555
