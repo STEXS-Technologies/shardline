@@ -145,7 +145,11 @@ The following still need implementation or stronger evidence before merge:
   owners additionally lock the existing root directory, retaining the legacy
   file lock when available. This creates no root entry or permission change and
   prevents a later lock-file creation from splitting current ownership. Existing
-  legacy file owners still block current writers. Other permission and
+  legacy file owners still block current writers. A real Linux read-only bind
+  mount also preserves released SDK file uploads when existing SQLite/WAL/SHM
+  files and chunks are mounted writable beneath it, with no legacy barrier file.
+  The current directory guard remains held when file creation returns EROFS.
+  Other permission and
   filesystem layouts remain part of the compatibility audit.
   Plain file requests without upload intents also check their original session
   before body ingestion and after ingestion. Publication failures check that

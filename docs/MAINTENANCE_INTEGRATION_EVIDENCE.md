@@ -5257,3 +5257,32 @@ higher; these observations do not establish a production regression threshold
 or a distributed SLO. Raw timing, memory, report and binary-hash records are in
 `.codex/validation/shardline-benchmark-compatibility.OB15u2`; the executed
 verification output is `.codex/validation/current-release-benchmark-compatibility.log`.
+
+### Existing SDK deployment on a read-only Linux mount
+
+An actual Docker bind mount, rather than directory permissions alone, exposed
+a compatibility regression: released 1.11.3 uploaded successfully while the
+current SDK returned EROFS when creating its absent legacy barrier file.
+The root is read-only; existing SQLite, WAL, SHM and chunks are writable nested
+mounts. The probe confirms the kernel returns error 30 for a new root entry.
+
+Linux owners now retain their existing root-directory lock when an absent
+legacy lock file cannot be created because the filesystem is read-only. Other
+errors and failures opening an existing legacy barrier still propagate.
+No directory entry, permission change or new operator configuration is needed.
+
+The checked-in `mounted_sdk_upgrade` integration probe is explicitly ignored
+outside its required mount fixture. The owned verifier
+`scripts/shardline/verify_sdk_readonly_mount.sh RELEASED_CLI RELEASED_PROBE CURRENT_PROBE`
+executes it inside `debian:13-slim`, alongside the public upload/read-back probe
+compiled against tag v1.11.3. Both execute without skips. The current probe
+also holds an exclusive directory lock: upload stays pending without writing
+chunks until that owner releases it, then succeeds. The four existing directory
+ownership/cancellation/legacy-lock tests pass, as does strict server library
+and test Clippy. Logs are `.codex/validation/mounted-sdk-red.log`,
+`.codex/validation/mounted-sdk-owned.log`,
+`.codex/validation/mounted-sdk-barrier-tests.log`,
+`.codex/validation/mounted-sdk-clippy.log` and
+`.codex/validation/mounted-sdk-probe-clippy.log`.
+This establishes the named Linux mount layout; it does not establish behavior
+on every network filesystem or upgrade layout.
