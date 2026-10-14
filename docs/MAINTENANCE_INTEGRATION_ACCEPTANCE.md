@@ -320,6 +320,11 @@ for each of those five ordinary command forms. It verifies exact native/shared
 progress, read-only inspection and a distinct fresh run after actual SIGTERM.
 The fixture explicitly cancels its injected server-side sleep; it does not
 establish immediate cancellation of arbitrary remote I/O when a client exits.
+A PostgreSQL partial-repair cut also verifies that a competing exclusive rebuild
+waits while the interrupted command's database session still owns maintenance.
+After the fixture cancels that session's paused query, rebuild succeeds. A fresh
+repair handles remaining and newly expired holds, preserves protected payloads
+and leaves the interrupted receipt unresolved. Other mutation paths remain open.
 
 | Gate | Finding | Evidence and remaining work |
 | --- | --- | --- |
