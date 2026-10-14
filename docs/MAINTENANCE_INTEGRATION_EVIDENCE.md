@@ -4718,3 +4718,24 @@ fresh-run allocation, same-process execution, explicit configuration, non-UTF8
 paths and restricted-root behavior. These executable results supplement the
 focused local upload ownership and cancellation tests; broader deployment
 and remaining merge-gate requirements still need their own evidence.
+
+## SQLite metadata with S3 payloads: startup history
+
+The real MinIO fixture exposed a supported-layout gap: startup completed but
+SQLite metadata with S3 payloads had no saved startup history. Tracking now binds
+to the actual local metadata backend, and read-only inspection finds its existing
+SQLite database independently of the payload adapter. Inspection still does not
+initialize a missing deployment; the legacy raw-S3 constructor is unchanged.
+
+`sqlite_s3_startup_records_history_in_metadata_for_every_role` passes for All,
+Api and Transfer roles. Each has one completed startup sweep owned by the server
+PID, physical task artifacts in SQLite, no task objects in S3 and no separate
+maintenance directory. The fixture failed before the fix and passed afterward
+in 2.363 seconds. Both inspection regression tests pass; strict server Clippy
+with all features, library and tests also passes.
+
+The preceding optimized executable, SHA-256
+`f66ee56e6c07669e9110efc3c35d00835f61f70aabf5b205c2598c8faf401ab4`,
+also passed all 23 deployment scenarios: 11 in 143.744 seconds and 12 protocol
+fault scenarios in 139.711 seconds, with no runtime skips. These runs precede
+the SQLite/S3 fix and do not establish full deployment coverage for that fix.
