@@ -1,5 +1,6 @@
 use super::super::*;
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore};
+use std::os::unix::fs::MetadataExt;
 use std::{fs, process::Command, thread, time::Instant};
 
 struct StopOnDrop(std::process::Child);
@@ -12,22 +13,54 @@ impl Drop for StopOnDrop {
 
 #[test]
 fn interrupted_local_to_s3_copy_is_inspectable_from_source_without_replay() {
-    interrupted_copy(true, true);
+    verify_copy_history(CopyProfile::LocalSource);
 }
 
 #[test]
 fn interrupted_s3_to_s3_copy_is_inspectable_without_worker_setup_or_replay() {
-    interrupted_copy(false, true);
+    verify_copy_history(CopyProfile::S3Source);
 }
 
 #[test]
 fn s3_only_copy_preserves_work_when_local_history_path_is_unsafe() {
-    interrupted_copy(false, false);
+    verify_copy_history(CopyProfile::UnsafeHistory);
 }
 
-fn interrupted_copy(local_source: bool, history_available: bool) {
+#[test]
+fn legacy_completed_copy_archive_is_read_without_rewriting_or_replay() {
+    verify_copy_history(CopyProfile::LegacyCompleted);
+}
+
+#[test]
+fn legacy_interrupted_copy_archive_is_read_without_rewriting_or_replay() {
+    verify_copy_history(CopyProfile::LegacyInterrupted);
+}
+
+#[derive(Clone, Copy)]
+enum CopyProfile {
+    LocalSource,
+    S3Source,
+    UnsafeHistory,
+    LegacyCompleted,
+    LegacyInterrupted,
+}
+
+fn verify_copy_history(profile: CopyProfile) {
+    let local_source = matches!(profile, CopyProfile::LocalSource);
+    let history_available = !matches!(profile, CopyProfile::UnsafeHistory);
+    let legacy = matches!(
+        profile,
+        CopyProfile::LegacyCompleted | CopyProfile::LegacyInterrupted
+    );
+    let completed = matches!(profile, CopyProfile::LegacyCompleted);
     let binary = std::env::var_os("CARGO_BIN_EXE_shardline")
         .expect("set CARGO_BIN_EXE_shardline to the current optimized binary");
+    let producer = if legacy {
+        std::env::var_os("SHARDLINE_ARCHIVE_PREDECESSOR_BINARY")
+            .expect("set SHARDLINE_ARCHIVE_PREDECESSOR_BINARY to the pre-project-history binary")
+    } else {
+        binary.clone()
+    };
     let stack = DockerLocalStack::builder()
         .with_minio()
         .start()
@@ -89,7 +122,7 @@ fn interrupted_copy(local_source: bool, history_available: bool) {
     } else {
         put_copy_source(&remote_source, "copy-cut/first", bytes);
     }
-    let mut command = Command::new(&binary);
+    let mut command = Command::new(&producer);
     command
         .env_clear()
         .env("TMPDIR", scratch.path())
@@ -183,8 +216,12 @@ fn interrupted_copy(local_source: bool, history_available: bool) {
         );
         return;
     }
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
+    if completed {
+        assert!(child.0.wait().unwrap().success());
+    } else {
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+    }
     if local_source {
         fs::write(source.path().join("chunks/copy-cut/later"), b"never replay").unwrap();
     } else {
@@ -196,11 +233,29 @@ fn interrupted_copy(local_source: bool, history_available: bool) {
         .env("TMPDIR", scratch.path())
         .current_dir(source.path())
         .arg("history");
-    if local_source {
+    let archive_root = scratch.path().join(format!(
+        "shardline-maintenance-{}-{}",
+        fs::metadata(source.path()).unwrap().uid(),
+        hex::encode(
+            shardline_server::task_tracking::deployment_fingerprint(&source_config)
+                .unwrap()
+                .0
+        ),
+    ));
+    let archive_before = if legacy {
+        Some(archive_evidence(&archive_root))
+    } else {
+        None
+    };
+    if legacy {
+        history_command
+            .args(["--archive", "--root"])
+            .arg(&archive_root);
+    } else if local_source {
         history_command.arg("--root").arg(source.path());
     }
     let history = history_command.output().unwrap();
-    if !local_source {
+    if !local_source && !legacy {
         assert!(
             source
                 .path()
@@ -226,7 +281,11 @@ fn interrupted_copy(local_source: bool, history_available: bool) {
     let task = tasks.first().unwrap();
     assert_eq!(
         task.get("state").and_then(serde_json::Value::as_str),
-        Some("needs_reconciliation")
+        Some(if completed {
+            "completed"
+        } else {
+            "needs_reconciliation"
+        })
     );
     assert_eq!(
         task.get("owner")
@@ -252,6 +311,46 @@ fn interrupted_copy(local_source: bool, history_available: bool) {
             .unwrap(),
         bytes
     );
+    if let Some(before) = archive_before {
+        for (path, bytes) in before {
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                bytes,
+                "archive evidence changed: {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            page.get("archive").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            page.get("history_notice")
+                .and_then(serde_json::Value::as_str)
+                .unwrap()
+                .contains("without a deployment filter")
+        );
+    }
+}
+
+fn archive_evidence(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut evidence = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            evidence.extend(archive_evidence(&path));
+        } else if entry.file_type().unwrap().is_file()
+            && !entry.file_name().to_string_lossy().ends_with("-shm")
+        {
+            // SQLite SHM contains read-lock bookkeeping; database, WAL,
+            // journals, identities, signing keys and artifacts are evidence.
+            evidence.insert(path.clone(), fs::read(path).unwrap());
+        }
+    }
+    evidence
 }
 
 fn put_copy_source(store: &shardline_server::ServerObjectStore, key: &str, bytes: &[u8]) {

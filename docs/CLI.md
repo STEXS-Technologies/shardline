@@ -208,6 +208,20 @@ what that run published, not the deployment's current health.
 Normal server startup and existing direct maintenance commands keep their
 behavior. This workflow introduces no deployment metadata migration.
 
+Retained private archives can be inspected as the archive's owner:
+
+```bash
+shardline history --archive --root /path/to/old/archive
+```
+
+This explicit mode verifies saved metadata across the archive's original
+deployment identities. It preserves signatures and files, starts no maintenance
+and does not migrate evidence. Normal history inspection keeps its deployment
+filter. Keep any private journals still awaiting export; an empty page does not
+prove that work never ran. `--archive` requires a private owner-only directory
+and cannot be combined with `--pending-deletes`. Pagination uses the same
+`--limit` and `--after` options, with a cursor from that archive.
+
 ## Shell Completions
 
 Generate one completion script for a supported shell:

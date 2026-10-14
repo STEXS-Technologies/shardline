@@ -83,6 +83,13 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
                     usize::from(history_args.limit),
                 )
                 .await
+            } else if history_args.archive {
+                crate::history_inspection::run_archive(
+                    history_args.root.as_deref(),
+                    history_args.after,
+                    usize::from(history_args.limit),
+                )
+                .await
             } else {
                 crate::history_inspection::run(
                     history_args.root.as_deref(),

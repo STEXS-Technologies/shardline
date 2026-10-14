@@ -12,6 +12,23 @@ use std::{
     ops::ControlFlow,
 };
 
+fn valid_identity(identity: &TaskRunIdentity, id: &str) -> bool {
+    identity.schema == 1
+        && identity.id == id
+        && identity.scope.definition == identity.definition.fingerprint()
+        && identity.definition.budget.max_history_records <= 4096
+        && identity.definition.validate().is_ok()
+}
+
+#[derive(Clone, Copy)]
+enum HistoryFilter {
+    Deployment {
+        deployment: Digest,
+        scope: Option<Digest>,
+    },
+    Archive,
+}
+
 /// Operator-visible evidence state. Remote ownership is never inferred from a PID.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -143,6 +160,44 @@ impl TaskEvidenceStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<serde_json::Value, ServerError> {
+        self.inspection_page_filtered(
+            HistoryFilter::Deployment {
+                deployment,
+                scope: history_scope,
+            },
+            after,
+            limit,
+        )
+    }
+
+    /// Reads an explicitly owner-selected archive across its original deployment
+    /// identities. Normal deployment inspection remains scoped. Signature,
+    /// artifact and history verification are unchanged; no work is executed.
+    /// Run on a blocking thread. Inventory can be O(N).
+    ///
+    /// # Errors
+    /// Returns invalid page bounds or storage failures.
+    pub fn inspection_archive_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<serde_json::Value, ServerError> {
+        let page = self.inspection_page_filtered(HistoryFilter::Archive, after, limit)?;
+        Ok(serde_json::json!({
+            "tasks": page.get("tasks"),
+            "next_after": page.get("next_after"),
+            "archive": true,
+            "recording_notice": page.get("history_notice"),
+            "history_notice": "Owner-selected local archive, without a deployment filter. Recorded owners and results do not establish current deployment health. Inspection starts no maintenance and does not migrate or rewrite evidence.",
+        }))
+    }
+
+    fn inspection_page_filtered(
+        &self,
+        filter: HistoryFilter,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<serde_json::Value, ServerError> {
         if limit == 0 || limit > 100 {
             return Err(ServerError::InvalidPath);
         }
@@ -155,12 +210,7 @@ impl TaskEvidenceStore {
                 )
             }
         };
-        let mut tasks = self.inspect_summaries_with_scope(
-            deployment,
-            history_scope,
-            after,
-            limit.saturating_add(1),
-        )?;
+        let mut tasks = self.inspect_summaries_filtered(filter, after, limit.saturating_add(1))?;
         let has_more = tasks.len() > limit;
         tasks.truncate(limit);
         let next_after = has_more
@@ -227,6 +277,22 @@ impl TaskEvidenceStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<TaskEvidenceEntry>, ServerError> {
+        self.inspect_summaries_filtered(
+            HistoryFilter::Deployment {
+                deployment,
+                scope: history_scope,
+            },
+            after,
+            limit,
+        )
+    }
+
+    fn inspect_summaries_filtered(
+        &self,
+        filter: HistoryFilter,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskEvidenceEntry>, ServerError> {
         if limit == 0 || limit > 101 || after.is_some_and(|id| id.len() > 128) {
             return Err(ServerError::InvalidPath);
         }
@@ -274,7 +340,12 @@ impl TaskEvidenceStore {
                     Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => None,
                     Err(error) => return Err(error),
                 };
-            if let Some(candidate) = identity.as_ref() {
+            if let Some(candidate) = identity.as_ref()
+                && let HistoryFilter::Deployment {
+                    deployment,
+                    scope: history_scope,
+                } = filter
+            {
                 let legacy_matches = candidate.deployment == deployment;
                 // Verify before admitting a foreign login's identity. Corrupt
                 // associations expose only an incident reference, never its
@@ -297,13 +368,7 @@ impl TaskEvidenceStore {
                     Err(error) => return Err(error),
                 }
             }
-            let identity = identity.filter(|identity| {
-                identity.schema == 1
-                    && identity.id == id
-                    && identity.scope.definition == identity.definition.fingerprint()
-                    && identity.definition.budget.max_history_records <= 4096
-                    && identity.definition.validate().is_ok()
-            });
+            let identity = identity.filter(|identity| valid_identity(identity, id));
             identities.insert(id.to_owned(), identity);
             if identities.len() > limit {
                 identities.pop_last();
@@ -323,35 +388,41 @@ impl TaskEvidenceStore {
         })?;
         identities
             .into_iter()
-            .map(|(id, identity)| {
-                let Some(identity) = identity else {
-                    return Ok(TaskEvidenceEntry::Unreadable {
-                        id,
-                        state: TaskRunState::Corrupt,
-                        identity_verified: false,
-                    });
-                };
-                let (state, output_verified) = match self.state(&identity) {
-                    Ok(result) => result,
-                    Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {
-                        (TaskRunState::Corrupt, None)
-                    }
-                    Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData => {
-                        (TaskRunState::Corrupt, None)
-                    }
-                    Err(error) => return Err(error),
-                };
-                Ok(TaskEvidenceEntry::Verified(TaskRunSummary {
-                    id: identity.id,
-                    operation: identity.operation,
-                    state,
-                    execution: identity.execution,
-                    created_at: identity.created_at,
-                    owner: identity.owner,
-                    output_verified,
-                }))
-            })
+            .map(|(id, identity)| self.inspect_identity(id, identity))
             .collect()
+    }
+
+    fn inspect_identity(
+        &self,
+        id: String,
+        identity: Option<TaskRunIdentity>,
+    ) -> Result<TaskEvidenceEntry, ServerError> {
+        let Some(identity) = identity else {
+            return Ok(TaskEvidenceEntry::Unreadable {
+                id,
+                state: TaskRunState::Corrupt,
+                identity_verified: false,
+            });
+        };
+        let (state, output_verified) = match self.state(&identity) {
+            Ok(result) => result,
+            Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {
+                (TaskRunState::Corrupt, None)
+            }
+            Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData => {
+                (TaskRunState::Corrupt, None)
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(TaskEvidenceEntry::Verified(TaskRunSummary {
+            id: identity.id,
+            operation: identity.operation,
+            state,
+            execution: identity.execution,
+            created_at: identity.created_at,
+            owner: identity.owner,
+            output_verified,
+        }))
     }
 
     pub(super) fn state(
