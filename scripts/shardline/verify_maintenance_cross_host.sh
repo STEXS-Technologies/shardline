@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Real machine identities, shared evidence, partition and replacement.
-# Usage: SHARDLINE_VALIDATION_VM_COUNT=6 bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [node-loss|connection-loss|repair-connection-loss|gc-connection-loss]
+# Usage: SHARDLINE_VALIDATION_VM_COUNT=6 bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [node-loss|connection-loss|repair-connection-loss|gc-connection-loss|concurrent-writes]
 set -euo pipefail
-test "$#" -ge 2 && test "$#" -le 3 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss|gc-connection-loss]' >&2; exit 2; }
+test "$#" -ge 2 && test "$#" -le 3 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE [node-loss|connection-loss|repair-connection-loss|gc-connection-loss|concurrent-writes]' >&2; exit 2; }
 mode=${3:-node-loss}
 node_count=${SHARDLINE_VALIDATION_VM_COUNT:-2}
 [[ "$node_count" =~ ^[0-9]+$ ]] && (( node_count >= 2 && node_count <= 6 )) || { echo 'SHARDLINE_VALIDATION_VM_COUNT must be between 2 and 6' >&2; exit 2; }
 nodes=()
 for ((node=0; node<node_count; node++)); do nodes+=("$node"); done
-test "$mode" = node-loss || test "$mode" = connection-loss || test "$mode" = repair-connection-loss || test "$mode" = gc-connection-loss
+test "$mode" = node-loss || test "$mode" = connection-loss || test "$mode" = repair-connection-loss || test "$mode" = gc-connection-loss || test "$mode" = concurrent-writes
 current=$(realpath "$1")
 image=$(realpath "$2")
 repository=$(cd "$(dirname "$0")/../.." && pwd)
@@ -22,18 +22,21 @@ fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-cross-host.XXXXXX")
 echo "Validation artifacts: $fixture"
 project=$(basename "$fixture" | tr '[:upper:].' '[:lower:]-')
 vm_pids=()
+client_pids=()
 blocker_pid=''
 ssh_ports=()
 http_ports=()
 export SHARDLINE_CHAOS_PG_PORT=0 SHARDLINE_CHAOS_MINIO_PORT=0 SHARDLINE_CHAOS_MINIO_CONSOLE_PORT=0 SHARDLINE_CHAOS_REDIS_PORT=0
 compose() { docker compose -f "$repository/docker-compose.chaos.yml" -p "$project" "$@"; }
 cleanup() {
+    for pid in "${client_pids[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
     if test -n "$blocker_pid"; then kill "$blocker_pid" 2>/dev/null || true; wait "$blocker_pid" 2>/dev/null || true; fi
     for pid in "${vm_pids[@]}"; do
         if test -n "$pid"; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done
     compose down --volumes --remove-orphans > "$fixture/cleanup.log" 2>&1 || true
     for node in "${nodes[@]}"; do rm -f "$fixture/$node/id_ed25519" "$fixture/$node/seed.iso" "$fixture/$node/disk.qcow2"; done
+    rm -rf "$fixture/payloads"
 }
 trap cleanup EXIT
 compose up -d chaos-postgres chaos-minio chaos-minio-init > "$fixture/backend.log" 2>&1
@@ -99,6 +102,9 @@ shared_hashes() {
 sql() { compose exec -T chaos-postgres psql -U shardline -d shardline -At -v ON_ERROR_STOP=1 -c "$1"; }
 assert_metadata_only_history() {
     test "$(sql "SELECT count(*) > 0 FROM shardline_task_artifacts_v1 WHERE artifact_key LIKE '_shardline_tasks/v1/manifests/%'")" = t
+    assert_no_payload_history
+}
+assert_no_payload_history() {
     compose run --rm --no-deps --entrypoint /bin/sh chaos-minio-init -c \
         'set -e; mc alias set local http://chaos-minio:9000 shardline shardline-dev-password >/dev/null; mc ls --recursive local/shardline' \
         > "$fixture/payload-inventory.log"
@@ -149,6 +155,10 @@ test "$(head -n 1 "$fixture/0/identity")" != "$(head -n 1 "$fixture/1/identity")
 test "$(tail -n 1 "$fixture/0/identity")" != "$(tail -n 1 "$fixture/1/identity")"
 test "$(head -q -n 1 "$fixture"/*/identity | sort -u | wc -l)" -eq "$node_count"
 test "$(tail -q -n 1 "$fixture"/*/identity | sort -u | wc -l)" -eq "$node_count"
+if test "$mode" = concurrent-writes; then
+    source "$repository/scripts/shardline/verify_concurrent_vm_writes.sh"
+    exit 0
+fi
 vm_ssh 1 'sudo systemd-run --unit shardline-validation-observer -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline serve'
 for attempt in $(seq 1 20); do
     if history > "$fixture/initial.json"; then break; fi
