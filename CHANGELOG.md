@@ -36,7 +36,7 @@ existing deployment data, public reliability types, and normal startup behavior.
 - Reduced duplicate S3 requests and overlapped bounded upload read-back while
   retaining full content verification.
 - Batched PostgreSQL version and latest metadata in the owning publication transaction
-  and reduced repeated reference-key sorting during publication.
+  and reduced repeated reference-key sorting and lock acquisition overhead during publication.
 - Strengthened upload and resumable lifecycle validation with native StateChronicle
   profiles while preserving existing transition rules.
 - Stored PostgreSQL task history in shared metadata without additional payload-bucket
