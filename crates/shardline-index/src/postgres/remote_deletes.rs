@@ -729,6 +729,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publication_acquires_every_reference_slot_in_ascending_order() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let keys: Vec<String> = query_scalar(
+            "SELECT DISTINCT ON (slot) key FROM (
+                SELECT '00/' || lpad(to_hex(n), 64, '0') AS key,
+                    (hashtextextended('shardline:remote-delete:00/' || lpad(to_hex(n), 64, '0'), 0) & 255)::INTEGER AS slot
+                FROM generate_series(0, 10000) n
+             ) candidates ORDER BY slot, key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(keys.len(), 256);
+        for (file_record, blocked_slot) in [(false, 128), (true, 128), (false, 255), (true, 255)] {
+            let mut blocker = pool.begin().await.unwrap();
+            query("SELECT pg_advisory_xact_lock(1397507140, $1)")
+                .bind(blocked_slot)
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let mut publication = pool.begin().await.unwrap();
+            let pid: i32 = query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *publication)
+                .await
+                .unwrap();
+            let statement = if file_record {
+                let chunks: Vec<_> = keys
+                    .iter()
+                    .map(|key| serde_json::json!({"hash": key.rsplit('/').next().unwrap()}))
+                    .collect();
+                query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ('order','version','global','order','content',$1)")
+                    .bind(sqlx::types::Json(serde_json::json!({"chunk_size": 1, "chunks": chunks})))
+            } else {
+                query("SELECT shardline_reference_keys_remote_delete_v1(current_schema(), $1)")
+                    .bind(&keys)
+            };
+            let mut acquire = Box::pin(statement.execute(&mut *publication));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut acquire)
+                    .await
+                    .is_err()
+            );
+            let slots: Vec<i64> = query_scalar(
+                "SELECT objid::bigint FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                 AND classid=1397507140 AND objsubid=2 AND mode='ShareLock' AND granted
+                 ORDER BY objid",
+            )
+            .bind(pid)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(slots, (0..i64::from(blocked_slot)).collect::<Vec<_>>());
+            blocker.rollback().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut acquire)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(acquire);
+            let count: i64 = query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                 AND classid=1397507140 AND objsubid=2 AND mode='ShareLock' AND granted",
+            )
+            .bind(pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(count, 256);
+            publication.rollback().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn large_file_publication_uses_bounded_delete_locks() {
         let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;

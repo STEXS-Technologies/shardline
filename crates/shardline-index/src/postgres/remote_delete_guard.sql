@@ -224,7 +224,7 @@ RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
 SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
 AS $references$
-DECLARE hashes TEXT[]; keys TEXT[]; lock_slot INTEGER; pending BOOLEAN;
+DECLARE hashes TEXT[]; keys TEXT[]; pending BOOLEAN;
         include_direct_chunks BOOLEAN := FALSE;
 BEGIN
     IF TG_TABLE_SCHEMA IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
@@ -274,11 +274,11 @@ BEGIN
     -- pending lookup still checks the exact key while protection is retained.
     -- Acquire slots in a stable order within each publication.
     PERFORM shardline_remote_delete_snapshot_v1(TG_TABLE_SCHEMA);
-    FOR lock_slot IN SELECT DISTINCT
+    PERFORM pg_advisory_xact_lock_shared(1397507140, slot)
+    FROM (SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
-        FROM unnest(keys) physical ORDER BY slot LOOP
-        PERFORM pg_advisory_xact_lock_shared(1397507140, lock_slot);
-    END LOOP;
+        FROM unnest(keys) physical) lock_slots
+    ORDER BY slot;
     SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
                   WHERE domain='maintenance-remote-delete' AND resource=ANY(keys))
     INTO pending;
@@ -412,7 +412,7 @@ CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_reference_keys_remote_delete_v1(
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
 SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
 AS $member_references$
-DECLARE keys TEXT[]; lock_slot INTEGER; pending BOOLEAN;
+DECLARE keys TEXT[]; pending BOOLEAN;
 BEGIN
     IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
         RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
@@ -432,11 +432,11 @@ BEGIN
          AND mapping.chunk_hash = right(member_key, 64)
     ) references_to_check;
     PERFORM shardline_remote_delete_snapshot_v1(index_schema);
-    FOR lock_slot IN SELECT DISTINCT
+    PERFORM pg_advisory_xact_lock_shared(1397507140, slot)
+    FROM (SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
-        FROM unnest(keys) physical ORDER BY slot LOOP
-        PERFORM pg_advisory_xact_lock_shared(1397507140, lock_slot);
-    END LOOP;
+        FROM unnest(keys) physical) lock_slots
+    ORDER BY slot;
     SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
                   WHERE domain='maintenance-remote-delete' AND resource=ANY(keys)) INTO pending;
     IF pending THEN
