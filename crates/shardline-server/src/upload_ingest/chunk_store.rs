@@ -36,6 +36,7 @@ pub(super) struct StoredChunkOutcome {
 struct ChunkStorageRequest {
     key: ObjectKey,
     integrity: ObjectIntegrity,
+    compressed: Bytes,
     hash_hex: String,
     chunk_length: u64,
     compressed_length: u64,
@@ -49,19 +50,22 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
     let (hash_hex, object_key) = chunk_object_key_for_computed_hash(raw_hash)?;
     let chunk_length = u64::try_from(raw.len())?;
     let compressed_length = u64::try_from(compressed.len())?;
-    #[allow(clippy::float_arithmetic)]
-    let ratio = format!("{:.2}", compressed.len() as f64 / raw.len().max(1) as f64);
-    trace!(
-        raw_len = raw.len(),
-        compressed_len = compressed.len(),
-        ratio = ratio,
-        "LZ4 compressed chunk"
-    );
+    if tracing::enabled!(tracing::Level::TRACE) {
+        #[allow(clippy::float_arithmetic)]
+        let ratio = format!("{:.2}", compressed.len() as f64 / raw.len().max(1) as f64);
+        trace!(
+            raw_len = raw.len(),
+            compressed_len = compressed.len(),
+            ratio = ratio,
+            "LZ4 compressed chunk"
+        );
+    }
     record_compression_saved(chunk_length, compressed_length);
     let integrity = ObjectIntegrity::new(compressed_hash, compressed_length);
     Ok(ChunkStorageRequest {
         key: object_key,
         integrity,
+        compressed: Bytes::from(compressed),
         hash_hex,
         chunk_length,
         compressed_length,
@@ -82,10 +86,8 @@ pub(super) async fn put_if_absent_pooled_chunk_buffer(
 ) -> Result<(StoredChunkOutcome, Option<BytesMut>), ServerError> {
     let request = chunk_object_key_and_integrity(&chunk)?;
     let ChunkBuffer::Pooled(bytes) = chunk;
-    let compressed = lz4_flex::compress_prepend_size(&bytes);
-    let compressed_bytes = Bytes::from(compressed);
     let (outcome, _compressed_bytes) =
-        put_if_absent_pooled_bytes(object_store, &request, compressed_bytes).await?;
+        put_if_absent_pooled_bytes(object_store, &request, request.compressed.clone()).await?;
     record_dedup_on_already_exists(outcome, request.chunk_length);
     // Return the original (uncompressed) bytes for reuse as a pending buffer
     let reusable_buffer = bytes.try_into_mut().ok();
