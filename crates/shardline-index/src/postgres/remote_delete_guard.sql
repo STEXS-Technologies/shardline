@@ -273,7 +273,12 @@ BEGIN
     -- publications may share slots; deletes take the exclusive side. The
     -- pending lookup still checks the exact key while protection is retained.
     -- Acquire slots in a stable order within each publication.
-    PERFORM shardline_remote_delete_snapshot_v1(TG_TABLE_SCHEMA);
+    -- The snapshot helper is a no-op at read committed. Avoid entering another
+    -- SECURITY DEFINER/configuration scope for that common case; this trigger
+    -- has already checked its installed schema above.
+    IF current_setting('transaction_isolation') IN ('repeatable read', 'serializable') THEN
+        PERFORM shardline_remote_delete_snapshot_v1(TG_TABLE_SCHEMA);
+    END IF;
     PERFORM pg_advisory_xact_lock_shared(1397507140, slot)
     FROM (SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
@@ -431,7 +436,9 @@ BEGIN
           ON member_key ~ '^[0-9a-f]{2}/[0-9a-f]{64}$'
          AND mapping.chunk_hash = right(member_key, 64)
     ) references_to_check;
-    PERFORM shardline_remote_delete_snapshot_v1(index_schema);
+    IF current_setting('transaction_isolation') IN ('repeatable read', 'serializable') THEN
+        PERFORM shardline_remote_delete_snapshot_v1(index_schema);
+    END IF;
     PERFORM pg_advisory_xact_lock_shared(1397507140, slot)
     FROM (SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot

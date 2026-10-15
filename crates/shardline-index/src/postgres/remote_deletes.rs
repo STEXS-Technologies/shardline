@@ -729,6 +729,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_strict_snapshots_cannot_publish_after_a_delete_has_settled() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let hash = "0d".repeat(32);
+        let key = ObjectKey::parse(&format!("0d/{hash}")).unwrap();
+        for isolation in [
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+        ] {
+            for file_record in [false, true] {
+                let mut publication = pool.begin().await.unwrap();
+                query(isolation).execute(&mut *publication).await.unwrap();
+                // Establish an old snapshot with no pending marker. The marker
+                // is subsequently admitted and settled in newer transactions.
+                let _: i64 = query_scalar(
+                    "SELECT epoch FROM shardline_resource_fences
+                     WHERE domain='maintenance-remote-delete-snapshot' AND resource='global'",
+                )
+                .fetch_one(&mut *publication)
+                .await
+                .unwrap();
+                let permit = store.begin_remote_delete(&key).await.unwrap();
+                assert!(store.finish_remote_delete(&permit).await.unwrap());
+                let statement = if file_record {
+                    query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ('stale','version','global','stale','content',$1)")
+                        .bind(sqlx::types::Json(serde_json::json!({"chunk_size": 1, "chunks": [{"hash": hash}]})))
+                } else {
+                    query("SELECT shardline_reference_keys_remote_delete_v1(current_schema(), $1)")
+                        .bind(vec![key.as_str()])
+                };
+                let error = statement.execute(&mut *publication).await.unwrap_err();
+                assert_eq!(
+                    error.as_database_error().unwrap().code().as_deref(),
+                    Some("40001"),
+                    "{isolation}, file_record={file_record}: {error}"
+                );
+                publication.rollback().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn publication_acquires_every_reference_slot_in_ascending_order() {
         let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
