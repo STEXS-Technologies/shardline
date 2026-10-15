@@ -122,17 +122,14 @@ async fn put_if_absent_pooled_bytes(
             .map_err(ServerError::BlockingTask)?
         }
         ServerObjectStore::S3(store) => {
-            let store = store.clone();
-            let key = request.key.clone();
-            let integrity = request.integrity;
-            task::spawn_blocking(move || {
-                let outcome = store
-                    .put_if_absent(&key, ObjectBody::from_bytes(bytes.clone()), &integrity)
-                    .map_err(ServerError::from)?;
-                Ok((outcome, bytes))
-            })
-            .await
-            .map_err(ServerError::BlockingTask)?
+            let outcome = shardline_storage::AsyncObjectStore::put_if_absent(
+                store,
+                &request.key,
+                ObjectBody::from_bytes(bytes.clone()),
+                &request.integrity,
+            )
+            .await?;
+            Ok((outcome, bytes))
         }
         ServerObjectStore::Blackhole => {
             let outcome = object_store.put_if_absent(
@@ -144,6 +141,9 @@ async fn put_if_absent_pooled_bytes(
         }
     }
 }
+
+#[cfg(test)]
+mod async_store_tests;
 
 #[cfg(test)]
 mod tests {

@@ -40,6 +40,7 @@ use super::{
 pub struct S3ObjectStore {
     pub(crate) inner: AmazonS3,
     single_attempt_inner: AmazonS3,
+    existence_hints: Arc<super::existence_hints::ExistenceHints>,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) key_prefix: Option<String>,
 }
@@ -49,18 +50,15 @@ async fn existing_object_outcome(
     location: &ObjectStorePath,
     integrity: &ObjectIntegrity,
 ) -> Result<PutOutcome, S3ObjectStoreError> {
-    let metadata = store
-        .head(location)
-        .await
-        .map_err(S3ObjectStoreError::External)?;
-    if metadata.size != integrity.length() {
-        return Err(S3ObjectStoreError::ExistingObjectConflict);
-    }
-
     let result = store
         .get(location)
         .await
         .map_err(S3ObjectStoreError::External)?;
+    // GET carries the length of the same object whose bytes are verified;
+    // a separate HEAD adds a request and can observe a different revision.
+    if result.meta.size != integrity.length() {
+        return Err(S3ObjectStoreError::ExistingObjectConflict);
+    }
     let mut stream = result.into_stream();
     let mut hasher = blake3::Hasher::new();
     let mut length = 0_u64;
@@ -72,6 +70,9 @@ async fn existing_object_outcome(
                     .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?,
             )
             .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
+        if length > integrity.length() {
+            return Err(S3ObjectStoreError::ExistingObjectConflict);
+        }
         hasher.update(&chunk);
     }
     let hash = ShardlineHash::from_bytes(*hasher.finalize().as_bytes());
@@ -137,9 +138,47 @@ impl S3ObjectStore {
         Ok(Self {
             inner,
             single_attempt_inner,
+            existence_hints: Arc::default(),
             runtime,
             key_prefix: config.key_prefix,
         })
+    }
+
+    async fn put_verified_bytes(
+        &self,
+        key: &ObjectKey,
+        bytes: bytes::Bytes,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        if self.existence_hints.contains(key) {
+            match existing_object_outcome(&self.inner, &location, integrity).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(S3ObjectStoreError::ExistingObjectConflict) => {
+                    return Err(S3ObjectStoreError::ExistingObjectConflict);
+                }
+                // A hint may outlive deletion or a permission change. The
+                // original conditional create remains authoritative, including
+                // support for credentials that can create but cannot read.
+                Err(_probe_error) => {}
+            }
+        }
+        let outcome = match self
+            .inner
+            .put_opts(&location, bytes.into(), PutMode::Create.into())
+            .await
+        {
+            Ok(_result) => Ok(PutOutcome::Inserted),
+            Err(ExternalObjectStoreError::AlreadyExists { .. })
+            | Err(ExternalObjectStoreError::Precondition { .. }) => {
+                existing_object_outcome(&self.inner, &location, integrity).await
+            }
+            Err(error) => Err(S3ObjectStoreError::External(error)),
+        };
+        if outcome.is_ok() {
+            self.existence_hints.remember(key);
+        }
+        outcome
     }
 
     /// Sends one delete without transparently retrying an uncertain mutation.
@@ -868,15 +907,10 @@ impl ObjectStore for S3ObjectStore {
 
     /// Stores an object if no identical object exists yet.
     ///
-    /// This method skips the HEAD existence check and relies entirely on
-    /// `PutMode::Create` (which sends `If-None-Match: *`) for conflict
-    /// detection.  For first-time uploads this saves one round-trip.  If the
-    /// object already exists, S3 returns `412 Precondition Failed` and the
-    /// method returns [`PutOutcome::AlreadyExists`].
-    ///
-    /// This is safe for content-addressed keys because the same digest always
-    /// maps to the same bytes — a race between two concurrent writers both
-    /// putting identical content is harmless.
+    /// New keys use conditional create. Recently successful keys first verify
+    /// the current remote bytes, avoiding a rejected write for deduplication.
+    /// Hints are bounded and never replace length and digest verification.
+    /// A failed probe falls back to the original conditional create.
     fn put_if_absent(
         &self,
         key: &ObjectKey,
@@ -884,23 +918,7 @@ impl ObjectStore for S3ObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, Self::Error> {
         verify_integrity(body.as_slice(), integrity)?;
-        let location = self.location_for_key(key)?;
-        let bytes = body.into_bytes();
-        let write = self.block_on(self.inner.put_opts(
-            &location,
-            bytes.into(),
-            PutMode::Create.into(),
-        ));
-        match write {
-            Ok(_result) => Ok(PutOutcome::Inserted),
-            Err(S3ObjectStoreError::External(ExternalObjectStoreError::AlreadyExists {
-                ..
-            }))
-            | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
-                ..
-            })) => self.block_on_result(existing_object_outcome(&self.inner, &location, integrity)),
-            Err(error) => Err(error),
-        }
+        self.block_on_result(self.put_verified_bytes(key, body.into_bytes(), integrity))
     }
 
     fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
@@ -1020,20 +1038,14 @@ impl AsyncObjectStore for S3ObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, Self::Error> {
         verify_integrity(body.as_slice(), integrity)?;
-        let location = self.location_for_key(key)?;
+        let store = self.clone();
+        let key = key.clone();
+        let integrity = *integrity;
         let bytes = body.into_bytes();
-        match self
-            .inner
-            .put_opts(&location, bytes.into(), PutMode::Create.into())
-            .await
-        {
-            Ok(_result) => Ok(PutOutcome::Inserted),
-            Err(ExternalObjectStoreError::AlreadyExists { .. })
-            | Err(ExternalObjectStoreError::Precondition { .. }) => {
-                existing_object_outcome(&self.inner, &location, integrity).await
-            }
-            Err(error) => Err(S3ObjectStoreError::External(error)),
-        }
+        super::async_write::run(&self.runtime, async move {
+            store.put_verified_bytes(&key, bytes, &integrity).await
+        })
+        .await
     }
 
     async fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
