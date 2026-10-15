@@ -4,9 +4,8 @@ use std::num::NonZeroUsize;
 
 use bytes::BytesMut;
 use sha2::{Digest, Sha256};
-use shardline_index::{FileChunkRecord, FileRecord, xet_hash_hex_string};
-use shardline_protocol::{ByteRange, RepositoryScope};
-use shardline_storage::AsyncObjectStore;
+use shardline_index::{FileChunkRecord, FileRecord};
+use shardline_protocol::RepositoryScope;
 use tokio::task::JoinSet;
 use tracing::{debug, instrument, warn};
 
@@ -15,7 +14,11 @@ use super::cdc::CdcChunker;
 use super::chunk_store::{
     SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome, put_if_absent_pooled_chunk_buffer,
 };
+use super::durable_chunks::DurableUploadChunks;
 use super::xorb_packer::{pack_owned_chunks_into_xorb, store_xorb};
+
+#[cfg(test)]
+use super::durable_chunks::decode_and_verify_durable_chunk;
 
 #[cfg(test)]
 use crate::config::default_upload_max_in_flight_chunks;
@@ -168,8 +171,13 @@ impl FileUploadIngestor {
         // Individual chunks remain authoritative fallback for any batch that
         // cannot be packed or stored.
         if matches!(object_store, ServerObjectStore::S3(_)) {
-            pack_and_store_xorb_from_durable_chunks(object_store, file_id, &mut self.records)
-                .await?;
+            pack_and_store_xorb_from_durable_chunks(
+                object_store,
+                file_id,
+                &mut self.records,
+                self.max_in_flight_chunks,
+            )
+            .await?;
         } else if !self.raw_chunk_offsets.is_empty() {
             pack_and_store_xorb_spool(
                 object_store,
@@ -481,33 +489,15 @@ async fn pack_and_store_xorb_from_durable_chunks(
     object_store: &ServerObjectStore,
     file_id: &str,
     records: &mut [FileChunkRecord],
+    parallelism: usize,
 ) -> Result<(), ServerError> {
     let mut batch = Vec::new();
     let mut batch_raw_bytes = 0usize;
     let mut batch_record_start = 0usize;
+    let mut reader = DurableUploadChunks::new(object_store.clone(), parallelism);
 
     for record_index in 0..records.len() {
-        let record = records.get(record_index).ok_or(ServerError::Overflow)?;
-        let chunk_hash = record.hash.clone();
-        let chunk_offset = record.offset;
-        let chunk_length = record.length;
-        let compressed_start = record.packed_start;
-        let compressed_limit = record.packed_end;
-        let object_key = crate::chunk_store::chunk_object_key(&chunk_hash)?;
-        let compressed_length = compressed_limit
-            .checked_sub(compressed_start)
-            .ok_or(ServerError::Overflow)?;
-        let compressed_end = compressed_length
-            .checked_sub(1)
-            .ok_or(ServerError::Overflow)?;
-        let compressed = AsyncObjectStore::read_range(
-            object_store,
-            &object_key,
-            ByteRange::new(0, compressed_end).map_err(|_error| ServerError::Overflow)?,
-        )
-        .await
-        .map_err(ServerError::from)?;
-        let raw = decode_and_verify_durable_chunk(&compressed, &chunk_hash, chunk_length)?;
+        let (raw, chunk_offset) = reader.next(records).await?.ok_or(ServerError::Overflow)?;
 
         let next_raw_bytes = batch_raw_bytes
             .checked_add(raw.len())
@@ -545,28 +535,6 @@ async fn pack_and_store_xorb_from_durable_chunks(
         .await;
     }
     Ok(())
-}
-
-fn decode_and_verify_durable_chunk(
-    compressed: &[u8],
-    expected_hash: &str,
-    expected_length: u64,
-) -> Result<Vec<u8>, ServerError> {
-    let raw = lz4_flex::decompress_size_prepended(compressed).map_err(|error| {
-        ServerError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("stored upload chunk could not be decompressed: {error}"),
-        ))
-    })?;
-    if u64::try_from(raw.len())? != expected_length {
-        return Err(ServerError::ObjectStore(
-            crate::error::ObjectStoreError::StoredLengthMismatch,
-        ));
-    }
-    if xet_hash_hex_string(crate::local_backend::chunk_hash(&raw)) != expected_hash {
-        return Err(ServerError::ExpectedBodyHashMismatch);
-    }
-    Ok(raw)
 }
 
 async fn pack_and_store_xorb_spool(
