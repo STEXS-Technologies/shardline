@@ -634,6 +634,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_publications_share_reference_slots_but_exclude_delete_admission() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let hash = "ac".repeat(32);
+        let key = ObjectKey::parse(&format!("ac/{hash}")).unwrap();
+        let record = serde_json::json!({"chunk_size": 1, "chunks": [{"hash": hash}]});
+        let mut first = pool.begin().await.unwrap();
+        query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ('first','version','global','first','content',$1)")
+            .bind(sqlx::types::Json(record.clone()))
+            .execute(&mut *first).await.unwrap();
+        let mut second = pool.begin().await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record) VALUES ('second','version','global','second','content',$1)")
+                .bind(sqlx::types::Json(record))
+                .execute(&mut *second),
+        ).await.expect("another publisher of immutable content must not wait for the first commit").unwrap();
+        let mut admission = Box::pin(store.begin_remote_delete(&key));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut admission)
+                .await
+                .is_err()
+        );
+        first.commit().await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut admission)
+                .await
+                .is_err(),
+            "deletion must wait for every publisher, not just the first"
+        );
+        second.commit().await.unwrap();
+        let permit = tokio::time::timeout(std::time::Duration::from_secs(2), admission)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        pool.close().await;
+    }
+
+    #[tokio::test]
     async fn file_publication_serializes_delete_admission_before_any_marker_exists() {
         let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
