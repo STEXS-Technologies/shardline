@@ -148,7 +148,11 @@ impl ServerBackend {
         match self {
             Self::Local(_) => crate::maintenance_barrier::acquire_local_shared(root).await,
             Self::Postgres(backend) => {
-                crate::maintenance_barrier::acquire_postgres_shared(&backend.gc_barrier_pool).await
+                crate::maintenance_barrier::acquire_postgres_shared_bounded(
+                    &backend.gc_barrier_pool,
+                    &backend.request_session_slots,
+                )
+                .await
             }
         }
     }
