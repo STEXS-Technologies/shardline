@@ -13,9 +13,8 @@ Tracking runs inside these processes. You need no tracker service, extra port,
 new mount, schedule or configuration. Commands keep their live output and exit
 status. Your existing timer starts GC; starting the server does not start GC.
 
-The integration acceptance review is complete. The version remains 1.11.3, with
-release numbering and the version bump planned separately. See the
-[reviewed guarantees and limits](MAINTENANCE_INTEGRATION_ACCEPTANCE.md).
+Follow the [rolling-upgrade procedure](ROLLING_UPGRADE.md) when upgrading an
+existing deployment. Pause destructive GC during upgrade and rollback.
 
 ## What users gain
 

@@ -2,14 +2,13 @@
 
 For commands, benefits and crash recovery, start with the
 [operator guide](MAINTENANCE_INTEGRATION_UX.md). This page describes implementation
-details. The [merge checklist](MAINTENANCE_INTEGRATION_ACCEPTANCE.md) records
-remaining gaps. Mutating GC, rebuild, lifecycle repair and retention hold updates
-keep their locks and metadata work on non-replaceable Postgres connections. Other
-operations' ownership and remote-effect boundaries still need validation.
+details. Mutating GC, rebuild, lifecycle repair and retention hold updates
+keep their locks and metadata work on non-replaceable Postgres connections.
+The [rolling-upgrade guide](ROLLING_UPGRADE.md) describes deployment requirements.
 
 The 0.2.0 integration includes an embedded server tracker and automatic Linux
 maintenance tracking, with an explicit bounded runner for advanced use. Default
-deployment acceptance is still under verification; see
+deployment and recovery requirements are described in
 [maintenance integration and operator experience](MAINTENANCE_INTEGRATION_UX.md).
 
 Shardline has one reliability model for durable server-side state machines:
@@ -628,6 +627,4 @@ separate owner held by the caller.
 
 Shardline's HTTP upload path supplies that owner and performs its storage checks
 before committing PostgreSQL publication. A successful saved maintenance result
-does not certify current object presence or deployment health. See the
-[write-boundary inventory](MAINTENANCE_INTEGRATION_EVIDENCE.md#public-write-boundary-inventory)
-for the reviewed entry points and evidence.
+does not certify current object presence or deployment health.
