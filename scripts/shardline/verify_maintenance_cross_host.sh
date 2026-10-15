@@ -179,6 +179,12 @@ fi
 if test "$mode" = repair-connection-loss; then
     source_command='repair lifecycle'
     vm_ssh 0 'sudo systemd-run --wait --pipe --unit shardline-validation-expired-hold -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline hold set --object-key retention/repair-owner --reason ownership-regression --ttl-seconds 0' > "$fixture/expired-hold.log"
+    # The hold uses the guest clock; eligibility uses the database clock. Wait
+    # for the actual predicate rather than assuming identical second boundaries.
+    for attempt in $(seq 1 15); do
+        if test "$(sql "SELECT COUNT(*) FROM shardline_retention_holds WHERE object_key='retention/repair-owner' AND release_after_unix_seconds <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint")" = 1; then break; fi
+        sleep 1
+    done
     test "$(sql "SELECT COUNT(*) FROM shardline_retention_holds WHERE object_key='retention/repair-owner' AND release_after_unix_seconds <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint")" = 1
     sql "SELECT row_to_json(hold)::text FROM shardline_retention_holds hold WHERE object_key='retention/repair-owner'" > "$fixture/expired-hold-before.json"
 fi

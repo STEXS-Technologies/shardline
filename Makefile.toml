@@ -105,6 +105,12 @@ workspace = false
 command = "bash"
 args = ["scripts/shardline/run_postgres_process_cut_gate.sh", "${@}"]
 
+[tasks.test-distributed-integrity]
+description = "Verify distributed integrity under real deployment faults and mixed-version operation"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/run_distributed_integrity_gate.sh", "${@}"]
+
 [tasks.test-e2e]
 description = "Run e2e integration tests from the e2e/ folder"
 workspace = false
