@@ -26,6 +26,29 @@ The restore order in [Operations](OPERATIONS.md#restore-order) applies to every
 scenario: object storage first, metadata database second, runtime secrets and
 provider catalog third, then API and transfer processes, and the cache layer last.
 
+## Unprovable remote deletes
+
+First follow [pending-delete repair](CLI.md#reconcile-pending-remote-deletes).
+If the original delete has no recoverable signed acknowledgement, leave its
+marker pending. Time elapsed, process death, revoked credentials and an absent
+object do not prove that an accepted request cannot finish later. Do not clear
+the marker manually or restore new bytes at that same physical key.
+
+There is no guaranteed recovery deadline for an unprovable external operation.
+If service must move on, use the existing disaster-recovery procedure to restore
+a known-good, consistent recovery point from before that attempt into a new S3
+bucket and an independent metadata database or schema. Use new credentials and
+keep all old nodes and GC jobs away from the replacement deployment. Restoring
+only metadata against the original bucket does not provide this isolation.
+
+This is an operator-approved restore with the backup's recovery point; it does
+not recover writes missing from that backup. Verify payloads and metadata with
+`fsck`, compare backup manifests, and test downloads before switching clients.
+Retain the original deployment's pending markers and evidence for investigation.
+Do not copy unresolved task history into a replacement and label it completed.
+The [backup guide](BACKUP.md) explains native backups and restore verification;
+`backup manifest` inventories objects but does not back up their bytes.
+
 ## Scenario A: Full Storage Loss On One Node
 
 A node that hosted both local object storage and local SQLite metadata is gone.

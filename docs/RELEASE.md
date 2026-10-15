@@ -1,10 +1,23 @@
 # Coordinated crates.io Release
 
 This document describes how to publish the Shardline workspace to crates.io for a
-coordinated release (all publishable crates move together to the same version, e.g.
-`v1.5.0`). Because every crate rewrites its in-workspace path dependencies to
-crates.io requirements (`^1.5.0`), the release **must** go out bottom-up
-(dependencies first).
+coordinated release. Publish dependencies first, using the order derived from
+Cargo metadata.
+
+## Dependency requirement
+
+Run `python3 scripts/check-publish-dependencies.py` before preparing a release.
+Workspace `[patch]` and `[replace]` entries do not propagate to downstream
+crates.io consumers. Both the coordinated publisher and release workflow reject
+them before publication.
+
+The temporary Hyper patch supplies the HTTP/1 connection-shutdown fix from
+[upstream PR 4222](https://github.com/hyperium/hyper/pull/4222). Until a published
+Hyper version contains that fix, crate publication remains blocked. Keep the
+patch for repository builds. When the fix is released, require that version in
+the manifests of published crates that depend on Hyper, update both lockfiles,
+remove the patch, and test a separate consumer without workspace overrides.
+Do not remove the patch merely to pass the publication check.
 
 Publishing is triggered only by pushing a release tag. Manual runs of the Release
 workflow validate the build and never publish crates, images, or release assets.

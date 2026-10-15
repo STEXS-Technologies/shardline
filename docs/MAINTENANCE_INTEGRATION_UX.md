@@ -104,6 +104,10 @@ second. See [pending-delete repair](CLI.md#reconcile-pending-remote-deletes).
 For other retryable errors, follow the response: provide missing content or
 start a fresh application-owned transaction as requested.
 
+Without a valid saved reply, retries may remain blocked indefinitely. There is
+no force-clear command. The [recovery runbook](DISASTER_RECOVERY.md#unprovable-remote-deletes)
+describes restoring to an independent deployment when that is necessary.
+
 ## Upgrade using the existing workflow
 
 1. Pause destructive GC and let existing GC commands finish.

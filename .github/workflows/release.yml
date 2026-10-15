@@ -39,6 +39,9 @@ jobs:
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
 
+      - name: Verify dependencies are safe for independent crate consumers
+        run: python3 scripts/check-publish-dependencies.py
+
       - name: Verify release commit is on main
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         shell: bash
