@@ -24,12 +24,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
-- Embedded server task observation and automatic Linux maintenance tracking through
-  existing commands, preserving their process, live output and result interfaces.
-  Durable local journals export signed outcomes through the existing object adapter;
-  export failure retains evidence without adding required S3 write permissions.
-  Administrative task status distinguishes completion, failed outcomes and
-  unresolved ownership. Verified finished evidence has a retention policy.
+- Track server maintenance inside the normal Shardline process, without requiring
+  another service. Existing commands retain their live output and exit behavior.
+  Administrative task history distinguishes completed, failed and interrupted
+  work; history does not grant ownership or prove that a remote process is alive.
+  PostgreSQL deployments store automatic task history in shared metadata without
+  requiring additional payload-bucket write permissions.
 - Opt-in Linux `shardline maintenance` execution for fsck, index rebuild, GC,
   lifecycle repair and storage migration with durable Penelope supervision and
   separate native StateChronicle checkpoint/result proofs. Trusted-key and
@@ -52,6 +52,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   cover all eleven evidence families, historical encodings, commitments, and
   signatures. Tests reject missing commitments, altered roots, and rewritten
   storage sequences, and verify older envelopes without schema markers.
+- Require distributed-integrity checks in CI for deployment faults, concurrent
+  replicas, and upgrades and rollbacks with the released 1.11.3 binary.
+- Add repeatable six-VM drills against shared PostgreSQL and MinIO backends.
+  Cover maintenance takeover after node or connection loss, simultaneous uploads,
+  competing writes to the same key, and byte-for-byte reads through every replica
+  before and after server restarts. Temporary VM resources are removed afterward.
 
 ## [1.11.3] - 2026-10-03
 
