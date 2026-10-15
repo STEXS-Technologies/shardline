@@ -183,7 +183,7 @@ impl super::PostgresBackend {
             .await
             .map_err(PostgresMetadataStoreError::from)?;
         self.record_store
-            .commit_file_version_metadata_on_connection(&mut transaction, record)
+            .stage_file_version_metadata_in_transaction(&mut transaction, record)
             .await?;
         self.verify_staged_file_on_connection(&mut transaction, record)
             .await?;
