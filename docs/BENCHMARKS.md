@@ -38,9 +38,37 @@ scripts/load_benchmark.sh \
 ```
 
 The load runner reports request count, success/error rate, throughput, p50/p95/p99,
-peak RSS, and min/max latency. Write and mixed-workload results are only emitted
+and min/max latency. Its latency ends at response headers, and its memory field is
+a client RSS snapshot; use the contention runner below for complete-response latency
+and server peak RSS. Write and mixed-workload results are only emitted
 when `BENCH_WRITE_URL`/`--write-url` is configured; otherwise the mixed lane is
 explicitly read-only.
+
+## Uploads while GC runs
+
+Compare two Linux binaries with disposable PostgreSQL and MinIO services:
+
+```bash
+python3 -B scripts/shardline/benchmark_gc_contention.py \
+  /path/to/current/shardline /path/to/1.11.3/shardline \
+  /tmp/shardline-gc-comparison
+```
+
+This runs three pairs in alternating order, with 16 clients each uploading and
+reading 128 distinct 64 KiB objects while mark-and-sweep GC runs. It measures complete
+PUT/GET p50/p95/p99, request throughput, server CPU/peak RSS, and GC cost. Every
+object is checked again after GC finishes. Any failed request, GC failure, or byte
+mismatch fails the run. Override `BENCH_CONCURRENCY`, `BENCH_OPERATIONS`, or
+`BENCH_REPEATS` for larger samples.
+
+GC starts again 0.5 seconds after each completed run and stops when the request
+workload finishes. Completed GC counts can differ between binaries and are included
+in each result. Compare repeated runs on an otherwise idle host before extrapolating.
+
+The services are removed afterward; local diagnostics remain at the output path.
+This measures live-object scanning and publication contention, not deletion-heavy
+GC, multiple API nodes, or cloud network latency. CPU/RSS describe Shardline
+processes; PostgreSQL and MinIO resource use is excluded.
 
 ## Production-shaped incident and recovery
 

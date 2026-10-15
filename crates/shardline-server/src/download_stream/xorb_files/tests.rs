@@ -131,13 +131,17 @@ async fn collected_validation_reuses_complete_payload_but_preserves_logical_term
 }
 
 #[tokio::test]
+#[allow(
+    clippy::panic,
+    reason = "a non-local store violates this test's fixture"
+)]
 async fn collected_validation_rejects_corruption_after_a_valid_prefix() {
     let storage = shardline_test_support::TempStorage::new();
     let store = ServerObjectStore::local(storage.path()).unwrap();
     let terms = container(&store, &[b"valid prefix", b"corrupt tail"]).await;
     let key = crate::xet_adapter::xorb_object_key(&terms[0].hash).unwrap();
     let ServerObjectStore::Local(local) = &store else {
-        unreachable!()
+        panic!("fixture must use local storage")
     };
     let path = local.path_for_key(&key);
     let mut bytes = std::fs::read(&path).unwrap();

@@ -25,7 +25,11 @@ async fn paired_read(State((objects, barrier)): State<Fixture>, uri: Uri) -> Res
         .header("content-length", bytes.len())
         .header(
             "content-range",
-            format!("bytes 0-{}/{}", bytes.len() - 1, bytes.len()),
+            format!(
+                "bytes 0-{}/{}",
+                bytes.len().checked_sub(1).unwrap(),
+                bytes.len()
+            ),
         )
         .header("etag", "\"fixture\"")
         .header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT")

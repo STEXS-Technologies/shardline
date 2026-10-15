@@ -424,17 +424,18 @@ mod tests {
     fn scalar_reference(chunker: &mut CdcChunker, data: &[u8]) -> Option<usize> {
         let mut start = chunker.pending_len;
         if start.wrapping_add(64) < chunker.min_chunk {
-            start += chunker
+            let skip = chunker
                 .min_chunk
-                .saturating_sub(start + 65)
+                .saturating_sub(start.checked_add(65)?)
                 .min(data.len().saturating_sub(start));
+            start = start.checked_add(skip)?;
         }
         let end = data.len().min(chunker.max_chunk);
         for (index, byte) in data.iter().enumerate().take(end).skip(start) {
             chunker.hash = (chunker.hash << 1).wrapping_add(GEAR_TABLE[usize::from(*byte)]);
             if index >= chunker.min_chunk && chunker.hash & chunker.mask == 0 {
                 chunker.reset();
-                return Some(index + 1);
+                return index.checked_add(1);
             }
         }
         if end == chunker.max_chunk {
