@@ -25,7 +25,9 @@ use crate::{
     object_store::run_before_local_object_read_hook,
 };
 
+mod collect;
 mod xorb_files;
+pub(crate) use collect::collect_file_record_bytes;
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
@@ -148,27 +150,38 @@ async fn read_xorb_backed_chunks(
     range: Option<ByteRange>,
     known_xorb_length: Option<u64>,
     pool: BoundedPool,
+    decoded_byte_budget: usize,
 ) -> Result<ServerByteStream, ServerError> {
     let chunk_zero = record.chunks.first().ok_or(ServerError::Overflow)?;
     let expected_hash = parse_xet_hash_hex(&chunk_zero.hash)?;
     let key = crate::xet_adapter::xorb_object_key(&chunk_zero.hash)?;
-    let (file, validated) = blocking_stream_work(&pool, move || {
-        let length = match known_xorb_length {
-            Some(length) => length,
-            None => object_store
-                .metadata(&key)?
-                .ok_or(ServerError::NotFound)?
-                .length(),
-        };
-        #[cfg(test)]
-        if let ServerObjectStore::Local(local) = &object_store {
-            run_before_local_object_read_hook(&local.path_for_key(&key));
-        }
-        let mut file = object_store.materialize_object_to_tempfile(&key, length)?;
-        let validated =
-            crate::xet_adapter::validate_serialized_xorb(file.as_file_mut(), expected_hash)?;
-        Ok((file, validated))
-    })
+    // Allocate the caller's result on its runtime worker, rather than growing
+    // large retained allocator arenas across blocking validation workers.
+    let (file, validated, decoded) = crate::admission::blocking_work_with_setup(
+        &pool,
+        move || Vec::with_capacity(decoded_byte_budget),
+        move |decoded_buffer| {
+            let length = match known_xorb_length {
+                Some(length) => length,
+                None => object_store
+                    .metadata(&key)?
+                    .ok_or(ServerError::NotFound)?
+                    .length(),
+            };
+            #[cfg(test)]
+            if let ServerObjectStore::Local(local) = &object_store {
+                run_before_local_object_read_hook(&local.path_for_key(&key));
+            }
+            let mut file = object_store.materialize_object_to_tempfile(&key, length)?;
+            let (validated, decoded) = shardline_xet_adapter::validate_serialized_xorb_with_data(
+                file.as_file_mut(),
+                expected_hash,
+                decoded_byte_budget,
+                decoded_buffer,
+            )?;
+            Ok((file, validated, decoded))
+        },
+    )
     .await?;
     let requested_start = range.map_or(0, |value| value.start());
     let requested_end = range.map_or_else(
@@ -180,6 +193,19 @@ async fn read_xorb_backed_chunks(
         },
         |value| Ok(value.end_inclusive()),
     )?;
+    if let Some(decoded) = decoded
+        && collect::covers_complete_xorb(&record, &validated)?
+    {
+        let start = usize::try_from(requested_start)?;
+        let end = usize::try_from(requested_end.checked_add(1).ok_or(ServerError::Overflow)?)?;
+        let bytes = Bytes::from(decoded);
+        if bytes.get(start..end).is_none() {
+            return Err(ServerError::Overflow);
+        }
+        return Ok(Box::pin(stream::once(async move {
+            Ok(bytes.slice(start..end))
+        })));
+    }
     let state = DecodedXorbStreamState {
         file,
         descriptors: validated.chunks().to_vec(),
@@ -322,6 +348,7 @@ async fn single_container_file_stream(
     record: FileRecord,
     range: Option<ByteRange>,
     pool: BoundedPool,
+    decoded_byte_budget: usize,
 ) -> Result<ServerByteStream, ServerError> {
     record.validate_reconstruction_plan()?;
     if record.total_bytes == 0 {
@@ -382,7 +409,15 @@ async fn single_container_file_stream(
             xorb_hash = %xorb_hash,
             "reading xorb-backed file"
         );
-        return read_xorb_backed_chunks(object_store, record, range, known_xorb_length, pool).await;
+        return read_xorb_backed_chunks(
+            object_store,
+            record,
+            range,
+            known_xorb_length,
+            pool,
+            decoded_byte_budget,
+        )
+        .await;
     }
 
     debug!(

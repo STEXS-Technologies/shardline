@@ -30,6 +30,11 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Improved
 
+- Reused bounded validation output for full-file downloads while preserving
+  complete container checks and bounded streaming responses.
+- Reduced duplicate S3 requests and overlapped bounded upload read-back while
+  retaining full content verification.
+- Batched PostgreSQL version and latest metadata in the owning publication transaction.
 - Strengthened upload and resumable lifecycle validation with native StateChronicle
   profiles while preserving existing transition rules.
 - Stored PostgreSQL task history in shared metadata without additional payload-bucket

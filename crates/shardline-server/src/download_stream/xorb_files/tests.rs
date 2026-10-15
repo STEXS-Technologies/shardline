@@ -84,6 +84,77 @@ async fn collect(
 }
 
 #[tokio::test]
+async fn collected_validation_reuses_complete_payload_but_preserves_logical_terms() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = ServerObjectStore::local(storage.path()).unwrap();
+    let terms = container(&store, &[b"first", b"second"]).await;
+    let record = file(terms.clone());
+    let retained = super::file_stream_with_decode_budget(
+        store.clone(),
+        record.clone(),
+        None,
+        ExecutionPools::default_sizes().blocking_io,
+        11,
+    )
+    .await
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0], b"firstsecond".as_slice());
+    let streamed = file_record_byte_stream(
+        store.clone(),
+        record.clone(),
+        None,
+        ExecutionPools::default_sizes().blocking_io,
+    )
+    .await
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    assert_eq!(
+        streamed.len(),
+        2,
+        "streaming callers must not retain the complete payload"
+    );
+    let reordered = file(vec![terms[1].clone(), terms[0].clone(), terms[1].clone()]);
+    let bytes = crate::download_stream::collect_file_record_bytes(
+        store,
+        reordered,
+        ExecutionPools::default_sizes().blocking_io,
+    )
+    .await
+    .unwrap();
+    assert_eq!(bytes, b"secondfirstsecond");
+}
+
+#[tokio::test]
+async fn collected_validation_rejects_corruption_after_a_valid_prefix() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = ServerObjectStore::local(storage.path()).unwrap();
+    let terms = container(&store, &[b"valid prefix", b"corrupt tail"]).await;
+    let key = crate::xet_adapter::xorb_object_key(&terms[0].hash).unwrap();
+    let ServerObjectStore::Local(local) = &store else {
+        unreachable!()
+    };
+    let path = local.path_for_key(&key);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[usize::try_from(terms[1].packed_end - 1).unwrap()] ^= 0x40;
+    std::fs::write(path, bytes).unwrap();
+    assert!(
+        crate::download_stream::collect_file_record_bytes(
+            store,
+            file(terms),
+            ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn multiple_containers_support_selected_multi_chunk_terms_and_reuse() {
     let storage = shardline_test_support::TempStorage::new();
     let store = ServerObjectStore::local(storage.path()).unwrap();

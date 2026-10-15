@@ -88,6 +88,7 @@ pub use xorb::{
     decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
     try_for_each_serialized_xorb_chunk_async, try_for_each_serialized_xorb_chunk_async_trusted,
     try_for_each_serialized_xorb_chunk_trusted, validate_serialized_xorb,
+    validate_serialized_xorb_with_data,
 };
 pub use xorb_store::{
     canonical_uploaded_xorb_file_length, canonical_uploaded_xorb_length, normalize_serialized_xorb,

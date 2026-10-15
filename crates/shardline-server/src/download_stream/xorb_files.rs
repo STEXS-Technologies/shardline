@@ -11,13 +11,30 @@ use crate::{ServerError, admission::BoundedPool, object_store::ServerObjectStore
 
 pub(super) async fn file_stream(
     object_store: ServerObjectStore,
-    mut record: FileRecord,
+    record: FileRecord,
     range: Option<ByteRange>,
     pool: BoundedPool,
 ) -> Result<ServerByteStream, ServerError> {
+    file_stream_with_decode_budget(object_store, record, range, pool, 0).await
+}
+
+pub(super) async fn file_stream_with_decode_budget(
+    object_store: ServerObjectStore,
+    mut record: FileRecord,
+    range: Option<ByteRange>,
+    pool: BoundedPool,
+    decoded_byte_budget: usize,
+) -> Result<ServerByteStream, ServerError> {
     record.validate_reconstruction_plan()?;
     if record.total_bytes == 0 || record.storage_repr == StorageRepresentation::WholeFileV1 {
-        return single_container_file_stream(object_store, record, range, pool).await;
+        return single_container_file_stream(
+            object_store,
+            record,
+            range,
+            pool,
+            decoded_byte_budget,
+        )
+        .await;
     }
     let requested_start = range.map_or(0, |value| value.start());
     let requested_end = range.map_or(
@@ -73,13 +90,21 @@ pub(super) async fn file_stream(
     // Preserve eager integrity validation for the first (and single) container.
     // Later containers are validated before their bytes are yielded, without
     // retaining earlier temporary files or buffering the complete logical file.
-    let first =
-        single_container_file_stream(object_store.clone(), first, first_range, pool.clone())
-            .await?;
+    let first = single_container_file_stream(
+        object_store.clone(),
+        first,
+        first_range,
+        pool.clone(),
+        decoded_byte_budget,
+    )
+    .await?;
     let remaining = stream::iter(groups).then(move |(next_record, next_range)| {
         let store = object_store.clone();
         let pool = pool.clone();
-        async move { single_container_file_stream(store, next_record, next_range, pool).await }
+        async move {
+            single_container_file_stream(store, next_record, next_range, pool, decoded_byte_budget)
+                .await
+        }
     });
     Ok(Box::pin(
         stream::once(async move { Ok(first) })
