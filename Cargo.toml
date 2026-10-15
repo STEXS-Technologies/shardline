@@ -207,3 +207,8 @@ format_push_string = "deny"
 option_if_let_else = "deny"
 manual_string_new = "deny"
 flat_map_option = "deny"
+
+[patch.crates-io]
+# Upstream fix for stranded HTTP/1 requests when a pooled connection closes.
+# https://github.com/hyperium/hyper/pull/4222
+hyper = { git = "https://github.com/hyperium/hyper", rev = "97fff93e53f9e6a993f2d6a25d50883b7b8752a7" }
