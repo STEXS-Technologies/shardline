@@ -6,58 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+This update strengthens maintenance coordination and recovery while preserving
+existing deployment data, public reliability types, and normal startup behavior.
+
 ### Changed
 
-- Use the `statechronicle` and `penelope` 0.2.0 umbrella crates and their
-  re-exports throughout Shardline, keeping the released-type compatibility bridge.
-- Upgrade StateChronicle and Penelope integration dependencies to 0.2.0 while
-  preserving existing reliability evidence encodings, Merkle envelopes, database
-  domain records and compatible upload/session recovery behavior. The normal
-  PostgreSQL owner upgrade installs additive protection/history objects without
-  changing released migration-ledger entries; SQLite installs its compatibility
+- Upgraded to the StateChronicle and Penelope 0.2.0 umbrella crates, preserving
+  existing public types, evidence formats, signatures, and recovery compatibility.
+- Added PostgreSQL protection and history objects through the explicit owner
+  upgrade, preserving released migration entries. SQLite installs compatibility
   guards during initialization.
-- Adapt StateChronicle signing keys internally while retaining the existing
-  public Ed25519 key API and zeroizing the temporary seed copy.
-- Retain released StateChronicle/Penelope digest, event, commit and signing
-  types through a checked compatibility bridge while the current protocol
-  engine and task runtime use 0.2.0. Existing Rust consumers need no type changes.
 
 ### Added
 
-- Track server maintenance inside the normal Shardline process, without requiring
-  another service. Existing commands retain their live output and exit behavior.
-  Administrative task history distinguishes completed, failed and interrupted
-  work; history does not grant ownership or prove that a remote process is alive.
-  PostgreSQL deployments store automatic task history in shared metadata without
-  requiring additional payload-bucket write permissions.
-- Opt-in Linux `shardline maintenance` execution for fsck, index rebuild, GC,
-  lifecycle repair and storage migration with durable Penelope supervision and
-  separate native StateChronicle checkpoint/result proofs. Trusted-key and
-  materialized-report verification precede acceptance; interrupted mutations
-  with unknown effects remain blocked. Existing commands retain their behavior.
+- Added embedded maintenance tracking and administrative task history without
+  requiring another service or changing existing command output and exit behavior.
+- Added opt-in Linux `shardline maintenance` supervision with verified checkpoint
+  and result proofs, plus optional durable task-journal and process-runtime features.
+- Added compatibility vectors and required distributed-integrity CI checks covering
+  deployment faults and upgrades and rollbacks with the released 1.11.3 binary.
+- Added six-VM drills for maintenance takeover and simultaneous writes against
+  shared PostgreSQL and MinIO, with cross-node integrity checks after restarts.
 
-- Native StateChronicle upload and resumable lifecycle profiles now validate
-  event creation and historical verification with the existing transition rules.
-  Explicit typed adapters provide separate domains, schema and payload bounds,
-  namespaced operations, expected-state checks, and required authority.
-- An opt-in `task-journal` feature provides a bounded SQLite Penelope task journal
-  with atomic history/blob persistence, scoped sequence/generation arbitration,
-  verified immutable blobs, and restart replay. It does not activate task workers
-  or change existing metadata databases.
-- The `process-runtime` feature adds a Linux hosted worker port with durable
-  start authorization, owner-only storage, controller/generation leases,
-  pidfd fencing, executable/definition pins, kernel CPU limits and an independent
-  deadline watchdog. Its boot clock expires unfinished work after reboot.
-- Frozen deployment compatibility vectors produced with the 0.1.0 dependencies
-  cover all eleven evidence families, historical encodings, commitments, and
-  signatures. Tests reject missing commitments, altered roots, and rewritten
-  storage sequences, and verify older envelopes without schema markers.
-- Require distributed-integrity checks in CI for deployment faults, concurrent
-  replicas, and upgrades and rollbacks with the released 1.11.3 binary.
-- Add repeatable six-VM drills against shared PostgreSQL and MinIO backends.
-  Cover maintenance takeover after node or connection loss, simultaneous uploads,
-  competing writes to the same key, and byte-for-byte reads through every replica
-  before and after server restarts. Temporary VM resources are removed afterward.
+### Improved
+
+- Strengthened upload and resumable lifecycle validation with native StateChronicle
+  profiles while preserving existing transition rules.
+- Stored PostgreSQL task history in shared metadata without additional payload-bucket
+  write permissions. Interrupted remote work remains explicitly unresolved.
+
+### Fixed
+
+- Prevented maintenance commands from continuing as the old owner after losing
+  their PostgreSQL ownership connection.
+- Blocked conflicting writes with a retryable error while an earlier remote delete
+  remains uncertain, until the exact attempt is reconciled.
 
 ## [1.11.3] - 2026-10-03
 
