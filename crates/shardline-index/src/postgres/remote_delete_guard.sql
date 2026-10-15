@@ -202,7 +202,7 @@ BEGIN
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
-        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+        PERFORM pg_advisory_xact_lock_shared(1397507140, lock_slot);
     END LOOP;
     EXECUTE format(
         'SELECT EXISTS(SELECT 1 FROM %I.shardline_resource_fences WHERE domain=$1 AND resource=ANY($2))',
@@ -266,13 +266,14 @@ BEGIN
         FROM unnest(hashes) hash
     ) references_to_check;
     -- Bound lock-table usage independently of the number of chunks. Colliding
-    -- keys serialize briefly; the pending lookup still checks the exact key.
+    -- publications may share slots; deletes take the exclusive side. The
+    -- pending lookup still checks the exact key while protection is retained.
     -- Acquire slots in a stable order within each publication.
     PERFORM shardline_remote_delete_snapshot_v1(TG_TABLE_SCHEMA);
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
-        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+        PERFORM pg_advisory_xact_lock_shared(1397507140, lock_slot);
     END LOOP;
     SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
                   WHERE domain='maintenance-remote-delete' AND resource=ANY(keys))
@@ -320,7 +321,7 @@ BEGIN
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
-        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+        PERFORM pg_advisory_xact_lock_shared(1397507140, lock_slot);
     END LOOP;
     SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
         WHERE domain='maintenance-remote-delete' AND resource=ANY(keys)) INTO pending;
@@ -366,7 +367,7 @@ BEGIN
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
-        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+        PERFORM pg_advisory_xact_lock_shared(1397507140, lock_slot);
     END LOOP;
     SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
         WHERE domain='maintenance-remote-delete' AND resource=ANY(keys)) INTO pending;
@@ -430,7 +431,7 @@ BEGIN
     FOR lock_slot IN SELECT DISTINCT
         (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
         FROM unnest(keys) physical ORDER BY slot LOOP
-        PERFORM pg_advisory_xact_lock(1397507140, lock_slot);
+        PERFORM pg_advisory_xact_lock_shared(1397507140, lock_slot);
     END LOOP;
     SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
                   WHERE domain='maintenance-remote-delete' AND resource=ANY(keys)) INTO pending;
