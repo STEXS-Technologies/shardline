@@ -92,12 +92,13 @@ async fn configured_rebuild_waits_for_active_writer_and_releases_barrier() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_rebuild_waits_for_active_writer_and_releases_barrier() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    let Some(fixture) = crate::test_support::postgres_fixture::PostgresFixture::new().await else {
         eprintln!("skipping PostgreSQL rebuild coordination: DATABASE_URL is unset");
         return;
     };
-    let storage = tempfile::tempdir().unwrap();
-    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let pool = sqlx::PgPool::connect(fixture.config.index_postgres_url().unwrap())
+        .await
+        .unwrap();
     let record_store = shardline_index::PostgresRecordStore::new(pool.clone());
     let record = synthetic_large_inventory_record(0).unwrap();
     RecordMutation::write_version_record(&record_store, &record)
@@ -106,15 +107,7 @@ async fn postgres_rebuild_waits_for_active_writer_and_releases_barrier() {
     let writer = crate::maintenance_barrier::acquire_postgres_shared(&pool)
         .await
         .unwrap();
-    let config = crate::ServerConfig::new(
-        "127.0.0.1:8080".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        storage.path().to_path_buf(),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_index_postgres_url(url)
-    .unwrap();
-    let rebuild = super::run_index_rebuild(config);
+    let rebuild = super::run_index_rebuild(fixture.config.clone());
     tokio::pin!(rebuild);
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut rebuild)
@@ -138,13 +131,16 @@ async fn postgres_rebuild_waits_for_active_writer_and_releases_barrier() {
         .unwrap()
         .unwrap();
     assert_eq!(from_slice::<FileRecord>(&latest).unwrap(), record);
-    let _next_writer = tokio::time::timeout(
+    let next_writer = tokio::time::timeout(
         Duration::from_secs(10),
         crate::maintenance_barrier::acquire_postgres_shared(&pool),
     )
     .await
     .unwrap()
     .unwrap();
+    drop(next_writer);
+    pool.close().await;
+    fixture.finish().await;
 }
 
 fn checked_inventory_value(index: u64, delta: u64) -> Result<u64, Box<dyn Error>> {

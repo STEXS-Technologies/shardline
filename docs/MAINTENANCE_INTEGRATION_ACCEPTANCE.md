@@ -1,8 +1,8 @@
 # Maintenance integration: merge checklist
 
 **The integration and UX acceptance review is complete within the contracts
-below.** A subsequent [release upgrade audit](RELEASE_UPGRADE_AUDIT.md) found and
-addressed a downstream Rust type compatibility gap with a public API bridge.
+below.** A public API bridge preserves the downstream Rust types released by
+1.11.3 while using the current StateChronicle and Penelope engines internally.
 The branch has not been merged or deployed.
 The version remains 1.11.3; release numbering belongs in a separate PR.
 
@@ -10,7 +10,7 @@ For operators, read [Maintenance without another service](MAINTENANCE_INTEGRATIO
 For source reviews, executed checks and reproduction commands, read the
 [evidence appendix](MAINTENANCE_INTEGRATION_EVIDENCE.md). The appendix preserves
 historical findings, including gaps subsequently resolved; this checklist is
-the integration acceptance assessment. The release audit records later findings.
+the integration acceptance assessment.
 
 ## Experience that must remain simple
 
@@ -77,8 +77,7 @@ upgrade, all three PostgreSQL/S3 startup roles, native Xet client flows, and the
 unchanged systemd sandbox with both real guest reboot cuts. The final library
 rerun passes 8,953 tests; the separate e2e workspace compiles with its updated
 lockfile. All four owned PostgreSQL tests pass through the complete verifier
-without selected skips. See the [release audit](RELEASE_UPGRADE_AUDIT.md) for
-exact scope.
+without selected skips.
 
 ## Completed focused reviews
 

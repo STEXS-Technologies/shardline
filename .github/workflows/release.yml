@@ -23,8 +23,11 @@ jobs:
     with:
       duration_seconds: "600"
 
+  postgres-gate:
+    uses: ./.github/workflows/postgres-contracts.yml
+
   release:
-    needs: reliability-gate
+    needs: [reliability-gate, postgres-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:

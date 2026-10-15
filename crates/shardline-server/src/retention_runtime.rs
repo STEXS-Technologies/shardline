@@ -740,18 +740,19 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_acknowledged_hold_protects_physical_oci_reclamation() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
+        let Some(fixture) = crate::test_support::postgres_fixture::PostgresFixture::new().await
+        else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
         let _test_guard = POSTGRES_TEST_LOCK.lock().await;
-        let storage = tempfile::tempdir().unwrap();
-        let config = config(storage.path())
-            .with_index_postgres_url(url)
-            .unwrap()
+        let config = fixture
+            .config
+            .clone()
             .with_server_frontends([crate::ServerFrontend::Oci])
             .unwrap();
         acknowledged_hold_protects_oci_bytes(&config).await;
+        fixture.finish().await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn local_lifecycle_repair_waits_for_gc_barrier() {

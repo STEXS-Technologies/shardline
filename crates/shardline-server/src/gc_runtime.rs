@@ -261,25 +261,20 @@ mod lib_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn postgres_gc_cannot_mark_after_ownership_connection_is_lost() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
+        let Some(fixture) = crate::test_support::postgres_fixture::PostgresFixture::new().await
+        else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        let storage = tempfile::tempdir().unwrap();
-        let config = ServerConfig::new(
-            "127.0.0.1:8080".parse().unwrap(),
-            "http://localhost:8080".to_owned(),
-            storage.path().to_path_buf(),
-            std::num::NonZeroUsize::new(4096).unwrap(),
-        )
-        .with_index_postgres_url(url.clone())
-        .unwrap();
+        let config = fixture.config.clone();
         let objects = object_store_from_config(&config).unwrap();
-        let bytes = storage.path().as_os_str().as_encoded_bytes();
+        let bytes = fixture.config.root_dir().as_os_str().as_encoded_bytes();
         let hash = shardline_index::xet_hash_hex_string(shardline_server_core::chunk_hash(bytes));
         let key = shardline_server_core::chunk_object_key(&hash).unwrap();
         put_test_staging_object(&objects, &key, bytes);
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let pool = sqlx::PgPool::connect(config.index_postgres_url().unwrap())
+            .await
+            .unwrap();
         let index = PostgresIndexStore::new(pool.clone());
         let mut blocker = pool.begin().await.unwrap();
         sqlx::query("LOCK TABLE shardline_file_records IN ACCESS EXCLUSIVE MODE")
@@ -351,6 +346,8 @@ mod lib_tests {
         );
         assert!(!anchor, "the obsolete GC owner published a clock anchor");
         assert!(shardline_storage::ObjectStore::contains(&objects, &key).unwrap());
+        pool.close().await;
+        fixture.finish().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
