@@ -16,8 +16,8 @@ use crate::{
     ServerError,
     chunk_store::chunk_object_key,
     download_stream::{
-        ServerByteStream, file_record_byte_stream, object_byte_range_stream, object_byte_stream,
-        validated_xorb_byte_range_stream,
+        ServerByteStream, collect_file_record_bytes, file_record_byte_stream,
+        object_byte_range_stream, object_byte_stream, validated_xorb_byte_range_stream,
     },
     error::IndexError,
     object_store::{read_full_object, reconstruct_file_record_bytes, visit_object_prefix},
@@ -286,7 +286,6 @@ impl super::PostgresBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
-        let total_bytes = record.total_bytes;
         let object_store = self.object_store();
         let server_frontends = self.server_frontends.clone();
 
@@ -304,17 +303,7 @@ impl super::PostgresBackend {
             .map_err(ServerError::BlockingTask)?;
         }
 
-        // StoredChunks path: stream with LZ4 decompression and xorb-fast-path.
-        let stream =
-            file_record_byte_stream(object_store, record, None, self.stream_work_pool.clone())
-                .await?;
-        let mut output = Vec::with_capacity(usize::try_from(total_bytes)?);
-        tokio::pin!(stream);
-        use futures_util::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            output.extend_from_slice(&chunk?);
-        }
-        Ok(output)
+        collect_file_record_bytes(object_store, record, self.stream_work_pool.clone()).await
     }
 
     /// Reads a stored chunk by hash.

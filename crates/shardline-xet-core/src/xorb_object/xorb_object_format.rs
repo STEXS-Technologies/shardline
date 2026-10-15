@@ -484,6 +484,12 @@ pub struct XorbObject {
     pub info_length: u64,
 }
 
+/// Fully validated container metadata and optionally retained decoded content.
+pub struct ValidatedXorbWithData {
+    pub xorb: XorbObject,
+    pub decoded: Option<Vec<u8>>,
+}
+
 impl Default for XorbObject {
     fn default() -> Self {
         Self {
@@ -556,6 +562,25 @@ impl XorbObject {
         xorb: XorbObject,
         hash: &MerkleHash,
     ) -> Result<Option<XorbObject>, CoreError> {
+        Ok(
+            Self::validate_xorb_object_with_info_and_data(reader, xorb, hash, 0, Vec::new())?
+                .map(|validated| validated.xorb),
+        )
+    }
+
+    /// Performs full validation and optionally retains decoded content within
+    /// the caller's byte budget. No content is returned on validation failure.
+    /// If the content exceeds the budget, validation continues without retaining it.
+    /// The supplied scratch buffer is cleared before use.
+    pub fn validate_xorb_object_with_info_and_data<R: Read + Seek>(
+        reader: &mut R,
+        xorb: XorbObject,
+        hash: &MerkleHash,
+        max_decoded_bytes: usize,
+        mut decoded_buffer: Vec<u8>,
+    ) -> Result<Option<ValidatedXorbWithData>, CoreError> {
+        decoded_buffer.clear();
+        let mut decoded = (max_decoded_bytes != 0).then_some(decoded_buffer);
         let mut hash_chunks = Vec::with_capacity(xorb.info.num_chunks as usize);
         let mut cumulative_compressed_length: u64 = 0;
         let mut unpacked_chunk_offset: u64 = 0;
@@ -611,6 +636,14 @@ impl XorbObject {
                 warn!("XORB Validation: Chunk unpacked byte offset does not match Info object.");
                 return Ok(None);
             }
+            if let Some(retained) = &mut decoded {
+                if data.len() > max_decoded_bytes.saturating_sub(retained.len()) {
+                    decoded = None;
+                } else {
+                    retained.reserve_exact(data.len());
+                    retained.extend_from_slice(&data);
+                }
+            }
         }
 
         let cur_position = reader.stream_position()?;
@@ -628,7 +661,7 @@ impl XorbObject {
             return Ok(None);
         }
 
-        Ok(Some(xorb))
+        Ok(Some(ValidatedXorbWithData { xorb, decoded }))
     }
 
     pub fn get_contents_length(&self) -> Result<u64, CoreError> {

@@ -421,7 +421,7 @@ pub(crate) async fn acquire_postgres_shared_bounded(
             let admission = Arc::clone(slots)
                 .acquire_owned()
                 .await
-            .map_err(|_error| sqlx::Error::PoolClosed)?;
+                .map_err(|_error| sqlx::Error::PoolClosed)?;
             Ok::<_, sqlx::Error>((pool.begin().await?, admission))
         })
         .await
