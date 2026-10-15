@@ -4,7 +4,9 @@ set -euo pipefail
 test "$#" -le 1 || { echo 'usage: run_distributed_integrity_gate.sh [OUTPUT_DIRECTORY]' >&2; exit 2; }
 : "${SHARDLINE_FAKETIME_LIBRARY:?Set SHARDLINE_FAKETIME_LIBRARY to libfaketime.so.1 for the clock-skew drill}"
 test -r "$SHARDLINE_FAKETIME_LIBRARY"
-for tool in cargo curl docker jq sha256sum tar rg; do command -v "$tool" >/dev/null; done
+for tool in cargo curl docker jq sha256sum tar rg; do
+    command -v "$tool" >/dev/null || { echo "Missing required verification tool: $tool" >&2; exit 1; }
+done
 docker info >/dev/null
 umask 077
 output=${1:-distributed-integrity-results}

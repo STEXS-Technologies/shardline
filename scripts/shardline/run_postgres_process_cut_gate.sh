@@ -4,7 +4,9 @@
 set -euo pipefail
 test "$#" -le 1 || { echo 'usage: run_postgres_process_cut_gate.sh [OUTPUT_DIRECTORY]' >&2; exit 2; }
 test "$(uname -s)" = Linux && test "$(uname -m)" = x86_64
-for tool in cargo curl docker jq sha256sum tar rg; do command -v "$tool" >/dev/null; done
+for tool in cargo curl docker jq sha256sum tar rg; do
+    command -v "$tool" >/dev/null || { echo "Missing required verification tool: $tool" >&2; exit 1; }
+done
 docker info >/dev/null
 umask 077
 output=${1:-postgres-process-cut-results}
