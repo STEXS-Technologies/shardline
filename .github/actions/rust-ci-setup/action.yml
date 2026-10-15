@@ -18,13 +18,13 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install LLVM and libclang (Linux)
+    - name: Install Linux build and verification tools
       if: runner.os == 'Linux'
       shell: bash
       run: |
         set -euo pipefail
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends clang llvm-dev libclang-dev
+        sudo apt-get install -y --no-install-recommends clang llvm-dev libclang-dev jq ripgrep
 
         llvm_config_bin="$(command -v llvm-config || true)"
         if [[ -z "${llvm_config_bin}" ]]; then
