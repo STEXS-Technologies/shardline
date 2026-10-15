@@ -836,15 +836,23 @@ mod tests {
             let key = ObjectKey::parse(&physical).unwrap();
             let permit = store.begin_remote_delete(&key).await.unwrap();
             for kind in ["latest", "version"] {
-                let record = serde_json::json!({"chunk_size": 1, "chunks": [{"hash": hash}]});
-                let error = query(insert)
-                    .bind(kind)
-                    .bind(kind)
-                    .bind(sqlx::types::Json(record))
-                    .execute(&pool)
-                    .await
-                    .unwrap_err();
-                assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+                // Missing legacy chunk_size still denotes direct chunks;
+                // repeated terms and malformed hashes must not hide a key.
+                for record in [
+                    serde_json::json!({"chunk_size": 1, "chunks": [{"hash": hash}]}),
+                    serde_json::json!({"chunks": [
+                        {"hash": hash}, {"hash": hash}, {"hash": "malformed"}
+                    ]}),
+                ] {
+                    let error = query(insert)
+                        .bind(kind)
+                        .bind(kind)
+                        .bind(sqlx::types::Json(record))
+                        .execute(&pool)
+                        .await
+                        .unwrap_err();
+                    assert!(PostgresMetadataStoreError::from(error).is_remote_delete_pending());
+                }
             }
             let count: i64 = query_scalar("SELECT count(*) FROM shardline_file_records")
                 .fetch_one(&pool)
