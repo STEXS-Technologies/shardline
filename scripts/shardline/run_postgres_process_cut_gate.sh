@@ -22,15 +22,7 @@ test -x "$harness"
 
 # Pin both the release and its published archive bytes. A later asset replacement
 # cannot silently change the baseline used to prove migration compatibility.
-archive=shardline-1.11.3-x86_64-unknown-linux-gnu.tar.gz
-curl --fail --silent --show-error --location --retry 3 \
-    "https://github.com/STEXS-Technologies/shardline/releases/download/v1.11.3/$archive" \
-    --output "$output/$archive"
-printf '%s  %s\n' c16b8e281bd08f51f24ee482b4808be809e30052a4c5b3df071b665e497209b1 \
-    "$output/$archive" | sha256sum --check > "$output/released-checksum.log"
-tar -xzf "$output/$archive" -C "$output"
-released="$output/shardline-1.11.3-x86_64-unknown-linux-gnu/shardline"
-test -x "$released"
+released=$(bash scripts/shardline/fetch_compatibility_baseline.sh "$output")
 sha256sum "$current" "$released" "$harness" > "$output/binaries.sha256"
 TMPDIR="$output" bash scripts/shardline/verify_maintenance_postgres_process_cuts.sh \
     "$current" "$released" "$harness" 2>&1 | tee "$output/verifier.log"
