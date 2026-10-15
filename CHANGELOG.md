@@ -44,6 +44,8 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Fixed
 
+- Blocked crate publication while workspace-only dependency overrides would
+  silently drop required fixes for downstream consumers.
 - Prevented maintenance commands from continuing as the old owner after losing
   their PostgreSQL ownership connection.
 - Blocked conflicting writes with a retryable error while an earlier remote delete

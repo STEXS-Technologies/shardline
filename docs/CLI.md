@@ -83,6 +83,10 @@ Missing or invalid replies remain blocked for investigation. Object absence
 alone cannot replace a valid reply. Repair does not mark an interrupted GC run
 completed. A write's `Retry-After: 1` is a retry delay, not a recovery deadline.
 
+If no valid reply can be recovered, there is no supported in-place force-clear
+or guaranteed recovery deadline. Keep the marker. For permanent recovery using
+a separate deployment, see [unprovable remote deletes](DISASTER_RECOVERY.md#unprovable-remote-deletes).
+
 ## Maintenance history limits
 
 Verified finished shared history becomes eligible for cleanup after 30 days.

@@ -27,5 +27,8 @@ jobs:
       - name: Run contributor CI matrix
         run: cargo make ci
 
+      - name: Test publication dependency safeguards
+        run: python3 -B -m unittest discover -s scripts/tests -v
+
   postgres:
     uses: ./.github/workflows/postgres-contracts.yml
