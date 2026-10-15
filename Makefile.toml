@@ -83,7 +83,7 @@ description = "Verify historical evidence, native profiles and durable task reco
 workspace = false
 dependencies = ["build-reliability-runtime-fixture"]
 command = "cargo"
-args = ["test", "-p", "shardline-reliability", "--all-features", "--locked", "--test", "deployment_compatibility", "--test", "native_profiles", "--test", "task_journal", "--test", "process_runtime", "--test", "task_artifact", "${@}"]
+args = ["test", "-p", "shardline-reliability", "--all-features", "--locked", "--test", "deployment_compatibility", "--test", "native_profiles", "--test", "task_journal", "--test", "process_runtime", "--test", "task_artifact", "--test", "released_public_api", "${@}"]
 
 [tasks.build-reliability-runtime-fixture]
 description = "Build the real child-process fixture for reliability runtime contracts"
@@ -97,7 +97,13 @@ workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "bash"
-args = ["-c", "cargo nextest run -p shardline-index -E 'test(hub_postgres)' && cargo nextest run -p shardline-server -E 'test(postgres_backend) or test(database_migration) or test(lifecycle_repair)' && cargo nextest run -p shardline --test db_migrate_e2e"]
+args = ["scripts/test-postgres.sh"]
+
+[tasks.test-postgres-process-cuts]
+description = "Verify owned PostgreSQL process cuts against the pinned released 1.11.3 executable"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/run_postgres_process_cut_gate.sh", "${@}"]
 
 [tasks.test-e2e]
 description = "Run e2e integration tests from the e2e/ folder"

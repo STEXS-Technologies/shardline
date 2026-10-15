@@ -22,8 +22,6 @@ docs that match your use case.
 
 ## Setup And Rollout
 
-- [Upgrade audit against released 1.11.3](RELEASE_UPGRADE_AUDIT.md)
-
 - [Provider Setup Guide](PROVIDER_QUICKSTART.md)
 - [Client Configuration](CLIENT_CONFIGURATION.md)
 - [Repository Bootstrap](REPOSITORY_BOOTSTRAP.md)
