@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Real machine identities, shared evidence, partition and replacement.
-# Usage: bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss|gc-connection-loss]
+# Usage: SHARDLINE_VALIDATION_VM_COUNT=6 bash scripts/shardline/verify_maintenance_cross_host.sh CURRENT IMAGE [node-loss|connection-loss|repair-connection-loss|gc-connection-loss]
 set -euo pipefail
 test "$#" -ge 2 && test "$#" -le 3 || { echo 'usage: verify_maintenance_cross_host.sh CURRENT IMAGE [connection-loss|repair-connection-loss|gc-connection-loss]' >&2; exit 2; }
 mode=${3:-node-loss}
+node_count=${SHARDLINE_VALIDATION_VM_COUNT:-2}
+[[ "$node_count" =~ ^[0-9]+$ ]] && (( node_count >= 2 && node_count <= 6 )) || { echo 'SHARDLINE_VALIDATION_VM_COUNT must be between 2 and 6' >&2; exit 2; }
+nodes=()
+for ((node=0; node<node_count; node++)); do nodes+=("$node"); done
 test "$mode" = node-loss || test "$mode" = connection-loss || test "$mode" = repair-connection-loss || test "$mode" = gc-connection-loss
 current=$(realpath "$1")
 image=$(realpath "$2")
@@ -17,7 +21,7 @@ umask 077
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/shardline-cross-host.XXXXXX")
 echo "Validation artifacts: $fixture"
 project=$(basename "$fixture" | tr '[:upper:].' '[:lower:]-')
-vm_pids=('' '')
+vm_pids=()
 blocker_pid=''
 ssh_ports=()
 http_ports=()
@@ -29,7 +33,7 @@ cleanup() {
         if test -n "$pid"; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done
     compose down --volumes --remove-orphans > "$fixture/cleanup.log" 2>&1 || true
-    for node in 0 1; do rm -f "$fixture/$node/id_ed25519" "$fixture/$node/seed.iso" "$fixture/$node/disk.qcow2"; done
+    for node in "${nodes[@]}"; do rm -f "$fixture/$node/id_ed25519" "$fixture/$node/seed.iso" "$fixture/$node/disk.qcow2"; done
 }
 trap cleanup EXIT
 compose up -d chaos-postgres chaos-minio chaos-minio-init > "$fixture/backend.log" 2>&1
@@ -42,7 +46,7 @@ test "$(docker wait "$(compose ps -aq chaos-minio-init)")" = 0
 pg_port=$(compose port chaos-postgres 5432 | head -n 1 | awk -F: '{print $NF}')
 s3_port=$(compose port chaos-minio 9000 | head -n 1 | awk -F: '{print $NF}')
 "$current" db migrate up --database-url "postgres://shardline:shardline-dev-password@127.0.0.1:$pg_port/shardline" > "$fixture/migrations.log" 2>&1
-for node in 0 1; do
+for node in "${nodes[@]}"; do
     directory="$fixture/$node"
     mkdir "$directory"
     ssh_ports[$node]=$(shuf -i 20000-39999 -n 1)
@@ -105,11 +109,11 @@ assert_metadata_only_history() {
 }
 barrier_filter="locktype = 'advisory' AND objsubid = 1 AND classid::bigint = (x'5348415244474301'::bit(64)::bigint >> 32) AND objid::bigint = (x'5348415244474301'::bit(64)::bigint & 4294967295)"
 contended_barrier() {
-    # Require one owner and one queued contender, not just two admitted tasks.
-    sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=1
+    # Require one owner and every other VM queued at the shared barrier.
+    sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=$((node_count - 1))
          FROM pg_locks WHERE $barrier_filter"
 }
-for node in 0 1; do
+for node in "${nodes[@]}"; do
     for attempt in $(seq 1 60); do
         kill -0 "${vm_pids[$node]}" || { cat "$fixture/$node/qemu.log" >&2; exit 1; }
         if vm_ssh "$node" 'cat /etc/machine-id; cat /proc/sys/kernel/random/boot_id' > "$fixture/$node/identity" 2>/dev/null; then break; fi
@@ -143,6 +147,8 @@ EOF
 done
 test "$(head -n 1 "$fixture/0/identity")" != "$(head -n 1 "$fixture/1/identity")"
 test "$(tail -n 1 "$fixture/0/identity")" != "$(tail -n 1 "$fixture/1/identity")"
+test "$(head -q -n 1 "$fixture"/*/identity | sort -u | wc -l)" -eq "$node_count"
+test "$(tail -q -n 1 "$fixture"/*/identity | sort -u | wc -l)" -eq "$node_count"
 vm_ssh 1 'sudo systemd-run --unit shardline-validation-observer -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline serve'
 for attempt in $(seq 1 20); do
     if history > "$fixture/initial.json"; then break; fi
@@ -219,6 +225,27 @@ source_cli_pid=$(vm_ssh 0 'sudo systemctl show shardline-validation-source-rebui
 jq -e --arg id "$source_run" --argjson pid "$source_cli_pid" 'any(.tasks[]; .id == $id and .owner.pid == $pid and .state == "running_or_interrupted")' "$fixture/source-rebuild.json"
 shared_hashes "$source_run" '0000000000 0000000001 0000000002' > "$fixture/source-cli-records-before"
 vm_ssh 1 'sudo systemd-run --unit shardline-validation-waiter-rebuild -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline index rebuild'
+for ((node=2; node<node_count; node++)); do
+    vm_ssh "$node" 'sudo systemd-run --unit shardline-validation-waiter-rebuild -p EnvironmentFile=/etc/shardline/shardline.env -p User=fixture -p Group=fixture /usr/local/bin/shardline index rebuild'
+done
+assert_all_waiters() {
+    local node run
+    for ((node=1; node<node_count; node++)); do
+        run=$(jq -er --arg host "$(head -n 1 "$fixture/$node/identity")" '.tasks[] | select(.execution == "inline" and .owner.host == $host and .state == "completed") | .id' "$fixture/all-waiters.json")
+        [[ "$run" =~ ^[a-f0-9]{32}$ ]]
+        vm_ssh "$node" 'sudo journalctl -u shardline-validation-waiter-rebuild -o cat --no-pager' > "$fixture/$node/waiter-report.log"
+    done
+    test "$(cat "$fixture"/*/waiter-report.log | grep -c '^removed_stale_latest_records: 1$')" -eq 1
+    test "$(sql "SELECT COUNT(*) FROM pg_locks WHERE $barrier_filter")" = 0
+    echo "PASS: all $((node_count - 1)) competing VM rebuilds completed; exactly one removed the stale record"
+}
+wait_all_waiters() {
+    for attempt in $(seq 1 60); do
+        if history > "$fixture/all-waiters.json" && jq -e --argjson count "$((node_count - 1))" '[.tasks[] | select(.execution == "inline" and .state == "completed")] | length == $count' "$fixture/all-waiters.json" >/dev/null; then break; fi
+        sleep 1
+    done
+    assert_all_waiters
+}
 for attempt in $(seq 1 30); do
     if test "$(contended_barrier)" = t; then break; fi
     sleep 1
@@ -256,13 +283,14 @@ if test "$mode" != node-loss; then
     test "$(sql "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='shardline-vm-scan-blocker'")" = t
     wait "$blocker_pid" 2>/dev/null || true
     blocker_pid=''
+    wait_all_waiters
     for attempt in $(seq 1 30); do
         if history > "$fixture/connection-waiter.json" && jq -e --arg id "$waiter_run" 'any(.tasks[]; .id == $id and .state == "completed")' "$fixture/connection-waiter.json" >/dev/null; then break; fi
         sleep 1
     done
     jq -e --arg id "$waiter_run" --arg source "$source_run" 'any(.tasks[]; .id == $id and .state == "completed") and any(.tasks[]; .id == $source and .state == "failed")' "$fixture/connection-waiter.json"
     vm_ssh 1 'sudo journalctl -u shardline-validation-waiter-rebuild -o cat --no-pager' > "$fixture/connection-waiter-report.log"
-    grep -Fx 'removed_stale_latest_records: 1' "$fixture/connection-waiter-report.log"
+    # The aggregate assertion above permits any queued VM to win first.
     test "$(sql "SELECT COUNT(*) FROM shardline_file_records WHERE file_id='stale.bin'")" = 0
     assert_metadata_only_history
     if test "$mode" = repair-connection-loss; then
@@ -285,7 +313,7 @@ if vm_ssh 0 true > "$fixture/source-unreachable.log" 2>&1; then
 fi
 kill -0 "${vm_pids[0]}"
 history > "$fixture/partitioned.json"
-jq -e --arg id "$id" --arg source "$source_run" --arg waiter "$waiter_run" '(.tasks | length) == 3 and all(.tasks[]; if .id == $waiter then .state == "running" else (.id == $id or .id == $source) and .state == "running_or_interrupted" end)' "$fixture/partitioned.json"
+jq -e --argjson count "$((node_count + 1))" --arg id "$id" --arg source "$source_run" --arg waiter "$waiter_run" '(.tasks | length) == $count and all(.tasks[]; if .id == $waiter then .state == "running" else .state == "running_or_interrupted" end) and any(.tasks[]; .id == $id) and any(.tasks[]; .id == $source)' "$fixture/partitioned.json"
 sql "SELECT pid, granted FROM pg_locks WHERE $barrier_filter ORDER BY pid" > "$fixture/partition-locks.log"
 sql "SELECT pid, state, wait_event, query FROM pg_stat_activity WHERE datname=current_database() ORDER BY pid" > "$fixture/partition-activity.log"
 test "$(contended_barrier)" = t
@@ -301,26 +329,27 @@ for attempt in $(seq 1 30); do
 done
 sql "SELECT pid, granted FROM pg_locks WHERE $barrier_filter ORDER BY pid" > "$fixture/node-loss-locks.log"
 sql "SELECT pid, state, wait_event, query FROM pg_stat_activity WHERE datname=current_database() ORDER BY pid" > "$fixture/node-loss-activity.log"
-test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=0 FROM pg_locks WHERE $barrier_filter")" = t
+test "$(sql "SELECT COUNT(*) FILTER (WHERE granted)=1 AND COUNT(*) FILTER (WHERE NOT granted)=$((node_count - 2)) FROM pg_locks WHERE $barrier_filter")" = t
 test "$replacement_coordinator" != "$source_coordinator"
 test "$(sql "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event='relation' AND query LIKE '%shardline_file_records%')")" = t
 test "$(sql "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='shardline-vm-scan-blocker'")" = t
 wait "$blocker_pid" 2>/dev/null || true
 blocker_pid=''
+wait_all_waiters
 for attempt in $(seq 1 30); do
     if history > "$fixture/waiter-finished.json" && jq -e --arg id "$waiter_run" 'any(.tasks[]; .id == $id and .state == "completed")' "$fixture/waiter-finished.json" >/dev/null; then break; fi
     sleep 1
 done
 jq -e --arg id "$waiter_run" --arg source "$source_run" 'any(.tasks[]; .id == $id and .state == "completed") and any(.tasks[]; .id == $source and .state == "running_or_interrupted")' "$fixture/waiter-finished.json"
 vm_ssh 1 'sudo journalctl -u shardline-validation-waiter-rebuild -o cat --no-pager' > "$fixture/waiter-report.log"
-grep -Fx 'removed_stale_latest_records: 1' "$fixture/waiter-report.log"
+# The aggregate assertion above permits any queued VM to win first.
 test "$(sql "SELECT COUNT(*) FROM shardline_file_records WHERE file_id='stale.bin'")" = 0
 vm_ssh 1 'sudo systemctl stop shardline-validation-observer; sudo systemd-run --unit shardline-validation-replacement -p EnvironmentFile=/etc/shardline/shardline-lfs.env -p User=fixture -p Group=fixture /usr/local/bin/shardline serve'
 for attempt in $(seq 1 30); do
-    if history > "$fixture/replaced.json" && jq -e '(.tasks | length) == 4' "$fixture/replaced.json" >/dev/null; then break; fi
+    if history > "$fixture/replaced.json" && jq -e --argjson count "$((node_count + 2))" '(.tasks | length) == $count' "$fixture/replaced.json" >/dev/null; then break; fi
     sleep 1
 done
-jq -e --arg id "$id" --arg source "$source_run" --arg waiter "$waiter_run" --arg host "$(head -n 1 "$fixture/1/identity")" '(.tasks | length) == 4 and ([.tasks[] | select((.id == $id or .id == $source) and .state == "running_or_interrupted")] | length) == 2 and ([.tasks[] | select(.state == "completed" and .owner.host == $host)] | length) == 2 and any(.tasks[]; .id == $waiter and .state == "completed")' "$fixture/replaced.json"
+jq -e --argjson count "$((node_count + 2))" --arg id "$id" --arg source "$source_run" --arg waiter "$waiter_run" --arg host "$(head -n 1 "$fixture/1/identity")" '(.tasks | length) == $count and ([.tasks[] | select((.id == $id or .id == $source) and .state == "running_or_interrupted")] | length) == 2 and ([.tasks[] | select(.state == "completed" and .owner.host == $host)] | length) == 2 and any(.tasks[]; .id == $waiter and .state == "completed")' "$fixture/replaced.json"
 curl --fail --silent --show-error --max-time 5 -H 'Authorization: Bearer maintenance-cross-host-token' \
     "http://127.0.0.1:${http_ports[1]}/api/v1/status" > "$fixture/status.json"
 jq -e '.state == "ready"' "$fixture/status.json"
