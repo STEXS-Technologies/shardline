@@ -1183,9 +1183,10 @@ async fn gc_write_barrier_middleware(
     if let ServerBackend::Postgres(backend) = &state.backend {
         let session = tokio::time::timeout(
             timeouts::REQUEST_TOTAL,
-            crate::maintenance_barrier::RequestSession::acquire(
+            crate::maintenance_barrier::RequestSession::acquire_bounded(
                 &backend.gc_barrier_pool,
                 Arc::clone(&backend.request_session_identity),
+                &backend.request_session_slots,
             ),
         )
         .await;

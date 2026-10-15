@@ -60,9 +60,10 @@ impl super::PostgresBackend {
         body: Bytes,
         repository_scope: Option<&RepositoryScope>,
     ) -> Result<UploadFileResponse, ServerError> {
-        crate::maintenance_barrier::RequestSession::scope_if_needed(
+        crate::maintenance_barrier::RequestSession::scope_bounded_if_needed(
             &self.gc_barrier_pool,
             &self.request_session_identity,
+            &self.request_session_slots,
             self.upload_file_stream(
                 file_id,
                 RequestBodyReader::from_bytes(body),
@@ -214,9 +215,10 @@ impl super::PostgresBackend {
         expected_hash: &str,
         body: Bytes,
     ) -> Result<XorbUploadResponse, ServerError> {
-        crate::maintenance_barrier::RequestSession::scope_if_needed(
+        crate::maintenance_barrier::RequestSession::scope_bounded_if_needed(
             &self.gc_barrier_pool,
             &self.request_session_identity,
+            &self.request_session_slots,
             self.upload_xorb_stream(expected_hash, RequestBodyReader::from_bytes(body)),
         )
         .await

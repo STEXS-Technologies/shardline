@@ -23,6 +23,7 @@ pub struct PostgresBackend {
     pub(crate) gc_barrier_pool: sqlx::PgPool,
     pub(crate) resource_lock_pool: sqlx::PgPool,
     pub(crate) request_session_identity: std::sync::Arc<()>,
+    pub(crate) request_session_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub(super) record_store: PostgresRecordStore,
     pub(super) object_store: ServerObjectStore,
     pub(crate) stream_work_pool: crate::admission::BoundedPool,
@@ -101,7 +102,9 @@ impl PostgresBackend {
         object_store: ServerObjectStore,
         server_frontends: &[ServerFrontend],
     ) -> Result<Self, ServerError> {
-        let pool = connect_postgres_metadata_pool(index_postgres_url, 10)?;
+        // Reuse the former 10 metadata + 4 request connections. Admission
+        // leaves four connections available for metadata even under write load.
+        let pool = connect_postgres_metadata_pool(index_postgres_url, 14)?;
 
         Ok(Self {
             public_base_url,
@@ -109,14 +112,13 @@ impl PostgresBackend {
             upload_max_in_flight_chunks,
             server_frontends: server_frontends.to_vec(),
             index_store: PostgresIndexStore::new(pool.clone()),
-            record_store: PostgresRecordStore::new(pool),
-            gc_barrier_pool: crate::maintenance_barrier::postgres_coordination_pool(
-                index_postgres_url,
-            )?,
+            record_store: PostgresRecordStore::new(pool.clone()),
+            gc_barrier_pool: pool,
             resource_lock_pool: crate::maintenance_barrier::postgres_coordination_pool(
                 index_postgres_url,
             )?,
             request_session_identity: std::sync::Arc::new(()),
+            request_session_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(10)),
             object_store,
             stream_work_pool: crate::admission::ExecutionPools::default_sizes().blocking_io,
         })
