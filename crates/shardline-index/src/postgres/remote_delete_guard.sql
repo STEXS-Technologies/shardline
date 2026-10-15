@@ -225,6 +225,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_te
 SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
 AS $references$
 DECLARE hashes TEXT[]; keys TEXT[]; lock_slot INTEGER; pending BOOLEAN;
+        include_direct_chunks BOOLEAN := FALSE;
 BEGIN
     IF TG_TABLE_SCHEMA IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
         RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
@@ -234,14 +235,7 @@ BEGIN
         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.record->'chunks') = 'array'
              THEN NEW.record->'chunks' ELSE '[]'::jsonb END) term
         WHERE term->>'hash' ~ '^[0-9a-f]{64}$';
-        IF NEW.record->>'chunk_size' IS DISTINCT FROM '0' THEN
-            SELECT array_agg(physical) INTO keys FROM (
-                SELECT left(hash, 2) || '/' || hash AS physical FROM unnest(hashes) hash
-                UNION
-                SELECT mapping.shard_object_key FROM shardline_dedupe_shards mapping
-                WHERE mapping.chunk_hash = ANY(hashes)
-            ) direct_chunks;
-        END IF;
+        include_direct_chunks := NEW.record->>'chunk_size' IS DISTINCT FROM '0';
     ELSIF TG_TABLE_NAME = 'shardline_file_reconstructions' THEN
         SELECT array_agg(DISTINCT term->>'object_hash') INTO hashes
         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.terms->'terms') = 'array'
@@ -256,12 +250,19 @@ BEGIN
     END IF;
     -- Xet containers and their GC-managed chunk-cache sidecars use these same
     -- namespaces. Other enabled frontends cannot make a pending key safe.
+    -- Collect every namespace together and deduplicate once. In particular,
+    -- both aliases of a file need the same checks without intermediate arrays
+    -- and repeated UNION sorts on each row's publication path.
     SELECT array_agg(DISTINCT physical ORDER BY physical) INTO keys FROM (
-        SELECT unnest(keys) AS physical
-        UNION
+        SELECT left(hash, 2) || '/' || hash AS physical FROM unnest(hashes) hash
+        WHERE include_direct_chunks
+        UNION ALL
+        SELECT mapping.shard_object_key FROM shardline_dedupe_shards mapping
+        WHERE include_direct_chunks AND mapping.chunk_hash = ANY(hashes)
+        UNION ALL
         SELECT 'xorbs/default/' || left(hash, 2) || '/' || hash || '.xorb'
         FROM unnest(hashes) hash
-        UNION
+        UNION ALL
         SELECT '_xorb_chunks/' || left(hash, 2) || '/' || hash
         FROM unnest(hashes) hash
     ) references_to_check;
