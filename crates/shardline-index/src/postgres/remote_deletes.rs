@@ -385,6 +385,33 @@ mod tests {
     use crate::{AsyncIndexStore, RecordTraversal, RetentionHold};
 
     #[tokio::test]
+    async fn canonical_reference_hash_check_preserves_legacy_regex_semantics() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        // Compare against the previous guard across byte lengths, ASCII,
+        // non-ASCII, whitespace and NULL. Invalid legacy values remain ignored.
+        let differences: i64 = query_scalar(
+            "WITH hashes(hash) AS (
+                SELECT repeat(chr(codepoint), len)
+                FROM generate_series(1, 255) codepoint
+                CROSS JOIN generate_series(63, 65) len
+                UNION ALL SELECT NULL::TEXT
+                UNION ALL SELECT repeat('a', 63) || chr(10)
+                UNION ALL SELECT repeat('a', 64) || chr(10)
+                UNION ALL SELECT repeat('a', 63) || '０'
+                UNION ALL SELECT repeat('0123456789abcdef', 4)
+             ) SELECT count(*) FROM hashes
+             WHERE (hash ~ '^[0-9a-f]{64}$') IS DISTINCT FROM
+                (octet_length(hash) = 64 AND translate(hash, '0123456789abcdef', '') = '')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(differences, 0);
+    }
+
+    #[tokio::test]
     async fn acknowledged_settlement_never_restores_work_ownership_or_clears_a_new_attempt() {
         let Some(observer_pool) = super::super::connect_isolated_postgres().await else {
             return;
