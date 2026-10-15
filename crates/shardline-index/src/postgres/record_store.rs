@@ -99,6 +99,46 @@ async fn prepare_record_upsert(
     .await
 }
 
+/// Both aliases carry the same record. Bind its JSON once, while preserving
+/// version-before-latest row processing and the existing per-row triggers.
+async fn upsert_file_aliases_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    version: &PostgresRecordLocator,
+    latest: &PostgresRecordLocator,
+    record: &FileRecord,
+) -> Result<(), PostgresMetadataStoreError> {
+    let permit = admit_record_conversion().await?;
+    let version = version.clone();
+    let latest = latest.clone();
+    let record = record.clone();
+    let statement = run_record_conversion(permit, move || {
+        Ok(query(
+            "INSERT INTO shardline_file_records (
+                record_key, record_kind, scope_key, file_id, content_hash, record
+             ) VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $3, $4, $5, $6)
+             ON CONFLICT (record_key)
+             DO UPDATE SET
+                record_kind = EXCLUDED.record_kind,
+                scope_key = EXCLUDED.scope_key,
+                file_id = EXCLUDED.file_id,
+                content_hash = EXCLUDED.content_hash,
+                record = EXCLUDED.record,
+                updated_at = now()",
+        )
+        .bind(version.record_key)
+        .bind(version.kind.as_str())
+        .bind(version.scope_key)
+        .bind(version.file_id)
+        .bind(record.content_hash.clone())
+        .bind(Json(record))
+        .bind(latest.record_key)
+        .bind(latest.kind.as_str()))
+    })
+    .await?;
+    statement.execute(&mut **transaction).await?;
+    Ok(())
+}
+
 impl super::PostgresRecordStore {
     /// Reads on the caller's ownership connection without replacing it.
     ///
@@ -173,11 +213,30 @@ impl super::PostgresRecordStore {
         record: &FileRecord,
     ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
-        let version_locator = self.version_record_locator(record);
-        upsert_record_in_transaction(&mut transaction, &version_locator, record).await?;
-        let latest_locator = self.latest_record_locator(record);
-        upsert_record_in_transaction(&mut transaction, &latest_locator, record).await?;
+        self.stage_file_version_metadata_in_transaction(&mut transaction, record)
+            .await?;
         transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Stages version and latest aliases in the caller's publication transaction.
+    ///
+    /// The caller must retain ownership and backing-object protection through
+    /// commit. Unlike the connection-based method, an error belongs to the
+    /// caller's transaction and requires its rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns conversion or database errors without committing the transaction.
+    pub async fn stage_file_version_metadata_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        record: &FileRecord,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let version_locator = self.version_record_locator(record);
+        let latest_locator = self.latest_record_locator(record);
+        upsert_file_aliases_in_transaction(transaction, &version_locator, &latest_locator, record)
+            .await?;
         Ok(())
     }
 
@@ -238,9 +297,8 @@ impl super::PostgresRecordStore {
             None
         };
         let version = self.version_record_locator(record);
-        upsert_record_in_transaction(&mut transaction, &version, record).await?;
         let latest = self.latest_record_locator(record);
-        upsert_record_in_transaction(&mut transaction, &latest, record).await?;
+        upsert_file_aliases_in_transaction(&mut transaction, &version, &latest, record).await?;
         let publication = match condition {
             S3PublishCondition::Unconditional => {
                 query(
@@ -1371,6 +1429,103 @@ mod tests {
             Err(super::super::PostgresMetadataStoreError::RecordNotFound)
         ));
         assert_eq!(store.read_latest_record_bytes(&record).await.unwrap(), None);
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn staged_aliases_remain_private_until_the_publication_transaction_commits() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut record = sample_record(None);
+        record.total_bytes = 50;
+        for commit in [false, true] {
+            let mut publication = pool.begin().await.unwrap();
+            store
+                .stage_file_version_metadata_in_transaction(&mut publication, &record)
+                .await
+                .unwrap();
+            let private_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+                    .fetch_one(&mut *publication)
+                    .await
+                    .unwrap();
+            assert_eq!(private_rows, 2);
+            let visible_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(visible_rows, 0);
+            if commit {
+                publication.commit().await.unwrap();
+            } else {
+                publication.rollback().await.unwrap();
+            }
+            let visible_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(visible_rows, if commit { 2 } else { 0 });
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_latest_alias_trigger_rolls_back_version_and_preserves_parent_transaction() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut previous = sample_record(None);
+        previous.total_bytes = 50;
+        store.commit_file_version_metadata(&previous).await.unwrap();
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_latest_alias() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+               IF NEW.record_kind = 'latest' THEN
+                 RAISE EXCEPTION 'latest alias rejected by fixture';
+               END IF;
+               RETURN NEW;
+             END $$;
+             CREATE TRIGGER reject_latest_alias BEFORE INSERT OR UPDATE
+             ON shardline_file_records FOR EACH ROW EXECUTE FUNCTION reject_latest_alias()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut replacement = previous.clone();
+        replacement.content_hash = "c".repeat(64);
+        let mut parent = pool.begin().await.unwrap();
+        let error = store
+            .commit_file_version_metadata_on_connection(&mut parent, &replacement)
+            .await
+            .unwrap_err();
+        let super::PostgresMetadataStoreError::Sqlx(error) = error else {
+            panic!("unexpected publication error: {error:?}");
+        };
+        assert_eq!(
+            error.as_database_error().unwrap().message(),
+            "latest alias rejected by fixture"
+        );
+        // The failed inner publication must leave the caller's transaction
+        // usable, with neither a replacement version nor a changed latest.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_kind, content_hash FROM shardline_file_records ORDER BY record_kind",
+        )
+        .fetch_all(&mut *parent)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("latest".into(), previous.content_hash.clone()),
+                ("version".into(), previous.content_hash)
+            ]
+        );
+        parent.commit().await.unwrap();
         pool.close().await;
     }
 
