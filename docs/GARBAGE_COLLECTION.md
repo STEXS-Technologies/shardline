@@ -80,8 +80,11 @@ Destructive runs also use a GC/write barrier. Every mutating server request hold
 shared side before it can write content or publish metadata; `--mark`, `--sweep`, and
 `--mark --sweep` hold the exclusive side for the complete collector run. Local
 deployments coordinate through an advisory file lock under the state root. Postgres
-deployments use a transaction-scoped advisory reader/writer lock shared by every
-replica. This closes the final re-reference race between the sweep's delete-time mark
+deployments use an advisory reader/writer barrier shared by every replica.
+Maintenance holds the lock on the same database session it uses for protected
+metadata work. If that session is lost, the run fails and cannot reconnect;
+a fresh invocation must acquire ownership again.
+This closes the final re-reference race between the sweep's delete-time mark
 and physical deletion. Read-only requests and GC dry runs do not take the exclusive
 barrier.
 

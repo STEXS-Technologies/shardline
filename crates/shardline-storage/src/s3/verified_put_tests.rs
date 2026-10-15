@@ -1,3 +1,8 @@
+#![allow(
+    clippy::panic,
+    reason = "unexpected requests must fail the fake provider test"
+)]
+
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -54,7 +59,7 @@ impl Provider {
                     assert!(read > 0);
                     request.extend_from_slice(&buffer[..read]);
                     if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                        break end + 4;
+                        break end.checked_add(4).unwrap();
                     }
                 };
                 let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
@@ -69,7 +74,8 @@ impl Provider {
                             .then(|| value.trim().parse().unwrap())
                     })
                     .unwrap_or(0);
-                while request.len() < header_end + length {
+                let body_end = header_end.checked_add(length).unwrap();
+                while request.len() < body_end {
                     let read = stream.read(&mut buffer).unwrap();
                     assert!(read > 0);
                     request.extend_from_slice(&buffer[..read]);
@@ -90,21 +96,21 @@ impl Provider {
                             } else {
                                 state.objects.insert(
                                     path.to_owned(),
-                                    request[header_end..header_end + length].to_vec(),
+                                    request[header_end..body_end].to_vec(),
                                 );
                                 ("200 OK", Vec::new())
                             }
                         }
                         "GET" if state.deny_reads => ("403 Forbidden", Vec::new()),
-                        "GET" => match state.objects.get(path).cloned() {
-                            Some(bytes) => ("200 OK", bytes),
-                            None => {
+                        "GET" => state.objects.get(path).cloned().map_or_else(
+                            || {
                                 if let Some(bytes) = state.insert_after_missing_read.take() {
                                     state.objects.insert(path.to_owned(), bytes);
                                 }
                                 ("404 Not Found", Vec::new())
-                            }
-                        },
+                            },
+                            |bytes| ("200 OK", bytes),
+                        ),
                         other => panic!("unexpected provider operation: {other}"),
                     }
                 };
