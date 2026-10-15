@@ -2,6 +2,10 @@ name: E2E Tests
 
 on:
   pull_request:
+  push:
+    branches:
+      - improve/reliability-integration-upgrade
+  workflow_dispatch:
 
 permissions:
   contents: read
