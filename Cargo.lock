@@ -4245,6 +4245,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek 2.2.0",
  "futures-util",
+ "gearhash",
  "getrandom 0.3.4",
  "hex",
  "hmac 0.12.1",

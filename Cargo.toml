@@ -40,6 +40,7 @@ ed25519-dalek = { version = "2", features = ["pem", "pkcs8"] }
 statechronicle-ed25519 = { package = "ed25519-dalek", version = "3" }
 flate2 = "1"
 futures-util = "0.3"
+gearhash = "0.1.3"
 getrandom = "0.3"
 hex = "0.4"
 hmac = "0.12"

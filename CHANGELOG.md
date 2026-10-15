@@ -30,6 +30,7 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Improved
 
+- Accelerated upload chunk-boundary scanning while preserving existing chunk identities.
 - Reused bounded validation output for full-file downloads while preserving
   complete container checks and bounded streaming responses.
 - Reduced duplicate S3 requests and overlapped bounded upload read-back while
