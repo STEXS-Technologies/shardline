@@ -20,6 +20,7 @@ base64.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
+gearhash.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 jsonwebtoken.workspace = true
