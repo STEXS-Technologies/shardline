@@ -234,15 +234,18 @@ BEGIN
         SELECT array_agg(DISTINCT term->>'hash') INTO hashes
         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.record->'chunks') = 'array'
              THEN NEW.record->'chunks' ELSE '[]'::jsonb END) term
-        WHERE term->>'hash' ~ '^[0-9a-f]{64}$';
+        WHERE octet_length(term->>'hash') = 64
+          AND translate(term->>'hash', '0123456789abcdef', '') = '';
         include_direct_chunks := NEW.record->>'chunk_size' IS DISTINCT FROM '0';
     ELSIF TG_TABLE_NAME = 'shardline_file_reconstructions' THEN
         SELECT array_agg(DISTINCT term->>'object_hash') INTO hashes
         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.terms->'terms') = 'array'
              THEN NEW.terms->'terms' ELSE '[]'::jsonb END) term
-        WHERE term->>'object_hash' ~ '^[0-9a-f]{64}$';
+        WHERE octet_length(term->>'object_hash') = 64
+          AND translate(term->>'object_hash', '0123456789abcdef', '') = '';
     ELSIF TG_TABLE_NAME = 'shardline_stored_objects' THEN
-        IF NEW.object_hash ~ '^[0-9a-f]{64}$' THEN
+        IF octet_length(NEW.object_hash) = 64
+           AND translate(NEW.object_hash, '0123456789abcdef', '') = '' THEN
             hashes := ARRAY[NEW.object_hash];
         END IF;
     ELSE
