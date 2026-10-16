@@ -16,7 +16,8 @@ The temporary Hyper patch supplies the HTTP/1 connection-shutdown fix from
 Hyper version contains that fix, crate publication remains blocked. Keep the
 patch for repository builds. When the fix is released, require that version in
 the manifests of published crates that depend on Hyper, update both lockfiles,
-remove the patch, and test a separate consumer without workspace overrides.
+remove the patches from both workspace manifests, and test a separate consumer
+without workspace overrides.
 Do not remove the patch merely to pass the publication check.
 
 Publishing is triggered only by pushing a release tag. Manual runs of the Release

@@ -1852,10 +1852,8 @@ fn run_bazel_build_with_download_mode(
         .arg("--curses=no")
         .arg(format!("--remote_download_outputs={download_mode}"))
         .arg(format!("--remote_cache={base_url}/v1/bazel/cache"))
+        // Send a single authorization header to the HTTP cache.
         .arg(format!("--remote_header=Authorization=Bearer {token}"))
-        .arg(format!(
-            "--remote_cache_header=Authorization=Bearer {token}"
-        ))
         .arg(format!(
             "--remote_upload_local_results={}",
             if allow_uploads { "true" } else { "false" }
@@ -2117,4 +2115,3 @@ fn create_oci_manifest_blob(
         manifest_size: manifest_bytes.len(),
     })
 }
-

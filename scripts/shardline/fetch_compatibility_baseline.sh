@@ -15,4 +15,6 @@ printf '%s  %s\n' c16b8e281bd08f51f24ee482b4808be809e30052a4c5b3df071b665e497209
 tar -xzf "$output/$archive" -C "$output"
 released="$output/shardline-1.11.3-x86_64-unknown-linux-gnu/shardline"
 test -x "$released"
+# The release executable is also mounted into non-root compatibility containers.
+chmod 0755 "$released"
 printf '%s\n' "$released"
