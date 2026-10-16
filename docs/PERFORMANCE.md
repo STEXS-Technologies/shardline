@@ -22,6 +22,13 @@ The target user experience is:
 - fetch feels normal
 - storage bills shrink
 
+These are goals, not savings guarantees. Exact duplicates, partially changed
+files and unique data have different storage costs. In the measured S3 protocol
+path, small edits can create a new container containing many unchanged chunks.
+The operational-efficiency patch reduces requests and temporary storage, but
+does not eliminate that duplication. See the [measured results](BENCHMARKS.md#operational-efficiency-measurements-october-16-2026)
+before estimating savings for a workload.
+
 ## Benchmark Categories
 
 Shardline needs three layers of measurement.
