@@ -1,5 +1,5 @@
 use serde_json::{from_value, to_value};
-use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
+use sqlx::{PgConnection, Row, postgres::PgRow, query};
 
 use super::{
     PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
@@ -8,9 +8,10 @@ use super::{
 use crate::{S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, s3_prefix_successor};
 use shardline_reliability::{
     OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
-    S3ObjectSnapshot, S3ObjectState, SnapshotEvidence, persisted_event_sequence,
-    reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
-    verify_persisted_merkle_commit_with_previous, verify_snapshot_event, verify_snapshot_evidence,
+    S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
+    build_reliability_merkle_commit_with_previous, persisted_event_sequence,
+    verify_and_append_snapshot_transition, verify_persisted_merkle_commit_with_previous,
+    verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -58,11 +59,16 @@ fn s3_object_snapshot(
     )?)
 }
 
+struct S3ObjectEvidenceHead {
+    evidence: S3ObjectEvidenceLog,
+    commitment: Option<serde_json::Value>,
+}
+
 async fn load_s3_object_evidence_head(
     connection: &mut PgConnection,
     scope_namespace: &str,
     object_key: &str,
-) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
+) -> Result<S3ObjectEvidenceHead, PostgresMetadataStoreError> {
     let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
     let row = query(
         "SELECT evidence.sequence, evidence.event_json,
@@ -101,7 +107,10 @@ async fn load_s3_object_evidence_head(
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
-        return Ok(S3ObjectEvidenceLog::default());
+        return Ok(S3ObjectEvidenceHead {
+            evidence: S3ObjectEvidenceLog::default(),
+            commitment: None,
+        });
     };
     let sequence = i64_to_u64(row.try_get("sequence")?)?;
     let event_json: serde_json::Value = row.try_get("event_json")?;
@@ -119,13 +128,17 @@ async fn load_s3_object_evidence_head(
             shardline_reliability::ReliabilityError::OperationMismatch,
         ));
     }
+    let commitment_json: Option<serde_json::Value> = row.try_get("evidence_merkle_json")?;
     verify_persisted_merkle_commit_with_previous(
         OperationKind::S3Object,
         event_json,
-        row.try_get("evidence_merkle_json")?,
+        commitment_json.clone(),
         row.try_get("previous_evidence_merkle_json")?,
     )?;
-    Ok(S3ObjectEvidenceLog::from_head(event)?)
+    Ok(S3ObjectEvidenceHead {
+        evidence: S3ObjectEvidenceLog::from_head(event)?,
+        commitment: commitment_json,
+    })
 }
 
 async fn lock_s3_object(
@@ -148,7 +161,7 @@ async fn verify_s3_object_evidence(
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, Some(entry))?;
     let evidence = load_s3_object_evidence_head(connection, scope_namespace, object_key).await?;
-    verify_snapshot_evidence(&evidence, &snapshot)?;
+    verify_snapshot_evidence(&evidence.evidence, &snapshot)?;
     Ok(())
 }
 
@@ -156,22 +169,11 @@ async fn persist_s3_object_evidence(
     connection: &mut PgConnection,
     evidence: &S3ObjectEvidenceLog,
     persisted_sequence: i64,
+    mut previous: Option<ReliabilityMerkleCommit>,
 ) -> Result<(), PostgresMetadataStoreError> {
-    if let Some(event) = evidence.events().last()
-        && persisted_sequence >= 0
-    {
-        let event_sequence = u64_to_i64(event.sequence)?;
-        if event_sequence <= persisted_sequence {
-            return Ok(());
-        }
-        if event_sequence == persisted_sequence.saturating_add(1) {
-            persist_s3_object_event(connection, event).await?;
-            return Ok(());
-        }
-    }
     for event in evidence.events() {
         if u64_to_i64(event.sequence)? > persisted_sequence {
-            persist_s3_object_event(connection, event).await?;
+            previous = Some(persist_s3_object_event(connection, event, previous.as_ref()).await?);
         }
     }
     Ok(())
@@ -180,30 +182,11 @@ async fn persist_s3_object_evidence(
 async fn persist_s3_object_event(
     connection: &mut PgConnection,
     event: &S3ObjectLifecycleEvent,
-) -> Result<(), PostgresMetadataStoreError> {
+    previous: Option<&ReliabilityMerkleCommit>,
+) -> Result<ReliabilityMerkleCommit, PostgresMetadataStoreError> {
     event.verify_integrity()?;
     let sequence = u64_to_i64(event.sequence)?;
-    let previous_json: Option<serde_json::Value> = query_scalar(
-        "SELECT CASE WHEN EXISTS (
-             SELECT 1 FROM shardline_reliability_events AS missing
-             WHERE missing.operation_kind = $1 AND missing.operation_id = $2
-               AND missing.sequence < $3
-               AND missing.merkle_commit_json IS NULL
-         ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
-         FROM shardline_reliability_events
-         WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
-         ORDER BY sequence DESC LIMIT 1",
-    )
-    .bind(event.operation.kind.as_str())
-    .bind(&event.operation.operation_id)
-    .bind(sequence)
-    .fetch_optional(&mut *connection)
-    .await?;
-    let previous = previous_json
-        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
-        .transpose()?;
-    let merkle_commit_json =
-        reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
+    let commitment = build_reliability_merkle_commit_with_previous(event, previous)?;
     let result = query(
         "INSERT INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
@@ -221,7 +204,7 @@ async fn persist_s3_object_event(
     .bind(sequence)
     .bind(to_value(event)?)
     .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
-    .bind(merkle_commit_json)
+    .bind(to_value(&commitment)?)
     .execute(&mut *connection)
     .await?;
     if result.rows_affected() == 0 {
@@ -229,7 +212,7 @@ async fn persist_s3_object_event(
             event.operation.operation_id.clone(),
         ));
     }
-    Ok(())
+    Ok(commitment)
 }
 
 pub(super) async fn current_s3_object_on_connection(
@@ -263,17 +246,19 @@ pub(super) async fn record_s3_object_transition(
         load_s3_object_evidence_head(connection, &entry.scope_namespace, &entry.object_key).await?;
     // Reuse the verified persisted head from this transition's transaction.
     // Capture it before baseline repair, whose sequence-zero event is new.
-    // Event persistence still checks the previous Merkle commitment and rejects
-    // conflicting events at the same sequence.
+    // Carry its verified commitment into each append, then chain any newly
+    // persisted baseline locally. Conflicting event inserts still fail.
     let persisted_sequence = stored
+        .evidence
         .events()
         .last()
         .map(|event| u64_to_i64(event.sequence))
         .transpose()?
         .unwrap_or(-1);
     let evidence =
-        verify_and_append_snapshot_transition(stored, before_snapshot, after_snapshot)?.0;
-    persist_s3_object_evidence(connection, &evidence, persisted_sequence).await
+        verify_and_append_snapshot_transition(stored.evidence, before_snapshot, after_snapshot)?.0;
+    let previous = stored.commitment.map(from_value).transpose()?;
+    persist_s3_object_evidence(connection, &evidence, persisted_sequence, previous).await
 }
 
 #[async_trait::async_trait]
@@ -549,6 +534,7 @@ mod tests {
         clippy::let_underscore_must_use
     )]
     use super::*;
+    use sqlx::query_scalar;
 
     async fn connect_postgres() -> Option<sqlx::PgPool> {
         super::super::connect_isolated_postgres().await
@@ -783,8 +769,8 @@ mod tests {
             .expect("snapshot")
             .evidence_operation()
             .expect("operation");
-        let json: Vec<serde_json::Value> = query_scalar(
-            "SELECT event_json FROM shardline_reliability_events
+        let rows = query(
+            "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
              WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
         )
         .bind(OperationKind::S3Object.as_str())
@@ -792,6 +778,33 @@ mod tests {
         .fetch_all(&pool)
         .await
         .expect("persisted history");
+        let sequences = rows
+            .iter()
+            .map(|row| {
+                i64_to_u64(row.try_get("sequence").expect("sequence")).expect("valid sequence")
+            })
+            .collect::<Vec<_>>();
+        let json = rows
+            .iter()
+            .map(|row| {
+                row.try_get::<serde_json::Value, _>("event_json")
+                    .expect("event JSON")
+            })
+            .collect::<Vec<_>>();
+        let commitments = rows
+            .iter()
+            .map(|row| {
+                row.try_get::<Option<serde_json::Value>, _>("merkle_commit_json")
+                    .expect("commitment JSON")
+            })
+            .collect::<Vec<_>>();
+        shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::S3Object,
+            &sequences,
+            &json,
+            &commitments,
+        )
+        .expect("all persisted Merkle parent links remain valid");
         let events: Vec<S3ObjectLifecycleEvent> = json
             .into_iter()
             .map(|value| from_value(value).expect("event"))
@@ -891,7 +904,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pg_s3_object_read_rejects_missing_predecessor_commitment() {
+    async fn pg_s3_object_read_and_write_reject_missing_predecessor_commitment() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
@@ -909,13 +922,16 @@ mod tests {
             "UPDATE shardline_reliability_events
              SET merkle_commit_json = NULL
              WHERE operation_kind = $1
+               AND event_json->'operation'->>'tenant' = $2
                AND sequence = (
                    SELECT MIN(sequence)
                    FROM shardline_reliability_events
                    WHERE operation_kind = $1
+                     AND event_json->'operation'->>'tenant' = $2
                )",
         )
         .bind(OperationKind::S3Object.as_str())
+        .bind(&scope)
         .execute(&pool)
         .await
         .expect("remove predecessor commitment");
@@ -924,6 +940,24 @@ mod tests {
             S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "model.bin")
                 .await
                 .is_err()
+        );
+        assert!(
+            store
+                .upsert_s3_object(&entry(&scope, "model.bin", "file-c"))
+                .await
+                .is_err(),
+            "publication must reject incomplete history before appending"
+        );
+        let file_id: String = query_scalar(
+            "SELECT file_id FROM shardline_s3_objects WHERE scope_namespace=$1 AND object_key='model.bin'",
+        )
+        .bind(&scope)
+        .fetch_one(&pool)
+        .await
+        .expect("unchanged row");
+        assert_eq!(
+            file_id, "file-b",
+            "failed append must roll back publication"
         );
         cleanup(&pool, &scope).await;
     }
