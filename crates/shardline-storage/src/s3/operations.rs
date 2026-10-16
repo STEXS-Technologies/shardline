@@ -41,6 +41,7 @@ pub struct S3ObjectStore {
     pub(crate) inner: AmazonS3,
     single_attempt_inner: AmazonS3,
     existence_hints: Arc<super::existence_hints::ExistenceHints>,
+    write_coordination: Arc<super::write_coordination::WriteCoordination>,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) key_prefix: Option<String>,
 }
@@ -139,6 +140,7 @@ impl S3ObjectStore {
             inner,
             single_attempt_inner,
             existence_hints: Arc::default(),
+            write_coordination: Arc::default(),
             runtime,
             key_prefix: config.key_prefix,
         })
@@ -151,7 +153,14 @@ impl S3ObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
         let location = self.location_for_key(key)?;
+        // A preceding writer can populate the hint before this writer probes.
+        // Every waiter still verifies remote bytes; this is request ordering,
+        // never a substitute for conditional creation or integrity checking.
+        let ownership = self.write_coordination.acquire(key).await;
         if self.existence_hints.contains(key) {
+            // Verification reads can overlap. Only uncertain creates need
+            // ordering; serializing large dedup reads would hurt throughput.
+            drop(ownership);
             match existing_object_outcome(&self.inner, &location, integrity).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(S3ObjectStoreError::ExistingObjectConflict) => {

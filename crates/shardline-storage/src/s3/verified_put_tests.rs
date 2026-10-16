@@ -165,6 +165,41 @@ fn integrity(bytes: &[u8]) -> ObjectIntegrity {
 }
 
 #[tokio::test]
+async fn concurrent_creates_use_one_put_and_revalidate_every_waiter() {
+    let provider = Provider::new();
+    let store = provider.store();
+    let key = ObjectKey::parse("chunks/concurrent").unwrap();
+    let bytes = b"shared upload chunk";
+    let expected = integrity(bytes);
+    let barrier = Arc::new(tokio::sync::Barrier::new(16));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        let store = store.clone();
+        let key = key.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.spawn(async move {
+            barrier.wait().await;
+            AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(bytes), &expected)
+                .await
+                .unwrap()
+        });
+    }
+    let mut inserted = 0;
+    while let Some(result) = tasks.join_next().await {
+        if result.unwrap() == PutOutcome::Inserted {
+            inserted += 1;
+        }
+    }
+    assert_eq!(inserted, 1);
+    let requests = provider.requests();
+    assert_eq!(requests.iter().filter(|method| *method == "PUT").count(), 1);
+    assert_eq!(
+        requests.iter().filter(|method| *method == "GET").count(),
+        15
+    );
+}
+
+#[tokio::test]
 async fn recent_key_is_revalidated_and_conflicting_remote_bytes_are_preserved() {
     let provider = Provider::new();
     let store = provider.store();

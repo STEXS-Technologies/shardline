@@ -7,6 +7,7 @@ mod existence_hints;
 pub mod multipart;
 pub mod operations;
 pub mod types;
+mod write_coordination;
 
 #[cfg(test)]
 mod tests;

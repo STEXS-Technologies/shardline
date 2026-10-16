@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Improved
+
+- Coordinate concurrent S3 creates for the same object within each server to
+  reduce failed duplicate PUT requests, while still checking existing content
+  and using conditional writes across servers.
+
 ## [1.12.0] - 2026-10-16
 
 This update strengthens maintenance coordination and recovery while preserving
