@@ -215,6 +215,23 @@ CPU costs, not a universal latency improvement or production scaling claim.
 Concurrent-GC phases perform different numbers of collections as workload
 duration changes; they are not comparisons of a fixed amount of GC work.
 
+Read-only follow-up reproduced the tail-latency trade-off. Three alternating
+pairs read 128 warmed one-MiB files through two replicas with 16 clients. Each
+run measured eight rounds of 1,024 complete responses. All 55,296 reads, including
+warmup, matched. Main-equivalent runs used two backend requests per read and the
+candidate used one; traces matched independent counters. The median round p99
+within each run was 48.1–48.3 ms before and 65.5–70.7 ms after, while median
+throughput increased from 530–558 to 810–990 MiB/s.
+
+A separate quota diagnostic observed substantially more CPU throttling on the
+candidate at one CPU per replica. At four CPUs neither version was throttled,
+and median round p99 was 46.7 ms before and 11.3 ms after. On the one-CPU candidate,
+setting the existing `SHARDLINE_BLOCKING_IO_POOL_SIZE=2` reduced p99 to 40.0 ms
+with approximately 990 MiB/s throughput. These are local diagnostic results,
+not default-sizing recommendations: a smaller blocking pool can limit useful
+concurrency when backend requests have longer latency. Measure that trade-off
+on the intended deployment before tuning; the patch keeps existing pool defaults.
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)
