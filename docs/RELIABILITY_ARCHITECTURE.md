@@ -45,6 +45,22 @@ intents use `LifecycleEvent`; LFS, OCI, and S3 resumable sessions use the same
 `shardline-index`. These are two domain views over one evidence protocol, not
 two interpretations of reliability.
 
+## Published crates and Hyper
+
+Workspace-built binaries and Docker images include the pinned Hyper HTTP/1
+shutdown fix from [Hyper PR #4222](https://github.com/hyperium/hyper/pull/4222).
+Cargo does not propagate a workspace patch to applications that depend on
+Shardline through crates.io. Those applications use released Hyper, which
+currently lacks this fix; under the affected connection-shutdown race, an HTTP
+request can remain pending. The binary and library distributions therefore do
+not have identical HTTP client failure behavior.
+
+The release and coordinated-publication scripts explicitly acknowledge this
+one exact override and warn before publication. Other overrides still block
+publication. Applications needing the fix can use the same Hyper patch in their
+own workspace until an upstream release includes it. Remove the exception once
+released dependencies and an independent consumer have been verified.
+
 ## Incremental dependency upgrade
 
 The StateChronicle and Penelope 0.2.0 dependency upgrade retains the existing

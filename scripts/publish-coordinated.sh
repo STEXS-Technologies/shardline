@@ -29,7 +29,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python3 "${REPO_ROOT}/scripts/check-publish-dependencies.py"
+python3 "${REPO_ROOT}/scripts/check-publish-dependencies.py" --allow-reviewed-hyper-patch
 ORDER_FILE="$(mktemp)"
 trap 'rm -f "${ORDER_FILE}"' EXIT
 

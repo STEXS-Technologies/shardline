@@ -46,8 +46,10 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Fixed
 
-- Blocked crate publication while workspace-only dependency overrides would
-  silently drop required fixes for downstream consumers.
+- Blocked unreviewed workspace dependency overrides during crate publication.
+  The pinned Hyper HTTP/1 shutdown fix has an explicit release exception:
+  binaries include it, while crates.io consumers use released Hyper without it.
+  See [library distribution limits](docs/RELIABILITY_ARCHITECTURE.md#published-crates-and-hyper).
 - Prevented maintenance commands from continuing as the old owner after losing
   their PostgreSQL ownership connection.
 - Blocked conflicting writes with a retryable error while an earlier remote delete
