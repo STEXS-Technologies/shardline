@@ -190,6 +190,31 @@ made 104 / 112 / 128 / 128 at 1 / 2 / 4 / 8 replicas in both repeats. Workspace
 compilation overlapped part of this run, so its timings are not used as additional
 latency or scaling evidence.
 
+A separate October 17 comparison alternated the main-equivalent and
+admission-qualified binaries across three pairs, with no compilation running.
+Each run used 128 one-MiB objects, 16 clients, and one or two API replicas limited
+to one CPU and 1 GiB each. The table shows medians across three runs; CPU seconds
+cover MinIO's container during initial ingestion of 128 MiB.
+
+| Initial upload workload | Replicas | Backend requests before → after | MinIO CPU seconds before → after |
+| --- | --- | --- | --- |
+| Unique content | 1 | 4,848 → 512 | 5.926 → 0.832 |
+| Unique content | 2 | 4,848 → 512 | 5.309 → 0.721 |
+| Repeated content | 1 | 4,828 → 416 | 2.875 → 0.368 |
+| Repeated content | 2 | 5,495 → 448 | 3.490 → 0.511 |
+
+All 13,824 post-GC full-body checks passed, and all lane traces matched MinIO's
+independent counters. Shardline CPU also fell in each initial-ingestion lane,
+but PostgreSQL CPU did not improve uniformly: the two-replica repeated-content
+lane rose from 0.800 to 0.927 seconds. Median initial-upload throughput increased
+in all four lanes, but individual timings varied substantially. Warm mixed reads
+also had a regression: with two replicas and unique content, the median of the
+three GET p99 measurements rose from 45.2 to 61.0 ms, despite higher aggregate
+throughput. These short shared-host runs support lower request and object-store
+CPU costs, not a universal latency improvement or production scaling claim.
+Concurrent-GC phases perform different numbers of collections as workload
+duration changes; they are not comparisons of a fixed amount of GC work.
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)
