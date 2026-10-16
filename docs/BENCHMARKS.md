@@ -239,6 +239,22 @@ with p99 of 117.9 ms. Both configurations made one backend GET per read, all
 8,192 body checks passed, and traces matched independent counters. This is an
 artificial-delay diagnostic, not a cloud-provider or production benchmark.
 
+A separate retention check uploaded 384 MiB of logical content (128 one-MiB
+files each of unique, repeated and compressible data) through two replicas per
+version. Repeated-data identities were separated from the unique dataset. The
+test waited the actual one-hour minimum retention period without changing clocks
+or quarantine timestamps, then ran GC and read every file through both replicas.
+All 1,536 full-body checks passed, both quarantine tables were empty, and backend
+traces matched independent MinIO counters.
+
+Direct packing avoided 3,824 temporary chunk objects totaling 169,005,073 bytes.
+After retention and GC, both versions held exactly 578 objects totaling
+168,862,899 bytes: 288 containers plus 290 maintenance/evidence objects. The final
+sweep made 17,641 backend requests before and 1,189 after. This fixture therefore
+demonstrates lower temporary storage and cleanup request costs, with an unchanged
+eventual stored footprint; it does not demonstrate additional compression or
+deduplication savings.
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)
