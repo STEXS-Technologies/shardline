@@ -124,6 +124,14 @@ initial stored/logical ratio excludes
 those later copies. Inspect quarantine counts and retention before interpreting
 individual chunk bytes as permanently retained or already reclaimable.
 
+S3-protocol uploads using PostgreSQL metadata and S3 storage now pack each bounded
+batch directly into its container. A successful upload verifies the complete stored container before
+publishing metadata, without first writing individual chunk objects. Container
+storage failures fall back to verified individual chunks. Public chunk-upload
+APIs keep their existing behavior. Compare backend request counts and object
+classes as well as bytes: avoiding temporary chunk objects lowers request and
+quarantine costs even when the eventual packed footprint is unchanged.
+
 This is a **shared-host S3 API baseline**, not evidence of eight-host production
 scaling. S3 routes run on the API role; this does not benchmark native LFS/Xet
 transfer replicas. Stored payload bytes exclude object-store filesystem overhead,

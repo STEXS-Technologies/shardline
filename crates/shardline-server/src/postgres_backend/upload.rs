@@ -39,7 +39,8 @@ impl super::PostgresBackend {
             self.chunk_size,
             false,
             self.upload_max_in_flight_chunks,
-        );
+        )
+        .with_packed_protocol_storage(&object_store);
         while let Some(bytes) = body.next_bytes().await? {
             ingestor.ingest_body_chunk(&object_store, &bytes).await?;
         }

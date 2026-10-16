@@ -35,8 +35,8 @@ use crate::{
 // Native Xet permits up to 64 MiB of raw data per xorb. Server-side ingest uses
 // half that ceiling so several independently validated range fetches can be in
 // flight without approaching whole-file memory use.
-const MAX_SERVER_XORB_RAW_BYTES: usize = 32 * 1024 * 1024;
-const MAX_XORB_CHUNKS: usize = 8 * 1024;
+pub(super) const MAX_SERVER_XORB_RAW_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_XORB_CHUNKS: usize = 8 * 1024;
 
 /// Incremental file upload assembler.
 pub(crate) struct FileUploadIngestor {
@@ -63,6 +63,7 @@ pub(crate) struct FileUploadIngestor {
     pub(super) raw_spool_bytes: u64,
     pub(super) raw_chunk_offsets: Vec<(u64, u64)>,
     verified_chunks: SharedReadCache,
+    packed_protocol: Option<super::packed_protocol::PackedProtocolUpload>,
 }
 
 impl FileUploadIngestor {
@@ -103,7 +104,19 @@ impl FileUploadIngestor {
             raw_spool_bytes: 0,
             raw_chunk_offsets: Vec::new(),
             verified_chunks: SharedReadCache::default(),
+            packed_protocol: None,
         }
+    }
+
+    /// Only internal protocol preparation may omit individual chunk objects.
+    /// Public chunk upload responses retain their existing storage behavior.
+    pub(crate) fn with_packed_protocol_storage(mut self, store: &ServerObjectStore) -> Self {
+        if let ServerObjectStore::S3(store) = store {
+            self.packed_protocol = Some(super::packed_protocol::PackedProtocolUpload::new(
+                store.clone(),
+            ));
+        }
+        self
     }
 
     /// Ingests one body chunk and persists complete content chunks.
@@ -153,7 +166,9 @@ impl FileUploadIngestor {
             self.flush_pending_chunk(object_store).await?;
         }
         self.drain_all_completed_chunks().await?;
-        self.record_completed_chunks()?;
+        if self.packed_protocol.is_none() {
+            self.record_completed_chunks()?;
+        }
 
         if let Some(expected_sha256) = expected_sha256 {
             let Some(sha256) = self.sha256.take() else {
@@ -174,7 +189,27 @@ impl FileUploadIngestor {
         // also bounds integrity validation before a requested range is exposed.
         // Individual chunks remain authoritative fallback for any batch that
         // cannot be packed or stored.
-        if matches!(object_store, ServerObjectStore::S3(_)) {
+        if let Some(packed) = self.packed_protocol.take() {
+            let result = packed.finish().await?;
+            if result.records.len() != usize::try_from(self.next_sequence)? {
+                return Err(ServerError::Overflow);
+            }
+            let mut offset = 0;
+            for record in &result.records {
+                if record.offset != offset {
+                    return Err(ServerError::Overflow);
+                }
+                offset = checked_add(offset, record.length)?;
+            }
+            if offset != self.next_offset {
+                return Err(ServerError::Overflow);
+            }
+            self.records = result.records;
+            self.chunks = result.chunks;
+            self.inserted_chunks = result.inserted;
+            self.reused_chunks = result.reused;
+            self.stored_bytes = result.stored_bytes;
+        } else if matches!(object_store, ServerObjectStore::S3(_)) {
             let verified_chunks = {
                 let mut cache = self
                     .verified_chunks
@@ -260,6 +295,10 @@ impl FileUploadIngestor {
         let offset = self.next_offset;
         let chunk_length = u64::try_from(chunk.len())?;
         self.next_offset = checked_add(self.next_offset, chunk_length)?;
+        if let Some(packed) = &mut self.packed_protocol {
+            packed.push(&chunk, offset).await?;
+            return Ok(());
+        }
         if matches!(object_store, ServerObjectStore::Blackhole) {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
@@ -311,6 +350,10 @@ impl FileUploadIngestor {
         let offset = self.next_offset;
         let chunk_length = u64::try_from(chunk.len())?;
         self.next_offset = checked_add(self.next_offset, chunk_length)?;
+        if let Some(packed) = &mut self.packed_protocol {
+            packed.push(&chunk, offset).await?;
+            return Ok(());
+        }
         if matches!(object_store, ServerObjectStore::Blackhole) {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =

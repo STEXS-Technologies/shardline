@@ -12,6 +12,9 @@ use shardline_xet_core::{
 
 use crate::{ServerError, object_store::ServerObjectStore};
 
+mod raw_batch;
+pub(super) use raw_batch::RecoverableXorbBatch;
+
 /// Metadata for one chunk packed inside a xorb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XorbChunkEntry {
@@ -96,6 +99,13 @@ pub(crate) fn pack_owned_chunks_into_xorb(
         ))
     })?;
 
+    packed_xorb_from_serialized(serialized, &chunk_metadata)
+}
+
+fn packed_xorb_from_serialized(
+    serialized: SerializedXorbObject,
+    chunk_metadata: &[(usize, u64)],
+) -> Result<PackedXorb, ServerError> {
     // Compute the xorb hash in Xet hex format.
     let merkle_hash: MerkleHash = serialized.hash;
     let hash_bytes: [u8; 32] = merkle_hash.into();

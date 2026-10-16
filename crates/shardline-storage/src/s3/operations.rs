@@ -190,6 +190,32 @@ impl S3ObjectStore {
         outcome
     }
 
+    /// Creates an immutable object and verifies its complete stored bytes.
+    ///
+    /// Existing objects retain the ordinary full integrity check. Newly created
+    /// objects are read back before success, so callers can publish a packed
+    /// container without first persisting and verifying its constituent chunks.
+    /// Verification streams the response instead of retaining a second copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or integrity error if creation or read-back fails.
+    /// A failed read-back never establishes that the newly written object is
+    /// safe to publish; it may remain as an unreachable immutable object.
+    pub async fn put_if_absent_with_read_back(
+        &self,
+        key: &ObjectKey,
+        body: ObjectBody<'_>,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, S3ObjectStoreError> {
+        let outcome = AsyncObjectStore::put_if_absent(self, key, body, integrity).await?;
+        if outcome == PutOutcome::Inserted {
+            let location = self.location_for_key(key)?;
+            existing_object_outcome(&self.inner, &location, integrity).await?;
+        }
+        Ok(outcome)
+    }
+
     /// Sends one delete without transparently retrying an uncertain mutation.
     ///
     /// A successful response settles this request. An error may mean the object

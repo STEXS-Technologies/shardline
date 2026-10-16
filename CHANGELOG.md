@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   to avoid reading them twice, without trusting fresh PUT acknowledgements.
 - Reuse object-listing lengths when checking quarantined orphans during GC,
   avoiding redundant S3 metadata requests while retaining length validation.
+- Pack S3-protocol uploads backed by PostgreSQL and S3 storage directly into
+  verified containers, avoiding temporary individual-chunk writes and their later
+  collection. Failed container storage retains the verified individual-chunk fallback.
 
 ## [1.12.0] - 2026-10-16
 

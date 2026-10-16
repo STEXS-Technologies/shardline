@@ -26,6 +26,7 @@ struct State {
     requests: Vec<String>,
     deny_reads: bool,
     insert_after_missing_read: Option<Vec<u8>>,
+    new_write_override: Option<Vec<u8>>,
 }
 
 struct Provider {
@@ -94,10 +95,11 @@ impl Provider {
                             if state.objects.contains_key(path) {
                                 ("412 Precondition Failed", Vec::new())
                             } else {
-                                state.objects.insert(
-                                    path.to_owned(),
-                                    request[header_end..body_end].to_vec(),
-                                );
+                                let stored = state
+                                    .new_write_override
+                                    .take()
+                                    .unwrap_or_else(|| request[header_end..body_end].to_vec());
+                                state.objects.insert(path.to_owned(), stored);
                                 ("200 OK", Vec::new())
                             }
                         }
@@ -162,6 +164,76 @@ fn integrity(bytes: &[u8]) -> ObjectIntegrity {
         ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes()),
         bytes.len() as u64,
     )
+}
+
+#[tokio::test]
+async fn read_back_checks_new_objects_and_does_not_repeat_existing_verification() {
+    let provider = Provider::new();
+    let store = provider.store();
+    let key = ObjectKey::parse("xorbs/read-back").unwrap();
+    let bytes = b"container bytes";
+    let expected = integrity(bytes);
+    assert_eq!(
+        store
+            .put_if_absent_with_read_back(&key, ObjectBody::from_slice(bytes), &expected)
+            .await
+            .unwrap(),
+        PutOutcome::Inserted
+    );
+    assert_eq!(provider.requests(), ["PUT", "GET"]);
+    assert_eq!(
+        store
+            .put_if_absent_with_read_back(&key, ObjectBody::from_slice(bytes), &expected)
+            .await
+            .unwrap(),
+        PutOutcome::AlreadyExists
+    );
+    assert_eq!(provider.requests(), ["PUT", "GET", "GET"]);
+}
+
+#[tokio::test]
+async fn read_back_rejects_corrupt_truncated_and_extended_new_objects() {
+    let bytes = b"container bytes";
+    for stored in [
+        b"different bytes".to_vec(),
+        Vec::new(),
+        [bytes.as_slice(), b"extra"].concat(),
+    ] {
+        let provider = Provider::new();
+        provider.state.lock().unwrap().new_write_override = Some(stored);
+        let result = provider
+            .store()
+            .put_if_absent_with_read_back(
+                &ObjectKey::parse("xorbs/corrupt").unwrap(),
+                ObjectBody::from_slice(bytes),
+                &integrity(bytes),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
+        assert_eq!(provider.requests(), ["PUT", "GET"]);
+    }
+}
+
+#[tokio::test]
+async fn read_back_does_not_accept_a_put_acknowledgement_without_read_permission() {
+    let provider = Provider::new();
+    provider.state.lock().unwrap().deny_reads = true;
+    let bytes = b"container bytes";
+    assert!(
+        provider
+            .store()
+            .put_if_absent_with_read_back(
+                &ObjectKey::parse("xorbs/unreadable").unwrap(),
+                ObjectBody::from_slice(bytes),
+                &integrity(bytes),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.requests(), ["PUT", "GET"]);
 }
 
 #[tokio::test]

@@ -3,6 +3,7 @@ pub mod cdc;
 mod chunk_store;
 mod durable_chunks;
 mod ingestor;
+mod packed_protocol;
 mod upload_attempt;
 pub mod xorb_packer;
 

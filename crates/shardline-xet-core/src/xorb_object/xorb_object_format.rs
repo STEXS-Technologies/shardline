@@ -716,6 +716,15 @@ impl SerializedXorbObject {
         compression_scheme: CompressionScheme,
         serialize_footer: bool,
     ) -> Result<Self, CoreError> {
+        Self::from_xorb_ref_with_compression(&xorb, compression_scheme, serialize_footer)
+    }
+
+    /// Serializes a bounded batch while retaining its input for storage fallback.
+    pub fn from_xorb_ref_with_compression(
+        xorb: &super::RawXorbData,
+        compression_scheme: CompressionScheme,
+        serialize_footer: bool,
+    ) -> Result<Self, CoreError> {
         let mut xorb_object_info = XorbObjectInfoV1::default();
 
         let (hash, chunk_hashes) = xorb.hash_with_chunk_hashes();
@@ -741,8 +750,8 @@ impl SerializedXorbObject {
 
         let mut serialized_data = Vec::with_capacity(size_upper_bound);
 
-        for chunk in xorb.data {
-            serialize_chunk(&chunk, &mut serialized_data, compression_scheme)?;
+        for chunk in &xorb.data {
+            serialize_chunk(chunk, &mut serialized_data, compression_scheme)?;
             xorb_object_info
                 .chunk_boundary_offsets
                 .push(serialized_data.len() as u64);
