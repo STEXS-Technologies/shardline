@@ -232,6 +232,13 @@ not default-sizing recommendations: a smaller blocking pool can limit useful
 concurrency when backend requests have longer latency. Measure that trade-off
 on the intended deployment before tuning; the patch keeps existing pool defaults.
 
+A controlled proxy adding 25 ms to each backend GET/HEAD demonstrated that
+trade-off on the one-CPU candidate. The default pool of 16 delivered about
+463 MiB/s with median round p99 of 38.1 ms; a pool of 2 delivered 139 MiB/s
+with p99 of 117.9 ms. Both configurations made one backend GET per read, all
+8,192 body checks passed, and traces matched independent counters. This is an
+artificial-delay diagnostic, not a cloud-provider or production benchmark.
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)
