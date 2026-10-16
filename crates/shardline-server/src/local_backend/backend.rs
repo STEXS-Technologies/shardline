@@ -34,6 +34,7 @@ pub struct LocalBackend {
     pub(super) record_store: LocalRecordStore,
     pub(super) object_store: ServerObjectStore,
     pub(crate) stream_work_pool: crate::admission::BoundedPool,
+    pub(crate) packing_work_pool: crate::admission::BoundedPool,
     pub(super) metadata_write_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) protocol_upload_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -139,6 +140,7 @@ impl LocalBackend {
             server_frontends: server_frontends.to_vec(),
             object_store,
             stream_work_pool: crate::admission::ExecutionPools::default_sizes().blocking_io,
+            packing_work_pool: crate::admission::ExecutionPools::default_sizes().hashing,
             metadata_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             protocol_upload_lock: Arc::new(tokio::sync::Mutex::new(())),
         };

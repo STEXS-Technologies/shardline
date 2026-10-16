@@ -35,6 +35,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Reuse the verified S3 evidence head during PostgreSQL publication, avoiding a
   repeated sequence query and parent-commitment reads while retaining history
   validation and conflict checks.
+- Bound direct upload packing through the existing hashing pool, including raw
+  batch buffering and cancelled blocking work.
+- Return a retryable overload response when PostgreSQL request admission times
+  out, instead of a generic internal error.
 
 ## [1.12.0] - 2026-10-16
 

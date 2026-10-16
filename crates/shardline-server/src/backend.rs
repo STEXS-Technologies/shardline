@@ -203,10 +203,16 @@ impl ServerBackend {
         Ok(vec![guard])
     }
 
-    pub(crate) fn set_stream_work_pool(&mut self, pool: crate::admission::BoundedPool) {
+    pub(crate) fn set_work_pools(&mut self, pools: &crate::admission::ExecutionPools) {
         match self {
-            Self::Local(backend) => backend.stream_work_pool = pool,
-            Self::Postgres(backend) => backend.stream_work_pool = pool,
+            Self::Local(backend) => {
+                backend.stream_work_pool = pools.blocking_io.clone();
+                backend.packing_work_pool = pools.hashing.clone();
+            }
+            Self::Postgres(backend) => {
+                backend.stream_work_pool = pools.blocking_io.clone();
+                backend.packing_work_pool = pools.hashing.clone();
+            }
         }
     }
 

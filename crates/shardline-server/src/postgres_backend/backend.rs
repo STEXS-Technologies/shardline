@@ -27,6 +27,7 @@ pub struct PostgresBackend {
     pub(super) record_store: PostgresRecordStore,
     pub(super) object_store: ServerObjectStore,
     pub(crate) stream_work_pool: crate::admission::BoundedPool,
+    pub(crate) packing_work_pool: crate::admission::BoundedPool,
 }
 
 impl PostgresBackend {
@@ -121,6 +122,7 @@ impl PostgresBackend {
             request_session_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(10)),
             object_store,
             stream_work_pool: crate::admission::ExecutionPools::default_sizes().blocking_io,
+            packing_work_pool: crate::admission::ExecutionPools::default_sizes().hashing,
         })
     }
 

@@ -110,10 +110,15 @@ impl FileUploadIngestor {
 
     /// Only internal protocol preparation may omit individual chunk objects.
     /// Public chunk upload responses retain their existing storage behavior.
-    pub(crate) fn with_packed_protocol_storage(mut self, store: &ServerObjectStore) -> Self {
+    pub(crate) fn with_packed_protocol_storage(
+        mut self,
+        store: &ServerObjectStore,
+        pool: &crate::admission::BoundedPool,
+    ) -> Self {
         if let ServerObjectStore::S3(store) = store {
             self.packed_protocol = Some(super::packed_protocol::PackedProtocolUpload::new(
                 store.clone(),
+                pool.clone(),
             ));
         }
         self

@@ -128,7 +128,13 @@ impl RequestSession {
             })
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
-            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+            .map_err(|error| {
+                if matches!(error, sqlx::Error::PoolTimedOut) {
+                    ServerError::WorkQueueSaturated
+                } else {
+                    shardline_index::PostgresMetadataStoreError::from(error).into()
+                }
+            })?;
         connection.close_on_drop();
         sqlx::query("SELECT pg_advisory_lock_shared($1)")
             .bind(GC_WRITE_BARRIER_KEY)

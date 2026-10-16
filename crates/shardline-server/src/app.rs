@@ -329,7 +329,7 @@ async fn router_with_housekeeping_guard(
         bounded_pool_size_from_env("SHARDLINE_BLOCKING_IO_POOL_SIZE", 16),
     )?;
     let mut backend = backend;
-    backend.set_stream_work_pool(pools.blocking_io.clone());
+    backend.set_work_pools(&pools);
     let state = Arc::new(AppState {
         config,
         role,

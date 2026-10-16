@@ -23,18 +23,22 @@ pub(super) struct PackedProtocolResult {
 
 pub(super) struct PackedProtocolUpload {
     store: S3ObjectStore,
+    work_pool: crate::admission::BoundedPool,
     pending: Vec<(Vec<u8>, u64)>,
     pending_bytes: usize,
     result: PackedProtocolResult,
+    batch_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl PackedProtocolUpload {
-    pub(super) fn new(store: S3ObjectStore) -> Self {
+    pub(super) fn new(store: S3ObjectStore, work_pool: crate::admission::BoundedPool) -> Self {
         Self {
             store,
+            work_pool,
             pending: Vec::new(),
             pending_bytes: 0,
             result: PackedProtocolResult::default(),
+            batch_permit: None,
         }
     }
 
@@ -47,6 +51,14 @@ impl PackedProtocolUpload {
             && (next > MAX_SERVER_XORB_RAW_BYTES || self.pending.len() >= MAX_XORB_CHUNKS)
         {
             self.flush().await?;
+        }
+        if self.batch_permit.is_none() {
+            self.batch_permit = Some(
+                self.work_pool
+                    .acquire()
+                    .await
+                    .map_err(|error| ServerError::Io(std::io::Error::other(error)))?,
+            );
         }
         self.pending_bytes = self
             .pending_bytes
@@ -69,15 +81,16 @@ impl PackedProtocolUpload {
         let raw_bytes = u64::try_from(self.pending_bytes)?;
         self.pending_bytes = 0;
         // Keep raw ownership for fallback without cloning a second raw batch.
-        // Cancellation can leave CPU work running, but it cannot start storage
-        // work after this future has been dropped.
-        let (raw, packed) = tokio::task::spawn_blocking(move || {
-            let raw = RecoverableXorbBatch::new(chunks);
-            let packed = raw.pack();
-            (raw, packed)
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?;
+        // The permit covers raw accumulation, CPU work, read-back and fallback.
+        // A cancelled running worker retains it until its buffers are dropped.
+        let permit = self.batch_permit.take().ok_or(ServerError::Overflow)?;
+        let ((raw, packed), _permit) =
+            crate::admission::blocking_work_with_permit(permit, move || {
+                let raw = RecoverableXorbBatch::new(chunks);
+                let packed = raw.pack();
+                Ok((raw, packed))
+            })
+            .await?;
         match packed {
             Ok(mut packed) => {
                 let key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex)?;

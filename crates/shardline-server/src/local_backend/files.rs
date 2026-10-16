@@ -221,7 +221,8 @@ impl LocalBackend {
             self.upload_max_in_flight_chunks,
         );
         if matches!(storage, UploadStorage::ProtocolContainers) {
-            ingestor = ingestor.with_packed_protocol_storage(&object_store);
+            ingestor =
+                ingestor.with_packed_protocol_storage(&object_store, &self.packing_work_pool);
         }
         while let Some(bytes) = body.next_bytes().await? {
             ingestor.ingest_body_chunk(&object_store, &bytes).await?;

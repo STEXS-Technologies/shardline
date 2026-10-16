@@ -136,6 +136,15 @@ storage, for both SQLite and PostgreSQL metadata. They retain source SHA-256
 validation and upload-intent recovery. Native Xet already uploads containers;
 the public generic upload API still stores its independently downloadable chunks.
 
+Direct packing uses the existing hashing pool (`SHARDLINE_HASHING_POOL_SIZE`,
+default 8). Each active batch holds a slot from its first raw chunk through
+packing, stored-container verification or fallback. Waiting uploads do not copy
+a packing batch, and cancelled running CPU work retains its slot until it ends.
+The normal raw batch target is 32 MiB; a single CDC chunk can exceed that target
+with unusually large configured chunk sizes. Encoded containers, request buffers
+and metadata also consume memory, so measure process RSS under representative
+concurrency rather than treating the raw batch target as a total memory limit.
+
 Packed-file downloads obtain container length and data in one S3 GET, avoiding
 the separate HEAD on successful reads. The complete container is still checked
 before its selected bytes are exposed, using a temporary file to bound memory.
@@ -153,6 +162,56 @@ Separate-host load generators, native LFS/Xet comparisons, node termination duri
 load, and 100 TB–1 PB metadata/object cardinality remain separate validation work.
 Increasing a logical byte estimate without creating the corresponding metadata
 and object population does not establish large-scale viability.
+
+### Operational-efficiency measurements (October 16, 2026)
+
+These local PostgreSQL/MinIO measurements compare main-equivalent product code
+(`c2301dac`, based on `01f2c9e3`) with `48727f81`. Each lane uploaded 32 objects
+of 1 MiB using 16 clients, with two repeats at 1, 2, 4 and 8 API replicas.
+Backend counts include attempted requests, including retries.
+
+| Initial upload workload | Replicas | Median backend requests before → after |
+| --- | --- | --- |
+| Repeated content | 1 | 1,205 → 104 |
+| Repeated content | 2 | 1,391 → 112 |
+| Repeated content | 4 / 8 | 1,605 → 128 |
+| Unique content | 1 / 2 / 4 / 8 | 1,188 → 128 |
+
+All 5,760 post-GC full-body checks passed. These counts demonstrate lower request
+amplification for this fixture; two shared-host repeats do not establish stable
+tail-latency or production scale-out improvements.
+
+Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
+608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
+savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)
+reduced database calls from 155,648 to 147,456 per 4,096 small-object PUT/GET pairs.
+In sequential four-replica runs, median server CPU fell from 9.14 to 8.56 seconds
+and PostgreSQL CPU from 15.20 to 11.86 seconds, with unchanged backend requests
+and 16,384 verified post-GC reads per version. Timing remains host-dependent.
+
+Packing-admission qualification used 64 concurrent unique 36 MiB uploads against
+one API replica with 1 CPU and a 1 GiB memory limit. All uploads and 64 post-GC
+reads passed; process peak RSS was approximately 500 MiB. An earlier run ended
+with a client broken pipe; a separate overload test established that request
+admission timeout responses can close an upload before its body is sent.
+After correcting those responses, a deliberately restricted 0.25-CPU run returned
+19 successes and 45 HTTP 503 responses with retry guidance. All 64 objects retained
+valid old or new content after GC, every acknowledged replacement was present,
+and peak process RSS was approximately 414 MiB with no OOM kill. These are bounded
+fixture results, not a universal memory or latency guarantee.
+
+The checksum-verified published v1.12.0 Linux binary also passed a two-replica
+shared-PostgreSQL/shared-bucket round trip: released writes, branch reads and
+writes, released reads and writes after rollback, then branch reads after GC.
+All 96 full-body reads matched across 36 MiB files. This verifies the exercised
+S3 protocol representations; other protocol and fault combinations need their
+own qualification.
+
+A two-replica fault drill killed and restarted a server during an incomplete
+72 MiB replacement after sending 36 MiB, preserving the previous object. It then
+completed 32 identical 36 MiB uploads through both replicas and eight uploads whose
+clients discarded acknowledgements. Both replicas returned the expected content
+after GC. Discarding client acknowledgements does not simulate a lost S3 response.
 
 ## Production-shaped incident and recovery
 

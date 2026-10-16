@@ -159,7 +159,10 @@ impl Provider {
             NonZeroUsize::new(8).unwrap(),
         );
         if direct {
-            ingestor = ingestor.with_packed_protocol_storage(&self.objects);
+            ingestor = ingestor.with_packed_protocol_storage(
+                &self.objects,
+                &crate::admission::ExecutionPools::default_sizes().hashing,
+            );
         }
         for part in bytes.chunks(frame) {
             ingestor
@@ -170,6 +173,7 @@ impl Provider {
     }
 }
 
+mod admission;
 mod digest;
 
 impl Drop for Provider {
@@ -191,7 +195,10 @@ async fn empty_upload_matches_legacy_without_storage_requests() {
 #[tokio::test]
 async fn chunk_count_limit_flushes_before_adding_another_chunk() {
     let provider = Provider::new(0).await;
-    let mut upload = PackedProtocolUpload::new(provider.s3_store().clone());
+    let mut upload = PackedProtocolUpload::new(
+        provider.s3_store().clone(),
+        crate::admission::ExecutionPools::default_sizes().hashing,
+    );
     for offset in 0..=MAX_XORB_CHUNKS {
         upload.push(b"x", offset as u64).await.unwrap();
         assert!(upload.pending.len() <= MAX_XORB_CHUNKS);
@@ -258,7 +265,10 @@ async fn corrupt_container_and_fallback_never_produce_a_publishable_record() {
 #[tokio::test]
 async fn bounded_batches_keep_original_container_boundaries_and_release_raw_input() {
     let provider = Provider::new(0).await;
-    let mut upload = PackedProtocolUpload::new(provider.s3_store().clone());
+    let mut upload = PackedProtocolUpload::new(
+        provider.s3_store().clone(),
+        crate::admission::BoundedPool::new(NonZeroUsize::new(1).unwrap()),
+    );
     let chunk = vec![b'a'; 1024 * 1024];
     for index in 0..33 {
         upload.push(&chunk, index * 1024 * 1024).await.unwrap();
