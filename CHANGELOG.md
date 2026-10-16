@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Pack S3-protocol uploads backed by PostgreSQL and S3 storage directly into
   verified containers, avoiding temporary individual-chunk writes and their later
   collection. Failed container storage retains the verified individual-chunk fallback.
+- Extend direct packing to LFS, OCI and Bazel digest uploads using S3 storage,
+  retaining SHA-256 validation, upload recovery and public chunk-upload behavior.
 
 ## [1.12.0] - 2026-10-16
 

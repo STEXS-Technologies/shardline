@@ -400,12 +400,12 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => {
                 backend
-                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
+                    .upload_digest_protocol_stream(&file_id, body, digest_hex)
                     .await?;
             }
             Self::Postgres(backend) => {
                 backend
-                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
+                    .upload_digest_protocol_stream(&file_id, body, digest_hex)
                     .await?;
             }
         }

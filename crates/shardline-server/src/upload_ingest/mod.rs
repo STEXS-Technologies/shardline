@@ -13,3 +13,10 @@ pub(super) use body_reader::{
 };
 pub(crate) use ingestor::FileUploadIngestor;
 pub(crate) use upload_attempt::upload_attempt_id;
+
+/// Public chunk responses require standalone objects; protocol responses do not.
+#[derive(Clone, Copy)]
+pub(crate) enum UploadStorage {
+    IndividualChunks,
+    ProtocolContainers,
+}

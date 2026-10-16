@@ -82,6 +82,16 @@ impl Provider {
                                 .body(axum::body::Body::empty())
                                 .unwrap();
                         }
+                        if method == Method::HEAD {
+                            return match state.objects.get(&path) {
+                                Some(bytes) => response
+                                    .header("content-length", bytes.len())
+                                    .status(StatusCode::OK),
+                                None => response.status(StatusCode::NOT_FOUND),
+                            }
+                            .body(axum::body::Body::empty())
+                            .unwrap();
+                        }
                         assert_eq!(method, Method::GET);
                         let Some(bytes) = state.objects.get(&path) else {
                             return response
@@ -159,6 +169,8 @@ impl Provider {
         ingestor.finish(&self.objects, "identity", None, None).await
     }
 }
+
+mod digest;
 
 impl Drop for Provider {
     fn drop(&mut self) {

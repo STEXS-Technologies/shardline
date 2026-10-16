@@ -131,6 +131,10 @@ storage failures fall back to verified individual chunks. Public chunk-upload
 APIs keep their existing behavior. Compare backend request counts and object
 classes as well as bytes: avoiding temporary chunk objects lowers request and
 quarantine costs even when the eventual packed footprint is unchanged.
+LFS, OCI and Bazel digest uploads use the same direct-packing path with S3
+storage, for both SQLite and PostgreSQL metadata. They retain source SHA-256
+validation and upload-intent recovery. Native Xet already uploads containers;
+the public generic upload API still stores its independently downloadable chunks.
 
 This is a **shared-host S3 API baseline**, not evidence of eight-host production
 scaling. S3 routes run on the API role; this does not benchmark native LFS/Xet
