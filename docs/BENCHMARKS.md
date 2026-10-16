@@ -212,9 +212,13 @@ fixture results, not a universal memory or latency guarantee.
 The checksum-verified published v1.12.0 Linux binary also passed a two-replica
 shared-PostgreSQL/shared-bucket round trip: released writes, branch reads and
 writes, released reads and writes after rollback, then branch reads after GC.
-All 96 full-body reads matched across 36 MiB files. This verifies the exercised
-S3 protocol representations; other protocol and fault combinations need their
-own qualification.
+All 96 full-body reads matched across 36 MiB files. A separate round trip through
+LFS, OCI and Bazel endpoints used the same released binary, two replicas and
+36 MiB files. All 72 full-body reads matched: 12 candidate reads of released
+writes, 24 released reads after candidate writes and GC, and 36 candidate reads
+after rollback writes and another GC. Backend trace totals matched MinIO
+counters. These checks verify the exercised representations and transitions;
+other protocol and fault combinations need their own qualification.
 
 A two-replica fault drill killed and restarted a server during an incomplete
 72 MiB replacement after sending 36 MiB, preserving the previous object. It then
