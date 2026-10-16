@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   bucket listing while retaining age checks and exact temporary-key matching.
 - Enable TCP_NODELAY on accepted HTTP connections to avoid delayed delivery of
   small streamed responses.
+- Reuse the verified S3 evidence head during PostgreSQL publication, avoiding a
+  repeated sequence query while retaining history validation and conflict checks.
 
 ## [1.12.0] - 2026-10-16
 

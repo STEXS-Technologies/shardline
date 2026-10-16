@@ -10,8 +10,7 @@ use shardline_reliability::{
     OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
     S3ObjectSnapshot, S3ObjectState, SnapshotEvidence, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit_with_previous,
-    verify_snapshot_event, verify_snapshot_evidence,
+    verify_persisted_merkle_commit_with_previous, verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -141,17 +140,6 @@ async fn lock_s3_object(
     Ok(())
 }
 
-async fn current_s3_object_evidence(
-    connection: &mut PgConnection,
-    scope_namespace: &str,
-    object_key: &str,
-    entry: Option<&S3ObjectEntry>,
-) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
-    let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
-    let loaded = load_s3_object_evidence_head(connection, scope_namespace, object_key).await?;
-    Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?.0)
-}
-
 async fn verify_s3_object_evidence(
     connection: &mut PgConnection,
     scope_namespace: &str,
@@ -167,20 +155,8 @@ async fn verify_s3_object_evidence(
 async fn persist_s3_object_evidence(
     connection: &mut PgConnection,
     evidence: &S3ObjectEvidenceLog,
+    persisted_sequence: i64,
 ) -> Result<(), PostgresMetadataStoreError> {
-    let Some(operation) = evidence.events().first() else {
-        return Ok(());
-    };
-    let persisted_sequence: Option<i64> = query_scalar(
-        "SELECT MAX(sequence)
-         FROM shardline_reliability_events
-         WHERE operation_kind = $1 AND operation_id = $2",
-    )
-    .bind(operation.operation.kind.as_str())
-    .bind(&operation.operation.operation_id)
-    .fetch_one(&mut *connection)
-    .await?;
-    let persisted_sequence = persisted_sequence.unwrap_or(-1);
     if let Some(event) = evidence.events().last()
         && persisted_sequence >= 0
     {
@@ -283,16 +259,21 @@ pub(super) async fn record_s3_object_transition(
     })?;
     let before_snapshot = s3_object_snapshot(&entry.scope_namespace, &entry.object_key, before)?;
     let after_snapshot = s3_object_snapshot(&entry.scope_namespace, &entry.object_key, after)?;
-    let stored = current_s3_object_evidence(
-        connection,
-        &entry.scope_namespace,
-        &entry.object_key,
-        before,
-    )
-    .await?;
+    let stored =
+        load_s3_object_evidence_head(connection, &entry.scope_namespace, &entry.object_key).await?;
+    // Reuse the verified persisted head from this transition's transaction.
+    // Capture it before baseline repair, whose sequence-zero event is new.
+    // Event persistence still checks the previous Merkle commitment and rejects
+    // conflicting events at the same sequence.
+    let persisted_sequence = stored
+        .events()
+        .last()
+        .map(|event| u64_to_i64(event.sequence))
+        .transpose()?
+        .unwrap_or(-1);
     let evidence =
         verify_and_append_snapshot_transition(stored, before_snapshot, after_snapshot)?.0;
-    persist_s3_object_evidence(connection, &evidence).await
+    persist_s3_object_evidence(connection, &evidence, persisted_sequence).await
 }
 
 #[async_trait::async_trait]
@@ -772,6 +753,69 @@ mod tests {
                 .is_empty()
         );
 
+        cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_recreated_object_preserves_complete_evidence_sequence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-recreate-history-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        let first = entry(&scope, "history.bin", "first");
+        let replacement = entry(&scope, "history.bin", "replacement");
+        for value in [&first, &replacement] {
+            store
+                .upsert_s3_object(value)
+                .await
+                .expect("publish version");
+        }
+        assert!(
+            store
+                .delete_s3_object(&scope, "history.bin")
+                .await
+                .expect("delete")
+        );
+        store.upsert_s3_object(&first).await.expect("recreate");
+        let operation = s3_object_snapshot(&scope, "history.bin", None)
+            .expect("snapshot")
+            .evidence_operation()
+            .expect("operation");
+        let json: Vec<serde_json::Value> = query_scalar(
+            "SELECT event_json FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
+        )
+        .bind(OperationKind::S3Object.as_str())
+        .bind(&operation.operation_id)
+        .fetch_all(&pool)
+        .await
+        .expect("persisted history");
+        let events: Vec<S3ObjectLifecycleEvent> = json
+            .into_iter()
+            .map(|value| from_value(value).expect("event"))
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        let history = S3ObjectEvidenceLog::from_events(events).expect("complete valid history");
+        verify_snapshot_evidence(
+            &history,
+            &s3_object_snapshot(&scope, "history.bin", Some(&first)).expect("final snapshot"),
+        )
+        .expect("history agrees with recreated object");
+        assert_eq!(
+            store
+                .scan_s3_object_exact(&scope, "history.bin")
+                .await
+                .expect("verified read"),
+            Some(first)
+        );
         cleanup(&pool, &scope).await;
     }
 
