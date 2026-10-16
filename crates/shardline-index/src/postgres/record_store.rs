@@ -86,7 +86,8 @@ async fn prepare_record_upsert(
                 scope_key = EXCLUDED.scope_key,
                 file_id = EXCLUDED.file_id,
                 content_hash = EXCLUDED.content_hash,
-                record = EXCLUDED.record,
+                record = CASE WHEN shardline_file_records.record = EXCLUDED.record
+                    THEN shardline_file_records.record ELSE EXCLUDED.record END,
                 updated_at = now()",
         )
         .bind(locator.record_key)
@@ -101,6 +102,8 @@ async fn prepare_record_upsert(
 
 /// Both aliases carry the same record. Bind its JSON once, while preserving
 /// version-before-latest row processing and the existing per-row triggers.
+/// Unchanged payloads retain their existing TOAST storage; timestamps and
+/// reference-protection triggers still refresh on every publication.
 async fn upsert_file_aliases_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     version: &PostgresRecordLocator,
@@ -122,7 +125,8 @@ async fn upsert_file_aliases_in_transaction(
                 scope_key = EXCLUDED.scope_key,
                 file_id = EXCLUDED.file_id,
                 content_hash = EXCLUDED.content_hash,
-                record = EXCLUDED.record,
+                record = CASE WHEN shardline_file_records.record = EXCLUDED.record
+                    THEN shardline_file_records.record ELSE EXCLUDED.record END,
                 updated_at = now()",
         )
         .bind(version.record_key)
@@ -1429,6 +1433,63 @@ mod tests {
             Err(super::super::PostgresMetadataStoreError::RecordNotFound)
         ));
         assert_eq!(store.read_latest_record_bytes(&record).await.unwrap(), None);
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unchanged_record_publication_refreshes_age_and_changed_payloads_remain_visible() {
+        use crate::RecordMutation;
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut record = sample_record(None);
+        record.total_bytes = 50;
+        store.commit_file_version_metadata(&record).await.unwrap();
+        for separate in [false, true] {
+            sqlx::query("UPDATE shardline_file_records SET updated_at = to_timestamp(1)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            if separate {
+                store.write_version_record(&record).await.unwrap();
+                store.write_latest_record(&record).await.unwrap();
+            } else {
+                store.commit_file_version_metadata(&record).await.unwrap();
+            }
+            let refreshed: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shardline_file_records WHERE updated_at > to_timestamp(1)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(refreshed, 2);
+            for locator in [
+                store.latest_record_locator(&record),
+                store.version_record_locator(&record),
+            ] {
+                assert_eq!(
+                    store.read_record_bytes(&locator).await.unwrap(),
+                    serde_json::to_vec(&record).unwrap()
+                );
+            }
+            record.chunk_size += 1;
+            if separate {
+                store.write_version_record(&record).await.unwrap();
+                store.write_latest_record(&record).await.unwrap();
+            } else {
+                store.commit_file_version_metadata(&record).await.unwrap();
+            }
+            for locator in [
+                store.latest_record_locator(&record),
+                store.version_record_locator(&record),
+            ] {
+                assert_eq!(
+                    store.read_record_bytes(&locator).await.unwrap(),
+                    serde_json::to_vec(&record).unwrap()
+                );
+            }
+        }
         pool.close().await;
     }
 
