@@ -136,7 +136,7 @@ def write_summary(output, results, direct):
               "- Stored payload bytes include live objects and reliability evidence, but exclude MinIO filesystem overhead, PostgreSQL bytes, replication and versions. PostgreSQL size is reported separately.",
               "- Container CPU includes all PostgreSQL workers. Container peak memory is the lifetime cgroup high-water mark, including page cache; client RSS is measured separately.",
               "- Database lock/connection peaks are sampled every 0.5 seconds and can miss shorter spikes. Query calls and execution time are cumulative server counters.",
-              "- GC uses zero retention only on disposable data. A completed collector must overlap each maintenance workload.",
+              "- The runner requests zero retention on disposable data, but the CLI enforces at least one hour. Short-run storage includes quarantined objects and does not establish the footprint after retention expires. A completed collector must overlap each maintenance workload.",
               "- GC overlap refers to CLI process lifetime, including startup and ownership waits; it does not prove every request overlapped an active scan.",
               "- These are fixed-size bursts, not a sustained-load test. With 32 objects per lane, p99 is the slowest sample; use larger samples for tail-latency claims.",
               "- Initial ingestion uses one logical namespace. Mixed lanes then add two identical copies to compare warm deduplication with/without GC; their final logical bytes are reported separately.",

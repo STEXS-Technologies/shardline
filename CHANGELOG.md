@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   upload-local cache, reducing S3 reads without retaining data across uploads.
 - Carry verified existing S3 chunks from ingestion into that same packing cache
   to avoid reading them twice, without trusting fresh PUT acknowledgements.
+- Reuse object-listing lengths when checking quarantined orphans during GC,
+  avoiding redundant S3 metadata requests while retaining length validation.
 
 ## [1.12.0] - 2026-10-16
 

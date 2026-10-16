@@ -178,9 +178,18 @@ where
         &mut reachability,
     )
     .await?;
+    // Listing already supplies lengths for managed, unreachable objects.
+    // Reuse that observation when checking quarantine entries instead of
+    // issuing a second metadata request for every retained orphan.
+    let mut orphan_objects = scan_orphan_objects(
+        object_store,
+        frontends,
+        &reachability.referenced_object_keys,
+    )?;
     validate_gc_index_integrity(
         index_store,
         object_store,
+        &orphan_objects,
         now_unix_seconds,
         // The missing-object auto-release is a store mutation, so it is gated
         // on a store-mutating run (`mark || sweep`): a pure dry run promises
@@ -263,11 +272,6 @@ where
         prune_expired_retention_holds,
     )
     .await?;
-    let mut orphan_objects = scan_orphan_objects(
-        object_store,
-        frontends,
-        &reachability.referenced_object_keys,
-    )?;
     orphan_objects
         .retain(|object_key, _orphan| !active_retention_hold_object_keys.contains(object_key));
     let orphan_chunk_bytes = orphan_objects.values().try_fold(0_u64, |total, orphan| {
@@ -677,6 +681,7 @@ pub(crate) fn retention_clock_is_skewed_with_elapsed(
 async fn validate_gc_index_integrity<IndexAdapter>(
     index_store: &IndexAdapter,
     object_store: &ServerObjectStore,
+    listed_orphans: &HashMap<String, OrphanObject>,
     now_unix_seconds: u64,
     auto_release_missing_quarantine_objects: bool,
 ) -> Result<(), GcError>
@@ -703,7 +708,19 @@ where
                 );
             }
 
-            let Ok(Some(_metadata)) = object_store.metadata(candidate.object_key()) else {
+            let observed_length = listed_orphans
+                .get(candidate.object_key().as_str())
+                .map_or_else(
+                    || {
+                        object_store
+                            .metadata(candidate.object_key())
+                            .ok()
+                            .flatten()
+                            .map(|metadata| metadata.length())
+                    },
+                    |orphan| Some(orphan.bytes),
+                );
+            let Some(observed_length) = observed_length else {
                 tracing::warn!(
                     "quarantine candidate {} references a missing object — will auto-release",
                     candidate.object_key().as_str(),
@@ -711,12 +728,12 @@ where
                 missing_candidates.push(candidate);
                 return Ok(());
             };
-            if _metadata.length() != candidate.observed_length() {
+            if observed_length != candidate.observed_length() {
                 return Err(
                     InvalidLifecycleMetadataError::QuarantineCandidateLengthMismatch {
                         object_key: candidate.object_key().as_str().to_owned(),
                         expected_length: candidate.observed_length(),
-                        observed_length: _metadata.length(),
+                        observed_length,
                     }
                     .into(),
                 );
@@ -889,6 +906,68 @@ pub(crate) fn orphan_inventory_entry(
 #[cfg(test)]
 mod tests {
     use super::{retention_clock_is_skewed_forward, temp_reaping_clock_is_skewed};
+
+    #[tokio::test]
+    async fn listed_quarantine_objects_keep_length_checks_without_another_store_read() {
+        use super::{GcError, InvalidLifecycleMetadataError, OrphanObject, ServerObjectStore};
+        use shardline_index::{AsyncIndexStore, MemoryIndexStore, QuarantineCandidate};
+        use shardline_storage::ObjectKey;
+
+        let index = MemoryIndexStore::new();
+        let key = ObjectKey::parse(&format!("aa/{}", "a".repeat(64))).unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 10, 100, 200).unwrap();
+        index.upsert_quarantine_candidate(&candidate).await.unwrap();
+        let mut listed = std::collections::HashMap::from([(
+            key.as_str().to_owned(),
+            OrphanObject {
+                hash: "a".repeat(64),
+                object_key: key.clone(),
+                bytes: 10,
+            },
+        )]);
+        // The backing adapter reports no objects. A second metadata read would
+        // incorrectly release the entry despite the listing's observation.
+        let objects = ServerObjectStore::blackhole();
+        super::validate_gc_index_integrity(&index, &objects, &listed, 150, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            index.list_quarantine_candidates().await.unwrap(),
+            vec![candidate.clone()]
+        );
+
+        listed.get_mut(key.as_str()).unwrap().bytes = 11;
+        let result = super::validate_gc_index_integrity(&index, &objects, &listed, 150, true).await;
+        assert!(matches!(
+            result,
+            Err(GcError::InvalidLifecycleMetadata(
+                InvalidLifecycleMetadataError::QuarantineCandidateLengthMismatch {
+                    expected_length: 10,
+                    observed_length: 11,
+                    ..
+                }
+            ))
+        ));
+        assert_eq!(
+            index.list_quarantine_candidates().await.unwrap(),
+            vec![candidate.clone()]
+        );
+
+        // A key absent from the listing still gets the ordinary metadata
+        // lookup and missing-object handling, including dry-run protection.
+        listed.clear();
+        super::validate_gc_index_integrity(&index, &objects, &listed, 150, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            index.list_quarantine_candidates().await.unwrap(),
+            vec![candidate]
+        );
+        super::validate_gc_index_integrity(&index, &objects, &listed, 150, true)
+            .await
+            .unwrap();
+        assert!(index.list_quarantine_candidates().await.unwrap().is_empty());
+    }
 
     fn boot(uptime: u64, id: &str) -> crate::quarantine::GcBootObservation {
         crate::quarantine::GcBootObservation {

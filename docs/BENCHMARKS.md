@@ -113,14 +113,16 @@ exactly one PUT and GET per object. Response timing includes the entire body.
 Every acknowledged object is read back from every replica after GC. A failed
 request, mismatched byte, missing trace, or failed collector fails the run.
 
-Initial ingestion measures uploads alone, followed by two zero-retention GC runs
-on disposable data. The mixed lanes then add two identical logical copies to
+Initial ingestion measures uploads alone, followed by two GC runs on disposable
+data. The runner requests zero retention, but the CLI enforces a minimum of one
+hour. These short runs measure storage during quarantine, not the eventual
+footprint after retention expires. The mixed lanes then add two identical logical copies to
 compare warm deduplication with and without concurrent GC. A completed collector
 must have a CLI process lifetime overlapping the maintenance workload; this does
 not mean every request overlaps the collector's scan or exclusive lock. The
 initial stored/logical ratio excludes
-those later copies. Live individual chunks remain a recovery fallback for packed
-Xorbs; packing does not imply GC removes that retained copy.
+those later copies. Inspect quarantine counts and retention before interpreting
+individual chunk bytes as permanently retained or already reclaimable.
 
 This is a **shared-host S3 API baseline**, not evidence of eight-host production
 scaling. S3 routes run on the API role; this does not benchmark native LFS/Xet

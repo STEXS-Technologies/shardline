@@ -41,7 +41,9 @@ class Deployment:
                                      "MINIO_ROOT_PASSWORD=owned_performance_password",
                                      "-e", "MINIO_PROMETHEUS_AUTH_TYPE=public",
                                      "-p", "127.0.0.1::9000", MINIO, "server", "/data")
-            ready(lambda: subprocess.run(["docker", "exec", self.pg, "pg_isready", "-U", "postgres"],
+            # The image's temporary initialization server accepts Unix sockets
+            # before restarting. TCP readiness waits for the final server.
+            ready(lambda: subprocess.run(["docker", "exec", self.pg, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
             self.endpoint = f"http://127.0.0.1:{port(self.s3, 9000)}"
             self.client = boto3.client("s3", endpoint_url=self.endpoint,
