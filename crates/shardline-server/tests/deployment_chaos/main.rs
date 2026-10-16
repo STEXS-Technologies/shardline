@@ -880,8 +880,8 @@ fn s3_object_count(store: &ServerObjectStore) -> usize {
     }
 }
 
-/// Waits until a new chunk object lands in the object store while the slow PUT
-/// is still streaming (provable mid-body evidence).
+/// Waits until a new immutable object lands while the slow PUT is still
+/// streaming (provable mid-body evidence for chunks or packed containers).
 async fn wait_s3_object_count_grows(
     store: &ServerObjectStore,
     baseline: usize,
@@ -1200,8 +1200,12 @@ async fn s3_delete(base: &str, token: &str, key: &str) -> reqwest::Response {
         .expect("s3 DELETE request")
 }
 
-/// Starts a slow PUT (streams one multipart-sized 8 MiB chunk, then stalls)
+/// Starts a slow PUT (streams 36 MiB, then stalls without sending EOF)
 /// and returns the body sender plus the in-flight request task.
+///
+/// The prefix crosses the 32 MiB direct-packing batch boundary so storage
+/// evidence exists before fault injection even when raw chunks are not written.
+/// The remaining bytes keep a second batch unfinished until the sender closes.
 ///
 /// The streamed bytes are derived from `first_chunk_seed` XOR a fresh
 /// nanosecond timestamp, so each invocation writes content the (persistent)
@@ -1235,7 +1239,7 @@ async fn start_slow_put(
             .await
     });
     tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
-        8 * 1024 * 1024,
+        36 * 1024 * 1024,
         unique_seed,
     ))))
     .await
