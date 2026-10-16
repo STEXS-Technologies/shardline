@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Coordinate concurrent S3 creates for the same object within each server to
   reduce failed duplicate PUT requests, while still checking existing content
   and using conditional writes across servers.
+- Reuse verified repeated chunks during upload packing with a bounded,
+  upload-local cache, reducing S3 reads without retaining data across uploads.
 
 ## [1.12.0] - 2026-10-16
 
