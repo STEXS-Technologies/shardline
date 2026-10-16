@@ -882,7 +882,7 @@ impl S3ObjectStore {
     /// and `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>`) are
     /// normally deleted immediately after promotion, but a crash between the
     /// temp write and the copy/delete strands them forever (F-48). The normal
-    /// listing paths skip temp keys, so this sweep does its own raw enumeration
+    /// listing paths skip temp keys, so this sweep enumerates only `__tmp/`
     /// and deletes only keys matching the exact generated-temp grammars
     /// (`is_temp_upload_key`) whose `LastModified` — S3 backend truth, immune
     /// to writer/GC wall-clock divergence — is older than the age bound. User
@@ -902,7 +902,7 @@ impl S3ObjectStore {
             u128::from(now_unix_seconds.saturating_sub(S3_TEMP_ARTIFACT_AGE_SECONDS))
                 * 1_000_000_000;
         let prefix =
-            ObjectPrefix::parse("").map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
+            ObjectPrefix::parse("__tmp/").map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
         let location = self.location_for_prefix(&prefix)?;
         self.block_on_result(async {
             let mut listed = self.inner.list(Some(&location));
