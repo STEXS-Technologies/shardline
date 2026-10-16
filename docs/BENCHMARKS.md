@@ -251,6 +251,17 @@ these measurements do not demonstrate better partial-overlap storage savings.
 Measure versioned and partially overlapping customer data separately from exact
 duplicates before estimating a bill reduction.
 
+Small range reads have another cost. For one incompressible 36 MiB file, a 4 KiB
+read at offset zero caused MinIO to report 33,495,294 response bytes, while a 4 KiB
+read at offset 33 MiB reported 4,285,994 bytes. Both versions fetched the complete
+selected container to verify integrity. The candidate reduced each read from
+two backend requests to one; response bytes stayed unchanged. A full 36 MiB read
+used four requests on main-equivalent code and two on the candidate. All six
+responses matched the requested bytes and backend trace totals matched MinIO
+counters. These are provider-reported transfer counts, not cloud billing figures.
+Measure small random reads separately from full downloads when estimating cost;
+fewer requests do not necessarily mean fewer backend bytes.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:
