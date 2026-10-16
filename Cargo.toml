@@ -132,6 +132,12 @@ incremental = false
 panic = "unwind"
 lto = false
 
+# Maintenance admission hashes the complete executable. Keep SHA-256 optimized
+# in debug/test builds too: hashing debug sections must not consume recovery
+# deadlines before a CLI can acquire its database ownership. Checks stay enabled.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.lints.rust]
 rust_2024_prelude_collisions = "warn"
 rust_2024_incompatible_pat = "warn"

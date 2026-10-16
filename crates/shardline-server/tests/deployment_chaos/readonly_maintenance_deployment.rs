@@ -276,12 +276,6 @@ async fn drill_concurrent_ordinary_rebuilds_keep_shared_ownership() {
         .unwrap();
     let first = readonly_cli(&binary, &stack, &["index", "rebuild"], false);
     tokio::pin!(first);
-    // Admission hashes the complete executable before requesting ownership.
-    // An unoptimized CLI with debug information is hundreds of MiB: on a busy
-    // runner this can exceed 20 seconds without any database lock being held.
-    // Budget startup separately from completion after releasing the scan;
-    // continue requiring the exact lock and blocked-query observations below.
-    let admission_timeout = Duration::from_secs(120);
     let first_inside = wait_for(
         "first rebuild holds exclusive deployment ownership",
         || async {
@@ -302,7 +296,7 @@ async fn drill_concurrent_ordinary_rebuilds_keep_shared_ownership() {
             .await
             .unwrap()
         },
-        admission_timeout,
+        Duration::from_secs(20),
     );
     tokio::select! {
         output = &mut first => panic!("first rebuild exited before held scan: {output:?}"),
@@ -336,7 +330,7 @@ async fn drill_concurrent_ordinary_rebuilds_keep_shared_ownership() {
                     )
                 })
         },
-        admission_timeout,
+        Duration::from_secs(20),
     );
     tokio::select! {
         output = &mut first => panic!("first rebuild bypassed held scan: {output:?}"),
