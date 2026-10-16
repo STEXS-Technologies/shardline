@@ -8,6 +8,9 @@ for tool in cargo curl docker jq sha256sum tar rg; do
     command -v "$tool" >/dev/null || { echo "Missing required verification tool: $tool" >&2; exit 1; }
 done
 docker info >/dev/null
+# These logs are checked for exact test and skip counts below. CI may force ANSI
+# colors globally, which would split the numbers from the surrounding text.
+export CARGO_TERM_COLOR=never
 umask 077
 output=${1:-distributed-integrity-results}
 mkdir -p "$output"
