@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-16
+
 This update strengthens maintenance coordination and recovery while preserving
 existing deployment data, public reliability types, and normal startup behavior.
 
@@ -1280,7 +1282,8 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
-[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.3...HEAD
+[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.3...v1.12.0
 [1.11.3]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.2...v1.11.3
 [1.11.2]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.1...v1.11.2
 [1.11.1]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.0...v1.11.1
