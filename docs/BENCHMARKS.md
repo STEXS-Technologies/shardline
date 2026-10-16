@@ -181,6 +181,15 @@ All 5,760 post-GC full-body checks passed. These counts demonstrate lower reques
 amplification for this fixture; two shared-host repeats do not establish stable
 tail-latency or production scale-out improvements.
 
+The admission-qualified candidate (production code at `73a93ae6`) subsequently
+passed all 24 lanes across unique, repeated and compressible data, the same four
+replica counts and two repeats. All 8,640 post-GC reads matched, backend traces
+matched MinIO counters, and no database deadlocks were reported. Unique and
+compressible initial uploads each made 128 requests per lane; repeated uploads
+made 104 / 112 / 128 / 128 at 1 / 2 / 4 / 8 replicas in both repeats. Workspace
+compilation overlapped part of this run, so its timings are not used as additional
+latency or scaling evidence.
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)
