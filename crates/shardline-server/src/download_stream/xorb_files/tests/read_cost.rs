@@ -20,6 +20,7 @@ use std::{
 struct Provider {
     objects: BTreeMap<String, Bytes>,
     requests: Vec<(Method, String)>,
+    deny_body: bool,
 }
 
 async fn request(
@@ -48,6 +49,12 @@ async fn request(
             .unwrap();
     }
     assert_eq!(method, Method::GET);
+    if provider.deny_body {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::empty())
+            .unwrap();
+    }
     let range = headers.get("range").map(|value| {
         let (start, end) = value
             .to_str()
@@ -87,6 +94,101 @@ impl Drop for StopServer {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn packed_reads_use_one_get_and_validate_unselected_content() {
+    let provider = Arc::new(Mutex::new(Provider::default()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().fallback(request).with_state(provider.clone());
+    let _server = StopServer(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    let store = ServerObjectStore::s3(
+        S3ObjectStoreConfig::new("fixture".to_owned(), "us-east-1".to_owned())
+            .with_endpoint(Some(endpoint))
+            .with_allow_http(true)
+            .with_credentials(
+                Some(SecretString::new("fixture-access".to_owned())),
+                Some(SecretString::new("fixture-secret".to_owned())),
+                None,
+            ),
+    )
+    .unwrap();
+    let storage = shardline_test_support::TempStorage::new();
+    let local = ServerObjectStore::local(storage.path()).unwrap();
+    let chunks = super::container(&local, &[b"valid prefix", b"unselected tail"]).await;
+    let key = crate::xet_adapter::xorb_object_key(&chunks[0].hash).unwrap();
+    use shardline_storage::ObjectStore;
+    let length = local.metadata(&key).unwrap().unwrap().length();
+    let bytes = local
+        .read_range(&key, ByteRange::new(0, length - 1).unwrap())
+        .unwrap();
+    let path = format!("/fixture/{}", key.as_str());
+    provider
+        .lock()
+        .unwrap()
+        .objects
+        .insert(path.clone(), Bytes::copy_from_slice(bytes.as_ref()));
+    let record = super::file(chunks.clone());
+    for range in [None, Some(ByteRange::new(0, 4).unwrap())] {
+        provider.lock().unwrap().requests.clear();
+        let actual = super::collect(&store, &record, range).await.unwrap();
+        assert_eq!(
+            actual,
+            if range.is_some() {
+                b"valid".as_slice()
+            } else {
+                b"valid prefixunselected tail".as_slice()
+            }
+        );
+        assert_eq!(
+            provider.lock().unwrap().requests,
+            [(Method::GET, path.clone())]
+        );
+    }
+    // The requested prefix is valid, but corruption elsewhere must still fail
+    // while constructing the stream, before a successful HTTP response exists.
+    let mut corrupted = bytes.clone();
+    corrupted[usize::try_from(chunks[1].packed_end - 1).unwrap()] ^= 0x40;
+    provider
+        .lock()
+        .unwrap()
+        .objects
+        .insert(path.clone(), Bytes::from(corrupted));
+    assert!(
+        crate::download_stream::file_record_byte_stream(
+            store.clone(),
+            record.clone(),
+            Some(ByteRange::new(0, 4).unwrap()),
+            crate::admission::ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .is_err()
+    );
+    {
+        let mut state = provider.lock().unwrap();
+        state
+            .objects
+            .insert(path.clone(), Bytes::copy_from_slice(bytes.as_ref()));
+        state.deny_body = true;
+        state.requests.clear();
+    }
+    assert!(
+        crate::download_stream::file_record_byte_stream(
+            store,
+            record,
+            None,
+            crate::admission::ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        provider.lock().unwrap().requests,
+        [(Method::GET, path.clone()), (Method::HEAD, path)]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -150,7 +252,7 @@ async fn legacy_chunk_reads_report_bounded_s3_request_cost() {
         let full = provider.lock().unwrap().requests.clone();
         let gets = full
             .iter()
-            .filter(|(method, _)| *method == Method::GET)
+            .filter(|(method, path)| *method == Method::GET && !path.contains("/xorbs/"))
             .count();
         let probes = full
             .iter()
@@ -177,7 +279,7 @@ async fn legacy_chunk_reads_report_bounded_s3_request_cost() {
         assert_eq!(
             selected
                 .iter()
-                .filter(|(method, _)| *method == Method::GET)
+                .filter(|(method, path)| *method == Method::GET && !path.contains("/xorbs/"))
                 .count(),
             1
         );

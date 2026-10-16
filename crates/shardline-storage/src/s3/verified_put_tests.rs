@@ -166,6 +166,44 @@ fn integrity(bytes: &[u8]) -> ObjectIntegrity {
     )
 }
 
+#[test]
+fn full_object_copy_uses_only_get_and_preserves_provider_errors() {
+    let provider = Provider::new();
+    let store = provider.store();
+    let key = ObjectKey::parse("xorbs/full-copy").unwrap();
+    for bytes in [b"complete container".as_slice(), b"".as_slice()] {
+        provider
+            .state
+            .lock()
+            .unwrap()
+            .objects
+            .insert("/fixture/xorbs/full-copy".to_owned(), bytes.to_vec());
+        let mut file = tempfile::tempfile().unwrap();
+        assert_eq!(
+            store.copy_object_to_file(&key, &mut file).unwrap(),
+            Some(bytes.len() as u64)
+        );
+        std::io::Seek::rewind(&mut file).unwrap();
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes);
+    }
+    provider.state.lock().unwrap().objects.clear();
+    assert_eq!(
+        store
+            .copy_object_to_file(&key, &mut tempfile::tempfile().unwrap())
+            .unwrap(),
+        None
+    );
+    provider.state.lock().unwrap().deny_reads = true;
+    assert!(
+        store
+            .copy_object_to_file(&key, &mut tempfile::tempfile().unwrap())
+            .is_err()
+    );
+    assert_eq!(provider.requests(), ["GET", "GET", "GET", "GET"]);
+}
+
 #[tokio::test]
 async fn read_back_checks_new_objects_and_does_not_repeat_existing_verification() {
     let provider = Provider::new();

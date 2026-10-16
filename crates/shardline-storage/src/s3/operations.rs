@@ -35,6 +35,8 @@ use super::{
     is_temp_upload_key,
 };
 
+mod full_read;
+
 /// S3-compatible implementation of [`ObjectStore`].
 #[derive(Clone)]
 pub struct S3ObjectStore {

@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   retaining SHA-256 validation, upload recovery and public chunk-upload behavior.
 - Compute S3 Content-MD5 validation and ETags in one pass, avoiding duplicate
   checksum work for uploads and multipart parts.
+- Read packed containers from S3 with one GET instead of HEAD plus GET, while
+  retaining complete integrity checks and bounded-memory streaming.
 
 ## [1.12.0] - 2026-10-16
 

@@ -136,6 +136,12 @@ storage, for both SQLite and PostgreSQL metadata. They retain source SHA-256
 validation and upload-intent recovery. Native Xet already uploads containers;
 the public generic upload API still stores its independently downloadable chunks.
 
+Packed-file downloads obtain container length and data in one S3 GET, avoiding
+the separate HEAD on successful reads. The complete container is still checked
+before its selected bytes are exposed, using a temporary file to bound memory.
+Legacy individual chunks retain their fallback path; storage failures still fail
+the download when a container is known to exist.
+
 This is a **shared-host S3 API baseline**, not evidence of eight-host production
 scaling. S3 routes run on the API role; this does not benchmark native LFS/Xet
 transfer replicas. Stored payload bytes exclude object-store filesystem overhead,
