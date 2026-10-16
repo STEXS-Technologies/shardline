@@ -4,7 +4,11 @@ use shardline_server::{
     ObjectStorageAdapter, ServerConfig,
     task_tracking::{TaskRunState, deployment_fingerprint},
 };
-use std::{fs, num::NonZeroUsize, os::unix::fs::PermissionsExt};
+use std::{
+    fs,
+    num::NonZeroUsize,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+};
 
 struct ServerContainer(String);
 
@@ -31,8 +35,16 @@ impl ServerContainer {
         .iter()
         .find_map(|path| fs::canonicalize(path).ok())
         .expect("existing trust bundle");
+        // Run as the fixture owner: CI does not necessarily use UID 1000.
+        // This also permits retaining /proc/<pid>/ns/pid without host privileges.
         // Only the existing deployment root is writable; no tracker mount.
-        fs::set_permissions(root, fs::Permissions::from_mode(0o777)).unwrap();
+        let owner = fs::metadata(root).unwrap();
+        assert_ne!(
+            owner.uid(),
+            0,
+            "this drill requires a non-root fixture owner"
+        );
+        let user = format!("{}:{}", owner.uid(), owner.gid());
         let mut args = vec![
             "run".to_owned(),
             "-d".to_owned(),
@@ -40,7 +52,7 @@ impl ServerContainer {
             container.0.clone(),
             "--read-only".to_owned(),
             "--user".to_owned(),
-            "1000:1000".to_owned(),
+            user,
             "--cap-drop".to_owned(),
             "ALL".to_owned(),
             "--network".to_owned(),

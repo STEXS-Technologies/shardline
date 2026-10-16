@@ -19,7 +19,7 @@ current=$(jq -r 'select(.reason=="compiler-artifact" and .target.name=="shardlin
 test -x "$current"
 # Freeze the current executable too: concurrent builds must not change a drill.
 cp -- "$current" "$output/current-shardline"
-# Non-root container drills execute this non-secret binary as UID 1000.
+# Non-root container drills must be able to execute this non-secret binary.
 chmod 0755 "$output/current-shardline"
 export CARGO_BIN_EXE_shardline="$output/current-shardline"
 export SHARDLINE_CHAOS_DEPLOYMENT=1
