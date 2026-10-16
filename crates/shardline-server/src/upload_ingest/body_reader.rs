@@ -15,6 +15,8 @@ use crate::{ServerError, object_store::ServerObjectStore, overflow::checked_add}
 type BodyChunkResult = Result<Bytes, ServerError>;
 type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
 
+mod md5_checked_tee;
+
 /// Stream wrapper that feeds every chunk into a caller-shared MD5 hasher, so
 /// the S3 ETag (hex MD5 of the object bytes) can be computed while a body
 /// streams through the ingestor without buffering it.
@@ -199,6 +201,23 @@ impl RequestBodyReader {
             expected_total_bytes: self.expected_total_bytes,
             read_bytes: self.read_bytes,
         }
+    }
+
+    /// Share the streamed checksum between Content-MD5 validation and the ETag.
+    pub(crate) fn with_md5_tee_and_expected(
+        mut self,
+        hasher: Arc<Mutex<Md5>>,
+        expected: Option<[u8; 16]>,
+    ) -> Self {
+        let Some(expected) = expected else {
+            return self.with_md5_tee(hasher);
+        };
+        self.stream = Box::pin(md5_checked_tee::Md5CheckedTee::new(
+            self.stream,
+            hasher,
+            expected,
+        ));
+        self
     }
 
     /// Creates a reader over an async byte reader (for example a staged part

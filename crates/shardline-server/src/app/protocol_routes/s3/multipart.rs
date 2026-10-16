@@ -418,11 +418,9 @@ pub(super) async fn s3_upload_part(
         ));
     }
 
-    if let Some(expected) = parse_content_md5(headers)? {
-        body = body.with_expected_md5(expected);
-    }
+    let expected_md5 = parse_content_md5(headers)?;
     let md5 = Arc::new(Mutex::new(Md5::new()));
-    body = body.with_md5_tee(md5.clone());
+    body = body.with_md5_tee_and_expected(md5.clone(), expected_md5);
 
     // Take the per-session lock while still holding the global lock (the
     // sweep takes them in the same order), then drop the global lock before
@@ -585,11 +583,9 @@ async fn durable_s3_upload_part(
         ));
     }
 
-    if let Some(expected) = parse_content_md5(headers)? {
-        reader = reader.with_expected_md5(expected);
-    }
+    let expected_md5 = parse_content_md5(headers)?;
     let md5 = Arc::new(Mutex::new(Md5::new()));
-    reader = reader.with_md5_tee(md5.clone());
+    reader = reader.with_md5_tee_and_expected(md5.clone(), expected_md5);
 
     let store = state.backend.object_store();
     let (staging_key, size_bytes) = match &store {

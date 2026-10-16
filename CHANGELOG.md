@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   collection. Failed container storage retains the verified individual-chunk fallback.
 - Extend direct packing to LFS, OCI and Bazel digest uploads using S3 storage,
   retaining SHA-256 validation, upload recovery and public chunk-upload behavior.
+- Compute S3 Content-MD5 validation and ETags in one pass, avoiding duplicate
+  checksum work for uploads and multipart parts.
 
 ## [1.12.0] - 2026-10-16
 
