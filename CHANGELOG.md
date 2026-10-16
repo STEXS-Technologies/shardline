@@ -30,6 +30,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   write-ahead logging, while retaining timestamp updates and reference checks.
 - Limit S3 temporary-upload cleanup to its reserved namespace, avoiding a full
   bucket listing while retaining age checks and exact temporary-key matching.
+- Enable TCP_NODELAY on accepted HTTP connections to avoid delayed delivery of
+  small streamed responses.
 
 ## [1.12.0] - 2026-10-16
 
