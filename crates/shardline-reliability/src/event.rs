@@ -1,4 +1,4 @@
-use penelope_domain::ContentDigest as PenelopeDigest;
+use crate::PenelopeDigest;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{
@@ -26,7 +26,7 @@ pub struct LifecycleEvidenceEvent<S: EvidenceState> {
     /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
     #[serde(default)]
     pub digest_encoding: DigestEncoding,
-    pub state_digest: statechronicle_core::digest::ContentDigest,
+    pub state_digest: crate::StateChronicleDigest,
     pub process_digest: PenelopeDigest,
 }
 
@@ -68,12 +68,7 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
         before: S,
         after: S,
     ) -> Result<Self, ReliabilityError> {
-        if !before.can_transition_to(after) {
-            return Err(ReliabilityError::InvalidTransition {
-                before: before.as_str(),
-                after: after.as_str(),
-            });
-        }
+        before.validate_transition(after)?;
         let digest_encoding = DigestEncoding::CanonicalBcsV2;
         let durable_after = durable_lifecycle_state_v1(after);
         let durable_transition =
@@ -98,12 +93,7 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
     /// Returns an error when the transition, state digest, or process digest
     /// is invalid.
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
-        if !self.before.can_transition_to(self.after) {
-            return Err(ReliabilityError::InvalidTransition {
-                before: self.before.as_str(),
-                after: self.after.as_str(),
-            });
-        }
+        self.before.validate_transition(self.after)?;
         let expected_state = match self.digest_encoding {
             DigestEncoding::LegacyJson => legacy_state_label_digest(self.after.as_str()),
             DigestEncoding::CanonicalBcsV1 => canonical_state_digest(&self.after)?,

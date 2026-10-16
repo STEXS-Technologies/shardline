@@ -4,7 +4,7 @@ mod v1;
 
 use axum::{
     Json,
-    extract::{RawQuery, State},
+    extract::{Path, RawQuery, State},
     http::{
         HeaderMap, HeaderValue,
         header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, X_CONTENT_TYPE_OPTIONS},
@@ -547,14 +547,196 @@ pub(super) async fn nodes(
     }))
 }
 
-/// Lists the current process's in-flight durable resumable upload sessions as
-/// bounded, keyset-paginated admin tasks.
-///
-/// Unlike the authoritative `/api/v1/storage` inventory (an O(N) store walk
-/// that is admission-gated at `weights::STATS`), this handler issues a bounded
-/// primary-key keyset query (at most `MAX_PAGE_LIMIT + 1` rows). Bounded admin
-/// reads are controlled by query/cursor/page bounds rather than weighted
-/// admission; only the unbounded authoritative-inventory scan takes a permit.
+/// Keeps admission charged while a detached blocking inspection is still running.
+fn spawn_maintenance_inspection<T: Send + 'static>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    inspect: impl FnOnce() -> Result<T, ServerError> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<T, ServerError>> {
+    tokio::task::spawn_blocking(move || {
+        // A disconnected request cannot stop an already running blocking scan.
+        // Keep its capacity charged to the scan, rather than the HTTP future.
+        let _permit = permit;
+        inspect()
+    })
+}
+
+/// Lists deployment maintenance evidence with bounded memory and admission-gated
+/// store enumeration. This is separate from the existing resumable-upload API.
+pub(super) async fn maintenance_tasks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Result<AdminJson<serde_json::Value>, ServerError> {
+    authorize_admin(&state, &headers)?;
+    let query = parse_collection_query(
+        raw_query.as_deref(),
+        AllowedFilters {
+            state: false,
+            prefix: false,
+            capability: false,
+        },
+    )?;
+    let after = query
+        .cursor
+        .as_ref()
+        .map(|cursor| decode_cursor(cursor.as_str(), &query))
+        .transpose()?
+        .map(|cursor| cursor.after);
+    let limit = query.limit.map_or(DEFAULT_PAGE_LIMIT, AdminPageLimit::get);
+    let permit = state
+        .admission
+        .try_acquire(weights::STATS)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    if limit > 100 {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let (store, history_scope) =
+        crate::task_tracking::TaskEvidenceStore::from_backend(&state.config, &state.backend)
+            .await?;
+    let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
+    let (mut tasks, history_notice) = spawn_maintenance_inspection(permit, move || {
+        let history_notice = match store.history_notice() {
+            Ok(notice) => notice,
+            Err(error) => {
+                tracing::warn!(%error, "task history recording availability could not be checked");
+                Some("New task history recording could not be checked. Existing records may still be listed; check maintenance warnings. This notice does not describe server readiness.")
+            }
+        };
+        let tasks = store.inspect_summaries_with_scope(
+            deployment,
+            history_scope,
+            after.as_ref().map(AdminItemKey::as_str),
+            limit.saturating_add(1),
+        )?;
+        Ok::<_, ServerError>((tasks, history_notice))
+    })
+    .await
+    .map_err(|error| ServerError::Io(std::io::Error::other(error)))??;
+    let has_more = tasks.len() > limit;
+    tasks.truncate(limit);
+    let next_cursor = if has_more {
+        tasks
+            .last()
+            .map(|task| encode_cursor(task.id(), &query))
+            .transpose()?
+    } else {
+        None
+    };
+    let page = AdminPage {
+        limit,
+        returned: tasks.len(),
+        next_cursor,
+    };
+    Ok(admin_json(serde_json::json!({
+        "api_version": ADMIN_API_VERSION,
+        "observed_at_unix_seconds": observed_at()?,
+        "supervision": "embedded",
+        "history_grouping": if history_scope.is_some() { "shared_metadata" } else { "legacy" },
+        "history_notice": history_notice,
+        "tasks": tasks.iter().map(|task| task.operator_view()).collect::<Vec<_>>(),
+        "page": page,
+    })))
+}
+
+/// Retrieves a verified embedded diagnostic without scanning all task identities.
+pub(super) async fn maintenance_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
+    RawQuery(raw_query): RawQuery,
+) -> Result<AdminJson<serde_json::Value>, ServerError> {
+    authorize_admin(&state, &headers)?;
+    let Path(id) = path.map_err(|_error| ServerError::InvalidAdminQuery)?;
+    if raw_query.is_some_and(|query| !query.is_empty()) {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let permit = state
+        .admission
+        .try_acquire(weights::STATS)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let (store, history_scope) =
+        crate::task_tracking::TaskEvidenceStore::from_backend(&state.config, &state.backend)
+            .await?;
+    let deployment = crate::task_tracking::deployment_fingerprint(&state.config)?;
+    let report = spawn_maintenance_inspection(permit, move || {
+        store.embedded_report(deployment, history_scope, &id)
+    })
+    .await
+    .map_err(|error| ServerError::Io(std::io::Error::other(error)))??
+    .ok_or(ServerError::NotFound)?;
+    Ok(admin_json(serde_json::json!({
+        "api_version": ADMIN_API_VERSION,
+        "observed_at_unix_seconds": observed_at()?,
+        "task": report,
+    })))
+}
+
+/// Inspects pending delete markers without replaying or settling any request.
+pub(super) async fn pending_remote_deletes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Result<AdminJson<serde_json::Value>, ServerError> {
+    authorize_admin(&state, &headers)?;
+    let query = parse_collection_query(
+        raw_query.as_deref(),
+        AllowedFilters {
+            state: false,
+            prefix: false,
+            capability: false,
+        },
+    )?;
+    let after = query
+        .cursor
+        .as_ref()
+        .map(|cursor| decode_cursor(cursor.as_str(), &query))
+        .transpose()?
+        .map(|cursor| cursor.after);
+    let after_epoch = after
+        .as_ref()
+        .map(|key| {
+            key.as_str()
+                .parse::<u64>()
+                .map_err(|_error| ServerError::InvalidAdminQuery)
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let limit = query.limit.map_or(DEFAULT_PAGE_LIMIT, AdminPageLimit::get);
+    if limit > 100 || after_epoch > i64::MAX.unsigned_abs() {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let _permit = state
+        .admission
+        .try_acquire(weights::STATS)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let pending = match &state.backend {
+        crate::ServerBackend::Postgres(backend) => {
+            backend
+                .index_store()
+                .pending_remote_deletes(after_epoch, limit.saturating_add(1))
+                .await?
+        }
+        crate::ServerBackend::Local(_) => None,
+    };
+    let inspection = crate::pending_delete_inspection_page(pending, limit)?;
+    let next_cursor = inspection
+        .next_after
+        .as_deref()
+        .map(|epoch| encode_cursor(epoch, &query))
+        .transpose()?;
+    let page = AdminPage {
+        limit,
+        returned: inspection.pending_deletes.len(),
+        next_cursor,
+    };
+    Ok(admin_json(serde_json::json!({
+        "api_version": ADMIN_API_VERSION, "observed_at_unix_seconds": observed_at()?,
+        "supported": inspection.supported, "inspection_notice": inspection.inspection_notice,
+        "pending_deletes": inspection.pending_deletes, "page": page,
+    })))
+}
+
+/// Lists in-flight durable resumable uploads using bounded metadata keyset reads.
 pub(super) async fn tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -693,13 +875,15 @@ mod tests {
     use crate::{DeploymentMode, ServerConfig, ServerFrontend, ServerRole, app::router};
 
     const ADMIN_TOKEN: &str = "admin-read-secret";
-    const ADMIN_PATHS: [&str; 7] = [
+    const ADMIN_PATHS: [&str; 9] = [
         "/api/v1/status",
         "/api/v1/storage",
         "/api/v1/gc",
         "/api/v1/integrity",
         "/api/v1/nodes",
         "/api/v1/tasks",
+        "/api/v1/tasks/maintenance",
+        "/api/v1/tasks/maintenance/deletes",
         "/api/v1/metrics",
     ];
 
@@ -804,15 +988,146 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_api_rejects_missing_and_wrong_credentials() {
-        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
-        for token in [None, Some("wrong-token")] {
+    async fn embedded_report_is_authenticated_verified_and_read_only() {
+        use crate::task_tracking::{
+            EmbeddedTaskTracker, TaskEvidenceStore, deployment_fingerprint,
+        };
+        let (app, root) = app(Some(ADMIN_TOKEN)).await;
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            NonZeroUsize::new(65_536).unwrap(),
+        );
+        let deployment = deployment_fingerprint(&config).unwrap();
+        let store = TaskEvidenceStore::from_config(&config).unwrap();
+        EmbeddedTaskTracker::new(
+            crate::object_store_from_config(&config).unwrap(),
+            deployment,
+        )
+        .begin(
+            "hub-webhook-secret-upgrade",
+            b"input",
+            shardline_reliability::MaintenanceArtifactKind::LifecycleRepair,
+        )
+        .unwrap()
+        .finish(false, b"inspected: 3\nupgraded: 2\nfailures: 1")
+        .unwrap();
+        let id = store.summaries(deployment, None, 10).unwrap().remove(0).id;
+        let path = format!("/api/v1/tasks/maintenance/{id}/report");
+        for token in [None, Some("wrong")] {
             let response = app
                 .clone()
-                .oneshot(request(Method::GET, ADMIN_PATHS[0], token))
+                .oneshot(request(Method::GET, &format!("{path}?invalid=true"), token))
                 .await
-                .expect("response");
+                .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, &path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+        let body = json_body(response).await;
+        assert_eq!(body["api_version"], ADMIN_API_VERSION);
+        assert_eq!(body["task"]["state"], "needs_reconciliation");
+        assert_eq!(
+            body["task"]["report"],
+            "inspected: 3\nupgraded: 2\nfailures: 1"
+        );
+        let response = app
+            .clone()
+            .oneshot(request(Method::HEAD, &path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+        assert!(to_bytes(response.into_body(), 1).await.unwrap().is_empty());
+        for (path, status) in [
+            (
+                "/api/v1/tasks/maintenance/missing/report",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/api/v1/tasks/maintenance/bad%2Fid/report",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            let response = app
+                .clone()
+                .oneshot(request(method, &path, Some(ADMIN_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("{path}?limit=1"),
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        std::fs::write(
+            root.path()
+                .join("chunks/_shardline_tasks/v1/runs")
+                .join(&id)
+                .join("artifacts")
+                .join(hex::encode(
+                    penelope::core::task::Digest::of(b"inspected: 3\nupgraded: 2\nfailures: 1").0,
+                )),
+            b"edited-report",
+        )
+        .unwrap();
+        let response = app
+            .oneshot(request(Method::GET, &path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("edited-report"));
+    }
+
+    #[tokio::test]
+    async fn embedded_report_route_preserves_disabled_api_concealment() {
+        let (app, _root) = app(None).await;
+        for path in [
+            "/api/v1/tasks/maintenance/test-run/report?invalid=true",
+            "/api/v1/tasks/maintenance/%FF/report",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_api_rejects_missing_and_wrong_credentials() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+        for path in ADMIN_PATHS {
+            for token in [None, Some("wrong-token")] {
+                let response = app
+                    .clone()
+                    .oneshot(request(Method::GET, path, token))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+            }
         }
     }
 
@@ -833,7 +1148,13 @@ mod tests {
             );
             let body = json_body(get_response).await;
             assert_eq!(body["api_version"], ADMIN_API_VERSION, "{path}");
-            if ["/api/v1/nodes", "/api/v1/tasks"].contains(&path) {
+            if [
+                "/api/v1/nodes",
+                "/api/v1/tasks",
+                "/api/v1/tasks/maintenance",
+            ]
+            .contains(&path)
+            {
                 assert_eq!(body["page"]["limit"], DEFAULT_PAGE_LIMIT, "{path}");
                 assert!(body["page"]["returned"].is_number(), "{path}");
                 assert!(body["page"]["next_cursor"].is_null(), "{path}");
@@ -919,7 +1240,24 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_failure_is_reported_as_degraded_without_internal_details() {
-        let (app, temp) = app(Some(ADMIN_TOKEN)).await;
+        let temp = TempDir::new().expect("temp dir");
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().expect("bind address"),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .expect("frontends")
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .expect("admin token");
+        let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
+        // Disable optional cleanup before startup. Otherwise it may recreate
+        // metadata between removal and the deliberate invalid-directory fault.
+        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        let app = crate::app::router_with_housekeeping_guard(config, guard, stopped)
+            .await
+            .expect("router");
         tokio::fs::remove_file(temp.path().join("metadata.sqlite3"))
             .await
             .expect("remove metadata database");
@@ -1046,6 +1384,41 @@ mod tests {
                 "unexpected bounded-poll status {status}"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_maintenance_poll_keeps_running_scan_admission_charged() {
+        let admission = crate::admission::WeightedAdmission::new(NonZeroUsize::MIN);
+        let permit = admission.try_acquire(weights::STATS).expect("first scan");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = spawn_maintenance_inspection(permit, move || {
+            let _sent = started_tx.send(());
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| ServerError::Io(std::io::Error::other(error)))
+        });
+        let observer = worker.abort_handle();
+        let caller = tokio::spawn(worker);
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("scan starts")
+            .expect("start notification");
+        assert!(admission.try_acquire(weights::STATS).is_none());
+        caller.abort();
+        assert!(caller.await.expect_err("cancelled poll").is_cancelled());
+        // The cancelled HTTP future is gone, but the scan still owns capacity.
+        assert!(!observer.is_finished());
+        assert!(admission.try_acquire(weights::STATS).is_none());
+        release_tx.send(()).expect("finish scan");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !observer.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scan finishes");
+        assert!(admission.try_acquire(weights::STATS).is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1400,6 +1773,158 @@ mod tests {
             decode_cursor(&invalid_newtype_cursor, &AdminCollectionQuery::default()),
             Err(ServerError::InvalidAdminQuery)
         ));
+    }
+
+    #[tokio::test]
+    async fn pending_delete_endpoint_paginates_long_keys_without_changing_markers() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("configured PostgreSQL fixture");
+        crate::apply_database_migrations(&pool).await.unwrap();
+        let temp = TempDir::new().unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65536).unwrap(),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .unwrap()
+        .with_index_postgres_url(database_url)
+        .unwrap()
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .unwrap();
+        let app = router(config).await.unwrap();
+        let index = PostgresIndexStore::new(pool.clone());
+        let long_key =
+            shardline_storage::ObjectKey::parse(&format!("inspection/{}", "a".repeat(3500)))
+                .unwrap();
+        let first = index.begin_remote_delete(&long_key).await.unwrap();
+        let other_key = shardline_storage::ObjectKey::parse("inspection/other").unwrap();
+        let second = index.begin_remote_delete(&other_key).await.unwrap();
+        let path = "/api/v1/tasks/maintenance/deletes?limit=1";
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], true);
+        assert!(body["inspection_notice"].is_null());
+        assert_eq!(body["pending_deletes"][0]["object_key"], long_key.as_str());
+        assert_eq!(
+            body["pending_deletes"][0]["attempt"],
+            first.epoch().to_string()
+        );
+        assert_eq!(body["pending_deletes"][0]["state"], "pending");
+        assert_eq!(
+            body["pending_deletes"][0]["next_step"],
+            "Check whether the original GC is still running and read its logs. After it stops, run shardline repair with the same configuration to recover saved replies, then inspect shardline history --pending-deletes again. A backlog may need several repair runs. Missing or invalid replies remain blocked; object absence alone cannot clear them."
+        );
+        let cursor = body["page"]["next_cursor"].as_str().unwrap();
+        assert!(cursor.len() < 1024);
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("{path}&cursor={cursor}"),
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let next = json_body(response).await;
+        assert_eq!(next["pending_deletes"][0]["object_key"], other_key.as_str());
+        assert!(next["page"]["next_cursor"].is_null());
+        assert_eq!(
+            index
+                .pending_remote_deletes(0, 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            index
+                .begin_remote_delete(&other_key)
+                .await
+                .unwrap_err()
+                .is_remote_delete_pending()
+        );
+        for invalid in ["limit=101", "state=pending"] {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    Method::GET,
+                    &format!("/api/v1/tasks/maintenance/deletes?{invalid}"),
+                    Some(ADMIN_TOKEN),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        // An unavailable row-scoped view must not turn existing pending
+        // attempts into a reassuring empty result or alter their markers.
+        sqlx::query("ALTER TABLE shardline_retention_holds ENABLE ROW LEVEL SECURITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let unavailable = json_body(response).await;
+        assert_eq!(unavailable["supported"], false);
+        assert_eq!(unavailable["pending_deletes"], serde_json::json!([]));
+        assert_eq!(
+            unavailable["inspection_notice"],
+            "Pending-delete inspection is unavailable for this backend or database account. An empty list does not prove that no deletes are pending. Check the original GC command and logs before retrying uncertain work."
+        );
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_resource_fences WHERE domain='maintenance-remote-delete'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 2);
+        sqlx::query("ALTER TABLE shardline_retention_holds DISABLE ROW LEVEL SECURITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(index.finish_remote_delete(&first).await.unwrap());
+        assert!(index.finish_remote_delete(&second).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_pending_delete_endpoint_reports_unsupported_without_claiming_health() {
+        let (app, _root) = app(Some(ADMIN_TOKEN)).await;
+        let response = app
+            .oneshot(request(
+                Method::GET,
+                "/api/v1/tasks/maintenance/deletes",
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], false);
+        assert_eq!(
+            body["inspection_notice"],
+            "Pending-delete inspection is unavailable for this backend or database account. An empty list does not prove that no deletes are pending. Check the original GC command and logs before retrying uncertain work."
+        );
+        assert_eq!(body["pending_deletes"], serde_json::json!([]));
+        assert!(body.get("ready").is_none());
     }
 
     #[tokio::test]

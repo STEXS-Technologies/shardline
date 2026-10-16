@@ -10,9 +10,11 @@ mod record_store;
 mod records;
 mod s3_objects;
 mod store;
+mod task_artifacts;
 #[cfg(test)]
 mod tests;
 mod tree_store;
+mod upload_recovery_guard;
 
 pub(crate) use crate::record_kind::RecordKind;
 pub(crate) use constants::{
@@ -33,3 +35,4 @@ pub(crate) use records::{
     StoredObjectPresenceRecord,
 };
 pub use store::{LocalIndexStore, LocalRecordLocator, LocalRecordStore};
+pub use task_artifacts::LocalTaskArtifactPage;

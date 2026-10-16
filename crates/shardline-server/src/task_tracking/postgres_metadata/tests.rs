@@ -1,0 +1,1644 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use super::*;
+use crate::task_tracking::{EmbeddedTaskTracker, TaskRunState, deployment_fingerprint};
+use crate::test_support::postgres_fixture::PostgresFixture as Fixture;
+use shardline_reliability::MaintenanceArtifactKind;
+use shardline_storage::{ObjectPrefix, ObjectStore};
+
+mod deadline;
+mod inspection;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_metadata_admission_preserves_runs_and_caller_isolation() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let mut connection = fixture.index().pool().acquire().await.unwrap();
+    let first = "_shardline_tasks/v1/manifests/first";
+    let second = "_shardline_tasks/v1/manifests/second";
+    let third = "_shardline_tasks/v1/manifests/third";
+    assert!(
+        !PostgresIndexStore::task_history_admission_full_on_connection(&mut connection, 2,)
+            .await
+            .unwrap()
+    );
+    for (key, body) in [(first, b"first".as_slice()), (second, b"second".as_slice())] {
+        assert!(
+            PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+                &mut connection,
+                key,
+                body,
+                2,
+            )
+            .await
+            .unwrap()
+        );
+    }
+    assert!(
+        !PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            third,
+            b"third",
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            first,
+            b"first",
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        PostgresIndexStore::task_history_admission_full_on_connection(&mut connection, 2,)
+            .await
+            .unwrap()
+    );
+    assert!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            first,
+            b"conflict",
+            2,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            "_shardline_tasks/v1/runs/first/completion",
+            &vec![1; 65536],
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            "_shardline_tasks/v1/runs/third/completion",
+            b"orphan",
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            "_shardline_tasks/v1/runs/first/large",
+            &vec![1; 65537],
+            2,
+        )
+        .await
+        .unwrap()
+    );
+    let mut transaction = connection.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let error = PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+        &mut transaction,
+        third,
+        b"third",
+        2,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, PostgresMetadataStoreError::Sqlx(ref error)
+        if error.as_database_error().unwrap().code().as_deref() == Some("SLD04")));
+    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+    assert_eq!(isolation, "repeatable read");
+    transaction.rollback().await.unwrap();
+    assert!(
+        PostgresIndexStore::read_task_artifact_on_connection(&mut connection, third, 16,)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut contender = fixture.admin.acquire().await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET search_path TO {}",
+        fixture.schema
+    )))
+    .execute(&mut *contender)
+    .await
+    .unwrap();
+    let (first_admission, second_admission) = tokio::join!(
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut connection,
+            third,
+            b"third",
+            3,
+        ),
+        PostgresIndexStore::publish_task_artifact_bounded_on_connection(
+            &mut contender,
+            "_shardline_tasks/v1/manifests/fourth",
+            b"fourth",
+            3,
+        ),
+    );
+    assert_ne!(first_admission.unwrap(), second_admission.unwrap());
+    drop(contender);
+    drop(connection);
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_scope_binding_requires_a_live_metadata_manifest() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let store = store.require_metadata_publication();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, identity, key, manifest) = tokio::task::spawn_blocking(move || {
+        EmbeddedTaskTracker::from_store(store.clone(), deployment)
+            .begin(
+                "scope-template",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+        let template = store.summaries(deployment, None, 1).unwrap().remove(0);
+        let mut identity: crate::task_tracking::TaskRunIdentity = serde_json::from_slice(
+            &store
+                .read(&format!("manifests/{}", template.id), 65536)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        identity.public_key = *key.verifying_key().as_bytes();
+        identity.id = hex::encode(identity.public_key);
+        identity.scope.task =
+            penelope::core::task::TaskId::from_digest(Digest::of(identity.id.as_bytes()));
+        let manifest = serde_json::to_vec(&identity).unwrap();
+        store
+            .publish(&format!("manifests/{}", identity.id), &manifest)
+            .unwrap();
+        let legacy = TaskEvidenceStore::from_objects(store.objects.clone());
+        legacy
+            .publish(&format!("manifests/{}", identity.id), &manifest)
+            .unwrap();
+        (store, identity, key, manifest)
+    })
+    .await
+    .unwrap();
+    let mut connection = fixture.index().pool().acquire().await.unwrap();
+    assert!(
+        store
+            .publish_scope_on_work_connection(&identity, &key, scope.unwrap(), &mut connection)
+            .await
+            .unwrap()
+    );
+    let binding = format!("_shardline_tasks/v1/scope-bindings/{}", identity.id);
+    PostgresIndexStore::delete_task_artifact_on_connection(&mut connection, &binding)
+        .await
+        .unwrap();
+    PostgresIndexStore::delete_task_artifact_on_connection(
+        &mut connection,
+        &format!("_shardline_tasks/v1/manifests/{}", identity.id),
+    )
+    .await
+    .unwrap();
+    // Exact legacy bytes cannot authorize a new orphan metadata association.
+    assert!(
+        store
+            .publish_scope_on_work_connection(&identity, &key, scope.unwrap(), &mut connection)
+            .await
+            .is_err()
+    );
+    assert!(
+        PostgresIndexStore::read_task_artifact_on_connection(&mut connection, &binding, 2048)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(connection);
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            store
+                .read(&format!("manifests/{}", identity.id), 65536)
+                .unwrap()
+                .unwrap(),
+            manifest
+        );
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[test]
+fn library_backend_without_runtime_returns_an_error_without_starting_one() {
+    use futures_util::FutureExt;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let Some(fixture) = runtime.block_on(Fixture::new()) else {
+        return;
+    };
+    let error = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .now_or_never()
+        .expect("runtime validation must return immediately")
+        .unwrap_err();
+    assert!(matches!(error, ServerError::Io(error)
+        if error.get_ref().is_some_and(|source| source.is::<tokio::runtime::TryCurrentError>())));
+    runtime.block_on(fixture.finish());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_record_reader_preserves_pages_conflicts_and_record_limits() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        super::super::tests::verify_bounded_record_reader(&store);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_inspection_and_report_use_bounded_record_pages() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let seed = store.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        EmbeddedTaskTracker::from_store(seed.clone(), deployment)
+            .begin(
+                "paged completed history",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"verified report")
+            .unwrap();
+        seed.summaries(deployment, None, 10)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .id
+    })
+    .await
+    .unwrap();
+    let record_prefix = format!("{}runs/{id}/records/", super::super::TASK_EVIDENCE_PREFIX);
+    let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_task_artifacts_v1 WHERE left(artifact_key,char_length($1))=$1", fixture.schema,
+    ))).bind(&record_prefix).fetch_one(&fixture.admin).await.unwrap();
+    assert!(count > 0 && count <= 64);
+    // Observe actual metadata read-function calls, without changing its result.
+    // Per-record reads use 16 KiB; bounded page reads use 64 KiB and the caller
+    // independently enforces the original 16 KiB record limit before decoding.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE {}.record_read_calls(maximum_bytes bigint);
+         ALTER FUNCTION {}.shardline_task_artifact_read_v1(text,text,bigint) RENAME TO original_artifact_read;
+         CREATE FUNCTION {}.shardline_task_artifact_read_v1(index_schema text,artifact text,maximum_bytes bigint)
+         RETURNS TABLE(byte_length bigint,body bytea) LANGUAGE plpgsql AS $$
+         BEGIN IF left(artifact,char_length('{record_prefix}'))='{record_prefix}' THEN
+             INSERT INTO {}.record_read_calls VALUES(maximum_bytes); END IF;
+         RETURN QUERY SELECT * FROM {}.original_artifact_read(index_schema,artifact,maximum_bytes); END $$",
+        fixture.schema, fixture.schema, fixture.schema, fixture.schema, fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    tokio::task::spawn_blocking(move || {
+        let summaries = store.summaries(deployment, None, 10).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries.first().unwrap().state, TaskRunState::Completed);
+        let report = store
+            .embedded_report(deployment, None, &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report["report"], "verified report");
+        assert_eq!(report["state"], "completed");
+    })
+    .await
+    .unwrap();
+    let calls: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT maximum_bytes FROM {}.record_read_calls",
+        fixture.schema,
+    )))
+    .fetch_all(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(calls.len(), usize::try_from(count * 2).unwrap());
+    assert!(calls.iter().all(|maximum| *maximum == 65536));
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_defers_scope_reads_for_runs_outside_the_oldest_batch() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let seed = store.clone();
+    let newest = tokio::task::spawn_blocking(move || {
+        let tracker = EmbeddedTaskTracker::from_store(seed.clone(), deployment);
+        for _ in 0..65 {
+            tracker
+                .begin(
+                    "completed",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"complete")
+                .unwrap();
+        }
+        let mut ids: Vec<_> = seed
+            .summaries(deployment, None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect();
+        ids.sort();
+        for (position, id) in ids.iter().enumerate() {
+            let suffix = format!("manifests/{id}");
+            let mut identity: super::super::TaskRunIdentity =
+                serde_json::from_slice(&seed.read(&suffix, 65536).unwrap().unwrap()).unwrap();
+            identity.created_at = u64::try_from(position).unwrap();
+            seed.delete_artifact(&TaskEvidenceStore::key(&suffix).unwrap())
+                .unwrap();
+            seed.publish(&suffix, &serde_json::to_vec(&identity).unwrap())
+                .unwrap();
+        }
+        ids.last().unwrap().clone()
+    })
+    .await
+    .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER FUNCTION {}.shardline_task_artifact_read_v1(text,text,bigint) RENAME TO original_artifact_read;
+         CREATE FUNCTION {}.shardline_task_artifact_read_v1(index_schema text,artifact text,maximum_bytes bigint)
+         RETURNS TABLE(byte_length bigint,body bytea) LANGUAGE plpgsql AS $$
+         BEGIN IF artifact='{}scope-bindings/{newest}' THEN RAISE EXCEPTION 'synthetic deferred scope read failure'; END IF;
+         RETURN QUERY SELECT * FROM {}.original_artifact_read(index_schema,artifact,maximum_bytes); END $$",
+        fixture.schema, fixture.schema, super::super::TASK_EVIDENCE_PREFIX, fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    let checked = store.clone();
+    let checked_id = newest.clone();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(checked.prune_completed(deployment, u64::MAX).unwrap(), 64);
+        assert!(checked.prune_completed(deployment, u64::MAX).is_err());
+        assert!(
+            checked
+                .read(&format!("manifests/{checked_id}"), 65536)
+                .unwrap()
+                .is_some()
+        );
+    })
+    .await
+    .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP FUNCTION {}.shardline_task_artifact_read_v1(text,text,bigint);
+         ALTER FUNCTION {}.original_artifact_read(text,text,bigint) RENAME TO shardline_task_artifact_read_v1",
+        fixture.schema, fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replacement_login_retires_shared_history_after_source_pool_closes() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let source_role = format!("{}_source", fixture.schema);
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {source_role} LOGIN PASSWORD 'owned_retention_source';
+         GRANT USAGE ON SCHEMA {} TO {source_role};
+         GRANT SELECT,INSERT,DELETE ON {}.shardline_reliability_events TO {source_role}",
+        fixture.schema, fixture.schema,
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    let mut source_url = url::Url::parse(fixture.config.index_postgres_url().unwrap()).unwrap();
+    source_url.set_username(&source_role).unwrap();
+    source_url
+        .set_password(Some("owned_retention_source"))
+        .unwrap();
+    let source_config = fixture
+        .config
+        .clone()
+        .with_index_postgres_url(source_url.to_string())
+        .unwrap();
+    let source_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(source_url.as_str())
+        .await
+        .unwrap();
+    let (source, source_scope) =
+        TaskEvidenceStore::from_postgres_pool(&source_config, &source_pool)
+            .await
+            .unwrap();
+    let source_scope = source_scope.unwrap();
+    let source_deployment = deployment_fingerprint(&source_config).unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    assert_ne!(source_deployment, deployment);
+    tokio::task::spawn_blocking(move || {
+        let tracker = EmbeddedTaskTracker::from_store(source, source_deployment)
+            .with_history_scope(source_scope);
+        for _ in 0..2 {
+            tracker
+                .begin(
+                    "previous-account-complete",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"complete")
+                .unwrap();
+        }
+        drop(
+            tracker
+                .begin(
+                    "previous-account-interrupted",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap(),
+        );
+    })
+    .await
+    .unwrap();
+    source_pool.close().await;
+    // The read-only CLI path must see the old account's shared history before
+    // any replacement cleanup, without altering its signed artifacts.
+    let artifact_query = format!(
+        "SELECT artifact_key,payload FROM {}.shardline_task_artifacts_v1 ORDER BY artifact_key",
+        fixture.schema,
+    );
+    let original_artifacts: Vec<(String, Vec<u8>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(artifact_query.clone()))
+            .fetch_all(&fixture.admin)
+            .await
+            .unwrap();
+    let (inspection, inspection_scope) =
+        TaskEvidenceStore::for_inspection(&fixture.config, Some(fixture.index().pool()))
+            .await
+            .unwrap();
+    assert_eq!(inspection_scope, Some(source_scope));
+    tokio::task::spawn_blocking(move || {
+        let page = inspection
+            .inspection_page(deployment, inspection_scope, None, 10)
+            .unwrap();
+        let tasks = page["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task["state"] == "completed")
+                .count(),
+            2
+        );
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task["operation"] == "previous-account-interrupted"
+                    && task["state"] != "completed"
+                    && task["next_step"].is_string())
+        );
+    })
+    .await
+    .unwrap();
+    let inspected_artifacts: Vec<(String, Vec<u8>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(artifact_query))
+            .fetch_all(&fixture.admin)
+            .await
+            .unwrap();
+    assert_eq!(inspected_artifacts, original_artifacts);
+    let (replacement, replacement_scope) =
+        TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+            .await
+            .unwrap();
+    assert_eq!(replacement_scope, Some(source_scope));
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            replacement.prune_completed(deployment, u64::MAX).unwrap(),
+            2
+        );
+        let history = replacement
+            .summaries_with_scope(deployment, replacement_scope, None, 10)
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.first().unwrap().operation,
+            "previous-account-interrupted"
+        );
+        assert!(!matches!(
+            history.first().unwrap().state,
+            TaskRunState::Completed | TaskRunState::Failed
+        ));
+    })
+    .await
+    .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {source_role}; DROP ROLE {source_role}"
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_scope_retention_accepts_foreign_configuration_without_crossing_scopes() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let scope = scope.unwrap();
+    tokio::task::spawn_blocking(move || {
+        let foreign = Digest::of(b"previous login configuration");
+        let create = |target, association: Option<Digest>, operation: &str| {
+            let source = if association.is_some_and(|associated| associated != scope) {
+                // A metadata adapter correctly refuses publishing another
+                // namespace's binding. Import genuine signed legacy history.
+                TaskEvidenceStore::from_objects(store.objects.clone())
+            } else {
+                store.clone()
+            };
+            let tracker = EmbeddedTaskTracker::from_store(source, target);
+            let tracker = if let Some(scope) = association {
+                tracker.with_history_scope(scope)
+            } else {
+                tracker
+            };
+            tracker
+                .begin(
+                    operation,
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"complete")
+                .unwrap();
+            let id = store
+                .summaries(target, None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|summary| summary.operation == operation)
+                .unwrap()
+                .id;
+            let suffix = format!("manifests/{id}");
+            let bytes = store.read(&suffix, 65536).unwrap();
+            (suffix, bytes)
+        };
+        let accepted = create(foreign, Some(scope), "shared-complete");
+        let unbound = create(foreign, None, "unbound-foreign");
+        let legacy_copy = create(foreign, Some(scope), "legacy-shared-copy");
+        TaskEvidenceStore::from_objects(store.objects.clone())
+            .publish(&legacy_copy.0, legacy_copy.1.as_ref().unwrap())
+            .unwrap();
+        let other_scope = create(
+            deployment,
+            Some(Digest::of(b"another metadata namespace")),
+            "other-scope",
+        );
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+        assert!(store.read(&accepted.0, 65536).unwrap().is_none());
+        assert_eq!(store.read(&unbound.0, 65536).unwrap(), unbound.1);
+        assert_eq!(store.read(&legacy_copy.0, 65536).unwrap(), legacy_copy.1);
+        assert_eq!(store.read(&other_scope.0, 65536).unwrap(), other_scope.1);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_shared_retirement_keeps_exact_manifest_and_atomic_authorization() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let scope = scope.unwrap();
+    let prepare = store.clone();
+    let (identity, exact_manifest) = tokio::task::spawn_blocking(move || {
+        let foreign = Digest::of(b"retired login configuration");
+        let receipt = EmbeddedTaskTracker::from_store(prepare.clone(), foreign)
+            .begin(
+                "shared-retirement",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap();
+        let id = prepare
+            .summaries(foreign, None, 10)
+            .unwrap()
+            .first()
+            .unwrap()
+            .id
+            .clone();
+        let suffix = format!("manifests/{id}");
+        let identity: super::super::TaskRunIdentity =
+            serde_json::from_slice(&prepare.read(&suffix, 65536).unwrap().unwrap()).unwrap();
+        let exact_manifest = serde_json::to_vec_pretty(&identity).unwrap();
+        prepare
+            .delete_artifact(&TaskEvidenceStore::key(&suffix).unwrap())
+            .unwrap();
+        prepare.publish(&suffix, &exact_manifest).unwrap();
+        receipt.bind_history_scope(scope).unwrap();
+        receipt.finish(true, b"complete").unwrap();
+        assert!(prepare.begin_retirement(&identity).unwrap());
+        prepare
+            .delete_artifact(&TaskEvidenceStore::key(&suffix).unwrap())
+            .unwrap();
+        (identity, exact_manifest)
+    })
+    .await
+    .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {}.reject_retirement_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF OLD.artifact_key = '{}retiring/{}' THEN RAISE EXCEPTION 'synthetic retirement deletion failure'; END IF;
+         RETURN OLD; END $$;
+         CREATE TRIGGER reject_retirement_delete BEFORE DELETE ON {}.shardline_task_artifacts_v1
+         FOR EACH ROW EXECUTE FUNCTION {}.reject_retirement_delete()",
+        fixture.schema, super::super::TASK_EVIDENCE_PREFIX, identity.id, fixture.schema, fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    let failed = store.clone();
+    let checked_identity = identity.clone();
+    let checked_manifest = exact_manifest.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(failed.prune_completed(deployment, u64::MAX).is_err());
+        assert_eq!(
+            failed
+                .read(&format!("retiring/{}", checked_identity.id), 65536)
+                .unwrap(),
+            Some(checked_manifest.clone())
+        );
+        assert!(
+            failed
+                .history_scope_binding_match_for_manifest(
+                    &checked_identity,
+                    scope,
+                    &checked_manifest
+                )
+                .unwrap()
+                .unwrap()
+        );
+    })
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER reject_retirement_delete ON {}.shardline_task_artifacts_v1",
+        fixture.schema,
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+        for category in ["retiring", "scope-bindings", "manifests"] {
+            assert!(
+                store
+                    .read(&format!("{category}/{}", identity.id), 65536)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batched_retention_crosses_pages_without_losing_oldest_first_or_unfinished_history() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    assert!(store.postgres_metadata.is_some());
+    let store = store.require_metadata_publication();
+    tokio::task::spawn_blocking(move || {
+        let tracker = EmbeddedTaskTracker::from_store(store.clone(), deployment);
+        for _ in 0..65 {
+            tracker
+                .begin(
+                    "finished",
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"complete")
+                .unwrap();
+        }
+        let mut ids: Vec<_> = store
+            .summaries(deployment, None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect();
+        ids.sort();
+        for (position, id) in ids.iter().enumerate() {
+            let suffix = format!("manifests/{id}");
+            let mut identity: super::super::TaskRunIdentity =
+                serde_json::from_slice(&store.read(&suffix, 65536).unwrap().unwrap()).unwrap();
+            identity.created_at = 65_u64
+                .checked_sub(u64::try_from(position).unwrap())
+                .unwrap();
+            store
+                .delete_artifact(&super::super::TaskEvidenceStore::key(&suffix).unwrap())
+                .unwrap();
+            store
+                .publish(&suffix, &serde_json::to_vec(&identity).unwrap())
+                .unwrap();
+        }
+        let unfinished = tracker
+            .begin(
+                "unfinished",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap();
+        let unfinished_id = store
+            .summaries(deployment, None, 100)
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.operation == "unfinished")
+            .unwrap()
+            .id;
+        let unfinished_suffix = format!("manifests/{unfinished_id}");
+        let original = store.read(&unfinished_suffix, 65536).unwrap();
+        tracker
+            .begin(
+                "conflicting",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"complete")
+            .unwrap();
+        let conflicting_id = store
+            .summaries(deployment, None, 100)
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.operation == "conflicting")
+            .unwrap()
+            .id;
+        let conflicting_suffix = format!("manifests/{conflicting_id}");
+        let metadata_original = store.read(&conflicting_suffix, 65536).unwrap();
+        TaskEvidenceStore::from_objects(store.objects.clone())
+            .publish(&conflicting_suffix, b"conflicting legacy identity")
+            .unwrap();
+        store
+            .publish("manifests/unreadable", b"invalid identity")
+            .unwrap();
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 64);
+        for (position, id) in ids.iter().enumerate() {
+            assert_eq!(
+                store
+                    .read(&format!("manifests/{id}"), 65536)
+                    .unwrap()
+                    .is_some(),
+                position == 0
+            );
+        }
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 1);
+        assert_eq!(store.prune_completed(deployment, u64::MAX).unwrap(), 0);
+        assert!(matches!(
+            store.read(&conflicting_suffix, 65536),
+            Err(ServerError::InvalidContentHash)
+        ));
+        assert_eq!(
+            store
+                .read_objects(&conflicting_suffix, 65536)
+                .unwrap()
+                .as_deref(),
+            Some(b"conflicting legacy identity".as_slice())
+        );
+        assert_eq!(
+            store
+                .postgres_metadata
+                .as_ref()
+                .unwrap()
+                .read(
+                    TaskEvidenceStore::key(&conflicting_suffix)
+                        .unwrap()
+                        .as_str(),
+                    65536
+                )
+                .unwrap()
+                .unwrap()
+                .bytes,
+            metadata_original
+        );
+        assert_eq!(store.read(&unfinished_suffix, 65536).unwrap(), original);
+        assert_eq!(
+            store
+                .read("manifests/unreadable", 65536)
+                .unwrap()
+                .as_deref(),
+            Some(b"invalid identity".as_slice())
+        );
+        drop(unfinished);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row_policies_disable_optional_history_without_stopping_startup_work() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let seed = store.clone();
+    tokio::task::spawn_blocking(move || seed.publish("rls-original", b"existing history"))
+        .await
+        .unwrap()
+        .unwrap();
+    for statement in [
+        format!(
+            "ALTER TABLE {}.shardline_task_artifacts_v1 ENABLE ROW LEVEL SECURITY",
+            fixture.schema
+        ),
+        format!(
+            "ALTER TABLE {}.shardline_task_artifacts_v1 FORCE ROW LEVEL SECURITY",
+            fixture.schema
+        ),
+        format!(
+            "CREATE POLICY deny_history ON {}.shardline_task_artifacts_v1 USING (false) WITH CHECK (false)",
+            fixture.schema
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&fixture.admin)
+            .await
+            .unwrap();
+    }
+    let reader = store.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(reader.read("rls-original", 100).is_err());
+        assert!(
+            reader
+                .publish("rls-new", b"must not bypass policy")
+                .is_err()
+        );
+    })
+    .await
+    .unwrap();
+    let (unsupported, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    assert!(scope.is_none());
+    assert!(
+        unsupported
+            .history_notice()
+            .unwrap()
+            .unwrap()
+            .contains("unavailable")
+    );
+
+    let sessions = fixture.config.root_dir().join("tmp/lfs-patch");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let oid = "01".repeat(32);
+    let staged = sessions.join(&oid);
+    let touched = sessions.join(format!("{oid}.meta"));
+    std::fs::write(&staged, b"expired legacy staging").unwrap();
+    std::fs::write(&touched, b"0").unwrap();
+    let config = fixture
+        .config
+        .clone()
+        .with_server_frontends([crate::ServerFrontend::Lfs])
+        .unwrap()
+        .with_admin_read_token(b"owned-rls-admin".to_vec())
+        .unwrap();
+    let app = crate::app::router(config).await.unwrap();
+    assert!(
+        !staged.exists(),
+        "optional history must not prevent the original sweep"
+    );
+    assert!(!touched.exists());
+    for path in ["/api/v1/status", "/api/v1/tasks/maintenance"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("Authorization", "Bearer owned-rls-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{path}");
+        if path == "/api/v1/tasks/maintenance" {
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["history_grouping"], "legacy");
+            assert!(body["tasks"].as_array().unwrap().is_empty());
+            assert!(
+                body["history_notice"]
+                    .as_str()
+                    .unwrap()
+                    .contains("an empty list does not prove maintenance did not run")
+            );
+        }
+    }
+    assert!(
+        fixture
+            .backend
+            .object_store()
+            .list_prefix(&ObjectPrefix::parse("_shardline_tasks/v1/").unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_task_artifacts_v1",
+        fixture.schema
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows, 1,
+        "unavailable tracking must neither overwrite nor claim completion"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {}.shardline_task_artifacts_v1 DISABLE ROW LEVEL SECURITY",
+        fixture.schema
+    )))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    let (restored, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            restored.read("rls-original", 100).unwrap(),
+            Some(b"existing history".to_vec())
+        );
+        assert!(restored.read("rls-new", 100).unwrap().is_none());
+    })
+    .await
+    .unwrap();
+    drop(app);
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_relocation_preserves_scope_associations_and_exact_history() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let scope = scope.unwrap();
+    let legacy = TaskEvidenceStore::from_objects(fixture.backend.object_store());
+    tokio::task::spawn_blocking(move || {
+        for (operation, legacy_deployment, history_scope) in [
+            ("same-login", deployment, None),
+            ("shared-login", Digest::of(b"another login"), Some(scope)),
+            (
+                "other-work-target",
+                deployment,
+                Some(Digest::of(b"another database/schema")),
+            ),
+        ] {
+            let mut tracker = EmbeddedTaskTracker::from_store(legacy.clone(), legacy_deployment);
+            if let Some(scope) = history_scope {
+                tracker = tracker.with_history_scope(scope);
+            }
+            tracker
+                .begin(
+                    operation,
+                    b"input",
+                    MaintenanceArtifactKind::LifecycleRepair,
+                )
+                .unwrap()
+                .finish(true, b"original report")
+                .unwrap();
+        }
+        let before: std::collections::BTreeMap<_, _> = legacy
+            .objects
+            .list_prefix(&ObjectPrefix::parse(super::super::TASK_EVIDENCE_PREFIX).unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|artifact| {
+                let suffix = artifact
+                    .key()
+                    .as_str()
+                    .strip_prefix(super::super::TASK_EVIDENCE_PREFIX)
+                    .unwrap()
+                    .to_owned();
+                let bytes = legacy.read(&suffix, artifact.length()).unwrap().unwrap();
+                (suffix, bytes)
+            })
+            .collect();
+        assert!(store.relocate_finished_history(deployment).unwrap() > 0);
+        let history = store
+            .summaries_with_scope(deployment, Some(scope), None, 10)
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .all(|task| task.state == TaskRunState::Completed)
+        );
+        let legacy_history = legacy.summaries(deployment, None, 10).unwrap();
+        assert_eq!(legacy_history.len(), 1);
+        assert_eq!(legacy_history[0].operation, "other-work-target");
+        for (suffix, bytes) in before {
+            assert_eq!(
+                store
+                    .read(&suffix, u64::try_from(bytes.len()).unwrap())
+                    .unwrap(),
+                Some(bytes)
+            );
+        }
+        assert_eq!(store.relocate_finished_history(deployment).unwrap(), 0);
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_metadata_preserves_legacy_history_and_retention() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    // Ordinary startup before an owner upgrade never installs tables or breaks
+    // the existing evidence writer. Its legacy run remains readable afterward.
+    let (legacy, legacy_scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    assert!(legacy.postgres_metadata.is_none());
+    assert!(legacy_scope.is_none());
+    tokio::task::spawn_blocking(move || {
+        EmbeddedTaskTracker::from_store(legacy, deployment)
+            .begin(
+                "legacy-server",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"old report")
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let absent: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NULL")
+        .bind(format!("{}.shardline_task_artifacts_v1", fixture.schema))
+        .fetch_one(&fixture.admin)
+        .await
+        .unwrap();
+    assert!(absent);
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let scope = scope.unwrap();
+    assert!(store.postgres_metadata.is_some());
+    let writer = store.clone();
+    tokio::task::spawn_blocking(move || {
+        EmbeddedTaskTracker::from_store(writer, deployment)
+            .with_history_scope(scope)
+            .begin(
+                "metadata-server",
+                b"input",
+                MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"new verified report")
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_task_artifacts_v1",
+        fixture.schema
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    assert!(count > 0);
+    assert_eq!(fixture.index().pool().size(), 1);
+    fixture.index().pool().close().await;
+    let other_backend = ServerBackend::from_config(&fixture.config).await.unwrap();
+    let (reader, reopened_scope) = TaskEvidenceStore::from_backend(&fixture.config, &other_backend)
+        .await
+        .unwrap();
+    assert_eq!(reopened_scope, Some(scope));
+    tokio::task::spawn_blocking(move || {
+        let history = reader
+            .summaries_with_scope(deployment, Some(scope), None, 10)
+            .unwrap();
+        assert_eq!(
+            reader
+                .inspect_summaries_with_scope(deployment, Some(scope), None, 10)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .all(|run| run.state == TaskRunState::Completed)
+        );
+        let new_run = history
+            .iter()
+            .find(|run| run.operation == "metadata-server")
+            .unwrap();
+        assert_eq!(
+            reader
+                .embedded_report(deployment, Some(scope), &new_run.id)
+                .unwrap()
+                .unwrap()["report"],
+            "new verified report"
+        );
+        // Only the legacy manifest is present in payload storage.
+        let prefix = ObjectPrefix::parse("_shardline_tasks/v1/manifests/").unwrap();
+        assert_eq!(reader.objects.list_prefix(&prefix).unwrap().len(), 1);
+        let suffix = format!("manifests/{}", new_run.id);
+        let manifest = reader.read(&suffix, 65536).unwrap().unwrap();
+        assert!(matches!(
+            reader.read(&suffix, 0),
+            Err(ServerError::RequestBodyTooLarge)
+        ));
+        assert!(reader.publish(&suffix, b"conflicting bytes").is_err());
+        assert_eq!(reader.read(&suffix, 65536).unwrap(), Some(manifest));
+        reader.prune_completed(deployment, u64::MAX).unwrap();
+        assert!(reader.summaries(deployment, None, 10).unwrap().is_empty());
+        assert!(
+            reader
+                .objects
+                .list_prefix(&ObjectPrefix::parse("_shardline_tasks/v1/").unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    })
+    .await
+    .unwrap();
+    let remaining: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_task_artifacts_v1",
+        fixture.schema
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0);
+    assert_eq!(fixture.index().pool().size(), 0);
+    if let ServerBackend::Postgres(backend) = other_backend {
+        backend.index_store().pool().close().await;
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changed_metadata_identity_never_redirects_evidence_or_falls_back_to_payloads() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, scope) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    assert!(scope.is_some());
+    let original: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT resource FROM {}.shardline_resource_fences WHERE domain='maintenance-task-history-scope'", fixture.schema
+    ))).fetch_one(&fixture.admin).await.unwrap();
+    let replacement = if original == "00".repeat(32) {
+        "01".repeat(32)
+    } else {
+        "00".repeat(32)
+    };
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {}.shardline_resource_fences SET resource=$1 WHERE domain='maintenance-task-history-scope'", fixture.schema
+    ))).bind(replacement).execute(&fixture.admin).await.unwrap();
+    let reader = store.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(
+            reader
+                .publish("manifests/changed-target", b"must not publish")
+                .is_err()
+        );
+        assert!(reader.read("manifests/changed-target", 100).is_err());
+        assert!(
+            reader
+                .objects
+                .list_prefix(&ObjectPrefix::parse("_shardline_tasks/v1/").unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    })
+    .await
+    .unwrap();
+    assert!(
+        fixture
+            .index()
+            .read_task_artifact("_shardline_tasks/v1/manifests/changed-target", 100)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture.index().pool().close().await;
+    assert!(
+        TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+            .await
+            .is_err()
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_postgres_router_role_records_fresh_same_process_startup_history() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let mut previous = std::collections::BTreeSet::new();
+    for (index, role) in [
+        crate::ServerRole::All,
+        crate::ServerRole::Api,
+        crate::ServerRole::Transfer,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let config = fixture
+            .config
+            .clone()
+            .with_server_frontends([crate::ServerFrontend::Lfs])
+            .unwrap()
+            .with_server_role(role)
+            .with_admin_read_token(b"role-history-admin".to_vec())
+            .unwrap();
+        let sessions = config.root_dir().join("tmp/lfs-patch");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let oid = format!("{:064x}", index + 1);
+        let data = sessions.join(&oid);
+        let touched = sessions.join(format!("{oid}.meta"));
+        std::fs::write(&data, b"new expired session for this role").unwrap();
+        std::fs::write(&touched, b"0").unwrap();
+        let app = crate::app::router(config).await.unwrap();
+        assert!(!data.exists());
+        assert!(!touched.exists());
+        for path in ["/api/v1/status", "/api/v1/tasks/maintenance"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("Authorization", "Bearer role-history-admin")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            if path == "/api/v1/status" {
+                assert_eq!(body["server_role"], role.as_str());
+                assert_eq!(body["state"], "ready");
+            } else {
+                assert_eq!(body["supervision"], "embedded");
+                assert_eq!(body["history_grouping"], "shared_metadata");
+                assert!(body["history_notice"].is_null());
+                let tasks = body["tasks"].as_array().unwrap();
+                assert_eq!(tasks.len(), index + 1);
+                let ids: std::collections::BTreeSet<_> = tasks
+                    .iter()
+                    .map(|task| {
+                        assert_eq!(task["operation"], "lfs-startup-session-sweep");
+                        assert_eq!(task["state"], "completed");
+                        assert_eq!(task["execution"], "embedded");
+                        assert_eq!(task["owner"]["pid"], std::process::id());
+                        task["id"].as_str().unwrap().to_owned()
+                    })
+                    .collect();
+                assert!(previous.is_subset(&ids));
+                assert_eq!(ids.len(), index + 1);
+                previous = ids;
+            }
+        }
+        drop(app);
+    }
+    assert!(
+        fixture
+            .backend
+            .object_store()
+            .list_prefix(&ObjectPrefix::parse("_shardline_tasks/v1/").unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normal_router_publishes_and_serves_authenticated_metadata_history() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let config = fixture
+        .config
+        .clone()
+        .with_server_frontends([crate::ServerFrontend::Lfs])
+        .unwrap()
+        .with_admin_read_token(b"owned-task-admin".to_vec())
+        .unwrap();
+    let app = crate::app::router(config.clone()).await.unwrap();
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tasks/maintenance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tasks/maintenance")
+                .header("Authorization", "Bearer owned-task-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(body["history_grouping"], "shared_metadata");
+    assert!(body["history_notice"].is_null());
+    let startup = body["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["operation"] == "lfs-startup-session-sweep")
+        .unwrap();
+    assert_eq!(startup["state"], "completed");
+    let id = startup["id"].as_str().unwrap();
+    let report_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/tasks/maintenance/{id}/report"))
+                .header("Authorization", "Bearer owned-task-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report_response.status(), StatusCode::OK);
+    let report: serde_json::Value =
+        serde_json::from_slice(&to_bytes(report_response.into_body(), 65536).await.unwrap())
+            .unwrap();
+    assert_eq!(report["task"]["operation"], "lfs-startup-session-sweep");
+    assert_eq!(report["task"]["state"], "completed");
+    assert_eq!(report["task"]["report_available"], true);
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO {}.shardline_task_artifacts_v1(artifact_key,payload)
+         SELECT '_shardline_tasks/v1/manifests/zbudget-'||item, convert_to('unresolved evidence','UTF8')
+         FROM generate_series(1,4095) item", fixture.schema,
+    ))).execute(&fixture.admin).await.unwrap();
+    let full = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tasks/maintenance?limit=1")
+                .header("Authorization", "Bearer owned-task-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(full.status(), StatusCode::OK);
+    let full: serde_json::Value =
+        serde_json::from_slice(&to_bytes(full.into_body(), 65536).await.unwrap()).unwrap();
+    assert!(
+        full["history_notice"]
+            .as_str()
+            .unwrap()
+            .contains("Task history is full")
+    );
+    let cursor = full["page"]["next_cursor"].as_str().unwrap();
+    let next = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/tasks/maintenance?limit=1&cursor={cursor}"))
+                .header("Authorization", "Bearer owned-task-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+    let next: serde_json::Value =
+        serde_json::from_slice(&to_bytes(next.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(next["history_grouping"], "shared_metadata");
+    assert_eq!(next["history_notice"], full["history_notice"]);
+    assert_eq!(next["page"]["returned"], 1);
+    let incident = &next["tasks"][0];
+    assert_ne!(incident["id"], full["tasks"][0]["id"]);
+    assert_eq!(incident["state"], "corrupt");
+    assert_eq!(incident["identity_verified"], false);
+    assert!(incident.get("owner").is_none());
+    assert!(incident.get("operation").is_none());
+    assert!(incident["next_step"].as_str().unwrap().contains("Preserve"));
+    let snapshot = sqlx::query_as::<_, (String, Vec<u8>)>(sqlx::AssertSqlSafe(format!(
+        "SELECT artifact_key,payload FROM {}.shardline_task_artifacts_v1 ORDER BY artifact_key",
+        fixture.schema,
+    )))
+    .fetch_all(&fixture.admin)
+    .await
+    .unwrap();
+    let sessions = fixture.config.root_dir().join("tmp/lfs-patch");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let oid = "02".repeat(32);
+    let staged = sessions.join(&oid);
+    let touched = sessions.join(format!("{oid}.meta"));
+    std::fs::write(&staged, b"expired staging at capacity").unwrap();
+    std::fs::write(&touched, b"0").unwrap();
+    let restarted = crate::app::router(config).await.unwrap();
+    assert!(
+        !staged.exists(),
+        "recording capacity must not stop the startup sweep"
+    );
+    assert!(!touched.exists());
+    let after_restart = sqlx::query_as::<_, (String, Vec<u8>)>(sqlx::AssertSqlSafe(format!(
+        "SELECT artifact_key,payload FROM {}.shardline_task_artifacts_v1 ORDER BY artifact_key",
+        fixture.schema,
+    )))
+    .fetch_all(&fixture.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot, after_restart,
+        "no fabricated outcome or orphan records at capacity"
+    );
+    drop(restarted);
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/status")
+                .header("Authorization", "Bearer owned-task-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {}.shardline_task_artifacts_v1",
+        fixture.schema
+    )))
+    .fetch_one(&fixture.admin)
+    .await
+    .unwrap();
+    assert!(count > 0);
+    assert!(
+        fixture
+            .backend
+            .object_store()
+            .list_prefix(&ObjectPrefix::parse("_shardline_tasks/v1/").unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    drop(app);
+    fixture.finish().await;
+}

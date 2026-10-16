@@ -6,14 +6,85 @@ controlled write maintenance window before that rollout.
 
 Shardline processes are stateless in the request path. The durable boundaries are the
 object-store adapter and the index and record adapters, which are external to the
-process. That makes a live upgrade safe as long as each process is drained, restarted
-on the new version, and confirmed ready before the next process moves.
+process. A live upgrade also requires compatible schemas and write behavior
+between the overlapping versions. Drain each process, restart it on the new
+version, and confirm readiness before replacing the next process; readiness
+alone does not establish mixed-version compatibility.
 
 On Unix, both SIGTERM (the usual container stop signal) and SIGINT start the
 server's graceful connection drain. By default the server waits for active
 connections to finish; allow enough runtime termination grace for those transfers.
 If an embedding application sets `ServerConfig::with_shutdown_timeout`, give the
 runtime a longer grace period so the server's deadline runs before SIGKILL.
+
+## StateChronicle/Penelope 0.2.0 dependency upgrade
+
+For tracking commands and recovery, see the
+[maintenance guide](MAINTENANCE_INTEGRATION_UX.md).
+
+Keep the existing server commands, maintenance commands and GC timer. Tracking
+runs in their existing process, with normal maintenance output streamed live.
+It needs no new service, port, mount, environment variable or signing key.
+Private temporary files use the existing writable root or host temporary storage.
+
+Run the usual owner command, `shardline db migrate up`, to install the optional
+history and protection functions, even if the migration ledger has no pending
+entries. Runtime accounts need no new fence-table grant. See the
+[database migration guide](DATABASE_MIGRATIONS.md).
+
+The dependencies preserve the evidence formats written by 1.11.3, including
+existing journal identities, digests and signatures. New validation checks those
+records without rewriting them. Recorded task history supplements the existing
+metadata journals and safety barriers; it does not replace them or automatically
+repeat interrupted work.
+
+Follow the role-by-role drain and readiness procedure below. The integration
+can reject an affected write while an earlier remote delete remains unresolved;
+see [maintenance without another service](MAINTENANCE_INTEGRATION_UX.md) for the
+retryable error and recovery steps. Earlier-version upgrades must still follow
+the schema, session, writer-routing, GC and repair restrictions below.
+
+For this integration's upgrade from released 1.11.3:
+
+1. Pause scheduled destructive GC and wait for existing GC commands to finish.
+   Normal server traffic can remain available for this integration when the
+   released schema is already current. If other schema migrations are pending,
+   follow their write-maintenance requirements first. An older GC binary does not create the
+   new remote-delete markers, so installing the new server cannot protect a
+   delete performed by that binary.
+2. Run the usual owner-run `shardline db migrate up` using the upgraded binary
+   and the same database/schema configuration as the deployment.
+   Let it finish all pending migrations. A step-limited upgrade that leaves
+   migrations pending does not install the new protection functions.
+3. Roll the server roles using the drain and readiness checks below. Replace
+   the binaries or images used by existing maintenance jobs as well.
+4. Inspect pending deletes with `shardline history --pending-deletes` using the
+   same configuration. Read `supported` and `inspection_notice`; unavailable
+   inspection is inconclusive. Investigate interrupted work before resuming the
+   existing destructive GC schedule. Saved successful replies can be recovered
+   by ordinary `shardline repair`; missing replies remain blocked. No extra
+   tracker service or schedule is required.
+
+Use this checklist for an already-current 1.11.3 deployment. The sections below
+also describe upgrades from earlier releases: apply their schema and format
+restrictions when your starting version lacks the corresponding behavior.
+Keep the destructive GC pause above throughout this integration's rollout.
+
+If server rollback is necessary, pause destructive GC during the rollback and
+keep uncertain deletes for reconciliation. Released servers can report a generic
+error for a protected pending delete. Returning maintenance jobs to an older GC
+binary also returns to its older safety behavior; it does not retain the new
+delete guarantees. This dependency integration adds no migration-ledger entries
+requiring `db migrate down`; do not remove protection state to bypass an error.
+
+The optional Linux `shardline maintenance` runner supplies process isolation for
+deadlines and CPU limits. Its existing jobs keep their original state directory,
+signing key, request, deployment, executable and deadline. A new binary can verify
+and fence an old job, but cannot execute its older pinned definition. Reboot
+expires unfinished jobs; moving live job state across hosts or PID namespaces is
+unsupported. Inspect uncertain effects before intentionally starting a new run.
+See [durable maintenance](CLI.md#durable-maintenance-linux) for this optional workflow.
+Task history and PID observations grant no permission to retry or change data.
 
 ## Roles And Upgrade Units
 
@@ -77,11 +148,13 @@ API replicas run the new version; this avoids two software versions using differ
 authoritative tag-pointer stores or bypassing repository-scoped locks during the brief
 mixed-version window.
 
-The same routing constraint applies to every evidence-bound logical resource. Do not
-let N-1 overwrite an S3 object, OCI tag, Hub ref, or resumable session after N has
-written it. N-1 may read it, but same-key writes must be drained or routed to N until
-the rollout is complete; testing a different key is not evidence that same-key
-compatibility exists.
+The same routing constraint applies to every evidence-bound logical resource when
+the older writers lack the evidence or authoritative-store behavior introduced by
+the upgrade. Do not let such N-1 writers overwrite an S3 object, OCI tag, Hub ref,
+or resumable session after N has written it. N-1 may read it, but same-key writes
+must be drained or routed to N until the rollout is complete; testing a different
+key is not evidence that same-key compatibility exists. The format-preserving
+dependency upgrade from 1.11.3 described above does not introduce this restriction.
 
 The durable resumable-session migration is also additive, but session formats are not
 shared across versions. Before replacing the API class, stop admitting new Git LFS
@@ -91,17 +164,18 @@ old API replicas remain. New replicas persist new sessions in Postgres/object st
 after every API replica is upgraded and legacy sessions are drained, the RWX claim can
 be removed permanently. Do not route one legacy session between old and new replicas.
 
-Suspend destructive GC (`--mark` and/or `--sweep`) for the entire mixed-version
-rollout. The new release coordinates GC against writers with a shared/exclusive
-barrier, but an older server does not participate in that barrier. Dry-run GC remains
-safe. Resume scheduled destructive GC only after every API and transfer replica runs
-the barrier-aware version.
+When upgrading from a version without the shared/exclusive writer barrier,
+suspend destructive GC (`--mark` and/or `--sweep`) for the entire mixed-version
+rollout. Those older servers do not participate in the barrier. Dry-run GC remains
+safe. Resume scheduled destructive GC only after every API and transfer replica
+runs the barrier-aware version. The integration's GC pause above also applies
+when upgrading from 1.11.3, because older GC does not create the new delete markers.
 
-Pause scheduled lifecycle repair and full repair during the rollout as well, and
-upgrade maintenance binaries before resuming these jobs. Older lifecycle repair
-can delete unexpired finite retention holds for objects that have not arrived yet;
-older fsck can reject these valid future-object holds. Resume maintenance only
-when every maintenance job uses the new future-object retention semantics.
+When upgrading from a version without future-object retention semantics, pause
+scheduled lifecycle repair and full repair during rollout, and upgrade maintenance
+binaries before resuming these jobs. Those older repair binaries can delete
+unexpired finite holds for objects that have not arrived yet, and older fsck can
+reject valid future-object holds. Released 1.11.3 already preserves these holds.
 
 ## Procedure
 
@@ -113,6 +187,7 @@ processes, replace the drain and restart steps with the equivalent service contr
 
 ```bash
 cd /srv/assets
+mkdir -p reports
 
 shardline backup manifest \
   --output reports/pre-upgrade-manifest.json
@@ -120,22 +195,38 @@ shardline backup manifest \
 shardline db migrate status
 ```
 
-Keep the previous container image tag or binary so rollback is one restart away.
+Also take coordinated native metadata and object-store backups; the manifest
+does not copy bytes or create an atomic snapshot. See [Backup](BACKUP.md).
+Keep the previous image or binary available, subject to the rollback restrictions
+below.
 
 ### 2. Upgrade The Transfer Class
 
-Drain the class so in-flight connections finish and new traffic moves to other
-replicas:
+Set the target image for the transfer server and its config-check init container.
+Use the same immutable image digest that was used for the owner-run migration.
+Changing the image starts the rolling replacement; `rollout restart` alone would
+reuse the currently configured image.
+
+The Deployment must drain terminating replicas while routing new traffic to ready
+peers. Set the runtime termination grace long enough for active transfers.
 
 ```bash
-kubectl -n shardline rollout restart deployment/shardline-transfer
+SHARDLINE_UPGRADE_IMAGE='registry.example.com/shardline@sha256:REPLACE_WITH_IMAGE_DIGEST'
+kubectl -n shardline set image deployment/shardline-transfer \
+  shardline="$SHARDLINE_UPGRADE_IMAGE" config-check="$SHARDLINE_UPGRADE_IMAGE"
 kubectl -n shardline rollout status deployment/shardline-transfer --timeout=10m
 ```
+
+Apply the same image change to your managed manifests or GitOps configuration so
+the controller does not restore the previous image. Keep destructive GC suspended;
+update its job image before resuming the schedule after both role classes finish.
 
 With a single transfer replica, the restart is a brief availability dip for transfer
 traffic. The API class keeps serving throughout.
 
-Confirm the process is up:
+Confirm the upgraded replica is up. The following probe examples assume a
+service-local connection or port-forward to that replica on port 8080; probing a
+load-balanced Service can hit a different replica.
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
@@ -164,7 +255,8 @@ reports the expected `server_role`, `object_backend`, and `cache_backend`.
 Repeat the same steps for the API Deployment:
 
 ```bash
-kubectl -n shardline rollout restart deployment/shardline-api
+kubectl -n shardline set image deployment/shardline-api \
+  shardline="$SHARDLINE_UPGRADE_IMAGE" config-check="$SHARDLINE_UPGRADE_IMAGE"
 kubectl -n shardline rollout status deployment/shardline-api --timeout=10m
 
 curl -fsS http://127.0.0.1:8080/healthz
@@ -231,9 +323,14 @@ separately, starts two N-1 processes against shared Postgres and S3, then perfor
 N-1 + N-1 -> N + N-1 -> N + N -> N-1 + N
 ```
 
-At every mixed-version stage, each binary reads exact bytes written by the other.
-Writes during the mixed window are issued only through N; the drill also proves that
-an N-1 write is rejected by the reliability gate and cannot alter the materialized
-state. Its transcript and exact N/N-1 commit identities are retained as CI artifacts.
+When both binaries support the same schema, the drill keeps one old node serving
+while replacing its peer. Both versions write and read each other's exact bytes;
+rollback also retains compatible writes. The new node's startup task outcome is
+verified through the existing authenticated admin API.
+
+When the new release adds migrations, the drill drains old nodes before applying
+them. It then checks exact historical bytes and verifies that an older binary
+rejects startup against an unknown migration. The transcript and exact N/N-1
+commit identities are retained as CI artifacts.
 This evidence applies to the tested adjacent release pair; every release reruns the
 automatically advanced pair rather than assuming transitive compatibility.

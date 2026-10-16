@@ -23,8 +23,11 @@ jobs:
     with:
       duration_seconds: "600"
 
+  postgres-gate:
+    uses: ./.github/workflows/postgres-contracts.yml
+
   release:
-    needs: reliability-gate
+    needs: [reliability-gate, postgres-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -35,6 +38,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+
+      - name: Verify dependencies are safe for independent crate consumers
+        run: python3 scripts/check-publish-dependencies.py
 
       - name: Verify release commit is on main
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')

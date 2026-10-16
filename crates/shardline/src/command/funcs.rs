@@ -24,6 +24,23 @@ use super::definition::{
 };
 use super::error::CliParseError;
 
+pub(crate) enum ParsedCommand {
+    Existing(CliCommand),
+    History(super::definition::HistoryArgs),
+    #[cfg(target_os = "linux")]
+    Maintenance {
+        state_dir: PathBuf,
+        task_id: String,
+        operation: crate::maintenance::MaintenanceOperation,
+    },
+    #[cfg(target_os = "linux")]
+    MaintenanceWorker {
+        journal: PathBuf,
+        scope: String,
+        generation: u32,
+    },
+}
+
 impl CliCommand {
     /// Parses a command from process arguments.
     ///
@@ -36,44 +53,20 @@ impl CliCommand {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let mut args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
-        if args.is_empty() {
-            args.push(OsString::from("shardline"));
+        match parse_command(args, false)? {
+            ParsedCommand::Existing(command) => Ok(command),
+            ParsedCommand::History(_) => Err(CliParseError::validation(
+                ErrorKind::InvalidSubcommand,
+                "history inspection must be dispatched through shardline::run",
+            )),
+            #[cfg(target_os = "linux")]
+            ParsedCommand::Maintenance { .. } | ParsedCommand::MaintenanceWorker { .. } => {
+                Err(CliParseError::validation(
+                    ErrorKind::InvalidSubcommand,
+                    "managed maintenance commands must be dispatched through shardline::run",
+                ))
+            }
         }
-
-        let definition = CliDefinition::try_parse_from(args).map_err(CliParseError::from)?;
-
-        // Load the --env-file into the process environment before any
-        // configuration resolution, so env vars referenced in config files
-        // or by the server are available.
-        // `gc schedule install --env-file` names the EnvironmentFile to emit
-        // into the unit; it is not an input dotenv file for this invocation.
-        let gc_schedule_install = matches!(
-            &definition.command,
-            CliDefinitionCommand::Gc(gc_args)
-                if matches!(gc_args.command, Some(GcSubcommand::Schedule(_)))
-        );
-        let env_file = definition.env_file.clone();
-        let config = definition.config.clone();
-        // Reject command-level validation errors before changing process state.
-        // Embedded callers can recover from a failed parse without inheriting
-        // its dotenv variables or selected configuration path.
-        let command = Self::try_from(definition)?;
-        if let Some(env_path) = &env_file
-            && !gc_schedule_install
-        {
-            load_cli_env_file(env_path)?;
-        }
-
-        // Preserve the explicit path for every configuration-consuming command.
-        // `load_server_config` consumes this native path before auto-detection.
-        // Replace or clear an override left by an earlier in-process parse.
-        crate::config::set_cli_config_override(config);
-
-        // Load shardline.toml (--config or auto-detected) for direct
-        // struct deserialization. The TOML values are applied via
-        // load_server_config_from_env_with_toml later during config resolution.
-        Ok(command)
     }
 
     /// Returns top-level help text.
@@ -81,6 +74,79 @@ impl CliCommand {
     pub fn help_text() -> String {
         cli_definition_command().render_long_help().to_string()
     }
+}
+
+// Keep the released public enum exhaustive. New managed entry points belong to
+// binary dispatch, so existing Rust callers can still match every old variant.
+pub(crate) fn parse_command<I, T>(args: I, managed: bool) -> Result<ParsedCommand, CliParseError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    if args.is_empty() {
+        args.push(OsString::from("shardline"));
+    }
+
+    let definition = CliDefinition::try_parse_from(args).map_err(CliParseError::from)?;
+
+    // Load the --env-file into the process environment before any
+    // configuration resolution, so env vars referenced in config files
+    // or by the server are available.
+    // `gc schedule install --env-file` names the EnvironmentFile to emit
+    // into the unit; it is not an input dotenv file for this invocation.
+    let gc_schedule_install = matches!(
+        &definition.command,
+        CliDefinitionCommand::Gc(gc_args)
+            if matches!(gc_args.command, Some(GcSubcommand::Schedule(_)))
+    );
+    let env_file = definition.env_file.clone();
+    let config = definition.config.clone();
+    // Reject command-level validation errors before changing process state.
+    // Embedded callers can recover from a failed parse without inheriting
+    // its dotenv variables or selected configuration path.
+    let command = match definition {
+        CliDefinition {
+            command: CliDefinitionCommand::History(history_args),
+            ..
+        } if managed => ParsedCommand::History(history_args),
+        #[cfg(target_os = "linux")]
+        CliDefinition {
+            command: CliDefinitionCommand::Maintenance(maintenance_args),
+            ..
+        } if managed => ParsedCommand::Maintenance {
+            state_dir: maintenance_args.state_dir,
+            task_id: maintenance_args.task_id,
+            operation: maintenance_args.command,
+        },
+        #[cfg(target_os = "linux")]
+        CliDefinition {
+            command: CliDefinitionCommand::MaintenanceWorker(worker_args),
+            ..
+        } if managed => ParsedCommand::MaintenanceWorker {
+            journal: worker_args.journal,
+            scope: worker_args.scope,
+            generation: worker_args.generation,
+        },
+        definition => ParsedCommand::Existing(CliCommand::try_from(definition)?),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = managed;
+    if let Some(env_path) = &env_file
+        && !gc_schedule_install
+    {
+        load_cli_env_file(env_path)?;
+    }
+
+    // Preserve the explicit path for every configuration-consuming command.
+    // `load_server_config` consumes this native path before auto-detection.
+    // Replace or clear an override left by an earlier in-process parse.
+    crate::config::set_cli_config_override(config);
+
+    // Load shardline.toml (--config or auto-detected) for direct
+    // struct deserialization. The TOML values are applied via
+    // load_server_config_from_env_with_toml later during config resolution.
+    Ok(command)
 }
 
 fn load_cli_env_file(path: &Path) -> Result<(), CliParseError> {
@@ -136,6 +202,17 @@ impl TryFrom<CliDefinition> for CliCommand {
 
     fn try_from(value: CliDefinition) -> Result<Self, Self::Error> {
         match value.command {
+            CliDefinitionCommand::History(_) => Err(CliParseError::validation(
+                ErrorKind::InvalidSubcommand,
+                "history inspection must be dispatched through shardline::run",
+            )),
+            #[cfg(target_os = "linux")]
+            CliDefinitionCommand::Maintenance(_) | CliDefinitionCommand::MaintenanceWorker(_) => {
+                Err(CliParseError::validation(
+                    ErrorKind::InvalidSubcommand,
+                    "managed maintenance commands must be dispatched through shardline::run",
+                ))
+            }
             CliDefinitionCommand::Providerless(args) => match args.command {
                 ProviderlessSubcommand::Setup => Ok(Self::ProviderlessSetup),
             },

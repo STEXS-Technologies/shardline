@@ -10,8 +10,8 @@
 
 //! Integration tests for dataset viewer and webhook endpoints.
 
-#[path = "support/common.rs"]
-mod common;
+mod support;
+use support::common;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, StructArray};
 use arrow_schema::{DataType, Field, Schema};

@@ -173,17 +173,21 @@ pub(crate) async fn store_xorb(
     xorb_hash_hex: &str,
     xorb_bytes: &[u8],
 ) -> Result<bool, ServerError> {
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore, PutOutcome};
+    use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, PutOutcome};
 
     let object_key = crate::xet_adapter::xorb_object_key(xorb_hash_hex)?;
     let integrity = ObjectIntegrity::new(
         crate::local_backend::chunk_hash(xorb_bytes),
         u64::try_from(xorb_bytes.len())?,
     );
-    let outcome =
-        object_store.put_if_absent(&object_key, ObjectBody::from_slice(xorb_bytes), &integrity)?;
+    let outcome = object_store
+        .put_if_absent(&object_key, ObjectBody::from_slice(xorb_bytes), &integrity)
+        .await?;
     Ok(matches!(outcome, PutOutcome::Inserted))
 }
+
+#[cfg(test)]
+mod async_store_tests;
 
 #[cfg(test)]
 mod tests {

@@ -41,8 +41,10 @@ routes with missing or invalid authentication return `401`. Query parsing
 happens only after this concealment/authentication decision.
 
 Keep these routes on an internal ingress. They reveal aggregate capacity,
-topology, backend kinds, and process activity, but never object keys,
-repositories, users, credentials, connection strings, or presigned URLs.
+topology, backend kinds and process activity. Pending-delete inspection also
+reveals affected object keys so operators can investigate blocked writes.
+Treat the admin token as permission to read those keys. Responses do not expose
+credentials, connection strings or presigned URLs.
 
 ## Common response contract
 
@@ -66,7 +68,8 @@ and a restrictive Content Security Policy. `GET` and the normal body-free
 `TRACE` do not reach mutation code and return `405`. Browser preflight may
 return `200`, but credentialed CORS is not enabled.
 
-Operational-state fields use exactly these values:
+Readiness fields use exactly these values. Maintenance history uses the separate
+outcome states described below.
 
 | Value | Meaning |
 | --- | --- |
@@ -165,6 +168,11 @@ reset on restart and are not cluster totals.
 
 ### `GET /api/v1/tasks`
 
+This lists live resumable uploads. For saved server and CLI maintenance outcomes,
+use [`GET /api/v1/tasks/maintenance`](#get-apiv1tasksmaintenance).
+The `scheduler: external` field means your existing timer or CronJob schedules
+maintenance; normal history tracking still runs inside Shardline.
+
 | Field | Type | Scope and meaning |
 | --- | --- | --- |
 | `api_version`, `observed_at_unix_seconds` | common | Common fields. |
@@ -175,6 +183,148 @@ reset on restart and are not cluster totals.
 | `page` | page object | Cursor metadata described below. |
 
 Pagination is keyset-ordered by session id and pushed into the store query, so a filtered page always returns a full bounded window of matching sessions; terminal sessions interleaved in id order never truncate a page or falsify the end of the list.
+
+### `GET /api/v1/tasks/maintenance/deletes`
+
+Use this endpoint when a write or retention hold reports an unresolved remote
+delete. It lists affected object keys using the existing admin read token:
+
+```bash
+curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
+  'https://cas.example.com/api/v1/tasks/maintenance/deletes?limit=20'
+```
+
+Each `pending_deletes` entry contains `object_key`, a string `attempt` identifier,
+`state: pending` and `reason: delete has not been proved settled`. A pending
+delete may still be running normally. Check the original GC command and its
+logs before deciding what happened.
+
+The additive `next_step` field gives the safe recovery action. After checking
+the original command, run `shardline repair` with the same database, schema and object
+storage configuration. It verifies saved successful delete replies and settles
+their matching attempts without deleting the object again. Each run examines
+at most 64 saved replies, including invalid evidence. Repeated runs work
+through the backlog using saved scan progress; a pending marker after one run
+does not establish that its reply is missing. Check repair logs for examined,
+settled and retained counts, then inspect pending deletes again. If no reply
+was saved, the marker remains pending; elapsed
+time or a missing object cannot safely clear it. See the
+[maintenance guide](MAINTENANCE_INTEGRATION_UX.md#handle-a-retryable-write).
+
+Only `limit` (`1..=100`, default `100`) and `cursor` are accepted. Pass
+`page.next_cursor` unchanged to fetch another page. Pages follow delete-attempt
+order, not object-key order; each request observes current markers rather than
+a fixed snapshot. `observed_at_unix_seconds` records the observation time.
+
+`supported: false` means inspection is unavailable: the backend is local, the
+usual owner-run database upgrade has not installed this view, or the database
+role lacks the existing maintenance read privileges. Databases using row-level
+security on these metadata tables also report unsupported, preserving their
+access boundary. An empty list in that response makes no safety claim. Other
+database failures fail the request instead of returning an empty list.
+The additive `inspection_notice` explains this limitation and the next safe
+action when `supported` is false; otherwise it is `null`. It does not certify
+current health or future inspection availability.
+
+This endpoint reads markers only. It sends no storage request and never clears
+or retries a delete. It uses the existing admin authorization, no-store headers
+and admission limit; an overloaded server can return `503`. It does not prove
+deployment health or recover a delete whose reply was never received or saved.
+
+### `GET /api/v1/tasks/maintenance`
+
+Use `/api/v1/status` to check this server's readiness. Use this endpoint to
+inspect recorded maintenance outcomes. A completed job is historical evidence;
+it does not establish current server health or completion across every node.
+No tracker service or extra token is required.
+
+This endpoint does not download full command logs. Its 8 MiB captured-stream
+verification threshold applies to the optional isolated runner. It does not
+truncate normal commands' live output or their existing diagnostic exports.
+
+```bash
+curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
+  'https://cas.example.com/api/v1/tasks/maintenance?limit=20'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `supervision` | `embedded`: tracking is integrated into Shardline. Individual jobs can use other execution modes. |
+| `history_grouping` | `shared_metadata`: includes signed records for the resolved metadata and object target across logins, plus unbound own-login legacy records. `legacy`: original deployment grouping, used for local storage or when shared resolution is unavailable. |
+| `history_notice` | Warning when new history is unavailable, automatic history is full, or recording capacity could not be checked. Existing evidence stays available. This is separate from server readiness; `null` does not guarantee a later history write will succeed. An empty list does not prove maintenance never ran. |
+| `tasks[].id` | Opaque incident reference; keep it when investigating a run. |
+| `tasks[].operation` | Name of the recorded maintenance operation. |
+| `tasks[].state` | What the available evidence establishes; see the table below. |
+| `tasks[].next_step` | Plain-language guidance for this recorded state. It does not authorize retrying an uncertain mutation or certify current health. |
+| `tasks[].execution` | `embedded` for server-owned work, `inline` for ordinary CLI commands, or `isolated` for the explicit advanced runner. |
+| `tasks[].created_at` | Run creation time in Unix seconds, not its completion time. |
+| `tasks[].owner` | Diagnostic process identity. It is not a cluster lease or permission to retry. |
+| `tasks[].output_verified` | For isolated jobs, whether full captured output was verified. Combined stdout/stderr above 8 MiB is not downloaded here: this field is `false` while the signed command outcome is still checked. Otherwise `null` for runs without captured streams. |
+| `tasks[].identity_verified` | Present as `false` when the run manifest cannot be verified. Only `id` and `state: corrupt` are available; owner, operation, execution and creation time are omitted. Its deployment cannot be confirmed, so it may belong to another deployment sharing the evidence store. |
+| `page` | Pagination metadata. An empty page does not prove that all maintenance succeeded or that every job was recorded. |
+
+| State | Meaning and next action |
+| --- | --- |
+| `pending` | Execution has not been committed. No completion claim is available. |
+| `running` | The recorded local owner is alive; completion is unconfirmed. |
+| `running_or_interrupted` | This node cannot observe the owner. Check the owning node and command logs before deciding what happened. |
+| `completed` | The recorded result verified as successful. No recovery action is implied. |
+| `failed` | The command finished with a verified nonzero exit status. Follow its normal diagnostics; it may have made partial changes. |
+| `needs_reconciliation` | The outcome or effects need investigation. Inspect the affected data before repeating a mutation. |
+| `corrupt` | Stored evidence failed verification. Preserve the evidence and investigate storage and command logs; do not treat it as a successful run. |
+
+This is a read-only inspection endpoint. No state authorizes an automatic retry.
+A failed optional startup job does not by itself mean the server is unhealthy;
+check readiness separately. Tracking warnings in command logs can explain why
+an expected outcome is missing.
+
+Verified finished runs created more than 30 days ago are eligible for automatic cleanup
+at startup and during ordinary maintenance, at most 64 per invocation. History
+is not a permanent audit archive. Unfinished and corrupt evidence is retained
+and can continue to grow; save needed reports separately and monitor metadata
+storage. A missing old run does not prove that no work occurred.
+
+A damaged manifest occupies its own pagination slot instead of hiding healthy
+jobs. Preserve its incident reference and investigate the stored evidence.
+Storage access failures still fail the request; they are not reported as an
+empty or successfully inspected history.
+
+Pages are ordered by opaque run ID, not creation time. Only `limit` (`1..=100`,
+default `100`) and `cursor` are accepted. State, prefix and capability filters
+are unsupported. Pass the returned cursor unchanged to get the next page.
+
+History inspection shares Shardline's existing admission limit. Under load it
+can return `503`; retry the read later. Closing a request does not free capacity
+while its storage scan is still running. No extra concurrency setting is needed.
+
+### `GET /api/v1/tasks/maintenance/{id}/report`
+
+Read the saved counts for one embedded server job. Use an `id` returned by the
+maintenance history list and the same admin token:
+
+```bash
+curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
+  "https://cas.example.com/api/v1/tasks/maintenance/$RUN_ID/report"
+```
+
+The response has common API fields and a `task` object containing `id`,
+`operation`, `state`, `next_step`, `report_available` and `report`. The recovery
+guidance matches the history list for the same recorded state. A saved report is verified
+before disclosure. For example, an incomplete webhook-secret sweep can report
+`inspected: 3`, `upgraded: 2` and `failures: 1` while its state remains
+`needs_reconciliation`. Saving diagnostic counts does not certify completion,
+current health or permission to retry.
+
+Older failed runs or jobs interrupted before saving a report return
+`report_available: false` and `report: null`. Missing runs, other deployments and
+CLI runs return `404`; ordinary commands retain their existing output and
+diagnostics. Damaged evidence fails the request without exposing an unverified
+report. No query parameters are accepted.
+
+This read uses the existing admission limit and authentication, returns
+`Cache-Control: no-store`, and reads at most 64 KiB per report. It inspects only
+the selected run rather than enumerating every manifest. Closing the request
+keeps its admission capacity charged until inspection finishes.
 
 ### `GET /api/v1/metrics`
 
@@ -222,7 +372,10 @@ This endpoint returns a bounded dashboard summary of process-lifetime integer co
 
 ## Cursor pagination and filtering
 
-`nodes` and `tasks` are keyset-paginated. Other endpoints reject all query
+`nodes`, resumable `tasks`, maintenance history and pending deletes are
+keyset-paginated. The two maintenance endpoints have the narrower limits
+documented above; the table below describes `nodes` and resumable `tasks`.
+Other endpoints reject all query
 parameters.
 
 | Parameter | Applicable endpoints | Contract |

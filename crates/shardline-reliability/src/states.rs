@@ -6,6 +6,17 @@ pub trait EvidenceState: Copy + Eq + Serialize {
     fn as_str(self) -> &'static str;
 
     fn can_transition_to(self, next: Self) -> bool;
+
+    fn validate_transition(self, next: Self) -> Result<(), crate::ReliabilityError> {
+        if self.can_transition_to(next) {
+            Ok(())
+        } else {
+            Err(crate::ReliabilityError::InvalidTransition {
+                before: self.as_str(),
+                after: next.as_str(),
+            })
+        }
+    }
 }
 
 /// Existing Shardline lifecycle states, represented without changing their
@@ -85,6 +96,16 @@ impl UploadLifecycleState {
 }
 
 impl EvidenceState for UploadLifecycleState {
+    fn validate_transition(self, next: Self) -> Result<(), crate::ReliabilityError> {
+        statechronicle::profile::StateProfile::validate(
+            &crate::UploadLifecycleProfile,
+            Some(&self),
+            &crate::LifecycleCommand::Transition {
+                expected: self,
+                next,
+            },
+        )
+    }
     fn as_str(self) -> &'static str {
         Self::as_str(self)
     }
@@ -152,6 +173,16 @@ impl ResumableLifecycleState {
 }
 
 impl EvidenceState for ResumableLifecycleState {
+    fn validate_transition(self, next: Self) -> Result<(), crate::ReliabilityError> {
+        statechronicle::profile::StateProfile::validate(
+            &crate::ResumableLifecycleProfile,
+            Some(&self),
+            &crate::LifecycleCommand::Transition {
+                expected: self,
+                next,
+            },
+        )
+    }
     fn as_str(self) -> &'static str {
         Self::as_str(self)
     }

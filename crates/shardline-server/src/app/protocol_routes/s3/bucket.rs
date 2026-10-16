@@ -253,6 +253,7 @@ pub(crate) async fn s3_post_bucket(
                         &object_key,
                     )
                     .await?;
+                resource_guard.release().await?;
                 outcomes.push(DeleteOutcome::Deleted(key));
             }
             Err(_error) => {

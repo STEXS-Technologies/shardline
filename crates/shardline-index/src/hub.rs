@@ -641,9 +641,9 @@ pub trait HubStore: Send + Sync {
 
     /// Updates the stored (opaque) signing secret for a webhook.
     ///
-    /// Used to lazily re-encrypt legacy plaintext rows when at-rest encryption
-    /// is enabled. The store treats the secret as opaque bytes and never
-    /// interprets it.
+    /// This unconditional update supports deliberate rotations. Automatic
+    /// encryption upgrades use `compare_and_swap_webhook_secret` instead. The
+    /// store treats secrets as opaque bytes and never interprets them.
     ///
     /// # Errors
     ///
@@ -654,6 +654,22 @@ pub trait HubStore: Send + Sync {
         webhook_id: &str,
         secret: Option<&str>,
     ) -> Result<(), Self::Error>;
+
+    /// Atomically replaces a signing secret only if its observed value matches.
+    /// Returns `None` when the backend does not support atomic comparison, and
+    /// `Some(false)` when the row changed or disappeared. Existing implementors
+    /// need not add a method; callers must never substitute an unchecked update.
+    /// # Errors
+    /// Returns storage failure without treating it as a successful replacement.
+    fn compare_and_swap_webhook_secret(
+        &self,
+        _repo_id: &str,
+        _webhook_id: &str,
+        _expected_secret: &str,
+        _secret: Option<&str>,
+    ) -> Result<Option<bool>, Self::Error> {
+        Ok(None)
+    }
 
     /// Returns webhooks subscribed to a given event for a repository.
     ///
@@ -825,6 +841,14 @@ trait ErasedHubStore: Send + Sync {
         webhook_id: &str,
         secret: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    fn compare_and_swap_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        expected_secret: &str,
+        secret: Option<&str>,
+    ) -> Result<Option<bool>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn webhooks_for_event(
         &self,
@@ -1081,6 +1105,17 @@ impl<T: HubStore> ErasedHubStore for T {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::update_webhook_secret(self, repo_id, webhook_id, secret)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn compare_and_swap_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        expected_secret: &str,
+        secret: Option<&str>,
+    ) -> Result<Option<bool>, Box<dyn std::error::Error + Send + Sync>> {
+        T::compare_and_swap_webhook_secret(self, repo_id, webhook_id, expected_secret, secret)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
     }
 
     fn webhooks_for_event(
@@ -1441,6 +1476,21 @@ impl BoxedHubStore {
             .update_webhook_secret(repo_id, webhook_id, secret)
     }
 
+    /// Atomically replaces the observed secret. `None` means unsupported;
+    /// `Some(false)` means the row changed or disappeared. No unchecked fallback.
+    /// # Errors
+    /// Returns storage failure without overwriting a concurrent rotation.
+    pub fn compare_and_swap_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        expected_secret: &str,
+        secret: Option<&str>,
+    ) -> Result<Option<bool>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .compare_and_swap_webhook_secret(repo_id, webhook_id, expected_secret, secret)
+    }
+
     /// Returns webhooks subscribed to a given event for a repository.
     ///
     /// # Errors
@@ -1698,6 +1748,17 @@ where
         T::update_webhook_secret(&self.0, repo_id, webhook_id, secret).map_err(Into::into)
     }
 
+    fn compare_and_swap_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        expected_secret: &str,
+        secret: Option<&str>,
+    ) -> Result<Option<bool>, Box<dyn std::error::Error + Send + Sync>> {
+        T::compare_and_swap_webhook_secret(&self.0, repo_id, webhook_id, expected_secret, secret)
+            .map_err(Into::into)
+    }
+
     fn webhooks_for_event(
         &self,
         repo_id: &str,
@@ -1705,6 +1766,144 @@ where
     ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
         T::webhooks_for_event(&self.0, repo_id, event).map_err(Into::into)
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+pub(crate) fn assert_atomic_webhook_secret_upgrade<S>(store: &S)
+where
+    S: HubStore + Clone + 'static,
+    S::Error: std::fmt::Debug + Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let repo = "atomic-secret/target";
+    store.create_repo(HubRepoType::Model, repo, false).unwrap();
+    let hook = store
+        .create_webhook(
+            repo,
+            "https://example.com/hook",
+            &["push".to_owned()],
+            Some("legacy-secret"),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .compare_and_swap_webhook_secret(repo, &hook.id, "Legacy-secret", Some("ciphertext"))
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        store
+            .compare_and_swap_webhook_secret(
+                "another/repo",
+                &hook.id,
+                "legacy-secret",
+                Some("ciphertext")
+            )
+            .unwrap(),
+        Some(false)
+    );
+    store
+        .update_webhook_secret(repo, &hook.id, Some("rotated-secret"))
+        .unwrap();
+    assert_eq!(
+        store
+            .compare_and_swap_webhook_secret(
+                repo,
+                &hook.id,
+                "legacy-secret",
+                Some("stale-ciphertext")
+            )
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        store.list_webhooks(repo).unwrap()[0]
+            .secret
+            .as_ref()
+            .map(SecretString::expose_secret),
+        Some("rotated-secret")
+    );
+    store.update_webhook_secret(repo, &hook.id, None).unwrap();
+    assert_eq!(
+        store
+            .compare_and_swap_webhook_secret(
+                repo,
+                &hook.id,
+                "rotated-secret",
+                Some("stale-ciphertext")
+            )
+            .unwrap(),
+        Some(false)
+    );
+    assert!(store.list_webhooks(repo).unwrap()[0].secret.is_none());
+    store
+        .update_webhook_secret(repo, &hook.id, Some("legacy-secret"))
+        .unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let workers: Vec<_> = ["encrypted-a", "encrypted-b"]
+        .into_iter()
+        .map(|replacement| {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            let id = hook.id.clone();
+            let runtime = runtime.clone();
+            std::thread::spawn(move || {
+                let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+                barrier.wait();
+                store
+                    .compare_and_swap_webhook_secret(repo, &id, "legacy-secret", Some(replacement))
+                    .unwrap()
+            })
+        })
+        .collect();
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| **result == Some(true))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| **result == Some(false))
+            .count(),
+        1
+    );
+    let current = store.list_webhooks(repo).unwrap()[0]
+        .secret
+        .clone()
+        .unwrap();
+    assert_eq!(
+        ErasedHubStore::compare_and_swap_webhook_secret(
+            store,
+            repo,
+            &hook.id,
+            current.expose_secret(),
+            Some("boxed-blanket")
+        )
+        .unwrap(),
+        Some(true)
+    );
+    let adapter = BoxedHubStore::from_store(store.clone());
+    assert_eq!(
+        adapter
+            .compare_and_swap_webhook_secret(repo, &hook.id, "boxed-blanket", Some("boxed-adapter"))
+            .unwrap(),
+        Some(true)
+    );
+    store.delete_webhook(repo, &hook.id).unwrap();
+    assert_eq!(
+        store
+            .compare_and_swap_webhook_secret(repo, &hook.id, "boxed-adapter", Some("resurrected"))
+            .unwrap(),
+        Some(false)
+    );
 }
 
 #[cfg(test)]
@@ -2770,6 +2969,21 @@ mod tests {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
         let cloned = store.clone();
         let _ = (store, cloned);
+    }
+
+    #[test]
+    fn existing_store_implementors_report_unsupported_atomic_secret_upgrade() {
+        for store in [
+            BoxedHubStore::new(MemoryHubStore::new()),
+            BoxedHubStore::from_store(MemoryHubStore::new()),
+        ] {
+            assert_eq!(
+                store
+                    .compare_and_swap_webhook_secret("repo", "webhook", "old", Some("new"))
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     /// Exercises the blanket `impl<T: HubStore> ErasedHubStore for T` path

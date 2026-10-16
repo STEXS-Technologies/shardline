@@ -1,13 +1,18 @@
+mod async_write;
 pub mod client;
 pub mod config;
 pub mod credentials;
 pub mod error;
+mod existence_hints;
 pub mod multipart;
 pub mod operations;
 pub mod types;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod verified_put_tests;
 
 #[cfg(test)]
 pub(crate) use operations::{

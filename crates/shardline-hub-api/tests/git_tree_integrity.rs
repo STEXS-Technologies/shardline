@@ -8,8 +8,8 @@
     clippy::unwrap_in_result
 )]
 
-#[path = "support/common.rs"]
-mod common;
+mod support;
+use support::common;
 
 use axum::{
     body::{Body, to_bytes},

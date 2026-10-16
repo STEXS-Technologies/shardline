@@ -14,11 +14,13 @@ targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
+gearhash.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 jsonwebtoken.workspace = true
@@ -31,7 +33,10 @@ shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
 shardline-rebuild.workspace = true
-shardline-reliability.workspace = true
+shardline-reliability = { workspace = true, features = ["task-journal"] }
+penelope.workspace = true
+ed25519-dalek.workspace = true
+statechronicle.workspace = true
 shardline-fsck.workspace = true
 shardline-gc.workspace = true
 shardline-hub-api.workspace = true
@@ -70,7 +75,7 @@ lz4_flex = "0.11"
 zeroize.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
+shardline-cas = { workspace = true, features = ["test-fault-injection"] }
 dotenvy.workspace = true
 ed25519-dalek.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }

@@ -1,5 +1,8 @@
 use std::{io::Cursor, path::PathBuf};
 
+mod evidence_inventory;
+use evidence_inventory::EvidenceInventory;
+
 use serde::Serialize;
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_storage::{
@@ -122,6 +125,13 @@ impl StorageMigrationReport {
 /// The command migrates object bytes only. Metadata, provider state, lifecycle state, and
 /// reconstruction rows remain in their configured metadata stores.
 ///
+/// These endpoint-only options supply no metadata authority. This function does
+/// not acquire deployment database ownership or reconcile remote-delete markers.
+/// Callers must coordinate writers and GC before a final copy and storage cutover;
+/// idempotent destination writes do not establish a consistent live snapshot.
+/// Recognized legacy task evidence is excluded, while unrecognized legacy bytes
+/// retain their existing copy behavior.
+///
 /// # Errors
 ///
 /// Returns [`ServerError`] when inventory, reads, integrity checks, or destination writes
@@ -133,9 +143,15 @@ pub fn run_storage_migration(
     let destination = endpoint_store(&options.destination)?;
     let prefix = ObjectPrefix::parse(&options.prefix)?;
     let mut report = StorageMigrationReport::new(options);
+    let mut evidence = EvidenceInventory::new(&source);
     const MAX_BUFFERED_MIGRATION_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 
     visit_object_prefix(&source, &prefix, |metadata| {
+        // Exclude recognized host evidence, while preserving older arbitrary
+        // objects that happen to use the newly introduced namespace.
+        if evidence.is_task_evidence(metadata.key()) {
+            return Ok(());
+        }
         report.scanned_objects = checked_add(report.scanned_objects, 1)?;
         report.scanned_bytes = checked_add(report.scanned_bytes, metadata.length())?;
         if options.dry_run {
@@ -265,6 +281,122 @@ mod tests {
     };
 
     // ── StorageMigrationEndpoint ──────────────────────────────────────────
+
+    #[test]
+    fn storage_migration_keeps_bound_unfinished_history_out_of_payload_copy() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let source_endpoint = StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf());
+        let objects = endpoint_store(&source_endpoint).unwrap();
+        let tracker = crate::task_tracking::EmbeddedTaskTracker::new(
+            objects.clone(),
+            penelope::core::task::Digest::of(b"copy-source-deployment"),
+        )
+        .with_history_scope(penelope::core::task::Digest::of(b"shared-copy-history"));
+        let unfinished = tracker
+            .begin(
+                "unfinished-copy-fixture",
+                b"input",
+                shardline_reliability::MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap();
+        let binding_prefix =
+            shardline_storage::ObjectPrefix::parse("_shardline_tasks/v1/scope-bindings/").unwrap();
+        assert_eq!(objects.list_prefix(&binding_prefix).unwrap().len(), 1);
+        let payload = ObjectKey::parse("fixture/user-payload").unwrap();
+        let unrelated = ObjectKey::parse("_shardline_tasks/v1/scope-bindings/unrelated").unwrap();
+        for key in [&payload, &unrelated] {
+            let bytes = b"existing arbitrary payload bytes";
+            objects
+                .put_if_absent(
+                    key,
+                    ObjectBody::from_slice(bytes),
+                    &ObjectIntegrity::new(chunk_hash(bytes), u64::try_from(bytes.len()).unwrap()),
+                )
+                .unwrap();
+        }
+        let snapshot = || {
+            objects
+                .list_prefix(&shardline_storage::ObjectPrefix::parse("").unwrap())
+                .unwrap()
+                .into_iter()
+                .map(|metadata| {
+                    let bytes = crate::object_store::read_full_object(
+                        &objects,
+                        metadata.key(),
+                        metadata.length(),
+                    )
+                    .unwrap();
+                    (metadata.key().as_str().to_owned(), bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let original = snapshot();
+        let options = StorageMigrationOptions::new(
+            source_endpoint,
+            StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
+        );
+        let inventory = run_storage_migration(&options.clone().with_dry_run(true)).unwrap();
+        assert_eq!(inventory.scanned_objects, 2);
+        assert_eq!(inventory.inserted_objects, 0);
+        let copied = run_storage_migration(&options).unwrap();
+        assert_eq!(copied.scanned_objects, 2);
+        assert_eq!(copied.inserted_objects, 2);
+        let copied_objects = endpoint_store(&options.destination).unwrap();
+        assert!(copied_objects.contains(&payload).unwrap());
+        assert!(copied_objects.contains(&unrelated).unwrap());
+        assert_eq!(
+            copied_objects.list_prefix(&binding_prefix).unwrap().len(),
+            1
+        );
+        assert_eq!(snapshot(), original);
+        unfinished
+            .finish(true, b"finished before retirement")
+            .unwrap();
+        let binding = objects
+            .list_prefix(&binding_prefix)
+            .unwrap()
+            .into_iter()
+            .find(|metadata| metadata.key() != &unrelated)
+            .unwrap();
+        let id = binding.key().as_str().rsplit('/').next().unwrap();
+        let manifest_path = source
+            .path()
+            .join(format!("chunks/_shardline_tasks/v1/manifests/{id}"));
+        let manifest = fs::read(&manifest_path).unwrap();
+        let retiring_path = source
+            .path()
+            .join(format!("chunks/_shardline_tasks/v1/retiring/{id}"));
+        fs::create_dir_all(retiring_path.parent().unwrap()).unwrap();
+        fs::write(retiring_path, manifest).unwrap();
+        fs::remove_file(manifest_path).unwrap();
+        let retiring_inventory = snapshot();
+        let copied_retiring = run_storage_migration(&options).unwrap();
+        assert_eq!(copied_retiring.scanned_objects, 2);
+        assert_eq!(copied_retiring.already_present_objects, 2);
+        assert_eq!(copied_retiring.inserted_objects, 0);
+        assert_eq!(snapshot(), retiring_inventory);
+        // A matching filename alone must not hide arbitrary legacy bytes.
+        let damaged = b"unrecognized legacy bytes at the same run ID";
+        fs::write(
+            source.path().join("chunks").join(binding.key().as_str()),
+            damaged,
+        )
+        .unwrap();
+        let copied_damaged = run_storage_migration(&options).unwrap();
+        assert_eq!(copied_damaged.scanned_objects, 3);
+        assert_eq!(copied_damaged.inserted_objects, 1);
+        assert_eq!(copied_damaged.already_present_objects, 2);
+        assert_eq!(
+            crate::object_store::read_full_object(
+                &copied_objects,
+                binding.key(),
+                u64::try_from(damaged.len()).unwrap(),
+            )
+            .unwrap(),
+            damaged
+        );
+    }
 
     #[test]
     fn storage_migration_endpoint_backend_name_local() {
@@ -441,6 +573,90 @@ mod tests {
     }
 
     // ── validate_source_object_matches_content_addressed_key ─────────────
+
+    #[test]
+    fn migration_preserves_existing_objects_in_new_evidence_namespace() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let objects = ServerObjectStore::local(source.path().join("chunks")).unwrap();
+        for suffix in [
+            "manifests/old",
+            "retiring/old",
+            "runs/old/payload",
+            "custom/payload",
+        ] {
+            let key = ObjectKey::parse(&format!("_shardline_tasks/v1/{suffix}")).unwrap();
+            let bytes = b"existing user data";
+            objects
+                .put_if_absent(
+                    &key,
+                    ObjectBody::from_slice(bytes),
+                    &ObjectIntegrity::new(chunk_hash(bytes), bytes.len() as u64),
+                )
+                .unwrap();
+        }
+        let config = crate::ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://localhost:8080".to_owned(),
+            source.path().to_path_buf(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        let tracker = crate::task_tracking::EmbeddedTaskTracker::new(
+            objects.clone(),
+            crate::task_tracking::deployment_fingerprint(&config).unwrap(),
+        );
+        tracker
+            .begin(
+                "test-sweep",
+                b"input",
+                shardline_reliability::MaintenanceArtifactKind::LifecycleRepair,
+            )
+            .unwrap()
+            .finish(true, b"done")
+            .unwrap();
+        // Partly retired native history must also stay with its deployment.
+        // Model a legacy retirement marker in the source object inventory,
+        // rather than publishing it into modern SQLite task metadata.
+        let evidence = crate::task_tracking::TaskEvidenceStore::from_objects(objects);
+        let id = fs::read_dir(source.path().join("chunks/_shardline_tasks/v1/manifests"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .find(|id| id != "old")
+            .unwrap();
+        let identity = evidence
+            .read(&format!("manifests/{id}"), 65536)
+            .unwrap()
+            .unwrap();
+        evidence
+            .publish(&format!("retiring/{id}"), &identity)
+            .unwrap();
+        fs::remove_file(
+            source
+                .path()
+                .join(format!("chunks/_shardline_tasks/v1/manifests/{id}")),
+        )
+        .unwrap();
+        let options = StorageMigrationOptions::new(
+            StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
+            StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
+        );
+        let dry = run_storage_migration(&options.clone().with_dry_run(true)).unwrap();
+        assert_eq!(dry.scanned_objects, 4);
+        let copied = run_storage_migration(&options).unwrap();
+        assert_eq!(copied.scanned_objects, 4);
+        assert_eq!(copied.inserted_objects, 4);
+        let repeated = run_storage_migration(&options).unwrap();
+        assert_eq!(repeated.already_present_objects, 4);
+        assert_eq!(
+            fs::read(
+                destination
+                    .path()
+                    .join("chunks/_shardline_tasks/v1/runs/old/payload")
+            )
+            .unwrap(),
+            b"existing user data"
+        );
+    }
 
     #[test]
     fn validate_source_ok_for_non_content_addressed_key() {

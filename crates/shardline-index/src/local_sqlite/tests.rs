@@ -7,6 +7,8 @@
     clippy::shadow_unrelated
 )]
 
+mod read_only;
+
 use std::{error::Error, fs, path::Path, slice::from_ref};
 
 use rusqlite::{Connection, config::DbConfig, params};

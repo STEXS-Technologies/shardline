@@ -1,0 +1,550 @@
+{
+  "commits": [
+    {
+      "body": {
+        "commit_id": "cmt_08175b83ab5d739b6285924a8c311f60dabd72ce7d7064209edac090ace12d5c",
+        "created_at": "1970-01-01T00:00:00Z",
+        "event_count": 1,
+        "event_merkle_root": "sha256:680ba0a539218d3b41f6db4feca16f373d4c2bc6fca8b23610d25fc39ae39f11",
+        "executor": "service:shardline.reliability",
+        "next_state_root": "sha256:d02653c7b9cca0a84b1162657714970b8152e910c486e69984184d6dab8c34da",
+        "parent_commit_id": null,
+        "previous_state_root": "sha256:c810a0e262c2af1f3b6dbb71c26fe246b0b6b5a3e903759595d17601f0178311",
+        "profile": "shardline.reliability.v1",
+        "schema": "statechronicle.commit.v0",
+        "scope": {
+          "kind": "tenant",
+          "tenant_id": "tenant"
+        },
+        "sequence": 0
+      },
+      "event": {
+        "actor": "service:shardline.reliability",
+        "after": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:2408fb283c6a876682e903b53604a45d1e62c8a72eeb5c40fcdcca963f56803d"
+            }
+          },
+          "state_hash": "sha256:5c203e77a91fa3564381ecee70b9e44a59f8e0c916cf567e6b794b3a9ac363d1",
+          "version": 0
+        },
+        "authority": null,
+        "before": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:2408fb283c6a876682e903b53604a45d1e62c8a72eeb5c40fcdcca963f56803d"
+            }
+          },
+          "state_hash": "sha256:5c203e77a91fa3564381ecee70b9e44a59f8e0c916cf567e6b794b3a9ac363d1",
+          "version": 0
+        },
+        "created_at": "1970-01-01T00:00:00Z",
+        "event_id": "evt_2408fb283c6a876682e903b53604a45d1e62c8a72eeb5c40fcdcca963f56803d",
+        "executor": "service:shardline.reliability",
+        "intent_id": "int_1a20d97653121396473d6598901e598759f6805546920ae2cffb55a60c56fa63",
+        "operation": "shardline.reliability.Upload",
+        "resource_id": "shardline:Upload:compatibility-upload",
+        "schema": "statechronicle.event.v0",
+        "tenant_id": "tenant"
+      },
+      "schema_version": 1
+    },
+    {
+      "body": {
+        "commit_id": "cmt_d2931c9ceb485fa345cd6ef9dca94b6eeffa481d8e4762fd333a833344cf3e12",
+        "created_at": "1970-01-01T00:00:01Z",
+        "event_count": 1,
+        "event_merkle_root": "sha256:7fab0766cc8d7e1aec5f61b270f5f22243850971441df5c040f5801046c74c3c",
+        "executor": "service:shardline.reliability",
+        "next_state_root": "sha256:ad6966925a783033bd46a22e80f0d71df2a7d813e33f53d65585a74af04a47cc",
+        "parent_commit_id": "cmt_08175b83ab5d739b6285924a8c311f60dabd72ce7d7064209edac090ace12d5c",
+        "previous_state_root": "sha256:d02653c7b9cca0a84b1162657714970b8152e910c486e69984184d6dab8c34da",
+        "profile": "shardline.reliability.v1",
+        "schema": "statechronicle.commit.v0",
+        "scope": {
+          "kind": "tenant",
+          "tenant_id": "tenant"
+        },
+        "sequence": 1
+      },
+      "event": {
+        "actor": "service:shardline.reliability",
+        "after": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:3b9fbea9c7017e851269d721a0f140352666725fc45d2daed5cb546d3402423c"
+            }
+          },
+          "state_hash": "sha256:59f7f68f4becc327924cc6715e3991c4ec2ef061bb935ef5453eff7da13855fa",
+          "version": 1
+        },
+        "authority": null,
+        "before": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:3b9fbea9c7017e851269d721a0f140352666725fc45d2daed5cb546d3402423c"
+            }
+          },
+          "state_hash": "sha256:59f7f68f4becc327924cc6715e3991c4ec2ef061bb935ef5453eff7da13855fa",
+          "version": 1
+        },
+        "created_at": "1970-01-01T00:00:01Z",
+        "event_id": "evt_3b9fbea9c7017e851269d721a0f140352666725fc45d2daed5cb546d3402423c",
+        "executor": "service:shardline.reliability",
+        "intent_id": "int_1a20d97653121396473d6598901e598759f6805546920ae2cffb55a60c56fa63",
+        "operation": "shardline.reliability.Upload",
+        "resource_id": "shardline:Upload:compatibility-upload",
+        "schema": "statechronicle.event.v0",
+        "tenant_id": "tenant"
+      },
+      "schema_version": 1
+    },
+    {
+      "body": {
+        "commit_id": "cmt_56a5e8934a5ded82f35de241a00ae7615e4c5889f38612882e63c8ac4ffc2a59",
+        "created_at": "1970-01-01T00:00:02Z",
+        "event_count": 1,
+        "event_merkle_root": "sha256:dcec2e8a37345f6efb09973e8f246f309049c3e33a482173b8f8ab11ba4bca99",
+        "executor": "service:shardline.reliability",
+        "next_state_root": "sha256:70d9fde1456553f57583ff2a05b50b94c18e660f99876419b072047c1ffbd118",
+        "parent_commit_id": "cmt_d2931c9ceb485fa345cd6ef9dca94b6eeffa481d8e4762fd333a833344cf3e12",
+        "previous_state_root": "sha256:ad6966925a783033bd46a22e80f0d71df2a7d813e33f53d65585a74af04a47cc",
+        "profile": "shardline.reliability.v1",
+        "schema": "statechronicle.commit.v0",
+        "scope": {
+          "kind": "tenant",
+          "tenant_id": "tenant"
+        },
+        "sequence": 2
+      },
+      "event": {
+        "actor": "service:shardline.reliability",
+        "after": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:b0c19fa6d4bac83ac887ab1942e2fb531dba7449ccead2f414756db33855c26a"
+            }
+          },
+          "state_hash": "sha256:16ef0d45da7ecabb35003d1b37a40628d6929898c86d62c79e832fa945ccec7c",
+          "version": 2
+        },
+        "authority": null,
+        "before": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:b0c19fa6d4bac83ac887ab1942e2fb531dba7449ccead2f414756db33855c26a"
+            }
+          },
+          "state_hash": "sha256:16ef0d45da7ecabb35003d1b37a40628d6929898c86d62c79e832fa945ccec7c",
+          "version": 2
+        },
+        "created_at": "1970-01-01T00:00:02Z",
+        "event_id": "evt_b0c19fa6d4bac83ac887ab1942e2fb531dba7449ccead2f414756db33855c26a",
+        "executor": "service:shardline.reliability",
+        "intent_id": "int_1a20d97653121396473d6598901e598759f6805546920ae2cffb55a60c56fa63",
+        "operation": "shardline.reliability.Upload",
+        "resource_id": "shardline:Upload:compatibility-upload",
+        "schema": "statechronicle.event.v0",
+        "tenant_id": "tenant"
+      },
+      "schema_version": 1
+    },
+    {
+      "body": {
+        "commit_id": "cmt_24d4fa6b010c7317bdb62f12eefe353d45b7a763b424d9f20d36a7b852654ab9",
+        "created_at": "1970-01-01T00:00:03Z",
+        "event_count": 1,
+        "event_merkle_root": "sha256:d721257e81d886b53001978e5d46a1d7418b5155f94f0c4b33b39dc0db00609b",
+        "executor": "service:shardline.reliability",
+        "next_state_root": "sha256:23403f1c315081333bd0e901ad0a83e04cef00774588184b003c18bac761d93b",
+        "parent_commit_id": "cmt_56a5e8934a5ded82f35de241a00ae7615e4c5889f38612882e63c8ac4ffc2a59",
+        "previous_state_root": "sha256:70d9fde1456553f57583ff2a05b50b94c18e660f99876419b072047c1ffbd118",
+        "profile": "shardline.reliability.v1",
+        "schema": "statechronicle.commit.v0",
+        "scope": {
+          "kind": "tenant",
+          "tenant_id": "tenant"
+        },
+        "sequence": 3
+      },
+      "event": {
+        "actor": "service:shardline.reliability",
+        "after": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:e8721ab4243eb76267f8f585a738d765596bdba5dd221f23ffcaef3815f5cae7"
+            }
+          },
+          "state_hash": "sha256:f4adecb3b597a7ff09a432600b818d59f49540a104670d3f23461642602c8e70",
+          "version": 3
+        },
+        "authority": null,
+        "before": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:e8721ab4243eb76267f8f585a738d765596bdba5dd221f23ffcaef3815f5cae7"
+            }
+          },
+          "state_hash": "sha256:f4adecb3b597a7ff09a432600b818d59f49540a104670d3f23461642602c8e70",
+          "version": 3
+        },
+        "created_at": "1970-01-01T00:00:03Z",
+        "event_id": "evt_e8721ab4243eb76267f8f585a738d765596bdba5dd221f23ffcaef3815f5cae7",
+        "executor": "service:shardline.reliability",
+        "intent_id": "int_1a20d97653121396473d6598901e598759f6805546920ae2cffb55a60c56fa63",
+        "operation": "shardline.reliability.Upload",
+        "resource_id": "shardline:Upload:compatibility-upload",
+        "schema": "statechronicle.event.v0",
+        "tenant_id": "tenant"
+      },
+      "schema_version": 1
+    },
+    {
+      "body": {
+        "commit_id": "cmt_45a269a7bf10a3502be175d85f688bfda2702a741689327379f5a01ad7b087c7",
+        "created_at": "1970-01-01T00:00:04Z",
+        "event_count": 1,
+        "event_merkle_root": "sha256:81a8d68cbf49dd5bcc786a73c86153f9c7a7ae054e66ffdb7e091421e6a7eac1",
+        "executor": "service:shardline.reliability",
+        "next_state_root": "sha256:739d6e0e4735c3c35365a770e1e660a5c37e899e7a672c0af16f2e0ee3d8217f",
+        "parent_commit_id": "cmt_24d4fa6b010c7317bdb62f12eefe353d45b7a763b424d9f20d36a7b852654ab9",
+        "previous_state_root": "sha256:23403f1c315081333bd0e901ad0a83e04cef00774588184b003c18bac761d93b",
+        "profile": "shardline.reliability.v1",
+        "schema": "statechronicle.commit.v0",
+        "scope": {
+          "kind": "tenant",
+          "tenant_id": "tenant"
+        },
+        "sequence": 4
+      },
+      "event": {
+        "actor": "service:shardline.reliability",
+        "after": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:8830bff467f8cd7c88fcf7b549dfeea1ab37f142d44796c107708d193ca71478"
+            }
+          },
+          "state_hash": "sha256:eb6ac47b97d7f113763995c910e09f0f3c5260f307296a33c9bd47281b756132",
+          "version": 4
+        },
+        "authority": null,
+        "before": {
+          "state": {
+            "UniqueAsset": {
+              "owner": "shardline:compatibility-upload",
+              "status": "evidence_committed",
+              "trade_id": "sha256:8830bff467f8cd7c88fcf7b549dfeea1ab37f142d44796c107708d193ca71478"
+            }
+          },
+          "state_hash": "sha256:eb6ac47b97d7f113763995c910e09f0f3c5260f307296a33c9bd47281b756132",
+          "version": 4
+        },
+        "created_at": "1970-01-01T00:00:04Z",
+        "event_id": "evt_8830bff467f8cd7c88fcf7b549dfeea1ab37f142d44796c107708d193ca71478",
+        "executor": "service:shardline.reliability",
+        "intent_id": "int_1a20d97653121396473d6598901e598759f6805546920ae2cffb55a60c56fa63",
+        "operation": "shardline.reliability.Upload",
+        "resource_id": "shardline:Upload:compatibility-upload",
+        "schema": "statechronicle.event.v0",
+        "tenant_id": "tenant"
+      },
+      "schema_version": 1
+    }
+  ],
+  "events": [
+    {
+      "after": "Created",
+      "before": "Created",
+      "digest_encoding": "LegacyJson",
+      "operation": {
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "Upload",
+        "object_key": "object",
+        "operation_id": "compatibility-upload",
+        "repository": "repository",
+        "tenant": "tenant"
+      },
+      "process_digest": [
+        251,
+        130,
+        195,
+        126,
+        16,
+        251,
+        160,
+        233,
+        18,
+        28,
+        157,
+        171,
+        248,
+        198,
+        44,
+        209,
+        12,
+        112,
+        83,
+        154,
+        123,
+        20,
+        238,
+        175,
+        136,
+        102,
+        126,
+        74,
+        159,
+        73,
+        221,
+        193
+      ],
+      "sequence": 0,
+      "state_digest": "sha256:406effb1e9c59672c66a598c2b21e331b23b16c54024e96d6df3e7c173549791"
+    },
+    {
+      "after": "Storing",
+      "before": "Created",
+      "digest_encoding": "LegacyJson",
+      "operation": {
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "Upload",
+        "object_key": "object",
+        "operation_id": "compatibility-upload",
+        "repository": "repository",
+        "tenant": "tenant"
+      },
+      "process_digest": [
+        84,
+        108,
+        184,
+        222,
+        35,
+        171,
+        114,
+        191,
+        250,
+        196,
+        138,
+        250,
+        71,
+        74,
+        117,
+        133,
+        239,
+        208,
+        17,
+        132,
+        43,
+        66,
+        30,
+        48,
+        234,
+        247,
+        34,
+        208,
+        254,
+        13,
+        118,
+        75
+      ],
+      "sequence": 1,
+      "state_digest": "sha256:728f0d06fcfab3904aa390f88b63faef59c0256afab6ae7ae3c08aa434fa38f9"
+    },
+    {
+      "after": "Stored",
+      "before": "Storing",
+      "digest_encoding": "CanonicalBcsV2",
+      "operation": {
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "Upload",
+        "object_key": "object",
+        "operation_id": "compatibility-upload",
+        "repository": "repository",
+        "tenant": "tenant"
+      },
+      "process_digest": [
+        211,
+        191,
+        152,
+        156,
+        21,
+        3,
+        200,
+        138,
+        233,
+        117,
+        241,
+        74,
+        226,
+        16,
+        170,
+        206,
+        195,
+        32,
+        0,
+        253,
+        203,
+        72,
+        235,
+        241,
+        227,
+        81,
+        214,
+        249,
+        128,
+        209,
+        9,
+        7
+      ],
+      "sequence": 2,
+      "state_digest": "sha256:de04972ba97f6ff97b264d8e5d16499db8f01df216842c75973f8144b7b1ad8b"
+    },
+    {
+      "after": "MetadataCommitted",
+      "before": "Stored",
+      "digest_encoding": "CanonicalBcsV2",
+      "operation": {
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "Upload",
+        "object_key": "object",
+        "operation_id": "compatibility-upload",
+        "repository": "repository",
+        "tenant": "tenant"
+      },
+      "process_digest": [
+        247,
+        145,
+        236,
+        126,
+        59,
+        222,
+        6,
+        249,
+        152,
+        204,
+        232,
+        4,
+        223,
+        32,
+        155,
+        221,
+        68,
+        139,
+        195,
+        183,
+        126,
+        4,
+        114,
+        92,
+        251,
+        92,
+        13,
+        147,
+        167,
+        97,
+        19,
+        37
+      ],
+      "sequence": 3,
+      "state_digest": "sha256:9c50f7765e88fcb4c5ca00173308aba0d6170d513bbbdeec2f97c026443b5dc4"
+    },
+    {
+      "after": "Visible",
+      "before": "MetadataCommitted",
+      "digest_encoding": "CanonicalBcsV2",
+      "operation": {
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "Upload",
+        "object_key": "object",
+        "operation_id": "compatibility-upload",
+        "repository": "repository",
+        "tenant": "tenant"
+      },
+      "process_digest": [
+        201,
+        158,
+        85,
+        195,
+        90,
+        133,
+        247,
+        187,
+        122,
+        38,
+        175,
+        18,
+        8,
+        190,
+        48,
+        89,
+        74,
+        115,
+        176,
+        62,
+        239,
+        252,
+        115,
+        187,
+        4,
+        145,
+        220,
+        52,
+        249,
+        229,
+        220,
+        236
+      ],
+      "sequence": 4,
+      "state_digest": "sha256:a94a661922fee3b28f21e791197dbdc236bcf18188138d991c37b37ecb923b10"
+    }
+  ],
+  "kind": "Upload",
+  "name": "upload/mixed-encoding",
+  "signatures": [
+    {
+      "alg": "ed25519",
+      "key_id": "deployment-compatibility-key",
+      "sig": "b64u:L7nSGLnUMNEXrq4vw05-f4EhKTmDQLBlTxgvoiBbytjvKfILB_Q8t1eSJi98-nDmNqrQ9lLpy3GyH0rWHwyiBg"
+    },
+    {
+      "alg": "ed25519",
+      "key_id": "deployment-compatibility-key",
+      "sig": "b64u:-vt1mmGYhbwsX_KDMe13Ddo1ZWIiojw525P1En3CY58Ou-Yh4xa0dp18-IuA5gRbDsg6Wk3-_7tBlmqp-2jYCg"
+    },
+    {
+      "alg": "ed25519",
+      "key_id": "deployment-compatibility-key",
+      "sig": "b64u:RxTsNORbPUMIw8fgwOv7xqhUDqIeiI2ymu1HCjKbG60IA3_Xky9LX7ygEL4m2D3_MKufXow-N0HxPzbah-fCCg"
+    },
+    {
+      "alg": "ed25519",
+      "key_id": "deployment-compatibility-key",
+      "sig": "b64u:209Y-8ToI916j6PFBaXrYtQRuP-VA6q3R7XLVF4bzgif2c3Nj-s_h2VFLLRA9etFRbfA0Lqvp07X4XsWuihmCg"
+    },
+    {
+      "alg": "ed25519",
+      "key_id": "deployment-compatibility-key",
+      "sig": "b64u:ZDxHnBo1WL4_s7W5LKuPz1RTrZlrS_Kpnv_g4BRyvVjxVmJqk_4Jv-0YaQaZz8XzPcIczroBvz6mS803zawABA"
+    }
+  ]
+}

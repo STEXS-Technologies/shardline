@@ -35,8 +35,11 @@ shardline storage migrate \
 
 The command reports `scanned_objects`, `scanned_bytes`, `inserted_objects`,
 `already_present_objects`, and `copied_bytes`. The dry-run and the real run must agree
-on `scanned_objects`; `copied_bytes` plus `already_present_objects` (in bytes) must
-equal the expected payload total.
+on `scanned_objects` and `scanned_bytes` when the source is unchanged. On a
+successful real copy, `inserted_objects + already_present_objects` must equal
+`scanned_objects`. `already_present_objects` is a count, not a byte total;
+`copied_bytes` counts only newly inserted objects. Compare destination inventories
+and run fsck rather than deriving missing byte totals from those counters.
 
 After the copy, take inventory on both configurations and compare:
 

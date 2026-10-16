@@ -10,6 +10,7 @@ mod body;
 mod index;
 mod object_store;
 mod oci;
+pub(crate) mod publication;
 mod server;
 
 #[cfg(test)]

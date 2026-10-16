@@ -2,6 +2,10 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches:
+      - improve/reliability-integration-upgrade
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,47 +31,8 @@ jobs:
       - name: Run contributor CI matrix
         run: cargo make ci
 
+      - name: Test publication dependency safeguards
+        run: python3 -B -m unittest discover -s scripts/tests -v
+
   postgres:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: shardline
-          POSTGRES_PASSWORD: shardline-dev-password
-          POSTGRES_DB: shardline
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U shardline"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: Setup Rust CI toolchain and tools
-        uses: ./.github/actions/rust-ci-setup
-
-      - name: Apply database schema
-        env:
-          DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
-        run: cargo run -p shardline -- db migrate up --database-url "$DATABASE_URL" 2>&1
-
-      - name: Run Postgres-gated unit tests
-        env:
-          DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
-        run: |
-          cargo nextest run -p shardline-index --no-tests=pass \
-            -E 'test(hub_postgres) or test(pg_upload_intent) or test(pg_s3_object) or test(pg_oci_tag) or test(pg_manifest_tombstone) or test(pg_provider_repository_state) or test(pg_provider_mutation)' 2>&1
-          cargo nextest run -p shardline-provider-events --test provider_events_integration --no-tests=pass \
-            -E 'test(postgres_)' 2>&1
-          cargo nextest run -p shardline-server --no-tests=pass \
-            -E 'test(postgres_backend) or test(database_migration) or test(maintenance_barrier) or test(lifecycle_repair)' 2>&1
-
-      - name: Run Postgres-gated E2E tests
-        env:
-          DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
-        run: cargo nextest run -p shardline --test db_migrate_e2e --no-tests=pass 2>&1
+    uses: ./.github/workflows/postgres-contracts.yml

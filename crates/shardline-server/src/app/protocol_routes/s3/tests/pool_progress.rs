@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_s3_writers_and_gc_progress_with_one_connection_per_pool() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    let Some(url) = isolated_postgres_url().await else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -17,10 +17,7 @@ async fn postgres_s3_writers_and_gc_progress_with_one_connection_per_pool() {
     };
     *backend = backend.clone().with_single_connection_pools(&url).unwrap();
     let work = backend.index_store().pool().clone();
-    let app = s3_router(state.clone()).layer(axum::middleware::from_fn_with_state(
-        state,
-        crate::app::gc_write_barrier_middleware,
-    ));
+    let app = s3_router(state.clone());
     let gc_pool = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
     let gc = crate::maintenance_barrier::acquire_postgres_exclusive(&gc_pool)
         .await

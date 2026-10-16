@@ -254,6 +254,22 @@ pub fn validate_serialized_xorb<R: Read + Seek>(
     reader: &mut R,
     expected_hash: ShardlineHash,
 ) -> Result<ValidatedXorb, XorbParseError> {
+    validate_serialized_xorb_with_data(reader, expected_hash, 0, Vec::new())
+        .map(|(validated, _data)| validated)
+}
+
+/// Fully validates a container and retains its decoded payload only when it
+/// fits within `max_decoded_bytes`. Invalid containers never return payloads.
+/// The supplied buffer is cleared and reused for the result allocation.
+///
+/// # Errors
+/// Returns the same validation errors as [`validate_serialized_xorb`].
+pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
+    reader: &mut R,
+    expected_hash: ShardlineHash,
+    max_decoded_bytes: usize,
+    decoded_buffer: Vec<u8>,
+) -> Result<(ValidatedXorb, Option<Vec<u8>>), XorbParseError> {
     reader
         .seek(SeekFrom::Start(0))
         .map_err(XorbParseError::from)?;
@@ -272,12 +288,19 @@ pub fn validate_serialized_xorb<R: Read + Seek>(
     reader
         .seek(SeekFrom::Start(0))
         .map_err(XorbParseError::from)?;
-    let validated =
-        XorbObject::validate_xorb_object_with_info(reader, parsed, &expected_merkle_hash)
-            .map_err(|error| map_core_error(&error))?;
+    let validated = XorbObject::validate_xorb_object_with_info_and_data(
+        reader,
+        parsed,
+        &expected_merkle_hash,
+        max_decoded_bytes,
+        decoded_buffer,
+    )
+    .map_err(|error| map_core_error(&error))?;
     let Some(validated) = validated else {
         return Err(XorbInvalidFormatError::StructuralValidationFailed.into());
     };
+    let decoded = validated.decoded;
+    let validated = validated.xorb;
     let total_length = reader.seek(SeekFrom::End(0))?;
     let packed_content_length = validated
         .get_contents_length()
@@ -314,12 +337,15 @@ pub fn validate_serialized_xorb<R: Read + Seek>(
         return Err(XorbInvalidFormatError::PackedContentLengthMismatch.into());
     }
 
-    Ok(ValidatedXorb::new(
-        expected_hash,
-        total_length,
-        packed_content_length,
-        unpacked_start,
-        chunks,
+    Ok((
+        ValidatedXorb::new(
+            expected_hash,
+            total_length,
+            packed_content_length,
+            unpacked_start,
+            chunks,
+        ),
+        decoded,
     ))
 }
 
@@ -794,6 +820,36 @@ mod tests {
         let Ok(validated) = validated else {
             return;
         };
+        for budget in [0, 10, 11] {
+            let (metadata, decoded) = super::validate_serialized_xorb_with_data(
+                &mut reader,
+                expected_hash,
+                budget,
+                Vec::from(b"discard previous data".as_slice()),
+            )
+            .unwrap();
+            assert_eq!(metadata, validated);
+            assert_eq!(
+                decoded.as_deref(),
+                (budget == 11).then_some(b"hello world".as_slice())
+            );
+        }
+        let mut corrupt = reader.get_ref().clone();
+        let last = validated.chunks().last().unwrap();
+        let position = usize::try_from(last.packed_end() - 1).unwrap();
+        corrupt[position] ^= 0x40;
+        for budget in [0, 5, 11] {
+            assert!(
+                super::validate_serialized_xorb_with_data(
+                    &mut Cursor::new(corrupt.clone()),
+                    expected_hash,
+                    budget,
+                    Vec::new(),
+                )
+                .is_err(),
+                "a valid retained prefix must not escape a corrupt final chunk"
+            );
+        }
         assert_eq!(validated.hash(), expected_hash);
         assert_eq!(validated.chunks().len(), 2);
         assert_eq!(validated.unpacked_length(), 11);

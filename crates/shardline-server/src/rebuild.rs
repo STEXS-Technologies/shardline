@@ -11,7 +11,6 @@ use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
 use crate::{
     ServerConfig, ServerError, maintenance_barrier,
     object_store::{ServerObjectStore, object_store_from_config},
-    postgres_backend::connect_postgres_metadata_pool,
     record_store::LocalRecordStore,
 };
 
@@ -54,18 +53,14 @@ impl From<RebuildError> for ServerError {
 pub async fn run_index_rebuild(config: ServerConfig) -> Result<IndexRebuildReport, ServerError> {
     // A version snapshot must remain authoritative until all derived heads and
     // reconstruction rows have been reconciled. Coordinate with uploads and GC.
-    let _maintenance_guard = if let Some(url) = config.index_postgres_url() {
-        let pool = maintenance_barrier::postgres_coordination_pool(url)?;
-        maintenance_barrier::acquire_postgres_exclusive(&pool).await?
-    } else {
-        maintenance_barrier::acquire_local_exclusive(config.root_dir()).await?
-    };
-    let object_store = object_store_from_config(&config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
+        let pool = maintenance_barrier::postgres_exclusive_work_pool(index_postgres_url).await?;
+        let _cleanup = maintenance_barrier::WorkPoolCleanup::new(&pool);
+        crate::task_tracking::observe_work_pool(&config, &pool).await;
+        let object_store = object_store_from_config(&config)?;
         let index_store = PostgresIndexStore::new(pool.clone());
-        let record_store = PostgresRecordStore::new(pool);
-        return run_index_rebuild_with_stores(
+        let record_store = PostgresRecordStore::new(pool.clone());
+        let result = run_index_rebuild_with_stores(
             &record_store,
             &index_store,
             &object_store,
@@ -73,8 +68,13 @@ pub async fn run_index_rebuild(config: ServerConfig) -> Result<IndexRebuildRepor
         )
         .await
         .map_err(Into::into);
+        pool.close().await;
+        return result;
     }
 
+    let _maintenance_guard =
+        maintenance_barrier::acquire_local_exclusive(config.root_dir()).await?;
+    let object_store = object_store_from_config(&config)?;
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
     let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
     run_index_rebuild_with_stores(

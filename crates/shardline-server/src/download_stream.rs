@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     io::{Error as IoError, ErrorKind, Seek, SeekFrom},
     pin::Pin,
 };
@@ -17,41 +16,22 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
-    ServerError, admission::BoundedPool, chunk_store::chunk_object_key, error::ObjectStoreError,
-    local_backend::chunk_hash, object_store::ServerObjectStore,
+    ServerError,
+    admission::{BoundedPool, blocking_work as blocking_stream_work},
+    chunk_store::chunk_object_key,
+    error::ObjectStoreError,
+    local_backend::chunk_hash,
+    object_store::ServerObjectStore,
     object_store::run_before_local_object_read_hook,
 };
+
+mod collect;
+mod xorb_files;
+pub(crate) use collect::collect_file_record_bytes;
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
-
-// A queued job is aborted when its polling future is dropped. Running jobs
-// retain admission until completion, including initial whole-xorb validation.
-// Subsequent polls read or decode only one bounded portion.
-struct AbortBlockingJob(tokio::task::AbortHandle);
-impl Drop for AbortBlockingJob {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-async fn blocking_stream_work<T: Send + 'static>(
-    pool: &BoundedPool,
-    work: impl FnOnce() -> Result<T, ServerError> + Send + 'static,
-) -> Result<T, ServerError> {
-    let permit = pool
-        .acquire()
-        .await
-        .map_err(|error| ServerError::Io(IoError::other(error)))?;
-    let job = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        work()
-    });
-    let _abort = AbortBlockingJob(job.abort_handle());
-    job.await
-        .map_err(|error| ServerError::Io(IoError::other(error)))?
-}
 
 struct SerializedXorbStreamState {
     file: tempfile::NamedTempFile,
@@ -131,7 +111,7 @@ pub(crate) async fn validated_xorb_byte_range_stream(
 
 /// Returns the serialized xorb length when an object is stored under `hash_hex`.
 ///
-/// Used by the single-chunk routing decision in [`file_record_byte_stream`]: a
+/// Used by the per-container routing decision in [`file_record_byte_stream`]: a
 /// xorb-backed single-chunk record stores its `hash` as the xorb hash, an
 /// opaque value that is indistinguishable from a plain chunk data hash without
 /// checking storage. A metadata miss (or an error) means the record is treated
@@ -149,43 +129,59 @@ fn xorb_object_length(object_store: &ServerObjectStore, hash_hex: &str) -> Optio
 
 struct DecodedXorbStreamState {
     file: tempfile::NamedTempFile,
-    descriptors: VecDeque<shardline_xet_adapter::ValidatedXorbChunk>,
+    descriptors: Vec<shardline_xet_adapter::ValidatedXorbChunk>,
     chunks: Vec<shardline_index::FileChunkRecord>,
     next_chunk_index: usize,
+    next_descriptor_index: Option<usize>,
     requested_start: u64,
     requested_end: u64,
     pool: BoundedPool,
 }
 
-/// Reads a xorb-backed file record by fetching the single xorb object, parsing
-/// all chunks, and extracting the requested byte range.
+/// Reads logical terms from one authenticated container, decoding one bounded
+/// physical chunk per poll. Terms may select or repeat any container chunk range.
 ///
 /// When all chunks in a [`FileRecord`] share the same hash (meaning they were
 /// packed into a single xorb container during upload), this path reads the xorb
-/// once and extracts decompressed chunk data without per-chunk storage round-trips.
+/// once. Logical file offsets do not have to equal container-relative offsets.
 async fn read_xorb_backed_chunks(
     object_store: ServerObjectStore,
     record: FileRecord,
     range: Option<ByteRange>,
     known_xorb_length: Option<u64>,
     pool: BoundedPool,
+    decoded_byte_budget: usize,
 ) -> Result<ServerByteStream, ServerError> {
     let chunk_zero = record.chunks.first().ok_or(ServerError::Overflow)?;
     let expected_hash = parse_xet_hash_hex(&chunk_zero.hash)?;
     let key = crate::xet_adapter::xorb_object_key(&chunk_zero.hash)?;
-    let (file, validated) = blocking_stream_work(&pool, move || {
-        let length = match known_xorb_length {
-            Some(length) => length,
-            None => object_store
-                .metadata(&key)?
-                .ok_or(ServerError::NotFound)?
-                .length(),
-        };
-        let mut file = object_store.materialize_object_to_tempfile(&key, length)?;
-        let validated =
-            crate::xet_adapter::validate_serialized_xorb(file.as_file_mut(), expected_hash)?;
-        Ok((file, validated))
-    })
+    // Allocate the caller's result on its runtime worker, rather than growing
+    // large retained allocator arenas across blocking validation workers.
+    let (file, validated, decoded) = crate::admission::blocking_work_with_setup(
+        &pool,
+        move || Vec::with_capacity(decoded_byte_budget),
+        move |decoded_buffer| {
+            let length = match known_xorb_length {
+                Some(length) => length,
+                None => object_store
+                    .metadata(&key)?
+                    .ok_or(ServerError::NotFound)?
+                    .length(),
+            };
+            #[cfg(test)]
+            if let ServerObjectStore::Local(local) = &object_store {
+                run_before_local_object_read_hook(&local.path_for_key(&key));
+            }
+            let mut file = object_store.materialize_object_to_tempfile(&key, length)?;
+            let (validated, decoded) = shardline_xet_adapter::validate_serialized_xorb_with_data(
+                file.as_file_mut(),
+                expected_hash,
+                decoded_byte_budget,
+                decoded_buffer,
+            )?;
+            Ok((file, validated, decoded))
+        },
+    )
     .await?;
     let requested_start = range.map_or(0, |value| value.start());
     let requested_end = range.map_or_else(
@@ -197,11 +193,25 @@ async fn read_xorb_backed_chunks(
         },
         |value| Ok(value.end_inclusive()),
     )?;
+    if let Some(decoded) = decoded
+        && collect::covers_complete_xorb(&record, &validated)?
+    {
+        let start = usize::try_from(requested_start)?;
+        let end = usize::try_from(requested_end.checked_add(1).ok_or(ServerError::Overflow)?)?;
+        let bytes = Bytes::from(decoded);
+        if bytes.get(start..end).is_none() {
+            return Err(ServerError::Overflow);
+        }
+        return Ok(Box::pin(stream::once(async move {
+            Ok(bytes.slice(start..end))
+        })));
+    }
     let state = DecodedXorbStreamState {
         file,
-        descriptors: validated.chunks().iter().cloned().collect(),
+        descriptors: validated.chunks().to_vec(),
         chunks: record.chunks,
         next_chunk_index: 0,
+        next_descriptor_index: None,
         requested_start,
         requested_end,
         pool,
@@ -209,51 +219,68 @@ async fn read_xorb_backed_chunks(
     Ok(Box::pin(stream::try_unfold(
         state,
         |mut state| async move {
-            if state.descriptors.is_empty() {
+            if state.next_chunk_index >= state.chunks.len() {
                 return Ok(None);
             }
             let work_pool = state.pool.clone();
             blocking_stream_work(&work_pool, move || {
-                while let Some(descriptor) = state.descriptors.pop_front() {
-                    let chunk_index = descriptor.unpacked_start();
-                    while state
-                        .chunks
-                        .get(state.next_chunk_index)
-                        .is_some_and(|chunk| chunk.offset < chunk_index)
+                while let Some(chunk) = state.chunks.get(state.next_chunk_index) {
+                    let first = usize::try_from(chunk.range_start)?;
+                    let limit = usize::try_from(chunk.range_end)?;
+                    let selected = state
+                        .descriptors
+                        .get(first..limit)
+                        .ok_or(ServerError::Overflow)?;
+                    let first_descriptor = selected.first().ok_or(ServerError::Overflow)?;
+                    let last_descriptor = selected.last().ok_or(ServerError::Overflow)?;
+                    if last_descriptor
+                        .unpacked_end()
+                        .checked_sub(first_descriptor.unpacked_start())
+                        != Some(chunk.length)
+                        || first_descriptor.packed_start() != chunk.packed_start
+                        || last_descriptor.packed_end() != chunk.packed_end
                     {
+                        return Err(ServerError::ObjectStore(
+                            ObjectStoreError::StoredLengthMismatch,
+                        ));
+                    }
+                    let index = state.next_descriptor_index.unwrap_or(first);
+                    let descriptor = state.descriptors.get(index).ok_or(ServerError::Overflow)?;
+                    let chunk_offset = chunk
+                        .offset
+                        .checked_add(
+                            descriptor
+                                .unpacked_start()
+                                .checked_sub(first_descriptor.unpacked_start())
+                                .ok_or(ServerError::Overflow)?,
+                        )
+                        .ok_or(ServerError::Overflow)?;
+                    let chunk_end = chunk_offset
+                        .checked_add(descriptor.unpacked_len())
+                        .and_then(|value| value.checked_sub(1))
+                        .ok_or(ServerError::Overflow)?;
+                    let next = index.checked_add(1).ok_or(ServerError::Overflow)?;
+                    if next == limit {
                         state.next_chunk_index = state
                             .next_chunk_index
                             .checked_add(1)
                             .ok_or(ServerError::Overflow)?;
+                        state.next_descriptor_index = None;
+                    } else {
+                        state.next_descriptor_index = Some(next);
                     }
-                    let chunk = state
-                        .chunks
-                        .get(state.next_chunk_index)
-                        .ok_or(ServerError::Overflow)?;
-                    if chunk.offset != chunk_index {
-                        return Err(ServerError::Overflow);
-                    }
-                    state.next_chunk_index = state
-                        .next_chunk_index
-                        .checked_add(1)
-                        .ok_or(ServerError::Overflow)?;
-                    let chunk_end = chunk
-                        .offset
-                        .checked_add(chunk.length)
-                        .and_then(|v| v.checked_sub(1))
-                        .ok_or(ServerError::Overflow)?;
-                    let start = state.requested_start.max(chunk.offset);
+                    let start = state.requested_start.max(chunk_offset);
                     let end = state.requested_end.min(chunk_end);
                     if start > end {
                         continue;
                     }
                     let relative_start = usize::try_from(
                         start
-                            .checked_sub(chunk.offset)
+                            .checked_sub(chunk_offset)
                             .ok_or(ServerError::Overflow)?,
                     )?;
                     let relative_end = usize::try_from(
-                        end.checked_sub(chunk.offset)
+                        end.checked_sub(chunk_offset)
                             .ok_or(ServerError::Overflow)?
                             .checked_add(1)
                             .ok_or(ServerError::Overflow)?,
@@ -266,7 +293,7 @@ async fn read_xorb_backed_chunks(
                     }
                     let cursor = state.file.as_file_mut();
                     cursor.seek(SeekFrom::Start(descriptor.packed_start()))?;
-                    // Full object integrity was verified before headers. The private
+                    // Full container integrity was verified before these bytes. The private
                     // temporary file is immutable; still check each decoder length
                     // against the validated footer before applying the output slice.
                     let (data, packed_len, unpacked_len) =
@@ -305,13 +332,23 @@ async fn read_xorb_backed_chunks(
 /// data. The `packed_end` field on the chunk record indicates the compressed storage
 /// length; `length` is the raw (uncompressed) length used for offset math.
 ///
-/// When all chunks in the record share the same hash (xorb-backed), this function
-/// delegates to [`read_xorb_backed_chunks`] for a single-GET read path.
+/// Adjacent terms in the same container share one validated read. Containers
+/// and individual fallback chunks may coexist in the same file.
 pub(crate) async fn file_record_byte_stream(
     object_store: ServerObjectStore,
     record: FileRecord,
     range: Option<ByteRange>,
     pool: BoundedPool,
+) -> Result<ServerByteStream, ServerError> {
+    xorb_files::file_stream(object_store, record, range, pool).await
+}
+
+async fn single_container_file_stream(
+    object_store: ServerObjectStore,
+    record: FileRecord,
+    range: Option<ByteRange>,
+    pool: BoundedPool,
+    decoded_byte_budget: usize,
 ) -> Result<ServerByteStream, ServerError> {
     record.validate_reconstruction_plan()?;
     if record.total_bytes == 0 {
@@ -344,25 +381,24 @@ pub(crate) async fn file_record_byte_stream(
     // which lets us skip the probe for legacy records that predate packing.
     let first_hash = record.chunks.first().map(|c| &c.hash);
     let all_same_hash = first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
-    let known_xorb_length = if record.chunks.len() == 1
-        && all_same_hash
+    let known_xorb_length = if all_same_hash
         && record
             .chunks
             .first()
             .is_some_and(|chunk| chunk.packed_end > 0)
     {
-        record
+        let store = object_store.clone();
+        let hash = record
             .chunks
             .first()
-            .and_then(|chunk| xorb_object_length(&object_store, &chunk.hash))
+            .ok_or(ServerError::Overflow)?
+            .hash
+            .clone();
+        blocking_stream_work(&pool, move || Ok(xorb_object_length(&store, &hash))).await?
     } else {
         None
     };
-    let is_xorb_backed = if record.chunks.len() > 1 {
-        all_same_hash
-    } else {
-        known_xorb_length.is_some()
-    };
+    let is_xorb_backed = known_xorb_length.is_some();
 
     if is_xorb_backed {
         #[allow(clippy::indexing_slicing)]
@@ -373,7 +409,15 @@ pub(crate) async fn file_record_byte_stream(
             xorb_hash = %xorb_hash,
             "reading xorb-backed file"
         );
-        return read_xorb_backed_chunks(object_store, record, range, known_xorb_length, pool).await;
+        return read_xorb_backed_chunks(
+            object_store,
+            record,
+            range,
+            known_xorb_length,
+            pool,
+            decoded_byte_budget,
+        )
+        .await;
     }
 
     debug!(
@@ -528,7 +572,13 @@ pub(crate) async fn file_record_byte_stream(
             }
         },
     );
-    Ok(Box::pin(streams.try_flatten()))
+    // Validate the first fallback chunk before the caller constructs HTTP
+    // success headers. Later chunks remain lazy; no complete file is buffered.
+    let mut remaining: ServerByteStream = Box::pin(streams.try_flatten());
+    let first = remaining.try_next().await?.ok_or(ServerError::Overflow)?;
+    Ok(Box::pin(
+        stream::once(async move { Ok(first) }).chain(remaining),
+    ))
 }
 
 struct LocalObjectByteStreamState {
@@ -686,20 +736,23 @@ async fn s3_store_byte_range_stream(
     total_length: u64,
     range: ByteRange,
 ) -> Result<ServerByteStream, ServerError> {
-    let metadata = object_store.metadata(&object_key)?;
-    let Some(metadata) = metadata else {
-        return Err(ServerError::NotFound);
-    };
-    if metadata.length() != total_length {
-        return Err(ServerError::ObjectStore(
-            ObjectStoreError::StoredLengthMismatch,
-        ));
-    }
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
     }
-
-    let byte_stream = object_store.stream_range(&object_key, range).await?;
+    let byte_stream = object_store
+        .stream_range_if_present(&object_key, range, total_length)
+        .await
+        .map_err(|error| {
+            if matches!(
+                error,
+                shardline_storage::S3ObjectStoreError::IntegrityLengthMismatch
+            ) {
+                ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch)
+            } else {
+                ServerError::from(error)
+            }
+        })?
+        .ok_or(ServerError::NotFound)?;
 
     Ok(Box::pin(byte_stream.map_err(ServerError::from)))
 }

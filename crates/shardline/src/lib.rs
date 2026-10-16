@@ -48,9 +48,16 @@ pub mod entry;
 mod fsck;
 mod gc;
 mod gc_schedule;
+mod history_inspection;
 mod hold;
 mod hub_repair;
 mod lfs_repair;
+mod logging;
+#[cfg(target_os = "linux")]
+mod maintenance;
+mod pending_delete_inspection;
+#[cfg(target_os = "linux")]
+pub use maintenance::{MaintenanceOperation, MaintenanceStorageAdapter};
 pub mod local_output;
 pub mod local_path;
 mod providerless;

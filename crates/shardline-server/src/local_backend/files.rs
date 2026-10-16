@@ -12,10 +12,9 @@ use super::LocalBackend;
 use crate::{
     ServerError, ShardMetadataLimits,
     chunk_store::chunk_object_key,
-    download_stream::{ServerByteStream, file_record_byte_stream},
+    download_stream::{ServerByteStream, collect_file_record_bytes, file_record_byte_stream},
     model::UploadFileResponse,
     object_store::{read_full_object, reconstruct_file_record_bytes},
-    protocol_support::reliability_repository_scope,
     upload_ingest::{
         FileUploadIngestor, RequestBodyReader, StagedRequestBody, stage_body_for_object_store,
         upload_attempt_id,
@@ -123,6 +122,9 @@ impl LocalBackend {
         body: Bytes,
         repository_scope: Option<&RepositoryScope>,
     ) -> Result<UploadFileResponse, ServerError> {
+        validate_identifier(file_id)?;
+        let _barrier =
+            crate::maintenance_barrier::acquire_local_shared(&self.metadata_root).await?;
         self.upload_file_stream(
             file_id,
             RequestBodyReader::from_bytes(body),
@@ -146,7 +148,8 @@ impl LocalBackend {
         expected_sha256: Option<&str>,
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
-        let reliability_repository = reliability_repository_scope(repository_scope);
+        let reliability_repository =
+            crate::upload_intent_recovery::file_intent_repository_scope(repository_scope)?;
 
         let intent = expected_sha256.map(|expected_hash| {
             UploadIntent::new(
@@ -164,7 +167,9 @@ impl LocalBackend {
         );
         if let Some(intent) = &intent {
             let _metadata_guard = self.metadata_write_lock.lock().await;
-            coordinator.begin_upload(intent).await?;
+            coordinator
+                .begin_upload_scoped(intent, "shardline", &reliability_repository)
+                .await?;
             coordinator
                 .transition_upload_scoped(
                     "shardline",
@@ -241,8 +246,9 @@ impl LocalBackend {
         let staged = stage_body_for_object_store(&mut body, &object_store).await?;
         let body_length = staged.length();
         let body_hash = staged.hash();
-        let intent_id = format!("shard-{}", hex::encode(body_hash.as_bytes()));
         let body_hash_hex = hex::encode(body_hash.as_bytes());
+        let (intent_id, reliability_repository) =
+            crate::upload_identity::native_shard(&body_hash_hex, repository_scope)?;
         let prefix = &body_hash_hex[..2];
         let object_key = format!("shards/{prefix}/{body_hash_hex}.shard");
         let intent = UploadIntent::new(intent_id.clone(), object_key, body_hash_hex, body_length);
@@ -256,7 +262,6 @@ impl LocalBackend {
         // Hold the metadata_write_lock for the entire shard commit to prevent
         // interleaved metadata writes from concurrent shard uploads.
         let _metadata_guard = self.metadata_write_lock.lock().await;
-        let reliability_repository = reliability_repository_scope(repository_scope);
         coordinator
             .with_upload_intent_scoped(
                 "shardline",
@@ -393,7 +398,6 @@ impl LocalBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
-        let total_bytes = record.total_bytes;
         let object_store = self.object_store();
 
         // ReferencedObjectTerms layout (shard/xorb-referenced) is handled
@@ -411,17 +415,7 @@ impl LocalBackend {
             .map_err(ServerError::BlockingTask)?;
         }
 
-        // StoredChunks path: stream with LZ4 decompression and xorb-fast-path.
-        let stream =
-            file_record_byte_stream(object_store, record, None, self.stream_work_pool.clone())
-                .await?;
-        let mut output = Vec::with_capacity(usize::try_from(total_bytes)?);
-        tokio::pin!(stream);
-        use futures_util::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            output.extend_from_slice(&chunk?);
-        }
-        Ok(output)
+        collect_file_record_bytes(object_store, record, self.stream_work_pool.clone()).await
     }
 
     /// Reads a stored chunk by hash.

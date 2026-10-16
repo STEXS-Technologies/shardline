@@ -94,6 +94,7 @@ pub use lifecycle::{
 };
 pub use local_sqlite::{
     LocalIndexStore, LocalIndexStoreError, LocalRecordLocator, LocalRecordStore,
+    LocalTaskArtifactPage,
 };
 pub use memory::{
     MemoryIndexStore, MemoryIndexStoreError, MemoryRecordLocator, MemoryRecordStore,
@@ -106,7 +107,8 @@ pub use oci_tags::{OciTagEntry, OciTagStore};
 pub use postgres::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresProviderMutation,
     PostgresProviderMutationOutcome, PostgresRecordLocator, PostgresRecordStore,
-    PostgresResourceFence, ProviderRepositoryKey,
+    PostgresRemoteDeletePermit, PostgresResourceFence, PostgresTaskArtifact, ProviderRepositoryKey,
+    RemoteDeletePending, RemoteDeleteReceipt, RemoteDeleteReceiptSettlement,
 };
 pub use reconstruction::{FileReconstruction, ReconstructionTerm};
 pub use record::{

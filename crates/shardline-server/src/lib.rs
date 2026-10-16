@@ -86,6 +86,7 @@ mod fsck;
 mod fuzz;
 pub(crate) mod gc;
 mod gc_runtime;
+mod hub_secret_upgrade;
 mod ingest_bench;
 mod jwks_provider;
 mod jwt_algorithm;
@@ -108,6 +109,9 @@ mod provider_events;
 mod rebuild;
 mod reconstruction_cache;
 mod record_store;
+mod remote_delete_inspection;
+mod remote_delete_recovery;
+pub use remote_delete_inspection::{PendingDeleteInspectionPage, pending_delete_inspection_page};
 mod repository_scope_path;
 mod retention_runtime;
 mod route_policy;
@@ -115,8 +119,11 @@ mod runtime_check;
 mod server_frontend;
 mod server_role;
 mod storage_migration;
+pub mod task_tracking;
 pub mod test_fixtures;
 pub mod test_invariant_error;
+#[cfg(test)]
+mod test_support;
 pub(crate) mod xet_adapter;
 
 pub use admission::{ExecutionPools, WeightedAdmission};
@@ -133,6 +140,7 @@ pub use backend::{
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
 pub use local_backend::chunk_hash;
 pub use object_store::ServerObjectStore;
+pub use object_store::object_store_from_config;
 pub use oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
 pub use protocol_support::shared_sha256_object_key;
 pub use reconstruction_cache::ReconstructionCacheService;
@@ -141,7 +149,9 @@ pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
 mod gc_tests;
 mod transfer_limiter;
+mod upload_identity;
 pub mod upload_ingest;
+mod upload_intent_recovery;
 mod validation;
 
 pub use app::{serve, serve_with_listener};

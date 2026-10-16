@@ -48,6 +48,14 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 
+mod readonly_maintenance_deployment;
+
+mod tracker_replacement;
+
+mod gc_acknowledgement;
+
+mod maintenance_history;
+
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------
@@ -668,12 +676,20 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
         .map(|root| root.join(COMPOSE_FILE))?;
     let compose_file_for_command = compose_file.clone();
     let project_for_command = project.clone();
-    let pg_port = free_tcp_port()?;
-    let minio_port = free_tcp_port()?;
-    let minio_console_port = free_tcp_port()?;
-    let redis_port = free_tcp_port()?;
-    let bind_port = free_tcp_port()?;
-    let secondary_bind_port = free_tcp_port()?;
+    // Keep PostgreSQL's endpoint stable when outage drills stop and start it.
+    // Docker's automatic published ports can change on restart. Reserve the
+    // backend ports used by persistent clients alongside both server listeners
+    // so recovery reconnects to the same endpoints.
+    let postgres_listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let postgres_port = postgres_listener.local_addr().ok()?.port();
+    let minio_listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let minio_port = minio_listener.local_addr().ok()?.port();
+    let bind_listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let bind_port = bind_listener.local_addr().ok()?.port();
+    let secondary_bind_listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let secondary_bind_port = secondary_bind_listener.local_addr().ok()?.port();
+    drop(postgres_listener);
+    drop(minio_listener);
     let started = tokio::task::spawn_blocking(move || {
         std::process::Command::new("docker")
             .args([
@@ -686,13 +702,10 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
                 "-d",
                 "--quiet-pull",
             ])
-            .env("SHARDLINE_CHAOS_PG_PORT", pg_port.to_string())
+            .env("SHARDLINE_CHAOS_PG_PORT", postgres_port.to_string())
             .env("SHARDLINE_CHAOS_MINIO_PORT", minio_port.to_string())
-            .env(
-                "SHARDLINE_CHAOS_MINIO_CONSOLE_PORT",
-                minio_console_port.to_string(),
-            )
-            .env("SHARDLINE_CHAOS_REDIS_PORT", redis_port.to_string())
+            .env("SHARDLINE_CHAOS_MINIO_CONSOLE_PORT", "0")
+            .env("SHARDLINE_CHAOS_REDIS_PORT", "0")
             .output()
             .unwrap()
     })
@@ -775,6 +788,7 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
         std::env::set_var("SHARDLINE_CHAOS_S3_ENDPOINT", &stack.s3_endpoint);
         std::env::set_var("SHARDLINE_CHAOS_REDIS_URL", &stack.redis_url);
     }
+    drop((bind_listener, secondary_bind_listener));
     Some(stack)
 }
 
@@ -923,7 +937,7 @@ fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
         .filter(|path| path.is_file());
     if path.is_none() {
         eprintln!(
-            "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to a built v1.6.0 shardline binary"
+            "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to the adjacent released shardline binary"
         );
     }
     path
@@ -2117,7 +2131,11 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     // proves that the new binary can read state created by the preceding
     // release after the explicit migration boundary.
     let seed_root = TempDir::new().unwrap();
-    let environment = [("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str())];
+    let environment = [
+        ("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str()),
+        ("SHARDLINE_SERVER_FRONTENDS", "s3,lfs"),
+        ("SHARDLINE_ADMIN_READ_TOKEN", ADMIN_READ_TOKEN),
+    ];
     let mut seed_node = DeploymentServer::spawn_at(
         &previous_binary,
         &chaos_bind_addr(),
@@ -2153,6 +2171,182 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     node_b.wait_ready(Duration::from_secs(20)).await;
 
     assert_s3_bytes(&node_b.base_url(), &token, "f-old", &old_bytes, "N-1 peer").await;
+
+    // A format-preserving dependency upgrade needs no domain migration window.
+    // Test overlap before optional owner setup, then upgraded history and rollback.
+    let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
+    let incremental = shardline_server::check_database_schema_compatibility(&pool)
+        .await
+        .is_ok();
+    pool.close().await;
+    if incremental {
+        drop(node_a);
+        node_a = DeploymentServer::spawn_at(
+            &current_binary,
+            &bind_addr,
+            &environment,
+            new_a_root.path(),
+        );
+        node_a.wait_ready(Duration::from_secs(20)).await;
+        assert_s3_bytes(
+            &node_a.base_url(),
+            &token,
+            "f-old",
+            &old_bytes,
+            "N reads N-1 history",
+        )
+        .await;
+        let new_bytes = deterministic_bytes(114_711, 602);
+        let new_put = s3_put(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            new_bytes.clone(),
+        )
+        .await;
+        assert_eq!(
+            new_put.status().as_u16(),
+            200,
+            "N write during mixed window"
+        );
+        assert_s3_bytes(
+            &node_b.base_url(),
+            &token,
+            "f-incremental-new",
+            &new_bytes,
+            "N-1 reads N write",
+        )
+        .await;
+        let peer_bytes = deterministic_bytes(81_923, 603);
+        let peer_put = s3_put(
+            &node_b.base_url(),
+            &token,
+            "f-incremental-new",
+            peer_bytes.clone(),
+        )
+        .await;
+        assert_eq!(
+            peer_put.status().as_u16(),
+            200,
+            "compatible N-1 writer remains supported"
+        );
+        assert_s3_bytes(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            &peer_bytes,
+            "N reads mixed-window N-1 write",
+        )
+        .await;
+
+        let response = admin_get(
+            &node_a.base_url(),
+            "/api/v1/tasks/maintenance",
+            ADMIN_READ_TOKEN,
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 200);
+        let status: serde_json::Value = response.json().await.unwrap();
+        assert!(status["history_notice"].is_string());
+        assert!(status["tasks"].as_array().unwrap().is_empty());
+        // The usual owner command installs optional history even when the
+        // domain migration ledger is already current. Startup never installs it.
+        drop(node_a);
+        migrate_chaos_postgres_with_binary(&current_binary, &stack.pg_url).await;
+        node_a = DeploymentServer::spawn_at(
+            &current_binary,
+            &bind_addr,
+            &environment,
+            new_a_root.path(),
+        );
+        node_a.wait_ready(Duration::from_secs(20)).await;
+        assert_s3_bytes(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            &peer_bytes,
+            "owner setup preserves mixed-version writes",
+        )
+        .await;
+        let response = admin_get(
+            &node_a.base_url(),
+            "/api/v1/tasks/maintenance",
+            ADMIN_READ_TOKEN,
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 200);
+        let status: serde_json::Value = response.json().await.unwrap();
+        assert!(status["history_notice"].is_null());
+        assert_eq!(status["history_grouping"], "shared_metadata");
+        assert!(
+            status["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["operation"] == "lfs-startup-session-sweep"
+                    && task["state"] == "completed"
+                    && task["owner"]["pid"] == node_a.child.id()),
+            "new startup outcome was not verified: {status}"
+        );
+
+        drop(node_b);
+        node_b = DeploymentServer::spawn_at(
+            &current_binary,
+            &chaos_secondary_bind_addr(),
+            &environment,
+            new_b_root.path(),
+        );
+        node_b.wait_ready(Duration::from_secs(20)).await;
+        assert_s3_bytes(
+            &node_b.base_url(),
+            &token,
+            "f-incremental-new",
+            &peer_bytes,
+            "N peer after full rollout",
+        )
+        .await;
+        drop(node_a);
+        node_a = DeploymentServer::spawn_at(
+            &previous_binary,
+            &bind_addr,
+            &environment,
+            rollback_root.path(),
+        );
+        node_a.wait_ready(Duration::from_secs(20)).await;
+        assert_s3_bytes(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            &peer_bytes,
+            "N-1 rollback reads N history",
+        )
+        .await;
+        let rollback_bytes = deterministic_bytes(74_011, 604);
+        let rollback_put = s3_put(
+            &node_a.base_url(),
+            &token,
+            "f-incremental-new",
+            rollback_bytes.clone(),
+        )
+        .await;
+        assert_eq!(
+            rollback_put.status().as_u16(),
+            200,
+            "rollback retains compatible writes"
+        );
+        assert_s3_bytes(
+            &node_b.base_url(),
+            &token,
+            "f-incremental-new",
+            &rollback_bytes,
+            "N reads rollback write",
+        )
+        .await;
+        eprintln!(
+            "chaos({drill}): PASS — incremental N-1/N overlap, optional owner setup and rollback preserved bytes, compatible writers and native task outcomes without new domain migrations"
+        );
+        return;
+    }
 
     // Drain all N-1 nodes before changing the shared schema. The upgrade is
     // explicit and leaves no unsafe N-1/N overlap across the migration.

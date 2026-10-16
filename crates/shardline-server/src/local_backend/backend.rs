@@ -25,6 +25,7 @@ use super::records::read_record;
 /// Local filesystem backend for file chunk storage and reconstruction metadata.
 #[derive(Debug, Clone)]
 pub struct LocalBackend {
+    pub(crate) metadata_root: PathBuf,
     pub(super) public_base_url: String,
     pub(super) chunk_size: NonZeroUsize,
     pub(super) upload_max_in_flight_chunks: NonZeroUsize,
@@ -39,6 +40,11 @@ pub struct LocalBackend {
 
 impl LocalBackend {
     /// Creates a local backend and initializes its directory structure.
+    ///
+    /// Initialization prepares the existing GC lock file when permissions allow.
+    /// Public uploads acquire this barrier automatically before writing. An
+    /// existing read-only deployment can still initialize for reads; uploads
+    /// require the barrier to be available.
     ///
     /// # Errors
     ///
@@ -125,6 +131,7 @@ impl LocalBackend {
             // concurrent protocol requests. Lazy first-use initialization lets
             // simultaneous uploads race while creating the schema/import marker.
             index_store: LocalIndexStore::new(root.clone())?,
+            metadata_root: std::path::absolute(&root)?,
             record_store: LocalRecordStore::open(root),
             public_base_url,
             chunk_size,
@@ -135,6 +142,13 @@ impl LocalBackend {
             metadata_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             protocol_upload_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
+        if let Err(error) =
+            crate::maintenance_barrier::prepare_local_barrier(&backend.metadata_root).await
+        {
+            // Preserve read-only initialization. Uploads still acquire the
+            // barrier before writing and cannot bypass an unavailable lock.
+            tracing::debug!("local upload barrier preparation unavailable: {error}");
+        }
         Ok(backend)
     }
 
@@ -225,17 +239,34 @@ impl LocalBackend {
         &self,
         minimum_age: std::time::Duration,
     ) -> Result<(), ServerError> {
+        self.reconcile_upload_intents(
+            minimum_age,
+            &crate::upload_intent_recovery::startup::RecoveryPass::Complete,
+        )
+        .await
+        .map(|_pending| ())
+    }
+
+    pub(crate) async fn reconcile_upload_intents(
+        &self,
+        minimum_age: std::time::Duration,
+        pass: &crate::upload_intent_recovery::startup::RecoveryPass,
+    ) -> Result<bool, ServerError> {
         use shardline_index::{UploadIntentState, UploadIntentStore};
         use shardline_storage::{AsyncObjectStore, ObjectKey};
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         let mut reconciled = 0u64;
+        let mut pending_files = false;
         for state in &[
             UploadIntentState::Created,
             UploadIntentState::Storing,
             UploadIntentState::Stored,
             UploadIntentState::MetadataCommitted,
         ] {
+            if pass.stopped() {
+                return Ok(pending_files);
+            }
             let intents = match self.index_store.intents_by_state(*state).await {
                 Ok(intents) => intents,
                 Err(e) => {
@@ -246,12 +277,28 @@ impl LocalBackend {
                 }
             };
             for intent in &intents {
+                if pass.stopped() {
+                    return Ok(pending_files);
+                }
+                if !pass.visits(intent) {
+                    continue;
+                }
                 let reliability_events = self
                     .index_store
                     .reliability_events(intent.intent_id())
                     .await?;
-                verify_lifecycle_chain_ends_at(&reliability_events, intent.state())
-                    .map_err(|error| ServerError::Io(std::io::Error::other(error.to_string())))?;
+                if let Err(error) =
+                    verify_lifecycle_chain_ends_at(&reliability_events, intent.state())
+                {
+                    let current = self.index_store.intent_by_id(intent.intent_id()).await?;
+                    if current
+                        .as_ref()
+                        .is_none_or(|current| current.state() != intent.state())
+                    {
+                        continue;
+                    }
+                    return Err(ServerError::Io(std::io::Error::other(error.to_string())));
+                }
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or(Duration::ZERO);
@@ -265,16 +312,54 @@ impl LocalBackend {
                     age_secs = age.as_secs(),
                     "reconciling stuck intent"
                 );
-                let visible_file_record =
-                    if let Some(file_id) = intent.object_key().strip_prefix("record/") {
-                        match self.read_record(file_id, None, None).await {
-                            Ok(_record) => true,
-                            Err(ServerError::NotFound) => false,
-                            Err(error) => return Err(error),
-                        }
-                    } else {
-                        false
+                let file_intent = intent.object_key().starts_with("record/");
+                if file_intent
+                    && !crate::upload_intent_recovery::file_publication_may_have_completed(intent)
+                {
+                    tracing::warn!(intent_id = %intent.intent_id(), "file upload has no Stored checkpoint; preserving unfinished intent for a fresh validated request");
+                    continue;
+                }
+                let visible_file_record = if let Some(file_id) =
+                    intent.object_key().strip_prefix("record/")
+                {
+                    let crate::upload_intent_recovery::FileRecoveryScope::Known(scope) =
+                        crate::upload_intent_recovery::file_recovery_scope(&reliability_events)
+                    else {
+                        tracing::warn!(intent_id = %intent.intent_id(), "legacy file scope cannot be verified; preserving unfinished intent");
+                        continue;
                     };
+                    match self.read_record(file_id, None, scope.as_ref()).await {
+                        Ok(record) => {
+                            if pass.defers_file_bytes() {
+                                pending_files |= crate::upload_intent_recovery::file_record_has_expected_identity(intent, &reliability_events, &record);
+                                continue;
+                            }
+                            match crate::upload_intent_recovery::file_record_matches_intent(
+                                intent,
+                                &reliability_events,
+                                record,
+                                self.object_store(),
+                                self.stream_work_pool.clone(),
+                                pass,
+                            )
+                            .await
+                            {
+                                Ok(matches) => matches,
+                                Err(error) => {
+                                    tracing::warn!(intent_id = %intent.intent_id(), %error, "file upload verification unavailable; preserving unfinished intent");
+                                    false
+                                }
+                            }
+                        }
+                        Err(ServerError::NotFound) => false,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    false
+                };
+                if pass.stopped() {
+                    return Ok(pending_files);
+                }
                 if visible_file_record {
                     // The atomic file-record commit is the visibility boundary.
                     // Walk every durable boundary so recovery remains valid even
@@ -286,6 +371,9 @@ impl LocalBackend {
                         UploadIntentState::MetadataCommitted,
                         UploadIntentState::Visible,
                     ] {
+                        if pass.stopped() {
+                            return Ok(pending_files);
+                        }
                         let transitioned = transition_intent_for_recovery(
                             &self.index_store,
                             intent.intent_id(),
@@ -309,6 +397,12 @@ impl LocalBackend {
                     reconciled = reconciled.saturating_add(1);
                     continue;
                 }
+                if file_intent {
+                    // This is a logical record key, not a physical CAS object.
+                    // Missing or unrelated latest metadata cannot settle it.
+                    tracing::warn!(intent_id = %intent.intent_id(), "file upload outcome cannot be verified; preserving unfinished intent for a fresh validated request");
+                    continue;
+                }
                 let target_state = match ObjectKey::parse(intent.object_key()) {
                     Ok(key) => match AsyncObjectStore::metadata(&self.object_store, &key).await? {
                         Some(metadata) if metadata.length() != intent.object_length() => {
@@ -327,6 +421,10 @@ impl LocalBackend {
                                 state = ?intent.state(),
                                 "durable object found for in-flight intent; preserving for retry"
                             );
+                            None
+                        }
+                        None if crate::upload_intent_recovery::missing_request_key_is_inconclusive(intent) => {
+                            tracing::warn!(intent_id = %intent.intent_id(), "native shard request key is absent; normalized storage may use another key, preserving for validated retry");
                             None
                         }
                         None => Some(UploadIntentState::Failed),
@@ -356,7 +454,7 @@ impl LocalBackend {
         if reconciled > 0 {
             tracing::info!(count = reconciled, "intent reconciliation complete");
         }
-        Ok(())
+        Ok(pending_files)
     }
 
     pub(super) async fn read_record(
@@ -849,6 +947,87 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normalized_shard_recovery_preserves_retry_after_metadata_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            root.path().to_owned(),
+            "http://localhost:8080".to_owned(),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .await
+        .unwrap();
+        let payload = b"normalized local shard retry";
+        let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(payload);
+        backend.upload_xorb(&hash, xorb).await.unwrap();
+        let (shard, file_hash) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
+        let (intent_id, _repository) =
+            crate::upload_identity::native_shard(blake3::hash(&shard).to_hex().as_ref(), None)
+                .unwrap();
+        let database = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        database.execute_batch("CREATE TRIGGER deny_native_metadata BEFORE INSERT ON shardline_file_records BEGIN SELECT RAISE(ABORT, 'fixture denies native publication'); END;").unwrap();
+        assert!(
+            backend
+                .upload_shard_stream(
+                    crate::upload_ingest::RequestBodyReader::from_bytes(shard.clone()),
+                    None,
+                    crate::ShardMetadataLimits::default()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            backend
+                .index_store
+                .intent_by_id(&intent_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        backend
+            .reconcile_stuck_upload_intents_older_than(std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .index_store
+                .intent_by_id(&intent_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+        assert!(matches!(
+            backend.read_record(&file_hash, None, None).await,
+            Err(crate::ServerError::NotFound)
+        ));
+        database
+            .execute_batch("DROP TRIGGER deny_native_metadata")
+            .unwrap();
+        backend
+            .upload_shard_stream(
+                crate::upload_ingest::RequestBodyReader::from_bytes(shard),
+                None,
+                crate::ShardMetadataLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .index_store
+                .intent_by_id(&intent_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Visible
+        );
+        assert!(backend.read_record(&file_hash, None, None).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconciliation_promotes_visible_storage_across_crash_boundaries() {
         let tmp = tempfile::tempdir().unwrap();
         let backend = LocalBackend::new(
@@ -934,7 +1113,7 @@ mod tests {
         let stored_record = UploadIntent::new(
             "stored-record-intent".to_owned(),
             "record/stored-record-reconcile".to_owned(),
-            "sha256".to_owned(),
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"visible record")),
             14,
         );
         backend
@@ -947,6 +1126,45 @@ mod tests {
                 backend
                     .index_store
                     .transition_intent(stored_record.intent_id(), state)
+                    .await
+                    .unwrap()
+            );
+        }
+
+        let checksum_failed = UploadIntent::new(
+            "failed-checksum-record-intent".to_owned(),
+            "record/stored-record-reconcile".to_owned(),
+            "00".repeat(32),
+            0,
+        );
+        backend
+            .index_store
+            .create_intent(&checksum_failed)
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .index_store
+                .transition_intent(checksum_failed.intent_id(), UploadIntentState::Storing,)
+                .await
+                .unwrap()
+        );
+        let unrelated_stored = UploadIntent::new(
+            "unrelated-stored-record-intent".to_owned(),
+            "record/stored-record-reconcile".to_owned(),
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"unrelated version")),
+            0,
+        );
+        backend
+            .index_store
+            .create_intent(&unrelated_stored)
+            .await
+            .unwrap();
+        for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+            assert!(
+                backend
+                    .index_store
+                    .transition_intent(unrelated_stored.intent_id(), state)
                     .await
                     .unwrap()
             );
@@ -984,6 +1202,101 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored_record.state(), UploadIntentState::Visible);
+        for (intent, expected) in [
+            (&checksum_failed, UploadIntentState::Storing),
+            (&unrelated_stored, UploadIntentState::Stored),
+        ] {
+            assert_eq!(
+                backend
+                    .index_store
+                    .intent_by_id(intent.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_file_recovery_preserves_absent_and_literal_dash_revisions() {
+        use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let root = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            root.path().to_path_buf(),
+            "http://localhost:8080".to_owned(),
+            NonZeroUsize::new(128).unwrap(),
+        )
+        .await
+        .unwrap();
+        for (id, revision, bytes) in [
+            ("absent-revision", None, b"absent".as_slice()),
+            ("literal-dash", Some("-"), b"dash".as_slice()),
+        ] {
+            let scope =
+                RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", revision)
+                    .unwrap();
+            let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes));
+            backend
+                .upload_file_stream(
+                    "scoped-file",
+                    crate::upload_ingest::RequestBodyReader::from_bytes(
+                        axum::body::Bytes::copy_from_slice(bytes),
+                    ),
+                    Some(&scope),
+                    Some(&digest),
+                )
+                .await
+                .unwrap();
+            let intent =
+                UploadIntent::new(id.to_owned(), "record/scoped-file".to_owned(), digest, 0);
+            let repository =
+                crate::upload_intent_recovery::file_intent_repository_scope(Some(&scope)).unwrap();
+            backend
+                .index_store
+                .create_intent_scoped(&intent, "shardline", &repository)
+                .await
+                .unwrap();
+            for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+                assert!(
+                    backend
+                        .index_store
+                        .transition_intent(id, state)
+                        .await
+                        .unwrap()
+                );
+            }
+            backend
+                .reconcile_stuck_upload_intents_older_than(std::time::Duration::ZERO)
+                .await
+                .unwrap();
+            assert_eq!(
+                backend
+                    .index_store
+                    .intent_by_id(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                UploadIntentState::Visible
+            );
+            let events = backend.index_store.reliability_events(id).await.unwrap();
+            assert_eq!(events.len(), 5);
+            assert!(
+                matches!(crate::upload_intent_recovery::file_recovery_scope(&events),
+                crate::upload_intent_recovery::FileRecoveryScope::Known(Some(actual)) if actual == scope)
+            );
+            assert_eq!(
+                backend
+                    .read_record("scoped-file", None, Some(&scope))
+                    .await
+                    .unwrap()
+                    .total_bytes,
+                u64::try_from(bytes.len()).unwrap()
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

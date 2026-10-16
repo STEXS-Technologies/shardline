@@ -20,6 +20,226 @@ shardline gc schedule install --help
 shardline bench --help
 ```
 
+## Inspect maintenance history
+
+Run `shardline history` with your existing configuration to inspect saved
+maintenance outcomes without enabling the admin API or starting a worker.
+Use `--root PATH` for a root override; it keeps the configured metadata backend.
+Output is JSON with `tasks`,
+`history_notice` and `next_after`. Read each task's `next_step`; saved history
+does not establish current server readiness or authorize retries.
+
+On Linux, use `shardline history --local` to inspect the host's local SQLite
+history independently of server configuration. This is useful for endpoint-only
+storage copies when the project normally selects PostgreSQL. It reads the usual
+project `.shardline/data` root, or `--root PATH` when supplied, without contacting
+PostgreSQL or initializing a database. Its `history_source` and `inspection_notice`
+make that scope explicit; PostgreSQL history is not included. Missing local
+metadata is an error. `--local` cannot be combined with `--archive` or
+`--pending-deletes`.
+
+The page size defaults to 20 (`--limit 1` through `--limit 100`). Continue with
+`shardline history --after RUN_ID`, using the preceding page's `next_after`
+and the same configuration. Inspection does not run maintenance, retire history
+or initialize local metadata. A storage failure exits unsuccessfully rather
+than presenting an empty history as success.
+
+Read-only SQLite needs its readable WAL sidecars. When they are unavailable,
+the command explains how to inspect the running deployment or a consistent
+backup. Keep the database and WAL together.
+
+Use `shardline history --pending-deletes` to inspect pending remote-delete
+attempts with the same configuration, without an admin token. Its JSON contains
+`supported`, `inspection_notice`, `pending_deletes` and `next_after`. Continue
+with `--pending-deletes --after ATTEMPT`, using its `next_after` value.
+Unavailable inspection is inconclusive; a pending attempt may still be running.
+The command performs no storage requests, retries or settlement. Recovery
+guidance points to the original GC logs and ordinary `shardline repair`.
+
+Keep the same configuration, root and inspection mode while paging. History
+and pending deletes use different cursors; do not exchange them. Read-only
+SQLite inspection needs readable `metadata.sqlite3-wal` and
+`metadata.sqlite3-shm` files alongside its database. If these are missing,
+inspect the running deployment or a consistent backup preserving its WAL.
+
+## Reconcile pending remote deletes
+
+Check whether the original GC is still running and read its logs. After it
+stops, use the same database, schema and storage configuration:
+
+```bash
+shardline repair
+shardline history --pending-deletes
+```
+
+Repair checks up to 64 saved replies per run, including invalid evidence,
+without sending another user-object delete. A later sweep can also recover
+saved replies. For a backlog, repeat repair; saved scan progress reaches replies
+beyond retained invalid evidence. Logs report `processed saved remote delete
+replies`: `settled` counts cleared attempts and `retained` counts evidence that
+cannot settle them. Processing 64 replies can leave more to check.
+
+Missing or invalid replies remain blocked for investigation. Object absence
+alone cannot replace a valid reply. Repair does not mark an interrupted GC run
+completed. A write's `Retry-After: 1` is a retry delay, not a recovery deadline.
+
+If no valid reply can be recovered, there is no supported in-place force-clear
+or guaranteed recovery deadline. Keep the marker. For permanent recovery using
+a separate deployment, see [unprovable remote deletes](DISASTER_RECOVERY.md#unprovable-remote-deletes).
+
+## Maintenance history limits
+
+Verified finished shared history becomes eligible for cleanup after 30 days.
+Unfinished and corrupt evidence is retained; save reports separately for a
+permanent archive.
+
+| Automatic limit | Effect |
+| --- | --- |
+| 64 old runs and 256 run-artifact keys per cleanup invocation | Larger histories continue cleanup on later invocations. |
+| 4,096 runs per metadata database or schema | When full, work continues with a recording warning. |
+| 4,096 private workspaces, including those awaiting deletion | Separate from the shared-history limit. |
+| 64 KiB per new automatic artifact | Limits saved history, not live output or diagnostic exports. |
+
+These are logical admission limits, not physical disk quotas or inspection-time
+bounds. Existing and imported history is preserved. Large archives can slow
+inspection and command exit: ordinary commands clean history after their work,
+while server startup does not wait for cleanup. Shutdown stops cleanup between
+storage calls; an active call may finish. Later startup resumes partial cleanup.
+See the [maintenance guide](MAINTENANCE_INTEGRATION_UX.md) for recovery and
+deployment requirements.
+
+## Durable Maintenance (Linux)
+
+Normal Linux maintenance commands allocate their own run identities and execute
+in their existing CLI process. Keep using `fsck`, `index rebuild`,
+`gc`, `repair`, `repair lifecycle`, and `storage migrate` with their existing flags.
+Their original handlers provide stdout, stderr, exit codes and diagnostic exports.
+There is no tracker service to start. `serve` owns an embedded tracker for its
+existing startup sweeps; it does not start a new maintenance schedule.
+Each ordinary maintenance invocation resolves its configuration and migration
+endpoints once. Changing a config or credential file does not redirect work
+already admitted; the next invocation reads the new configuration.
+
+Local maintenance scratch lives in `.shardline-maintenance` under the existing
+root. PostgreSQL jobs and storage copies use the standard temporary filesystem
+for private scratch, so copying does not require write access to its source.
+Normal jobs keep inherited host resource limits.
+
+Signed outcomes use the deployment's task metadata when available. A local copy
+stores its history in the destination's SQLite metadata. A copy to an S3-only
+endpoint keeps history in private temporary storage on the command's host:
+there is no verified database association for that endpoint. That history is
+not shared between nodes and can be lost when temporary storage is cleaned.
+Tracking adds no objects to the copy's payload bucket and requires no new S3
+permissions, service or mount. Dry runs publish no task history.
+Other automatic maintenance also avoids new history objects in payload storage:
+when metadata history is unavailable, it warns and keeps the original command
+behavior without a verified receipt. Existing legacy history remains readable.
+Private tracking setup can fall back before work starts. After work finishes,
+receipt and scratch-cleanup failures preserve its original exit status and do
+not retry the handler. The CLI sends tracking diagnostics to stderr, preserving
+command stdout and the existing stream for other application logs. Embedders
+retain their own logging subscriber.
+
+With a local journal, a history-export failure retains local evidence and logs a warning;
+it does not disable local supervision or change the application's result. Later
+invocations can export verified completed evidence without repeating its effects.
+Verified unfinished history can also be exported for inspection; its local
+journal stays retained and the export does not authorize an execution retry.
+Recovery examines at most 64 journals per invocation and advances through the
+backlog, so unfinished or corrupt entries do not permanently hide later outcomes.
+Completed local evidence can also be exported after a reboot on the same
+identified host. A different host or an unobservable container owner stays
+unconfirmed; its recorded PID does not authorize a retry.
+GC dry runs and storage-migration dry runs write no shared task history.
+Finished shared histories older than 30 days are eligible for bounded cleanup;
+interrupted cleanup resumes later, and unresolved and corrupt histories are
+retained. These policies do not grant any
+extra storage permissions.
+
+Without writable private task storage, commands use their available metadata
+history. S3-to-S3 copies use this host's local project metadata, discovered from
+the working directory just like ordinary local history. If history
+cannot be recorded, Shardline warns and preserves the original command's result
+under its existing domain barriers. It does not claim verified completion or
+automatically repeat work to recover a missing receipt.
+
+With the existing admin read token, `/api/v1/tasks/maintenance` lists verified
+operation outcomes separately from `/api/v1/tasks` resumable uploads. Remote
+ownership can be `running_or_interrupted`; it is never declared dead from a PID
+on another host. Normal live output is not collected into shared storage; its
+signed outcome records the exit status. Completion is historical evidence, not
+a current health certificate.
+
+Default deployment and interruption verification is still in progress; see
+[maintenance integration and operator experience](MAINTENANCE_INTEGRATION_UX.md).
+The explicit interface below remains available for advanced bounded jobs:
+
+Use a private state directory outside the deployment root for bounded, durable
+maintenance with native signed checkpoints and reports:
+
+```bash
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id fsck-2026-10-11 \
+  fsck --root /var/lib/shardline
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id rebuild-2026-10-11 \
+  index-rebuild --root /var/lib/shardline
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id gc-2026-10-11 \
+  gc --root /var/lib/shardline --mark --sweep --retention-seconds 86400
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id repair-2026-10-11 \
+  lifecycle-repair --root /var/lib/shardline
+shardline maintenance --state-dir /var/lib/shardline-maintenance --task-id copy-2026-10-11 \
+  storage-migrate --root /var/lib/shardline --from local --from-root /var/lib/shardline \
+  --to local --to-root /var/lib/shardline-copy --dry-run
+```
+
+Create local migration roots before invoking this workflow. S3 endpoints use
+the existing `SHARDLINE_MIGRATE_FROM_S3_*` and `SHARDLINE_MIGRATE_TO_S3_*`
+configuration. Global `--config` and `--env-file` options work as usual.
+
+Repeat the exact command and task ID to restore its history or verify an already
+completed report. A new ID starts an intentional new run. Keep the state
+directory, journal, artifacts and owner-only signing key; do not copy live task
+state between hosts or PID namespaces. The printed public key is the verifier's
+trust input and should be retained independently for external auditing.
+
+Tasks have a 30-minute original deadline, 15-minute execution timeouts,
+600 CPU seconds per generation, at most two attempts, four checkpoints and
+128 history records. Reports are limited to 64 MiB and proof blobs to 64 KiB.
+Restarting a controller does not reset these limits. A reboot expires unfinished
+work; changed requests, targets or executable definitions cannot be substituted.
+
+The optional runner binds its worker to the controller's lifetime: on Linux,
+controller exit or death stops the child. Requests already received by remote
+storage may still finish, so interrupted mutations require inspection.
+Recovery fences surviving workers before deciding what happened. A signed,
+materialized final report can establish completion. Fsck can retry a full scan;
+other interrupted workflows without a verified result stop with unknown effects.
+Inspect the deployment before choosing a new task ID for such work. Existing
+barriers, GC holds, reachability and retention checks still apply. A completed
+fsck or rebuild report with integrity issues returns failure. The report proves
+what that run published, not the deployment's current health.
+
+Normal server startup and existing direct maintenance commands keep their
+behavior. This workflow introduces no deployment metadata migration.
+
+Retained private archives can be inspected as the archive's owner:
+
+```bash
+shardline history --archive --root /path/to/old/archive
+```
+
+This explicit mode verifies saved metadata across the archive's original
+deployment identities. It preserves signatures and files, starts no maintenance
+and does not migrate evidence. Normal history inspection keeps its deployment
+filter. Keep any private journals still awaiting export; an empty page does not
+prove that work never ran. Point `--root` at an individual native task workspace
+to inspect its `identity.json`, journal and signed results directly, even if
+shared export failed. Inspection verifies materialized results and any captured
+command output without exporting evidence or running work.
+`--archive` requires a private owner-only directory
+and cannot be combined with `--pending-deletes`. Pagination uses the same
+`--limit` and `--after` options, with a cursor from that archive.
+
 ## Shell Completions
 
 Generate one completion script for a supported shell:
@@ -199,6 +419,17 @@ copies them into the destination. Use `--dry-run` to inventory without writing
 destination payloads. `--from-root` / `--to-root` supply the local state root when the
 corresponding adapter is `local`.
 
+Copying buffers one object at a time and accepts objects up to 64 MiB, as in
+1.11.3. A larger object fails the copy rather than consuming unbounded memory.
+Dry-run inventory can include larger objects without reading their bodies.
+
+Copy history uses the local destination's SQLite metadata. For a local-to-S3
+copy, it uses the local source's SQLite metadata instead. Inspect that root with
+`shardline history --local --root /path/to/local/root`; inspection does not resume copying.
+With two S3 endpoints, run `shardline history --local` from the same project working
+directory. Its copy history is local to that host, not shared S3 payload data.
+These endpoint-only commands do not establish a PostgreSQL metadata association.
+
 Run garbage collection:
 
 ```bash
@@ -233,11 +464,20 @@ shardline hold list --active-only
 shardline hold release --object-key s3://team-assets/model.pt
 ```
 
-Probe a running server's health:
+Probe process liveness:
 
 ```bash
 shardline health --server http://127.0.0.1:8080
 ```
+
+Check this server's readiness, including its backend check:
+
+```bash
+curl -f http://127.0.0.1:8080/readyz
+```
+
+Both endpoints work without enabling the admin API. A successful liveness
+probe does not establish readiness or cluster-wide health.
 
 Run benchmarks:
 

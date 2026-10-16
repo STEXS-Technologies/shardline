@@ -27,8 +27,13 @@ async fn reclaim_postgres_resumable_staging(
         .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let mut report =
-        reclaim_unprotected_resumable_staging_objects(object_store, &protected, sweep).await?;
+    let mut report = reclaim_unprotected_resumable_staging_objects_with_guard(
+        object_store,
+        &protected,
+        sweep,
+        Some(index_store),
+    )
+    .await?;
     if sweep {
         report.reclaimed_sessions = index_store
             .delete_reclaimable_resumable_sessions(inventory.reclaimable_sessions())
@@ -37,10 +42,21 @@ async fn reclaim_postgres_resumable_staging(
     Ok(report)
 }
 
+#[cfg(test)]
 async fn reclaim_unprotected_resumable_staging_objects(
     object_store: &ServerObjectStore,
     protected: &std::collections::HashSet<String>,
     sweep: bool,
+) -> Result<ResumableStagingGcReport, error::ServerError> {
+    reclaim_unprotected_resumable_staging_objects_with_guard(object_store, protected, sweep, None)
+        .await
+}
+
+async fn reclaim_unprotected_resumable_staging_objects_with_guard(
+    object_store: &ServerObjectStore,
+    protected: &std::collections::HashSet<String>,
+    sweep: bool,
+    remote_guard: Option<&PostgresIndexStore>,
 ) -> Result<ResumableStagingGcReport, error::ServerError> {
     let prefix = ObjectPrefix::parse("staging/resumable/")
         .map_err(|_error| error::ServerError::InvalidPath)?;
@@ -62,7 +78,24 @@ async fn reclaim_unprotected_resumable_staging_objects(
         if protected.contains(metadata.key().as_str()) {
             continue;
         }
-        object_store.delete_if_present(metadata.key()).await?;
+        if let Some(index) = remote_guard {
+            shardline_server_core::remote_delete::delete_with_postgres_guard(
+                index,
+                object_store,
+                metadata.key(),
+            )
+            .await
+            .map_err(|error| match error {
+                shardline_server_core::remote_delete::GuardedRemoteDeleteError::Metadata(error) => {
+                    error::ServerError::from(error)
+                }
+                shardline_server_core::remote_delete::GuardedRemoteDeleteError::ObjectStore(
+                    error,
+                ) => error::ServerError::from(error),
+            })?;
+        } else {
+            object_store.delete_if_present(metadata.key()).await?;
+        }
         report.reclaimed_objects = report
             .reclaimed_objects
             .checked_add(1)
@@ -101,12 +134,12 @@ struct ResumableStagingGcReport {
 /// }
 /// ```
 ///
-/// See [`LocalGcOptions`] for the supported modes: `dry_run`, `mark_only`,
+/// See [`gc::LocalGcOptions`] for the supported modes: `dry_run`, `mark_only`,
 /// `sweep_only`, and `mark_and_sweep`.
 ///
 /// # Errors
 ///
-/// Returns [`ServerError`] when metadata cannot be read, quarantine state cannot be
+/// Returns [`error::ServerError`] when metadata cannot be read, quarantine state cannot be
 /// updated, or deletion fails.
 pub async fn run_gc(
     config: ServerConfig,
@@ -119,7 +152,7 @@ pub async fn run_gc(
 ///
 /// # Errors
 ///
-/// Returns [`ServerError`] when metadata cannot be read, quarantine state cannot be
+/// Returns [`error::ServerError`] when metadata cannot be read, quarantine state cannot be
 /// updated, or deletion fails.
 pub async fn run_gc_diagnostics(
     config: ServerConfig,
@@ -127,36 +160,61 @@ pub async fn run_gc_diagnostics(
 ) -> Result<gc::LocalGcDiagnostics, error::ServerError> {
     let object_store = object_store_from_config(&config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
-        let _gc_barrier = if options.mark || options.sweep {
-            Some(
-                maintenance_barrier::acquire_postgres_exclusive(
-                    &maintenance_barrier::postgres_coordination_pool(index_postgres_url)?,
-                )
-                .await?,
-            )
+        let pool = if options.mark || options.sweep {
+            maintenance_barrier::postgres_exclusive_work_pool(index_postgres_url).await?
+        } else {
+            connect_postgres_metadata_pool(index_postgres_url, 4)?
+        };
+        let _cleanup = maintenance_barrier::WorkPoolCleanup::new(&pool);
+        let settlement_pool = if options.sweep && matches!(object_store, ServerObjectStore::S3(_)) {
+            Some(connect_postgres_metadata_pool(index_postgres_url, 1)?)
         } else {
             None
         };
-        let index_store = PostgresIndexStore::new(pool.clone());
-        let record_store = PostgresRecordStore::new(pool);
-        let staging_report =
-            reclaim_postgres_resumable_staging(&index_store, &object_store, options.sweep).await?;
-        let mut diagnostics = gc::run_gc_with_oci_tombstones(
-            &record_store,
-            &index_store,
-            &object_store,
-            config.server_frontends(),
-            options,
-        )
-        .await
-        .map_err(error::ServerError::from)?;
-        diagnostics.report.scanned_resumable_staging_objects = staging_report.scanned_objects;
-        diagnostics.report.protected_resumable_staging_objects = staging_report.protected_objects;
-        diagnostics.report.reclaimed_resumable_staging_objects = staging_report.reclaimed_objects;
-        diagnostics.report.reclaimed_resumable_staging_bytes = staging_report.reclaimed_bytes;
-        diagnostics.report.reclaimed_resumable_sessions = staging_report.reclaimed_sessions;
-        return Ok(diagnostics);
+        let _settlement_cleanup = settlement_pool
+            .as_ref()
+            .map(maintenance_barrier::WorkPoolCleanup::new);
+        crate::task_tracking::observe_work_pool(&config, &pool).await;
+        let result = async {
+            let index_store = settlement_pool.as_ref().map_or_else(
+                || PostgresIndexStore::new(pool.clone()),
+                |recorder| {
+                    PostgresIndexStore::new(pool.clone())
+                        .with_remote_delete_settlement_pool(recorder.clone())
+                },
+            );
+            let record_store = PostgresRecordStore::new(pool.clone());
+            if options.sweep {
+                crate::remote_delete_recovery::recover_saved_replies(&index_store, &object_store)
+                    .await;
+            }
+            let staging_report =
+                reclaim_postgres_resumable_staging(&index_store, &object_store, options.sweep)
+                    .await?;
+            let mut diagnostics = shardline_gc::run_postgres_gc_with_remote_delete_protection(
+                &record_store,
+                &index_store,
+                &object_store,
+                config.server_frontends(),
+                options,
+            )
+            .await
+            .map_err(error::ServerError::from)?;
+            diagnostics.report.scanned_resumable_staging_objects = staging_report.scanned_objects;
+            diagnostics.report.protected_resumable_staging_objects =
+                staging_report.protected_objects;
+            diagnostics.report.reclaimed_resumable_staging_objects =
+                staging_report.reclaimed_objects;
+            diagnostics.report.reclaimed_resumable_staging_bytes = staging_report.reclaimed_bytes;
+            diagnostics.report.reclaimed_resumable_sessions = staging_report.reclaimed_sessions;
+            Ok(diagnostics)
+        }
+        .await;
+        pool.close().await;
+        if let Some(recorder) = settlement_pool {
+            recorder.close().await;
+        }
+        return result;
     }
 
     let _gc_barrier = if options.mark || options.sweep {
@@ -180,7 +238,9 @@ pub async fn run_gc_diagnostics(
 #[cfg(test)]
 mod lib_tests {
     use std::collections::HashSet;
+    use std::time::Duration;
 
+    use shardline_index::AsyncIndexStore;
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
 
     use super::*;
@@ -197,6 +257,97 @@ mod lib_tests {
             &integrity,
         )
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_gc_cannot_mark_after_ownership_connection_is_lost() {
+        let Some(fixture) = crate::test_support::postgres_fixture::PostgresFixture::new().await
+        else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let config = fixture.config.clone();
+        let objects = object_store_from_config(&config).unwrap();
+        let bytes = fixture.config.root_dir().as_os_str().as_encoded_bytes();
+        let hash = shardline_index::xet_hash_hex_string(shardline_server_core::chunk_hash(bytes));
+        let key = shardline_server_core::chunk_object_key(&hash).unwrap();
+        put_test_staging_object(&objects, &key, bytes);
+        let pool = sqlx::PgPool::connect(config.index_postgres_url().unwrap())
+            .await
+            .unwrap();
+        let index = PostgresIndexStore::new(pool.clone());
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE shardline_file_records IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let source =
+            tokio::spawn(async move { run_gc(config, gc::LocalGcOptions::mark_only(3600)).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let blocked = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event='relation'
+                     AND query LIKE '%shardline_file_records%')",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let owner = sqlx::query_scalar::<_, i32>(
+            "SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND objsubid=1
+             AND classid::bigint=(($1::bigint >> 32) & 4294967295)
+             AND objid::bigint=($1::bigint & 4294967295)",
+        )
+        .bind(0x5348_4152_4447_4301_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintenance_barrier::acquire_postgres_exclusive(&pool),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        blocker.rollback().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), source)
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = index.quarantine_candidate(&key).await.unwrap();
+        let anchor = shardline_storage::ObjectStore::contains(
+            &objects,
+            &ObjectKey::parse("gc/last-gc-clock-anchor").unwrap(),
+        )
+        .unwrap();
+        drop(replacement);
+        index.delete_quarantine_candidate(&key).await.unwrap();
+        assert!(
+            result.is_err(),
+            "GC continued its old scan after exclusive takeover"
+        );
+        assert!(
+            observed.is_none(),
+            "the obsolete GC owner changed quarantine metadata"
+        );
+        assert!(!anchor, "the obsolete GC owner published a clock anchor");
+        assert!(shardline_storage::ObjectStore::contains(&objects, &key).unwrap());
+        pool.close().await;
+        fixture.finish().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

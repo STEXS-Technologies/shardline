@@ -61,8 +61,19 @@ tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+shardline-reliability = { workspace = true, features = ["process-runtime"] }
+penelope.workspace = true
+statechronicle.workspace = true
+ed25519-dalek.workspace = true
+chrono.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+rustix.workspace = true
+
 [dev-dependencies]
 axum.workspace = true
+shardline-xet-core.workspace = true
 shardline-server-core.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 shardline-test-support.workspace = true

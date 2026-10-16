@@ -1,6 +1,9 @@
 use axum::{
     Json,
-    http::{HeaderValue, header::WWW_AUTHENTICATE},
+    http::{
+        HeaderValue,
+        header::{RETRY_AFTER, WWW_AUTHENTICATE},
+    },
     response::{IntoResponse, Response},
 };
 
@@ -56,6 +59,11 @@ impl IntoResponse for OciError {
                 WWW_AUTHENTICATE,
                 HeaderValue::from_static("Bearer realm=\"shardline\""),
             );
+        }
+        if self.0.is_retryable_publication() {
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
         }
         response
     }

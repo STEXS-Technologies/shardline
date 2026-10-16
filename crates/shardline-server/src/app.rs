@@ -2,6 +2,8 @@ mod admin_api;
 mod metadata_routes;
 mod operational;
 mod protocol_routes;
+#[cfg(test)]
+pub(crate) use protocol_routes::oci::test_helpers::build_oci_postgres_test_cluster;
 mod provider;
 mod provider_routes;
 mod reconstruction_helpers;
@@ -65,8 +67,10 @@ use crate::{
     },
 };
 use admin_api::{
-    gc as admin_gc, integrity as admin_integrity, metrics as admin_metrics, nodes as admin_nodes,
-    status as admin_status, storage as admin_storage, tasks as admin_tasks,
+    gc as admin_gc, integrity as admin_integrity, maintenance_report as admin_maintenance_report,
+    maintenance_tasks as admin_maintenance_tasks, metrics as admin_metrics, nodes as admin_nodes,
+    pending_remote_deletes as admin_pending_remote_deletes, status as admin_status,
+    storage as admin_storage, tasks as admin_tasks,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use admin_api::{parse_admin_cursor_for_fuzzing, parse_admin_query_for_fuzzing};
@@ -197,6 +201,15 @@ impl Drop for ActiveProtocolRequestGuard<'_> {
 ///
 /// Returns [`ServerError`] when the configured backend cannot initialize.
 pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
+    let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
+    router_with_housekeeping_guard(config, guard, stopped).await
+}
+
+async fn router_with_housekeeping_guard(
+    config: ServerConfig,
+    housekeeping_guard: crate::task_tracking::housekeeping::HousekeepingGuard,
+    housekeeping_stopped: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Router, ServerError> {
     config.validate_runtime_requirements()?;
     let role = config.server_role();
     let max_request_body_bytes = config.max_request_body_bytes();
@@ -206,7 +219,50 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     );
     let provider_webhook_body_limit =
         bounded_api_body_limit(max_request_body_bytes, MAX_PROVIDER_WEBHOOK_BODY_BYTES);
-    let backend = ServerBackend::from_config(&config).await?;
+    let (backend, pending_files) = ServerBackend::from_config_for_router(&config).await?;
+    let (evidence_store, history_scope) =
+        match crate::task_tracking::TaskEvidenceStore::from_backend(&config, &backend).await {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                tracing::warn!(%error, "task metadata unavailable; serving continues without new verified history");
+                (
+                    crate::task_tracking::TaskEvidenceStore::from_backend_objects(
+                        &config,
+                        backend.object_store(),
+                    ),
+                    None,
+                )
+            }
+        };
+    let evidence_store = evidence_store.require_metadata_publication();
+    let mut task_tracker = crate::task_tracking::EmbeddedTaskTracker::from_store(
+        evidence_store.clone(),
+        crate::task_tracking::deployment_fingerprint(&config)?,
+    );
+    if let Some(scope) = history_scope {
+        task_tracker = task_tracker.with_history_scope(scope);
+    }
+    let task_tracker = Arc::new(task_tracker);
+    let retention_store = evidence_store.with_housekeeping_stop(housekeeping_stopped.clone());
+    let retention_deployment = crate::task_tracking::deployment_fingerprint(&config)?;
+    let retention_stopped = housekeeping_stopped.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = retention_store.prune_completed_incrementally(
+            retention_deployment,
+            shardline_protocol::unix_now_seconds_lossy(),
+        ) && !retention_stopped.load(Ordering::Relaxed)
+        {
+            tracing::warn!("task evidence retention unavailable; serving continues: {error}");
+        }
+        if let Err(error) = retention_store.relocate_finished_history(retention_deployment)
+            && !retention_stopped.load(Ordering::Relaxed)
+        {
+            tracing::warn!(
+                "legacy task history relocation unavailable; serving continues: {error}"
+            );
+        }
+    });
+    tracing::info!("embedded task tracker initialized; no separate tracker service required");
     let auth = build_auth_provider(&config).await?;
     let config_secret_cipher = config.config_secret_key().map_or_else(
         || {
@@ -297,12 +353,33 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .any(|frontend| matches!(frontend, ServerFrontend::S3))
         && !state.backend.supports_fenced_s3_publication()
     {
-        match shardline_s3_adapter::sweep_expired_sessions(
+        let tracking = task_tracker
+            .begin_async(
+                "s3-startup-session-sweep",
+                b"s3-startup-session-sweep.v1".to_vec(),
+                shardline_reliability::MaintenanceArtifactKind::GarbageCollection,
+            )
+            .await;
+        if let Err(error) = &tracking {
+            crate::task_tracking::embedded::tracking_error(error.as_ref());
+        }
+        let result = shardline_s3_adapter::sweep_expired_sessions(
             state.config.root_dir(),
             state.config.s3_upload_session_ttl_seconds(),
         )
-        .await
-        {
+        .await;
+        if let Ok(receipt) = tracking {
+            receipt
+                .finish_async(
+                    result.is_ok(),
+                    result.as_ref().map_or_else(
+                        |_error| b"sweep failed; removed count unavailable".to_vec(),
+                        |removed| format!("removed: {removed}").into_bytes(),
+                    ),
+                )
+                .await;
+        }
+        match result {
             Ok(removed) => {
                 tracing::info!(
                     removed,
@@ -324,10 +401,32 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .iter()
         .any(|frontend| matches!(frontend, ServerFrontend::Lfs))
     {
-        match protocol_routes::sweep_lfs_patch_sessions(
+        let tracking = task_tracker
+            .begin_async(
+                "lfs-startup-session-sweep",
+                b"lfs-startup-session-sweep.v1".to_vec(),
+                shardline_reliability::MaintenanceArtifactKind::GarbageCollection,
+            )
+            .await;
+        if let Err(error) = &tracking {
+            crate::task_tracking::embedded::tracking_error(error.as_ref());
+        }
+        let result = protocol_routes::sweep_lfs_patch_sessions(
             state.config.root_dir(),
             state.config.lfs_patch_ttl_seconds(),
-        ) {
+        );
+        if let Ok(receipt) = tracking {
+            receipt
+                .finish_async(
+                    result.is_ok(),
+                    result.as_ref().map_or_else(
+                        |_error| b"sweep failed; removed count unavailable".to_vec(),
+                        |removed| format!("removed: {removed}").into_bytes(),
+                    ),
+                )
+                .await;
+        }
+        match result {
             Ok(removed) => {
                 tracing::info!(
                     removed,
@@ -371,6 +470,15 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/api/v1/integrity", get(admin_integrity))
         .route("/api/v1/nodes", get(admin_nodes))
         .route("/api/v1/tasks", get(admin_tasks))
+        .route("/api/v1/tasks/maintenance", get(admin_maintenance_tasks))
+        .route(
+            "/api/v1/tasks/maintenance/{id}/report",
+            get(admin_maintenance_report),
+        )
+        .route(
+            "/api/v1/tasks/maintenance/deletes",
+            get(admin_pending_remote_deletes),
+        )
         .route("/api/v1/metrics", get(admin_metrics));
     if role.serves_api() {
         app = app
@@ -406,7 +514,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     for frontend in state.config.server_frontends() {
         match frontend {
             ServerFrontend::Hub => {
-                hub_state = Some(build_hub_state(&state)?);
+                hub_state = Some(build_hub_state(&state, task_tracker.clone())?);
             }
             ServerFrontend::Xet => {
                 xet_frontend_enabled = true;
@@ -425,6 +533,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     }
 
     let app = app
+        .layer(axum::Extension(task_tracker))
         .layer(DefaultBodyLimit::max(max_request_body_bytes.get()))
         .with_state(state.clone());
 
@@ -446,6 +555,14 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // Apply CORS after every optional frontend has been registered and the Hub
     // router has been merged, so preflight and normal requests are covered by
     // the same policy regardless of which protocol owns the route.
+    let file_recovery = pending_files.then(|| {
+        Arc::new(
+            crate::upload_intent_recovery::startup::RecoveryGuard::start(
+                state.backend.clone(),
+                housekeeping_stopped.clone(),
+            ),
+        )
+    });
     let app = app
         .layer(middleware::from_fn_with_state(
             state,
@@ -467,7 +584,9 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     register_route_policies(&mut policy_registry);
     tracing::debug!("registered {} route auth policies", policy_registry.len());
 
-    Ok(app)
+    Ok(app
+        .layer(axum::Extension(Arc::new(housekeeping_guard)))
+        .layer(axum::Extension(file_recovery)))
 }
 
 /// Runs the Shardline HTTP server.
@@ -554,21 +673,24 @@ async fn serve_with_listener_until<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let app = router(config.clone()).await?;
+    let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
+    let app = router_with_housekeeping_guard(config.clone(), guard, stopped.clone()).await?;
     shardline_metrics::metrics().system.start_uptime();
     tracing::info!("router initialized, starting HTTP serve");
     let shutdown_timeout = config.shutdown_timeout();
     let (shutdown_started_tx, shutdown_started_rx) = oneshot::channel();
+    let shutdown_stopped = stopped.clone();
     let graceful_shutdown = async move {
         shutdown_signal.await;
+        shutdown_stopped.store(true, Ordering::Relaxed);
         tracing::info!("shutdown signal received, draining connections");
         let _ignored = shutdown_started_tx.send(());
     };
     let serve = serve_http(listener, app).with_graceful_shutdown(graceful_shutdown);
-    if let Some(timeout) = shutdown_timeout {
+    let result = if let Some(timeout) = shutdown_timeout {
         tokio::select! {
             result = serve => {
-                result.map_err(ServerError::from)?;
+                result.map_err(ServerError::from)
             }
             () = async {
                 if shutdown_started_rx.await.is_ok() {
@@ -578,12 +700,14 @@ where
                 }
             } => {
                 tracing::warn!("graceful shutdown timed out after {timeout:?}, aborting");
+                Ok(())
             }
         }
     } else {
-        serve.await.map_err(ServerError::from)?;
-    }
-    Ok(())
+        serve.await.map_err(ServerError::from)
+    };
+    stopped.store(true, Ordering::Relaxed);
+    result
 }
 
 fn register_frontend_routes(
@@ -786,6 +910,7 @@ pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: us
 
 fn build_hub_state(
     app_state: &AppState,
+    task_tracker: Arc<crate::task_tracking::EmbeddedTaskTracker>,
 ) -> Result<shardline_hub_api::routes::HubState, ServerError> {
     let hub_auth = app_state
         .auth
@@ -793,8 +918,8 @@ fn build_hub_state(
         .map(|sa| shardline_hub_api::auth::HubAuth::from_arc(sa.provider_arc()));
 
     // Create a HubStore from the configured backend.
-    // When using Postgres, share the main server's pool so Hub API and the core
-    // server operate on the same database connection pool (multi-process safe).
+    // Postgres Hub requests use their own pool on the configured database.
+    // This is not the startup metadata pool or a maintenance ownership session.
     let root_dir = app_state.config.root_dir();
     let store: shardline_index::hub::BoxedHubStore =
         app_state.config.index_postgres_url().map_or_else(
@@ -842,19 +967,16 @@ fn build_hub_state(
                     // Run the sweep as a background task so startup latency stays
                     // bounded regardless of repository count. This is purely an
                     // accelerator — the delivery path already upgrades lazily per
-                    // row — and it is idempotent vs. that lazy path: both write
-                    // the same valid ciphertext under the same key, and since the
-                    // nonce is random a concurrent write just replaces one valid
-                    // blob with another (last-write-wins is harmless).
+                    // row. Both paths compare the exact observed secret in their
+                    // update, so one upgrader wins and a concurrent secret
+                    // rotation or removal is never overwritten by a stale read.
                     let sweep_store = store.clone();
                     let sweep_cipher = cipher.clone();
+                    let sweep_config = app_state.config.clone();
                     let _sweep_handle = tokio::task::spawn_blocking(move || {
-                        tracing::info!("starting background webhook-secret upgrade sweep");
-                        shardline_hub_api::secrets::upgrade_webhook_secrets(
-                            &sweep_store,
-                            &sweep_cipher,
-                        );
-                        tracing::info!("background webhook-secret upgrade sweep completed");
+                        crate::hub_secret_upgrade::run(
+                            &sweep_config, &sweep_store, &sweep_cipher, &task_tracker,
+                        )
                     });
                     Some(cipher)
                 }
@@ -1058,6 +1180,25 @@ async fn gc_write_barrier_middleware(
         return next.run(request).await;
     }
 
+    if let ServerBackend::Postgres(backend) = &state.backend {
+        let session = tokio::time::timeout(
+            timeouts::REQUEST_TOTAL,
+            crate::maintenance_barrier::RequestSession::acquire_bounded(
+                &backend.gc_barrier_pool,
+                Arc::clone(&backend.request_session_identity),
+                &backend.request_session_slots,
+            ),
+        )
+        .await;
+        let session = match session {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => return error.into_response(),
+            Err(_) => return ServerError::RequestTimedOut.into_response(),
+        };
+        let response = session.scope(next.run(request)).await;
+        session.finish().await;
+        return response;
+    }
     let barrier = tokio::time::timeout(
         timeouts::REQUEST_TOTAL,
         state

@@ -116,3 +116,33 @@ pub enum LocalIndexStoreError {
     #[error("invalid local table name")]
     InvalidTableName,
 }
+
+impl LocalIndexStoreError {
+    /// Whether read-only WAL access cannot initialize its required sidecars.
+    /// Callers can explain this permissions boundary without matching messages.
+    #[must_use]
+    pub fn read_only_wal_needs_sidecars(error: &(dyn std::error::Error + 'static)) -> bool {
+        if let Some(sqlite) = error.downcast_ref::<rusqlite::ffi::Error>() {
+            return matches!(
+                sqlite.extended_code,
+                rusqlite::ffi::SQLITE_READONLY_CANTINIT | rusqlite::ffi::SQLITE_READONLY_DIRECTORY
+            );
+        }
+        let sqlite = error.downcast_ref::<SqliteError>().or_else(|| {
+            if let Some(Self::Sqlite(sqlite)) = error.downcast_ref::<Self>() {
+                Some(sqlite)
+            } else {
+                None
+            }
+        });
+        sqlite
+            .and_then(SqliteError::sqlite_error)
+            .is_some_and(|sqlite| {
+                matches!(
+                    sqlite.extended_code,
+                    rusqlite::ffi::SQLITE_READONLY_CANTINIT
+                        | rusqlite::ffi::SQLITE_READONLY_DIRECTORY
+                )
+            })
+    }
+}

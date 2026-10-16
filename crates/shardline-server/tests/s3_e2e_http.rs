@@ -29,6 +29,7 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
+mod maintenance_profiles;
 
 // ---------------------------------------------------------------------------
 // Shared Docker MinIO — one container for all tests.

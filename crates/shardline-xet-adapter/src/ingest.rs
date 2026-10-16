@@ -4,6 +4,7 @@ use std::path::Path;
 use shardline_index::{DedupeShardMapping, FileRecord};
 use shardline_protocol::RepositoryScope;
 use shardline_server_core::{ServerObjectStore, ShardMetadataLimits};
+use shardline_storage::ObjectKey;
 
 use crate::{
     error::XetAdapterError,
@@ -107,6 +108,85 @@ where
     })
 }
 
+/// Registers a shard and supplies physical member references obtained during
+/// the existing xorb validation. No second object read or cache lookup is used.
+/// The caller must check these references atomically with metadata publication.
+///
+/// # Errors
+///
+/// Returns an error when bounded parsing, validation, or metadata commit fails.
+pub async fn register_uploaded_shard_bytes_with_member_references<Commit, CommitFuture>(
+    object_store: &ServerObjectStore,
+    uploaded_body: &[u8],
+    repository_scope: Option<&RepositoryScope>,
+    shard_metadata_limits: ShardMetadataLimits,
+    commit_metadata: Commit,
+) -> Result<ShardUploadResponse, XetAdapterError>
+where
+    Commit: FnOnce(Vec<FileRecord>, Vec<DedupeShardMapping>, Vec<ObjectKey>) -> CommitFuture,
+    CommitFuture: Future<Output = Result<(), XetAdapterError>>,
+{
+    let mut references = std::collections::HashSet::new();
+    let parsed = crate::shard_store::parse_uploaded_shard_from_reader(
+        &mut std::io::Cursor::new(uploaded_body),
+        object_store,
+        repository_scope,
+        shard_metadata_limits,
+        Some(&mut references),
+    )?;
+    let mappings = parsed
+        .dedupe_chunk_hashes
+        .iter()
+        .map(|hash| dedupe_shard_mapping(hash, &parsed.shard_key))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut references: Vec<_> = references.into_iter().collect();
+    references.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    commit_metadata(parsed.records, mappings, references).await?;
+    Ok(ShardUploadResponse {
+        result: parsed.result,
+    })
+}
+
+/// File-backed registration with references from the same validation pass.
+/// The uploaded body is not copied into a process-sized buffer.
+/// The caller must check these references atomically with metadata publication.
+///
+/// # Errors
+///
+/// Returns an error when opening, bounded parsing, validation, or commit fails.
+pub async fn register_uploaded_shard_file_with_member_references<Commit, CommitFuture>(
+    object_store: &ServerObjectStore,
+    path: &Path,
+    repository_scope: Option<&RepositoryScope>,
+    shard_metadata_limits: ShardMetadataLimits,
+    commit_metadata: Commit,
+) -> Result<ShardUploadResponse, XetAdapterError>
+where
+    Commit: FnOnce(Vec<FileRecord>, Vec<DedupeShardMapping>, Vec<ObjectKey>) -> CommitFuture,
+    CommitFuture: Future<Output = Result<(), XetAdapterError>>,
+{
+    let mut file = std::fs::File::open(path).map_err(XetAdapterError::Io)?;
+    let mut references = std::collections::HashSet::new();
+    let parsed = crate::shard_store::parse_uploaded_shard_from_reader(
+        &mut file,
+        object_store,
+        repository_scope,
+        shard_metadata_limits,
+        Some(&mut references),
+    )?;
+    let mappings = parsed
+        .dedupe_chunk_hashes
+        .iter()
+        .map(|hash| dedupe_shard_mapping(hash, &parsed.shard_key))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut references: Vec<_> = references.into_iter().collect();
+    references.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    commit_metadata(parsed.records, mappings, references).await?;
+    Ok(ShardUploadResponse {
+        result: parsed.result,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
@@ -156,6 +236,92 @@ mod tests {
     fn store_xorb_sync(store: &ServerObjectStore, hash: &str, body: &[u8]) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(store_uploaded_xorb(store, hash, body)).unwrap();
+    }
+
+    #[test]
+    fn member_aware_byte_and_file_registration_preserve_legacy_metadata() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
+        let serialized = SerializedXorbObject::from_xorb_with_compression(
+            build_raw_xorb(1, ChunkSize::Fixed(256)),
+            CompressionScheme::None,
+            true,
+        )
+        .unwrap();
+        let hash = serialized.hash;
+        store_xorb_sync(&objects, &hash.hex(), &serialized.serialized_data);
+        let shard = serialize_test_shard(
+            vec![MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(
+                    compute_data_hash(b"fixture"),
+                    2_u64,
+                    false,
+                    false,
+                ),
+                segments: vec![FileDataSequenceEntry::new(hash, 256_u64, 0_u64, 1_u64); 2],
+                verification: Vec::new(),
+                metadata_ext: None,
+            }],
+            Vec::new(),
+        );
+        let validated = crate::validate_serialized_xorb(
+            &mut std::io::Cursor::new(&serialized.serialized_data),
+            shardline_index::parse_xet_hash_hex(&hash.hex()).unwrap(),
+        )
+        .unwrap();
+        let expected_key = shardline_server_core::chunk_object_key(
+            &shardline_index::xet_hash_hex_string(validated.chunks().first().unwrap().hash()),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut legacy = None;
+        runtime
+            .block_on(register_uploaded_shard_bytes(
+                &objects,
+                &shard,
+                None,
+                DEFAULT_SHARD_METADATA_LIMITS,
+                |records, mappings| {
+                    legacy = Some((records, mappings));
+                    async { Ok(()) }
+                },
+            ))
+            .unwrap();
+        let mut from_bytes = None;
+        let byte_response = runtime
+            .block_on(register_uploaded_shard_bytes_with_member_references(
+                &objects,
+                &shard,
+                None,
+                DEFAULT_SHARD_METADATA_LIMITS,
+                |records, mappings, references| {
+                    from_bytes = Some((records, mappings, references));
+                    async { Ok(()) }
+                },
+            ))
+            .unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&shard).unwrap();
+        let mut from_file = None;
+        let file_response = runtime
+            .block_on(register_uploaded_shard_file_with_member_references(
+                &objects,
+                file.path(),
+                None,
+                DEFAULT_SHARD_METADATA_LIMITS,
+                |records, mappings, references| {
+                    from_file = Some((records, mappings, references));
+                    async { Ok(()) }
+                },
+            ))
+            .unwrap();
+        let (records, mappings, references) = from_bytes.unwrap();
+        assert_eq!((records.clone(), mappings.clone()), legacy.unwrap());
+        assert_eq!(references, vec![expected_key]);
+        assert_eq!((records, mappings, references), from_file.unwrap());
+        assert_eq!(byte_response.result, 0);
+        assert_eq!(file_response.result, 0);
     }
 
     // ---- store_uploaded_xorb_bytes ----

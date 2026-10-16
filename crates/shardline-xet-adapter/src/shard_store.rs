@@ -65,7 +65,7 @@ pub fn parse_uploaded_shard(
     limits: ShardMetadataLimits,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
     let mut reader = Cursor::new(uploaded_shard);
-    parse_uploaded_shard_from_reader(&mut reader, object_store, repository_scope, limits)
+    parse_uploaded_shard_from_reader(&mut reader, object_store, repository_scope, limits, None)
 }
 
 /// Parses a shard from a seekable file without copying the uploaded bytes into
@@ -82,17 +82,23 @@ pub fn parse_uploaded_shard_file(
     limits: ShardMetadataLimits,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
     let mut file = File::open(path).map_err(XetAdapterError::Io)?;
-    parse_uploaded_shard_from_reader(&mut file, object_store, repository_scope, limits)
+    parse_uploaded_shard_from_reader(&mut file, object_store, repository_scope, limits, None)
 }
 
-fn parse_uploaded_shard_from_reader<R: Read + Seek>(
+pub(crate) fn parse_uploaded_shard_from_reader<R: Read + Seek>(
     reader: &mut R,
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     limits: ShardMetadataLimits,
+    member_references: Option<&mut HashSet<ObjectKey>>,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
-    let parsed_shard =
-        parse_shard_records_from_reader(reader, object_store, repository_scope, limits)?;
+    let parsed_shard = parse_shard_records_from_reader(
+        reader,
+        object_store,
+        repository_scope,
+        limits,
+        member_references,
+    )?;
     let shard_key = shard_object_key_local(&parsed_shard.shard_hash_hex)?;
     let was_present = object_store.metadata(&shard_key)?.is_some();
     let shard_length = u64::try_from(parsed_shard.normalized_bytes.len())?;
@@ -200,6 +206,7 @@ fn parse_shard_records_from_reader<R: Read + Seek>(
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     limits: ShardMetadataLimits,
+    member_references: Option<&mut HashSet<ObjectKey>>,
 ) -> Result<NormalizedShardUpload, XetAdapterError> {
     shard_reader
         .seek(std::io::SeekFrom::Start(0))
@@ -227,8 +234,12 @@ fn parse_shard_records_from_reader<R: Read + Seek>(
         .to_bytes()
         .map_err(|error| invalid_serialized_shard(&error))?;
     let shard_hash_hex = compute_data_hash(&normalized_bytes).hex();
-    let records =
-        build_file_records_from_infos(bounded_shard.file_infos, object_store, repository_scope)?;
+    let records = build_file_records_from_infos(
+        bounded_shard.file_infos,
+        object_store,
+        repository_scope,
+        member_references,
+    )?;
 
     Ok(NormalizedShardUpload {
         shard_hash_hex,
@@ -489,6 +500,7 @@ fn build_file_records_from_infos(
     file_infos: Vec<MDBFileInfo>,
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
+    mut member_references: Option<&mut HashSet<ObjectKey>>,
 ) -> Result<Vec<FileRecord>, XetAdapterError> {
     let mut xorb_cache = HashMap::<String, XorbRangeInfo>::new();
     let mut records = Vec::with_capacity(file_infos.len());
@@ -511,7 +523,8 @@ fn build_file_records_from_infos(
             let xorb_info = if let Some(info) = xorb_cache.get(&hash) {
                 info
             } else {
-                let loaded = load_xorb_range_info(object_store, &hash)?;
+                let loaded =
+                    load_xorb_range_info(object_store, &hash, member_references.as_deref_mut())?;
                 xorb_cache.insert(hash.clone(), loaded);
                 xorb_cache
                     .get(&hash)
@@ -570,6 +583,7 @@ fn validate_referenced_xorb_count(
 fn load_xorb_range_info(
     object_store: &ServerObjectStore,
     hash_hex: &str,
+    member_references: Option<&mut HashSet<ObjectKey>>,
 ) -> Result<XorbRangeInfo, XetAdapterError> {
     let key = xorb_object_key(hash_hex)?;
     let Some(metadata) = object_store.metadata(&key)? else {
@@ -579,6 +593,12 @@ fn load_xorb_range_info(
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
     let mut reader = file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
+    if let Some(references) = member_references {
+        for chunk in validated.chunks() {
+            let hash = shardline_index::xet_hash_hex_string(chunk.hash());
+            references.insert(shardline_server_core::chunk_object_key(&hash)?);
+        }
+    }
     let packed_chunk_ends = validated
         .chunks()
         .iter()
@@ -679,6 +699,146 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(crate::store_uploaded_xorb(store, hash, body))
             .unwrap();
+    }
+
+    #[test]
+    fn member_reference_collection_reuses_the_original_s3_validation_read() {
+        use shardline_xet_core::xorb_object::{
+            CompressionScheme, SerializedXorbObject,
+            xorb_format_test_utils::{ChunkSize, build_raw_xorb},
+        };
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::{Duration, Instant};
+
+        let serialized = SerializedXorbObject::from_xorb_with_compression(
+            build_raw_xorb(1, ChunkSize::Fixed(256)),
+            CompressionScheme::None,
+            true,
+        )
+        .unwrap();
+        let hash = serialized.hash;
+        let mut outcomes = Vec::new();
+        for collect_members in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_stop = Arc::clone(&stop);
+            let body = serialized.serialized_data.clone();
+            let path = format!(
+                "/assets/xorbs/default/{}/{}.xorb",
+                hash.hex().get(..2).unwrap(),
+                hash.hex()
+            );
+            let server = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut heads = 0;
+                let mut gets = 0;
+                while !server_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let count = stream.read(&mut buffer).unwrap();
+                        assert!(count > 0);
+                        request.extend_from_slice(buffer.get(..count).unwrap());
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let get = request.starts_with(&format!("GET {path} "));
+                    assert!(
+                        get || request.starts_with(&format!("HEAD {path} ")),
+                        "unexpected object read"
+                    );
+                    if get {
+                        gets += 1;
+                    } else {
+                        heads += 1;
+                    }
+                    if get {
+                        write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Mon, 12 Oct 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n", body.len().saturating_sub(1), body.len(), body.len()).unwrap();
+                    } else {
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Mon, 12 Oct 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                    }
+                    if get {
+                        stream.write_all(&body).unwrap();
+                    }
+                }
+                Ok((heads, gets))
+            });
+            let objects = ServerObjectStore::s3(
+                shardline_storage::S3ObjectStoreConfig::new(
+                    "assets".to_owned(),
+                    "us-east-1".to_owned(),
+                )
+                .with_endpoint(Some(format!("http://{address}")))
+                .with_allow_http(true)
+                .with_credentials(
+                    Some(shardline_protocol::SecretString::from_secret(
+                        "fixture-access",
+                    )),
+                    Some(shardline_protocol::SecretString::from_secret(
+                        "fixture-secret",
+                    )),
+                    None,
+                ),
+            )
+            .unwrap();
+            let info = MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(
+                    compute_data_hash(b"fixture"),
+                    2_u64,
+                    false,
+                    false,
+                ),
+                segments: vec![FileDataSequenceEntry::new(hash, 256_u64, 0_u64, 1_u64); 2],
+                verification: Vec::new(),
+                metadata_ext: None,
+            };
+            let mut references = std::collections::HashSet::new();
+            let records = super::build_file_records_from_infos(
+                vec![info],
+                &objects,
+                None,
+                if collect_members {
+                    Some(&mut references)
+                } else {
+                    None
+                },
+            )
+            .unwrap();
+            stop.store(true, Ordering::Relaxed);
+            let reads = server.join().unwrap().unwrap();
+            assert_eq!(
+                reads.1, 1,
+                "a repeated xorb reference must share its validation read"
+            );
+            if collect_members {
+                assert_eq!(references.len(), 1);
+            } else {
+                assert!(references.is_empty());
+            }
+            outcomes.push((records, reads));
+        }
+        let first = outcomes.first().unwrap();
+        let last = outcomes.last().unwrap();
+        assert_eq!(
+            first, last,
+            "collecting references must preserve records and S3 read counts"
+        );
     }
 
     #[test]

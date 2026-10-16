@@ -228,7 +228,8 @@ mark-and-sweep can collect unreferenced chunks.
 
 ## Source Layout
 
-The workspace contains 24 product crates organized in a layered dependency graph.
+The workspace contains 25 product crates, plus benchmark, fuzz and concurrency-test
+crates, organized in a layered dependency graph.
 
 ```mermaid
 flowchart TD
@@ -281,6 +282,8 @@ flowchart TD
 
 ### Layer 1 — Foundation
 
+- `shardline-reliability`: compatible lifecycle evidence, StateChronicle/Penelope
+  integration, task journals and optional process supervision
 - `shardline-storage`: content-addressed `ObjectStore` trait + `LocalObjectStore` and
   `S3ObjectStore`
 - `shardline-vcs`: provider adapters (`ProviderAdapter` trait) for GitHub, GitLab,
@@ -470,26 +473,17 @@ database/object-store access. See
 
 ## Database Migrations
 
-Shardline ships 18 bundled migrations applied via `shardline db migrate up`:
+The bundled schemas cover core records, retention, deduplication, provider state,
+Hub metadata, S3 listings, OCI tags and tombstones, resource fences, durable
+resumable sessions, reliability events and Merkle commitments, and query indexes.
 
-1. `metadata_store` — core index and record tables
-2. `retention_holds` — GC retention hold tracking
-3. `dedupe_shards` — shard deduplication tables
-4. `webhook_deliveries` — provider webhook event log
-5. `provider_repository_states` — provider repo lifecycle state
-6. `provider_repository_reconciliation` — provider reconciliation tracking
-7. `hub_api` — Hub API metadata (repos, revisions, file entries, LFS objects)
-8. `hub_inline_content` — Hub inline content storage
-9. `hub_webhooks` — Hub webhook delivery tracking
-10. `hub_refs` — Hub reference management (branches, tags)
-11. `drop_inline_content` — remove inline content column
-12. `drop_lfs_objects` — remove legacy LFS objects table
-13. `fix_indexes` — database index optimizations
-14. `upload_intents` — upload lifecycle intent tracking
-15. `tree_store` — Xet path-to-file_id and revision registry tables
-16. `s3_object_index` — S3 object-key registry tables
-17. `s3_object_etag_metadata` — S3 ETag and user-metadata columns
-18. `oci_tags` — database-linearized OCI tag pointers
+Postgres migrations live in `migrations/`; SQLite migrations live in
+`crates/shardline-index/migrations/`. Use `shardline db migrate status` for the
+Postgres ledger, `shardline db migrate up` for owner-run Postgres upgrades, and
+`shardline db migrate local-up --root <root>` for existing SQLite deployments.
+Server startup checks schema compatibility rather than applying pending migrations.
 
-SQLite uses `BLOB`/`INTEGER`; Postgres uses `BYTEA`/`BOOLEAN`/`BIGINT`. Migrations are
-stored in `migrations/` (Postgres) and `crates/shardline-index/migrations/` (SQLite).
+The current integration also installs additive protection functions and triggers
+through owner-run `db migrate up`, even when the ledger is already current.
+See [Database Migrations](DATABASE_MIGRATIONS.md) for permissions, write-maintenance
+windows and rollback requirements.

@@ -25,7 +25,7 @@ use crate::{
     clock::unix_now_seconds_checked,
     metrics,
     model::{GitLfsAuthenticateResponse, ProviderTokenIssueResponse, XetCasTokenResponse},
-    provider_events::{apply_provider_webhook, apply_provider_webhook_with_stores},
+    provider_events::apply_provider_webhook,
 };
 
 #[derive(Debug, Deserialize)]
@@ -173,13 +173,7 @@ pub(super) async fn handle_provider_webhook(
         // Reuse the server's own Postgres record/index stores (their pool is
         // created once per server) instead of opening a fresh pool per webhook
         // event.
-        ServerBackend::Postgres(backend)
-            if matches!(
-                event.kind(),
-                RepositoryWebhookEventKind::RepositoryDeleted
-                    | RepositoryWebhookEventKind::RepositoryRenamed { .. }
-            ) =>
-        {
+        ServerBackend::Postgres(backend) => {
             let object_store = backend.object_store();
             let plan = shardline_provider_events::plan_postgres_provider_repository_webhook(
                 backend.record_store(),
@@ -204,7 +198,7 @@ pub(super) async fn handle_provider_webhook(
                 .first_mut()
                 .and_then(|guard| guard.postgres_connection_mut())
                 .ok_or(ServerError::StaleResourceFence)?;
-            match PostgresIndexStore::commit_provider_mutation_on_connection(
+            let outcome = match PostgresIndexStore::commit_provider_mutation_on_connection(
                 connection,
                 &expected_fences,
                 &mutation,
@@ -216,17 +210,10 @@ pub(super) async fn handle_provider_webhook(
                 PostgresProviderMutationOutcome::StaleFence => {
                     return Err(ServerError::StaleResourceFence);
                 }
-            }
-        }
-        ServerBackend::Postgres(backend) => {
-            let object_store = backend.object_store();
-            apply_provider_webhook_with_stores(
-                backend.record_store(),
-                backend.index_store(),
-                &object_store,
-                &event,
-            )
-            .await?
+            };
+            shardline_provider_events::purge_expired_webhook_deliveries(backend.index_store())
+                .await;
+            outcome
         }
         ServerBackend::Local(_) => apply_provider_webhook(&state.config, &event).await?,
     };
@@ -262,6 +249,401 @@ mod tests {
         ProtocolMetrics, ReconstructionCacheService, ServerBackend, ServerConfig, ServerRole,
         TransferLimiter, app::AppState,
     };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_push_owner_loss_preserves_state_and_delivery_retry() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("push", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_access_owner_loss_preserves_state_and_delivery_retry() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("repository", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_push_owner_loss_preserves_existing_reconciliation() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("push", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_access_owner_loss_preserves_existing_reconciliation() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("repository", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_rename_owner_loss_preserves_existing_repository() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("rename", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_delete_owner_loss_preserves_existing_repository() {
+        postgres_provider_owner_loss_preserves_state_and_delivery_retry("delete", true).await;
+    }
+
+    async fn postgres_provider_owner_loss_preserves_state_and_delivery_retry(
+        event_kind: &str,
+        seed_existing: bool,
+    ) {
+        use hmac::Mac;
+        use shardline_index::{FileChunkRecord, FileRecord, RecordMutation, RecordTraversal};
+        use tower::ServiceExt;
+        if std::env::var("DATABASE_URL").is_err() {
+            return;
+        }
+        let mut cluster =
+            crate::app::protocol_routes::oci::test_helpers::build_oci_postgres_test_cluster()
+                .await
+                .unwrap();
+        let path = cluster._temp.path().join("providers.json");
+        std::fs::write(&path, br#"{"providers":[{"kind":"github","integration_subject":"app","webhook_secret":"secret","repositories":[{"owner":"team","name":"assets","visibility":"private","default_revision":"main","clone_url":"https://github.example/team/assets.git","read_subjects":["test"],"write_subjects":["test"]}]}]}"#).unwrap();
+        let state = Arc::get_mut(&mut cluster.node_a).unwrap();
+        state.provider_tokens = Some(
+            crate::provider::ProviderTokenService::from_file(
+                &path,
+                b"bootstrap-key-16bytes".to_vec(),
+                "test-issuer",
+                std::num::NonZeroU64::MIN,
+                b"a]32-byte-signing-key-for-testing!",
+                None,
+            )
+            .unwrap(),
+        );
+        let backend = match &mut state.backend {
+            ServerBackend::Postgres(backend) => Some(backend),
+            ServerBackend::Local(_) => None,
+        }
+        .unwrap();
+        let label = format!(
+            "provider_owner_{}_{event_kind}_{seed_existing}",
+            std::process::id()
+        );
+        let metadata_label = format!("{label}_metadata");
+        let options = backend.index_store().pool().connect_options();
+        backend
+            .index_store()
+            .pool()
+            .set_connect_options((*options).clone().application_name(&metadata_label));
+        backend.gc_barrier_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with((*options).clone().application_name(&label));
+        backend.resource_lock_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(
+                (*options)
+                    .clone()
+                    .application_name(&format!("{label}_resource")),
+            );
+        let pool = backend.index_store().pool().clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/providers/{provider}/webhooks",
+                axum::routing::post(super::handle_provider_webhook),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                cluster.node_a.clone(),
+                crate::app::gc_write_barrier_middleware,
+            ))
+            .with_state(cluster.node_a.clone());
+        let backend = match &cluster.node_a.backend {
+            ServerBackend::Postgres(backend) => Some(backend),
+            ServerBackend::Local(_) => None,
+        }
+        .unwrap();
+        let previous = shardline_index::ProviderRepositoryState::new(
+            ProviderKind::GitHub.repository_provider(),
+            "team".to_owned(),
+            "assets".to_owned(),
+            Some(100),
+            Some(200),
+            Some("refs/heads/previous".to_owned()),
+        )
+        .with_reconciliation(Some(300), Some(400), Some(500));
+        if seed_existing {
+            shardline_index::AsyncIndexStore::upsert_provider_repository_state(
+                backend.index_store(),
+                &previous,
+            )
+            .await
+            .unwrap();
+        }
+        let record = FileRecord {
+            file_id: "asset.bin".to_owned(),
+            content_hash: "a".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: Some(
+                shardline_protocol::RepositoryScope::new(
+                    ProviderKind::GitHub.repository_provider(),
+                    "team",
+                    "assets",
+                    Some("main"),
+                )
+                .unwrap(),
+            ),
+            chunks: vec![FileChunkRecord {
+                hash: "b".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+        if matches!(event_kind, "rename" | "delete") {
+            backend
+                .record_store()
+                .write_version_record(&record)
+                .await
+                .unwrap();
+            backend
+                .record_store()
+                .write_latest_record(&record)
+                .await
+                .unwrap();
+        }
+        let previous_records: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE FUNCTION pause_provider_state() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER pause_provider_state BEFORE INSERT OR UPDATE OR DELETE ON shardline_provider_repository_states FOR EACH ROW EXECUTE FUNCTION pause_provider_state()")
+            .execute(&pool).await.unwrap();
+        let body: &[u8] = match event_kind {
+            "rename" => br#"{"action":"renamed","repository":{"full_name":"team/assets-renamed"},"changes":{"repository":{"name":{"from":"assets"}}}}"#,
+            "delete" => br#"{"action":"deleted","repository":{"full_name":"team/assets"}}"#,
+            _ => br#"{"action":"privatized","ref":"refs/heads/main","repository":{"full_name":"team/assets"}}"#,
+        };
+        let github_event = if matches!(event_kind, "rename" | "delete") {
+            "repository"
+        } else {
+            event_kind
+        };
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
+        mac.update(body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let request = || {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/providers/github/webhooks")
+                .header("x-github-event", github_event)
+                .header("x-github-delivery", "owner-loss-push")
+                .header("x-hub-signature-256", &signature)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_vec()))
+                .unwrap()
+        };
+        let event_request = request();
+        let source_app = app.clone();
+        let source = tokio::spawn(async move { source_app.oneshot(event_request).await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let paused: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event='PgSleep' AND application_name IN ($1,$2))")
+                    .bind(&label).bind(&metadata_label).fetch_one(&pool).await.unwrap();
+                if paused { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        let terminated: bool = sqlx::query_scalar(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name=$1",
+        )
+        .bind(&label)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(terminated);
+        assert!(source.await.unwrap().status().is_server_error());
+        sqlx::query("DROP TRIGGER pause_provider_state ON shardline_provider_repository_states")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP FUNCTION pause_provider_state()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let states: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM shardline_provider_repository_states")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let deliveries: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM shardline_webhook_deliveries")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (states, deliveries),
+            (i64::from(seed_existing), 0),
+            "obsolete request committed provider state or consumed the delivery"
+        );
+        let preserved = shardline_index::AsyncIndexStore::provider_repository_state(
+            backend.index_store(),
+            ProviderKind::GitHub.repository_provider(),
+            "team",
+            "assets",
+        )
+        .await
+        .unwrap();
+        assert_eq!(preserved.as_ref(), seed_existing.then_some(&previous));
+        let preserved_records: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(preserved_records, previous_records);
+        let holds: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_retention_holds")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(holds, 0, "failed delivery committed retention holds");
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            axum::http::StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            app.oneshot(request()).await.unwrap().status(),
+            axum::http::StatusCode::ACCEPTED
+        );
+        let deliveries: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM shardline_webhook_deliveries")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(deliveries, 1);
+        let backend = match &cluster.node_a.backend {
+            ServerBackend::Postgres(backend) => Some(backend),
+            ServerBackend::Local(_) => None,
+        }
+        .unwrap();
+        let stored = shardline_index::AsyncIndexStore::provider_repository_state(
+            backend.index_store(),
+            ProviderKind::GitHub.repository_provider(),
+            "team",
+            "assets",
+        )
+        .await
+        .unwrap();
+        if event_kind == "delete" {
+            assert!(stored.is_none());
+            let records: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let holds: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_retention_holds")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            // Fixed-chunk records protect both the chunk and its compatible xorb key.
+            assert_eq!((records, holds), (0, 2));
+            return;
+        }
+        if event_kind == "rename" {
+            assert!(stored.is_none());
+            assert!(
+                backend
+                    .record_store()
+                    .read_latest_record_bytes(&record)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let renamed_record = FileRecord {
+                repository_scope: Some(
+                    shardline_protocol::RepositoryScope::new(
+                        ProviderKind::GitHub.repository_provider(),
+                        "team",
+                        "assets-renamed",
+                        Some("main"),
+                    )
+                    .unwrap(),
+                ),
+                ..record
+            };
+            let latest = backend
+                .record_store()
+                .read_latest_record_bytes(&renamed_record)
+                .await
+                .unwrap()
+                .unwrap();
+            let version = backend
+                .record_store()
+                .read_record_bytes(
+                    &backend
+                        .record_store()
+                        .version_record_locator(&renamed_record),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<FileRecord>(&latest).unwrap(),
+                renamed_record
+            );
+            assert_eq!(
+                serde_json::from_slice::<FileRecord>(&version).unwrap(),
+                renamed_record
+            );
+            let renamed = shardline_index::AsyncIndexStore::provider_repository_state(
+                backend.index_store(),
+                ProviderKind::GitHub.repository_provider(),
+                "team",
+                "assets-renamed",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                renamed.last_pushed_revision(),
+                previous.last_pushed_revision()
+            );
+            assert_eq!(
+                renamed.last_access_changed_at_unix_seconds(),
+                previous.last_access_changed_at_unix_seconds()
+            );
+            assert_eq!(
+                renamed.last_revision_pushed_at_unix_seconds(),
+                previous.last_revision_pushed_at_unix_seconds()
+            );
+            assert_eq!(
+                renamed.last_cache_invalidated_at_unix_seconds(),
+                previous.last_cache_invalidated_at_unix_seconds()
+            );
+            assert_eq!(
+                renamed.last_authorization_rechecked_at_unix_seconds(),
+                previous.last_authorization_rechecked_at_unix_seconds()
+            );
+            assert_eq!(
+                renamed.last_drift_checked_at_unix_seconds(),
+                previous.last_drift_checked_at_unix_seconds()
+            );
+            return;
+        }
+        let stored = stored.unwrap();
+        if event_kind == "push" {
+            assert!(stored.last_revision_pushed_at_unix_seconds().is_some());
+            assert_eq!(stored.last_pushed_revision(), Some("refs/heads/main"));
+        } else {
+            assert!(stored.last_access_changed_at_unix_seconds().is_some());
+        }
+        if seed_existing {
+            assert_eq!(stored.last_cache_invalidated_at_unix_seconds(), Some(300));
+            assert_eq!(
+                stored.last_authorization_rechecked_at_unix_seconds(),
+                Some(400)
+            );
+            assert_eq!(stored.last_drift_checked_at_unix_seconds(), Some(500));
+            if event_kind == "push" {
+                assert_eq!(stored.last_access_changed_at_unix_seconds(), Some(100));
+            } else {
+                assert_eq!(stored.last_revision_pushed_at_unix_seconds(), Some(200));
+                assert_eq!(stored.last_pushed_revision(), Some("refs/heads/previous"));
+            }
+        }
+    }
 
     #[test]
     fn xet_token_query_debug_format() {

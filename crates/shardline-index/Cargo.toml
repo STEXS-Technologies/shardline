@@ -15,7 +15,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 chrono.workspace = true
+ed25519-dalek.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 hex.workspace = true
 libc.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }

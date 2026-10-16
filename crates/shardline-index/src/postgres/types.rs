@@ -14,13 +14,29 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct PostgresIndexStore {
     pub(super) pool: PgPool,
+    pub(super) remote_delete_settlement_pool: Option<PgPool>,
 }
 
 impl PostgresIndexStore {
     /// Creates a Postgres index-store adapter from an existing pool.
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            remote_delete_settlement_pool: None,
+        }
+    }
+
+    /// Supplies a connection pool for recording an acknowledged delete after
+    /// losing the original work session. It must address the same database
+    /// with maintenance permissions for the admitted schema. Settlement uses
+    /// the schema captured by the permit, not the recorder's search path.
+    /// It never replaces `pool`
+    /// for ordinary metadata work or remote-delete admission.
+    #[must_use]
+    pub fn with_remote_delete_settlement_pool(mut self, pool: PgPool) -> Self {
+        self.remote_delete_settlement_pool = Some(pool);
+        self
     }
 
     /// Returns the underlying connection pool.
@@ -79,6 +95,15 @@ impl PostgresRecordLocator {
 }
 
 /// Postgres-compatible implementation of the record-store contract.
+///
+/// This adapter stores metadata; it has no object-store handle and cannot
+/// verify backing content. Creating it from a pool does not acquire operation
+/// ownership. In particular, the generic [`crate::RecordMutation`] methods use
+/// that pool and do not retain a separately held caller connection.
+/// Storage-backed callers must keep their operation's ownership and reference
+/// protection through validation and publication. Use the connection-bound
+/// file, S3 or native publication methods when an existing session owns the
+/// operation. Supplying a connection alone does not establish ownership.
 #[derive(Debug, Clone)]
 pub struct PostgresRecordStore {
     pub(super) pool: PgPool,

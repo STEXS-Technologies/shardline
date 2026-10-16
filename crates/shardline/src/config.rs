@@ -29,6 +29,10 @@ pub(crate) fn set_cli_config_override(path: Option<PathBuf>) {
 }
 
 pub(crate) fn selected_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(path) = crate::maintenance::configuration::config_path() {
+        return path;
+    }
     if let Some(path) = explicit {
         return Some(path.to_path_buf());
     }
@@ -79,6 +83,12 @@ pub fn load_server_config(
     root_override: Option<&Path>,
     config_override: Option<&Path>,
 ) -> Result<ServerConfig, ServerConfigError> {
+    #[cfg(target_os = "linux")]
+    if let Some(config) = crate::maintenance::configuration::config() {
+        ensure_directory_path_components_are_not_symlinked(config.root_dir())
+            .map_err(ServerConfigError::RootDir)?;
+        return Ok(config);
+    }
     let config_path = selected_config_path(config_override);
     let config = match load_toml_config(config_path.as_deref())
         .map_err(ServerConfigError::ConfigFileError)?
@@ -112,14 +122,15 @@ fn resolve_root_dir(root_override: Option<&Path>, configured_root: &Path) -> Pat
     }
 
     if let Ok(current_dir) = current_dir() {
-        if let Some(root) = discover_project_root(&current_dir) {
-            return root;
-        }
-
-        return default_project_root(&current_dir);
+        return project_state_root(&current_dir);
     }
 
     configured_root.to_path_buf()
+}
+
+/// Existing local project discovery, without loading unrelated server settings.
+pub(crate) fn project_state_root(current_dir: &Path) -> PathBuf {
+    discover_project_root(current_dir).unwrap_or_else(|| default_project_root(current_dir))
 }
 
 fn discover_project_root(current_dir: &Path) -> Option<PathBuf> {

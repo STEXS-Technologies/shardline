@@ -12,14 +12,14 @@ use crate::{OperationIdentity, ReliabilityError, snapshot_event::SnapshotEvidenc
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DigestSnapshot {
     pub operation: OperationIdentity,
-    pub state_digest: statechronicle_core::digest::ContentDigest,
+    pub state_digest: crate::StateChronicleDigest,
 }
 
 impl DigestSnapshot {
     #[must_use]
     pub const fn new(
         operation: OperationIdentity,
-        state_digest: statechronicle_core::digest::ContentDigest,
+        state_digest: crate::StateChronicleDigest,
     ) -> Self {
         Self {
             operation,

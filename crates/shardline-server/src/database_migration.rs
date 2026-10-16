@@ -560,6 +560,9 @@ pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigr
     for migration in pending_migrations(pool).await? {
         apply_one_migration(pool, migration, None).await?;
     }
+    shardline_index::PostgresIndexStore::new(pool.clone())
+        .initialize_remote_delete_guard()
+        .await?;
     Ok(())
 }
 
@@ -657,6 +660,11 @@ pub async fn run_database_migration(
             for migration in pending.into_iter().take(steps.unwrap_or(usize::MAX)) {
                 apply_one_migration(&pool, migration, Some(options.database_url())).await?;
                 applied_count = applied_count.saturating_add(1);
+            }
+            if pending_migrations(&pool).await?.is_empty() {
+                shardline_index::PostgresIndexStore::new(pool.clone())
+                    .initialize_remote_delete_guard()
+                    .await?;
             }
             (applied_count, 0)
         }

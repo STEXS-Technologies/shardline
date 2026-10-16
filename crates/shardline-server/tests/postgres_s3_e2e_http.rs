@@ -498,6 +498,127 @@ async fn test_readyz_returns_postgres_and_s3_backends() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maintenance_tracking_is_shared_across_postgres_s3_nodes_and_roles() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use shardline_server::task_tracking::{
+        TaskEvidenceStore, TaskRunState, deployment_fingerprint,
+    };
+
+    let (pg_url, prefix) = ensure_stack().await;
+    let roots = [
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+    ];
+    let prefix = format!(
+        "{prefix}/maintenance-ux-{}",
+        roots[0].path().file_name().unwrap().to_string_lossy()
+    );
+    let mut routers = Vec::new();
+    let mut deployment = None;
+    let mut evidence = None;
+    let mut history_scope = None;
+    let inspection_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(pg_url)
+        .await
+        .unwrap();
+    for (root, (role, frontend)) in roots.iter().zip([
+        (ServerRole::Api, ServerFrontend::Lfs),
+        (ServerRole::Transfer, ServerFrontend::Lfs),
+        (ServerRole::All, ServerFrontend::Lfs),
+        (ServerRole::All, ServerFrontend::Xet),
+    ]) {
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().join("deployment-root"),
+            NonZeroUsize::new(65536).unwrap(),
+        )
+        .with_server_role(role)
+        .with_server_frontends([frontend])
+        .unwrap()
+        .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
+        .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+        .unwrap()
+        .with_index_postgres_url(pg_url.to_owned())
+        .unwrap()
+        .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())
+        .unwrap()
+        .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config(&prefix)));
+        let fingerprint = deployment_fingerprint(&config).unwrap();
+        assert_eq!(*deployment.get_or_insert(fingerprint), fingerprint);
+        routers.push(app::router(config.clone()).await.unwrap());
+        let (reader, scope) = TaskEvidenceStore::for_inspection(&config, Some(&inspection_pool))
+            .await
+            .unwrap();
+        let scope = scope.expect("PostgreSQL startup resolves shared metadata history");
+        assert_eq!(*history_scope.get_or_insert(scope), scope);
+        evidence = Some(reader);
+        assert!(
+            !root
+                .path()
+                .join("deployment-root/.shardline-maintenance")
+                .exists()
+        );
+        assert!(!root.path().join("deployment-root/chunks").exists());
+        if frontend == ServerFrontend::Xet {
+            assert!(!root.path().join("deployment-root").exists());
+        }
+    }
+    let summaries = tokio::task::spawn_blocking(move || {
+        evidence
+            .unwrap()
+            .summaries_with_scope(deployment.unwrap(), history_scope, None, 100)
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(summaries.len(), 3);
+    assert!(
+        summaries
+            .iter()
+            .all(|task| task.operation == "lfs-startup-session-sweep"
+                && task.state == TaskRunState::Completed)
+    );
+    for router in routers {
+        let denied = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks/maintenance")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks/maintenance")
+                    .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body["tasks"].as_array().unwrap().len(), 3);
+        assert_eq!(body["supervision"], "embedded");
+        assert_eq!(body["history_grouping"], "shared_metadata");
+        assert!(body["history_notice"].is_null());
+    }
+    inspection_pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_stats_without_auth_returns_401() {
     let server = TestServer::start(&[ServerFrontend::Xet]).await;
     let client = reqwest::Client::new();

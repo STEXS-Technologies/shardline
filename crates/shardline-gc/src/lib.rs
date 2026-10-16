@@ -62,6 +62,7 @@ mod error;
 mod oci_tombstones;
 mod quarantine;
 mod reachability;
+mod remote_delete;
 mod runner;
 mod types;
 
@@ -77,7 +78,7 @@ pub use error::GcError;
 pub use oci_tombstones::OciRecordReclaimer;
 pub use runner::{
     quarantine_record_path, quarantine_root, run_gc_with_oci_tombstones, run_gc_with_stores,
-    run_local_gc, run_local_gc_diagnostics,
+    run_local_gc, run_local_gc_diagnostics, run_postgres_gc_with_remote_delete_protection,
 };
 pub use shardline_server_core::server_frontend::{
     ServerFrontend, ServerFrontend as ServerFrontendKind, ServerFrontendParseError,

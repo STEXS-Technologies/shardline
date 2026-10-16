@@ -1,6 +1,10 @@
 use std::{
     fs::{File, TryLockError},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -10,10 +14,18 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection, qu
 
 use crate::ServerError;
 
+#[cfg(target_os = "linux")]
+mod local_directory;
+mod work_pool;
+pub(crate) use work_pool::{WorkPoolCleanup, close_work_pool};
+
 /// Stable application-level advisory-lock key for GC versus visible metadata writers.
 const GC_WRITE_BARRIER_KEY: i64 = 0x5348_4152_4447_4301;
 const LOCAL_BARRIER_FILE_NAME: &str = ".gc-write-barrier.lock";
 const LOCAL_RESOURCE_LOCK_DIR: &str = ".resource-locks";
+
+mod request_session;
+pub(crate) use request_session::{RequestConnectionGuard, RequestSession};
 
 /// Held shared or exclusive maintenance barrier.
 ///
@@ -21,10 +33,11 @@ const LOCAL_RESOURCE_LOCK_DIR: &str = ".resource-locks";
 /// transaction rolls it back and releases its transaction-scoped advisory lock.
 pub(crate) enum MaintenanceBarrierGuard {
     Local {
-        file: File,
+        files: Vec<File>,
     },
     Postgres {
         _transaction: Transaction<'static, Postgres>,
+        _admission: Option<tokio::sync::OwnedSemaphorePermit>,
     },
 }
 
@@ -39,8 +52,10 @@ impl std::fmt::Debug for MaintenanceBarrierGuard {
 
 impl Drop for MaintenanceBarrierGuard {
     fn drop(&mut self) {
-        if let Self::Local { file } = self {
-            let _ignored = file.unlock();
+        if let Self::Local { files } = self {
+            for file in files {
+                let _ignored = file.unlock();
+            }
         }
     }
 }
@@ -48,8 +63,8 @@ impl Drop for MaintenanceBarrierGuard {
 /// Exclusive ownership of one mutable application resource.
 ///
 /// Postgres guards retain a dedicated session-level advisory lock and a durable,
-/// monotonically increasing fencing epoch. The connection is always closed rather
-/// than returned to the pool so a session lock cannot leak into an unrelated request.
+/// monotonically increasing fencing epoch. Dedicated sessions close on drop;
+/// request sessions are returned only after explicitly releasing every lock.
 pub(crate) enum ResourceWriteGuard {
     Local {
         files: Vec<File>,
@@ -58,13 +73,17 @@ pub(crate) enum ResourceWriteGuard {
         connection: PoolConnection<Postgres>,
         fences: Vec<(ResourceLockKey, i64)>,
     },
+    PostgresRequest {
+        connection: RequestConnectionGuard,
+        fences: Vec<(ResourceLockKey, i64)>,
+    },
 }
 
 impl std::fmt::Debug for ResourceWriteGuard {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Local { .. } => formatter.write_str("ResourceWriteGuard::Local"),
-            Self::Postgres { fences, .. } => formatter
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => formatter
                 .debug_struct("ResourceWriteGuard::Postgres")
                 .field("fences", fences)
                 .finish_non_exhaustive(),
@@ -83,10 +102,29 @@ impl Drop for ResourceWriteGuard {
 }
 
 impl ResourceWriteGuard {
+    /// Releases this request's resource locks while retaining its GC barrier.
+    /// Consuming the guard prevents subsequent use of its released fences.
+    pub(crate) async fn release(mut self) -> Result<(), ServerError> {
+        if let Self::PostgresRequest { connection, fences } = &mut self {
+            let work = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
+            for (key, _) in fences {
+                let released = query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+                    .bind(resource_lock_key(key))
+                    .fetch_one(&mut **work)
+                    .await
+                    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+                if !released {
+                    return Err(ServerError::StaleResourceFence);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn postgres_fences(&self) -> Option<Vec<shardline_index::PostgresResourceFence>> {
         match self {
             Self::Local { .. } => None,
-            Self::Postgres { fences, .. } => Some(
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => Some(
                 fences
                     .iter()
                     .map(|(key, epoch)| {
@@ -101,24 +139,31 @@ impl ResourceWriteGuard {
         match self {
             Self::Local { .. } => None,
             Self::Postgres { connection, .. } => Some(&mut **connection),
+            Self::PostgresRequest { connection, .. } => {
+                connection.as_mut().map(|value| &mut **value)
+            }
         }
     }
 
     /// Checks every fence using the session that owns all of the locks.
     pub(crate) async fn assert_current(&mut self) -> Result<(), ServerError> {
-        let Self::Postgres { connection, fences } = self else {
-            return Ok(());
+        let fences = match self {
+            Self::Local { .. } => return Ok(()),
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => fences.clone(),
         };
+        let connection = self
+            .postgres_connection_mut()
+            .ok_or(ServerError::StaleResourceFence)?;
         for (key, epoch) in fences {
             let current = query_scalar::<_, i64>(
                 "SELECT epoch FROM shardline_resource_fences WHERE domain = $1 AND resource = $2",
             )
             .bind(key.domain().as_str())
             .bind(key.resource())
-            .fetch_optional(&mut **connection)
+            .fetch_optional(&mut *connection)
             .await
             .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-            if current != Some(*epoch) {
+            if current != Some(epoch) {
                 return Err(ServerError::StaleResourceFence);
             }
         }
@@ -129,15 +174,97 @@ impl ResourceWriteGuard {
     fn epoch(&self) -> Option<i64> {
         match self {
             Self::Local { .. } => None,
-            Self::Postgres { fences, .. } => fences.first().map(|(_, epoch)| *epoch),
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => {
+                fences.first().map(|(_, epoch)| *epoch)
+            }
         }
     }
 }
 
-/// Long-lived advisory guards must never borrow from the metadata work pool.
-/// Each backend owns separate bounded GC and resource coordination pools.
+/// Separate pools for guards that keep their connection checked out.
+/// Bound work sessions below instead return their locked connection to a private pool.
 pub(crate) fn postgres_coordination_pool(url: &str) -> Result<PgPool, ServerError> {
     crate::postgres_backend::connect_postgres_metadata_pool(url, 4)
+}
+
+/// A single, non-replaceable metadata session that owns the exclusive barrier.
+///
+/// Protected reads and metadata mutations must use this pool, so losing the lock also loses
+/// their database connection. Reconnecting would let an obsolete scan resume
+/// after another owner acquired the barrier. Pool retirement is disabled for
+/// long scans; only a fresh invocation may create another session.
+pub(crate) async fn postgres_exclusive_work_pool(url: &str) -> Result<PgPool, ServerError> {
+    postgres_work_pool(url, true).await
+}
+
+/// Shares the maintenance barrier on the same session used for metadata writes.
+pub(crate) async fn postgres_shared_work_pool(url: &str) -> Result<PgPool, ServerError> {
+    postgres_work_pool(url, false).await
+}
+
+/// One work session without a maintenance barrier. Callers still enforce their
+/// own mutation boundary; this pool never reconnects after its first session.
+pub(crate) fn postgres_nonreplaceable_work_pool(url: &str) -> Result<PgPool, ServerError> {
+    let connected = Arc::new(AtomicBool::new(false));
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .test_before_acquire(true)
+        .after_connect(move |_connection, _metadata| {
+            let first_connection = !connected.swap(true, Ordering::AcqRel);
+            Box::pin(async move {
+                if first_connection {
+                    Ok(())
+                } else {
+                    Err(sqlx::Error::Protocol(
+                        "maintenance session lost; a new invocation must establish ownership"
+                            .into(),
+                    ))
+                }
+            })
+        })
+        .connect_lazy(url)
+        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    Ok(pool)
+}
+
+async fn postgres_work_pool(url: &str, exclusive: bool) -> Result<PgPool, ServerError> {
+    let pool = postgres_nonreplaceable_work_pool(url)?;
+    let mut connection = pool
+        .acquire()
+        .await
+        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    // Cancellation while queued must close the session, not start a detached
+    // pool-return ping that waits behind the same lock. Successful acquisition
+    // explicitly returns the live connection below.
+    connection.close_on_drop();
+    // An active query waiting on a table lock otherwise may not notice client
+    // death until it next uses the socket. Enable built-in disconnect checks
+    // when supported and disabled; preserve an operator's configured interval.
+    // Older Postgres versions without the setting keep their existing behavior.
+    sqlx::query(
+        "SELECT set_config(name, '1000', false) FROM pg_settings
+         WHERE name = 'client_connection_check_interval' AND setting = '0'",
+    )
+    .execute(&mut *connection)
+    .await
+    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    // Use Postgres's wait queue: later readers must not leapfrog a queued
+    // exclusive owner and indefinitely postpone maintenance.
+    let lock_query = if exclusive {
+        "SELECT pg_advisory_lock($1)"
+    } else {
+        "SELECT pg_advisory_lock_shared($1)"
+    };
+    sqlx::query(lock_query)
+        .bind(GC_WRITE_BARRIER_KEY)
+        .execute(&mut *connection)
+        .await
+        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    connection.return_to_pool().await;
+    Ok(pool)
 }
 
 fn ordered_resources(keys: &[ResourceLockKey]) -> Vec<ResourceLockKey> {
@@ -164,29 +291,41 @@ async fn acquire_local(
     exclusive: bool,
 ) -> Result<MaintenanceBarrierGuard, ServerError> {
     let path = root.join(LOCAL_BARRIER_FILE_NAME);
-    let file = acquire_local_file_lock(path, exclusive).await?;
-    Ok(MaintenanceBarrierGuard::Local { file })
+    let mut files = Vec::new();
+    // Every current Linux owner uses the directory, including owners that can
+    // also create the legacy file. Changing root permissions cannot split the
+    // barrier into two independent lock namespaces.
+    #[cfg(target_os = "linux")]
+    files.push(local_directory::acquire(root, exclusive).await?);
+    match acquire_local_file_lock(path.clone(), exclusive).await {
+        Ok(file) => files.push(file),
+        #[cfg(target_os = "linux")]
+        Err(ServerError::Io(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) && !path.try_exists()? => {}
+        Err(error) => return Err(error),
+    }
+    Ok(MaintenanceBarrierGuard::Local { files })
+}
+
+/// Prepare the existing lock file while initialization can still create root
+/// entries. Opening it neither takes ownership nor waits for active maintenance.
+pub(crate) async fn prepare_local_barrier(root: &Path) -> Result<(), ServerError> {
+    drop(open_local_lock_file(root.join(LOCAL_BARRIER_FILE_NAME)).await?);
+    Ok(())
 }
 
 /// Waits cooperatively for the OS lock. Only opening the file uses a blocking
 /// worker: cancellation must not leave a worker waiting for another process to
 /// release its lock, or exhaust the blocking pool and prevent runtime shutdown.
 async fn acquire_local_file_lock(path: PathBuf, exclusive: bool) -> Result<File, ServerError> {
-    let file = tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(
-            path.parent()
-                .ok_or_else(|| std::io::Error::other("maintenance lock has no parent"))?,
-        )?;
-        File::options()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)
-    })
-    .await
-    .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
-    .map_err(ServerError::Io)?;
+    let file = open_local_lock_file(path).await?;
+    lock_local_file(file, exclusive).await
+}
+
+async fn lock_local_file(file: File, exclusive: bool) -> Result<File, ServerError> {
     let mut retry_delay = Duration::from_millis(10);
     loop {
         let result = if exclusive {
@@ -203,6 +342,41 @@ async fn acquire_local_file_lock(path: PathBuf, exclusive: bool) -> Result<File,
         tokio::time::sleep(retry_delay).await;
         retry_delay = retry_delay.saturating_mul(2).min(Duration::from_millis(50));
     }
+}
+
+async fn open_local_lock_file(path: PathBuf) -> Result<File, ServerError> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(
+            path.parent()
+                .ok_or_else(|| std::io::Error::other("maintenance lock has no parent"))?,
+        )?;
+        let opened = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path);
+        #[cfg(target_os = "linux")]
+        if let Err(error) = &opened
+            && matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            )
+            && path.try_exists()?
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Linux flock retains shared/exclusive ownership on a read-only
+            // descriptor. Keep coordinating with the existing legacy inode.
+            return File::options()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&path);
+        }
+        opened
+    })
+    .await
+    .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
+    .map_err(ServerError::Io)
 }
 
 /// Acquires an exclusive application-resource lock through the shared local root.
@@ -231,18 +405,47 @@ pub(crate) async fn acquire_local_resources_exclusive(
     Ok(ResourceWriteGuard::Local { files })
 }
 
+#[cfg(test)]
 pub(crate) async fn acquire_postgres_shared(
     pool: &PgPool,
 ) -> Result<MaintenanceBarrierGuard, ServerError> {
     acquire_postgres(pool, false).await
 }
 
+pub(crate) async fn acquire_postgres_shared_bounded(
+    pool: &PgPool,
+    slots: &Arc<tokio::sync::Semaphore>,
+) -> Result<MaintenanceBarrierGuard, ServerError> {
+    let (mut transaction, admission) =
+        tokio::time::timeout(pool.options().get_acquire_timeout(), async {
+            let admission = Arc::clone(slots)
+                .acquire_owned()
+                .await
+                .map_err(|_error| sqlx::Error::PoolClosed)?;
+            Ok::<_, sqlx::Error>((pool.begin().await?, admission))
+        })
+        .await
+        .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+        .bind(GC_WRITE_BARRIER_KEY)
+        .execute(&mut *transaction)
+        .await
+        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    Ok(MaintenanceBarrierGuard::Postgres {
+        _transaction: transaction,
+        _admission: Some(admission),
+    })
+}
+
+#[cfg(test)]
 pub(crate) async fn acquire_postgres_exclusive(
     pool: &PgPool,
 ) -> Result<MaintenanceBarrierGuard, ServerError> {
     acquire_postgres(pool, true).await
 }
 
+#[cfg(test)]
 async fn acquire_postgres(
     pool: &PgPool,
     exclusive: bool,
@@ -264,10 +467,12 @@ async fn acquire_postgres(
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
     Ok(MaintenanceBarrierGuard::Postgres {
         _transaction: transaction,
+        _admission: None,
     })
 }
 
 /// Acquires an exclusive session-scoped advisory lock for an application resource.
+#[cfg(test)]
 pub(crate) async fn acquire_postgres_resource_exclusive(
     pool: &PgPool,
     key: &ResourceLockKey,
@@ -287,6 +492,27 @@ pub(crate) async fn acquire_postgres_resources_exclusive(
         .await
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
     connection.close_on_drop();
+    let fences = acquire_resource_fences(&mut connection, keys).await?;
+    Ok(ResourceWriteGuard::Postgres { connection, fences })
+}
+
+pub(crate) async fn acquire_postgres_request_resources(
+    pool: &PgPool,
+    backend: &Arc<()>,
+    keys: &[ResourceLockKey],
+) -> Result<ResourceWriteGuard, ServerError> {
+    let Some(mut connection) = RequestSession::connection_for(backend).await else {
+        return acquire_postgres_resources_exclusive(pool, keys).await;
+    };
+    let work = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
+    let fences = acquire_resource_fences(work, keys).await?;
+    Ok(ResourceWriteGuard::PostgresRequest { connection, fences })
+}
+
+async fn acquire_resource_fences(
+    connection: &mut PgConnection,
+    keys: &[ResourceLockKey],
+) -> Result<Vec<(ResourceLockKey, i64)>, ServerError> {
     let mut fences = Vec::new();
     for key in ordered_resources(keys) {
         // A backend blocked on a later lock may not read the termination
@@ -319,7 +545,7 @@ pub(crate) async fn acquire_postgres_resources_exclusive(
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
         fences.push((key, epoch));
     }
-    Ok(ResourceWriteGuard::Postgres { connection, fences })
+    Ok(fences)
 }
 
 fn resource_lock_digest(key: &ResourceLockKey) -> String {
@@ -349,6 +575,165 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_queued_exclusive_work_does_not_let_later_readers_leapfrog() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let first_reader = postgres_shared_work_pool(&url).await.unwrap();
+        let observer = postgres_coordination_pool(&url).unwrap();
+        let writer_url = url.clone();
+        let writer = tokio::spawn(async move { postgres_exclusive_work_pool(&writer_url).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let queued = query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks
+                     WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1
+                       AND classid::bigint = (($1::bigint >> 32) & 4294967295)
+                       AND objid::bigint = ($1::bigint & 4294967295))",
+                )
+                .bind(GC_WRITE_BARRIER_KEY)
+                .fetch_one(&observer)
+                .await
+                .unwrap();
+                if queued {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let reader_url = url.clone();
+        let mut later_reader =
+            tokio::spawn(async move { postgres_shared_work_pool(&reader_url).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut later_reader)
+                .await
+                .is_err()
+        );
+        first_reader.close().await;
+        let writer = tokio::time::timeout(Duration::from_secs(2), writer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut later_reader)
+                .await
+                .is_err()
+        );
+        writer.close().await;
+        let reader = tokio::time::timeout(Duration::from_secs(2), later_reader)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        reader.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_exclusive_work_session_cannot_reconnect_and_write_after_takeover() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let observer = postgres_coordination_pool(&url).unwrap();
+        let work = postgres_exclusive_work_pool(&url).await.unwrap();
+        let owner = query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&work)
+            .await
+            .unwrap();
+        let scope = format!("work-session-loss-{}", std::process::id());
+        query("INSERT INTO shardline_resource_fences (domain, resource, epoch) VALUES ($1, 'probe', 1)")
+            .bind(&scope).execute(&observer).await.unwrap();
+        let waiter_pool = postgres_coordination_pool(&url).unwrap();
+        let waiter = tokio::spawn(async move { acquire_postgres_exclusive(&waiter_pool).await });
+        let sleeping_work = work.clone();
+        let sleeping =
+            tokio::spawn(
+                async move { query("SELECT pg_sleep(600)").execute(&sleeping_work).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let active = query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'PgSleep')",
+                ).bind(owner).fetch_one(&observer).await.unwrap();
+                if active { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(
+            query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(owner)
+                .fetch_one(&observer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), sleeping)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let replacement = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // Even with ownership now available elsewhere, the old invocation's
+        // pool cannot replace its dead session and apply a stale mutation.
+        assert!(query("UPDATE shardline_resource_fences SET epoch = 99 WHERE domain = $1 AND resource = 'probe'")
+            .bind(&scope).execute(&work).await.is_err());
+        assert_eq!(query_scalar::<_, i64>("SELECT epoch FROM shardline_resource_fences WHERE domain = $1 AND resource = 'probe'")
+            .bind(&scope).fetch_one(&observer).await.unwrap(), 1);
+        query("DELETE FROM shardline_resource_fences WHERE domain = $1")
+            .bind(&scope)
+            .execute(&observer)
+            .await
+            .unwrap();
+        drop(replacement);
+        work.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_exclusive_work_session_closes_and_cancelled_waits_release_sessions() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let work = postgres_exclusive_work_pool(&url).await.unwrap();
+        query("SELECT 1").execute(&work).await.unwrap();
+        let waiter_url = url.clone();
+        let waiter = tokio::spawn(async move { postgres_exclusive_work_pool(&waiter_url).await });
+        let observer = postgres_coordination_pool(&url).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting = query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE query = 'SELECT pg_advisory_lock($1)' AND wait_event = 'advisory')",
+                ).fetch_one(&observer).await.unwrap();
+                if waiting { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        work.close().await;
+        let next = tokio::time::timeout(Duration::from_secs(2), postgres_exclusive_work_pool(&url))
+            .await
+            .unwrap()
+            .unwrap();
+        let first = query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&next)
+            .await
+            .unwrap();
+        let second = query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&next)
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        next.close().await;
+    }
 
     #[test]
     fn cancelled_local_lock_waits_leave_blocking_pool_and_shutdown_available() {
@@ -434,6 +819,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn local_preparation_preserves_existing_exclusive_owner_without_waiting() {
+        let storage = shardline_test_support::TempStorage::new();
+        let owner = acquire_local_exclusive(storage.path()).await.unwrap();
+        std::fs::write(
+            storage.path().join(LOCAL_BARRIER_FILE_NAME),
+            b"existing lock bytes",
+        )
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            prepare_local_barrier(storage.path()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            std::fs::read(storage.path().join(LOCAL_BARRIER_FILE_NAME)).unwrap(),
+            b"existing lock bytes"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                acquire_local_shared(storage.path())
+            )
+            .await
+            .is_err()
+        );
+        drop(owner);
+        let shared =
+            tokio::time::timeout(Duration::from_secs(2), acquire_local_shared(storage.path()))
+                .await
+                .unwrap()
+                .unwrap();
+        drop(shared);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn local_exclusive_waits_for_shared_guard() {
         let storage = shardline_test_support::TempStorage::new();
         let shared = acquire_local_shared(storage.path()).await.unwrap();
@@ -499,6 +921,80 @@ mod tests {
             .expect("same-resource lock task should complete")
             .unwrap();
         drop(second);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_request_releases_each_resource_without_losing_gc_ownership() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let shared = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let resources = postgres_coordination_pool(&url).unwrap();
+        let competitor = postgres_coordination_pool(&url).unwrap();
+        let identity = Arc::new(());
+        let request = RequestSession::acquire(&shared, Arc::clone(&identity))
+            .await
+            .unwrap();
+        let pid: i32 = request
+            .scope(async {
+                let key = ResourceLockKey::s3_object("request-release", "first");
+                let mut guard = acquire_postgres_request_resources(
+                    &resources,
+                    &identity,
+                    std::slice::from_ref(&key),
+                )
+                .await
+                .unwrap();
+                let pid: i32 = query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(guard.postgres_connection_mut().unwrap())
+                    .await
+                    .unwrap();
+                guard.release().await.unwrap();
+                let competing = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    acquire_postgres_resource_exclusive(&competitor, &key),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                drop(competing);
+                let mut observer = competitor.acquire().await.unwrap();
+                let gc_available: bool = query_scalar("SELECT pg_try_advisory_lock($1)")
+                    .bind(GC_WRITE_BARRIER_KEY)
+                    .fetch_one(&mut *observer)
+                    .await
+                    .unwrap();
+                assert!(
+                    !gc_available,
+                    "resource release must retain the request GC barrier"
+                );
+                let other = ResourceLockKey::s3_object("request-release", "second");
+                let mut next = acquire_postgres_request_resources(&resources, &identity, &[other])
+                    .await
+                    .unwrap();
+                let next_pid: i32 = query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(next.postgres_connection_mut().unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(next_pid, pid);
+                next.release().await.unwrap();
+                pid
+            })
+            .await;
+        request.finish().await;
+        let mut reused = shared.acquire().await.unwrap();
+        let reused_pid: i32 = query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *reused)
+            .await
+            .unwrap();
+        assert_eq!(reused_pid, pid);
+        let remaining: i64 = query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory'",
+        )
+        .fetch_one(&mut *reused)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

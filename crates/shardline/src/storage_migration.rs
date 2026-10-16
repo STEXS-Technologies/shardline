@@ -147,11 +147,15 @@ pub fn run_storage_migration(
     Ok(run_server_storage_migration(&options)?)
 }
 
-fn endpoint(
+pub(crate) fn endpoint(
     adapter: ObjectStorageAdapter,
     root: Option<&Path>,
     side: &'static str,
 ) -> Result<StorageMigrationEndpoint, StorageMigrationRuntimeError> {
+    #[cfg(target_os = "linux")]
+    if let Some(endpoint) = crate::maintenance::configuration::endpoint(side) {
+        return Ok(endpoint);
+    }
     match adapter {
         ObjectStorageAdapter::Local => local_endpoint(root, side),
         ObjectStorageAdapter::S3 => {

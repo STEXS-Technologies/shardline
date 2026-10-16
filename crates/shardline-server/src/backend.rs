@@ -148,7 +148,11 @@ impl ServerBackend {
         match self {
             Self::Local(_) => crate::maintenance_barrier::acquire_local_shared(root).await,
             Self::Postgres(backend) => {
-                crate::maintenance_barrier::acquire_postgres_shared(&backend.gc_barrier_pool).await
+                crate::maintenance_barrier::acquire_postgres_shared_bounded(
+                    &backend.gc_barrier_pool,
+                    &backend.request_session_slots,
+                )
+                .await
             }
         }
     }
@@ -164,9 +168,10 @@ impl ServerBackend {
                 crate::maintenance_barrier::acquire_local_resource_exclusive(root, key).await
             }
             Self::Postgres(backend) => {
-                crate::maintenance_barrier::acquire_postgres_resource_exclusive(
+                crate::maintenance_barrier::acquire_postgres_request_resources(
                     &backend.resource_lock_pool,
-                    key,
+                    &backend.request_session_identity,
+                    std::slice::from_ref(key),
                 )
                 .await
             }
@@ -187,8 +192,9 @@ impl ServerBackend {
                 crate::maintenance_barrier::acquire_local_resources_exclusive(root, keys).await?
             }
             Self::Postgres(backend) => {
-                crate::maintenance_barrier::acquire_postgres_resources_exclusive(
+                crate::maintenance_barrier::acquire_postgres_request_resources(
                     &backend.resource_lock_pool,
+                    &backend.request_session_identity,
                     keys,
                 )
                 .await?
@@ -214,6 +220,21 @@ impl ServerBackend {
     ///
     /// Returns [`ServerError`] when the object store or Postgres backend fails to initialise.
     pub async fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
+        Self::from_config_with_recovery(config, false)
+            .await
+            .map(|(backend, _pending_files)| backend)
+    }
+
+    pub(crate) async fn from_config_for_router(
+        config: &ServerConfig,
+    ) -> Result<(Self, bool), ServerError> {
+        Self::from_config_with_recovery(config, true).await
+    }
+
+    async fn from_config_with_recovery(
+        config: &ServerConfig,
+        defer_file_bytes: bool,
+    ) -> Result<(Self, bool), ServerError> {
         let object_store = object_store_from_config(config)?;
 
         // Probe object storage — warn but don't fail (S3 may be slow to start)
@@ -262,9 +283,18 @@ impl ServerBackend {
             tracing::info!("startup schema compatibility check: postgres OK");
 
             // Reconcile any stuck upload intents from a previous crash
-            backend.reconcile_stuck_upload_intents().await?;
-
-            return Ok(Self::Postgres(backend));
+            let pending_files = if defer_file_bytes {
+                backend
+                    .reconcile_upload_intents(
+                        std::time::Duration::from_secs(30),
+                        &crate::upload_intent_recovery::startup::RecoveryPass::Startup,
+                    )
+                    .await?
+            } else {
+                backend.reconcile_stuck_upload_intents().await?;
+                false
+            };
+            return Ok((Self::Postgres(backend), pending_files));
         }
 
         let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
@@ -285,9 +315,18 @@ impl ServerBackend {
         tracing::info!("startup probe: sqlite metadata OK");
 
         // Reconcile any stuck upload intents from a previous crash
-        backend.reconcile_stuck_upload_intents().await?;
-
-        Ok(Self::Local(backend))
+        let pending_files = if defer_file_bytes {
+            backend
+                .reconcile_upload_intents(
+                    std::time::Duration::from_secs(30),
+                    &crate::upload_intent_recovery::startup::RecoveryPass::Startup,
+                )
+                .await?
+        } else {
+            backend.reconcile_stuck_upload_intents().await?;
+            false
+        };
+        Ok((Self::Local(backend), pending_files))
     }
 
     pub(crate) async fn upload_xorb_stream(
@@ -439,8 +478,7 @@ impl ServerBackend {
             .postgres_connection_mut()
             .ok_or(ServerError::StaleResourceFence)?;
         let published = backend
-            .record_store()
-            .publish_s3_object_on_connection(
+            .publish_prepared_s3_on_connection(
                 connection,
                 &prepared.record,
                 entry,
@@ -540,6 +578,20 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            return Ok(backend
+                .index_store()
+                .create_resumable_session_bounded_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    session,
+                    max_active,
+                )
+                .await?);
+        }
         Ok(backend
             .index_store()
             .create_resumable_session_bounded(session, max_active)
@@ -630,6 +682,28 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            let connection = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
+            return Ok(
+                shardline_index::PostgresIndexStore::publish_resumable_part_bounded_on_connection(
+                    connection,
+                    session_id,
+                    part_number,
+                    staging_key,
+                    size_bytes,
+                    etag,
+                    range,
+                    session_max_bytes,
+                    aggregate_max_bytes,
+                    max_active_parts,
+                )
+                .await?,
+            );
+        }
         Ok(backend
             .index_store()
             .publish_resumable_part_bounded(
@@ -653,6 +727,19 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            return Ok(backend
+                .index_store()
+                .begin_resumable_completion_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    session_id,
+                )
+                .await?);
+        }
         Ok(backend
             .index_store()
             .begin_resumable_completion(session_id)
@@ -669,6 +756,22 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            return Ok(backend
+                .index_store()
+                .transition_resumable_session_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    session_id,
+                    expected_state,
+                    expected_fence_epoch,
+                    next_state,
+                )
+                .await?);
+        }
         Ok(backend
             .index_store()
             .transition_resumable_session(
@@ -688,6 +791,20 @@ impl ServerBackend {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &backend.request_session_identity,
+        )
+        .await
+        {
+            return Ok(backend
+                .index_store()
+                .reopen_resumable_session_after_failed_completion_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    session_id,
+                    expected_fence_epoch,
+                )
+                .await?);
+        }
         Ok(backend
             .index_store()
             .reopen_resumable_session_after_failed_completion(session_id, expected_fence_epoch)
@@ -917,11 +1034,48 @@ impl ServerBackend {
     /// Publishes immutable OCI bytes through the metadata session that owns
     /// the repository fence. Clearing a prior tombstone and retargeting tags
     /// form one database transaction.
+    pub(crate) async fn stage_new_oci_manifest_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+        physical_key: &ObjectKey,
+        references: &[OciObjectKey],
+    ) -> Result<(), ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Ok(());
+        };
+        match self.object_length(physical_key).await {
+            Ok(_) => return Ok(()),
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        let connection = guard
+            .postgres_connection_mut()
+            .ok_or(ServerError::StaleResourceFence)?;
+        backend
+            .index_store()
+            .stage_oci_object_on_connection(connection, key, references)
+            .await?;
+        Ok(())
+    }
+
+    /// Publishes metadata through the repository fence's database session.
     pub(crate) async fn publish_oci_object_locked(
         &self,
         guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
         key: &OciObjectKey,
         tags: &[OciTagEntry],
+    ) -> Result<(), ServerError> {
+        self.publish_oci_object_with_references_locked(guard, key, tags, &[])
+            .await
+    }
+
+    pub(crate) async fn publish_oci_object_with_references_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+        references: &[OciObjectKey],
     ) -> Result<(), ServerError> {
         match self {
             Self::Local(backend) => {
@@ -936,7 +1090,9 @@ impl ServerBackend {
                     .ok_or(ServerError::StaleResourceFence)?;
                 backend
                     .index_store()
-                    .publish_oci_object_on_connection(connection, key, tags)
+                    .publish_oci_object_with_references_on_connection(
+                        connection, key, tags, references,
+                    )
                     .await?;
                 Ok(())
             }

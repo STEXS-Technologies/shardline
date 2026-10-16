@@ -7,6 +7,71 @@ fn status_for(error: &ServerError) -> StatusCode {
     error.status_code()
 }
 
+#[tokio::test]
+async fn lost_write_ownership_is_retryable_across_protocols() {
+    use axum::http::header::RETRY_AFTER;
+    let responses = [
+        ServerError::StaleResourceFence.into_response(),
+        OciError(ServerError::StaleResourceFence).into_response(),
+        shardline_s3_adapter::S3Error::from(ServerError::StaleResourceFence).into_response(),
+    ];
+    for (protocol, response) in ["HTTP", "OCI", "S3"].into_iter().zip(responses) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(RETRY_AFTER),
+            Some(&axum::http::HeaderValue::from_static("1")),
+            "{protocol} must tell the client when to retry"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(
+            body.contains("retry with a fresh request"),
+            "{protocol}: {body}"
+        );
+        if protocol == "OCI" {
+            let value: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(value["errors"][0]["code"], "INTERNAL");
+        } else if protocol == "S3" {
+            assert!(body.contains("<Code>SlowDown</Code>"), "{body}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_staged_content_is_retryable_across_protocols() {
+    use axum::http::header::RETRY_AFTER;
+    let responses = [
+        super::publication::content_unavailable().into_response(),
+        OciError(super::publication::content_unavailable()).into_response(),
+        shardline_s3_adapter::S3Error::from(super::publication::content_unavailable())
+            .into_response(),
+    ];
+    for response in responses {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[RETRY_AFTER], "1");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("retry the upload"), "{body}");
+        assert!(
+            !body.contains("reconciliation"),
+            "a settled delete needs a new upload"
+        );
+    }
+}
+
+#[test]
+fn ordinary_io_errors_keep_their_existing_response() {
+    let error = ServerError::Io(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error.to_string(), "local storage operation failed");
+    assert!(!error.is_retryable_publication());
+    assert!(!error.is_remote_delete_pending());
+}
+
 #[test]
 fn not_found_maps_to_404() {
     assert_eq!(status_for(&ServerError::NotFound), StatusCode::NOT_FOUND);

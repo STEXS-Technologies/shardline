@@ -99,8 +99,71 @@ async fn prepare_record_upsert(
     .await
 }
 
+/// Both aliases carry the same record. Bind its JSON once, while preserving
+/// version-before-latest row processing and the existing per-row triggers.
+async fn upsert_file_aliases_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    version: &PostgresRecordLocator,
+    latest: &PostgresRecordLocator,
+    record: &FileRecord,
+) -> Result<(), PostgresMetadataStoreError> {
+    let permit = admit_record_conversion().await?;
+    let version = version.clone();
+    let latest = latest.clone();
+    let record = record.clone();
+    let statement = run_record_conversion(permit, move || {
+        Ok(query(
+            "INSERT INTO shardline_file_records (
+                record_key, record_kind, scope_key, file_id, content_hash, record
+             ) VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $3, $4, $5, $6)
+             ON CONFLICT (record_key)
+             DO UPDATE SET
+                record_kind = EXCLUDED.record_kind,
+                scope_key = EXCLUDED.scope_key,
+                file_id = EXCLUDED.file_id,
+                content_hash = EXCLUDED.content_hash,
+                record = EXCLUDED.record,
+                updated_at = now()",
+        )
+        .bind(version.record_key)
+        .bind(version.kind.as_str())
+        .bind(version.scope_key)
+        .bind(version.file_id)
+        .bind(record.content_hash.clone())
+        .bind(Json(record))
+        .bind(latest.record_key)
+        .bind(latest.kind.as_str()))
+    })
+    .await?;
+    statement.execute(&mut **transaction).await?;
+    Ok(())
+}
+
 impl super::PostgresRecordStore {
+    /// Reads on the caller's ownership connection without replacing it.
+    ///
+    /// # Errors
+    /// Returns a missing-record or metadata error, including connection loss.
+    pub async fn read_record_bytes_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        locator: &PostgresRecordLocator,
+    ) -> Result<Vec<u8>, PostgresMetadataStoreError> {
+        let permit = admit_record_conversion().await?;
+        let row = query("SELECT record FROM shardline_file_records WHERE record_key = $1")
+            .bind(&locator.record_key)
+            .fetch_optional(connection)
+            .await?
+            .ok_or(PostgresMetadataStoreError::RecordNotFound)?;
+        run_record_conversion(permit, move || canonical_record_bytes_from_row(&row)).await
+    }
     /// Inserts or replaces an immutable version record.
+    ///
+    /// This writes metadata through the store's pool. It does not check backing
+    /// bytes, preserve a caller-owned connection or publish the latest-file
+    /// alias. Storage-backed callers must retain their operation's protection
+    /// while validating content. Use `commit_file_version_metadata_on_connection`
+    /// when an existing ownership session must publish a version and latest alias.
     ///
     /// # Errors
     ///
@@ -115,6 +178,12 @@ impl super::PostgresRecordStore {
 
     /// Atomically commits one file-version record and its latest-file alias.
     ///
+    /// This method commits metadata only. It does not inspect object storage or
+    /// retain an ownership connection held by the caller. Callers publishing
+    /// storage-backed content must validate that content under their operation's
+    /// storage/reference protection. Use the connection-bound variant when an
+    /// existing session owns the operation.
+    ///
     /// # Errors
     ///
     /// Returns [`PostgresMetadataStoreError`] when either row cannot be written. No
@@ -124,17 +193,61 @@ impl super::PostgresRecordStore {
         &self,
         record: &FileRecord,
     ) -> Result<(), PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
-        let version_locator = self.version_record_locator(record);
-        upsert_record_in_transaction(&mut transaction, &version_locator, record).await?;
-        let latest_locator = self.latest_record_locator(record);
-        upsert_record_in_transaction(&mut transaction, &latest_locator, record).await?;
+        let mut connection = self.pool.acquire().await?;
+        self.commit_file_version_metadata_on_connection(&mut connection, record)
+            .await
+    }
+
+    /// Commits a file version and latest alias on the caller's ownership session.
+    ///
+    /// Keeping the session preserves its locks; this method does not validate
+    /// backing bytes in object storage. The caller must perform that validation
+    /// while its reference protection remains held through publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or metadata error without replacing a lost connection.
+    pub async fn commit_file_version_metadata_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        record: &FileRecord,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        self.stage_file_version_metadata_in_transaction(&mut transaction, record)
+            .await?;
         transaction.commit().await?;
         Ok(())
     }
 
+    /// Stages version and latest aliases in the caller's publication transaction.
+    ///
+    /// The caller must retain ownership and backing-object protection through
+    /// commit. Unlike the connection-based method, an error belongs to the
+    /// caller's transaction and requires its rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns conversion or database errors without committing the transaction.
+    pub async fn stage_file_version_metadata_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        record: &FileRecord,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let version_locator = self.version_record_locator(record);
+        let latest_locator = self.latest_record_locator(record);
+        upsert_file_aliases_in_transaction(transaction, &version_locator, &latest_locator, record)
+            .await?;
+        Ok(())
+    }
+
     /// Atomically publishes an S3 record version, its latest alias, and the
-    /// listing row through a lock-owning Postgres connection.
+    /// listing row through the caller's Postgres connection.
+    ///
+    /// This method publishes metadata only. It does not acquire the caller's
+    /// operation ownership or inspect object storage. The caller must retain
+    /// its ownership/reference protection and validate backing content through
+    /// the commit. A supplied completion fence additionally checks the resumable
+    /// session; it does not replace those storage and ownership checks.
     ///
     /// # Errors
     ///
@@ -184,9 +297,8 @@ impl super::PostgresRecordStore {
             None
         };
         let version = self.version_record_locator(record);
-        upsert_record_in_transaction(&mut transaction, &version, record).await?;
         let latest = self.latest_record_locator(record);
-        upsert_record_in_transaction(&mut transaction, &latest, record).await?;
+        upsert_file_aliases_in_transaction(&mut transaction, &version, &latest, record).await?;
         let publication = match condition {
             S3PublishCondition::Unconditional => {
                 query(
@@ -396,7 +508,21 @@ impl super::PostgresRecordStore {
         &self,
         record: &FileRecord,
     ) -> Result<(), PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        self.delete_file_version_metadata_on_connection(&mut connection, record)
+            .await
+    }
+
+    /// Removes metadata on the caller's non-replaceable ownership connection.
+    ///
+    /// # Errors
+    /// Returns a metadata error, including connection loss.
+    pub async fn delete_file_version_metadata_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        record: &FileRecord,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
         let latest = self.latest_record_locator(record);
         let version = self.version_record_locator(record);
         query("DELETE FROM shardline_file_records WHERE record_key = $1 OR record_key = $2")
@@ -408,7 +534,61 @@ impl super::PostgresRecordStore {
         Ok(())
     }
 
+    /// Removes a file reference only if its latest hash still matches `record`.
+    /// A concurrent publisher's latest alias and the losing version are retained
+    /// when the condition fails.
+    ///
+    /// # Errors
+    /// Returns a metadata error if the transaction cannot complete.
+    pub async fn delete_file_version_metadata_if_latest(
+        &self,
+        record: &FileRecord,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut connection = self.pool.acquire().await?;
+        self.delete_file_version_metadata_if_latest_on_connection(&mut connection, record)
+            .await
+    }
+
+    /// Conditionally removes metadata on the caller's ownership connection.
+    ///
+    /// # Errors
+    /// Returns a metadata error, including connection loss.
+    pub async fn delete_file_version_metadata_if_latest_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        record: &FileRecord,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        let latest = self.latest_record_locator(record);
+        let removed = query(
+            "DELETE FROM shardline_file_records
+             WHERE record_key = $1 AND content_hash = $2",
+        )
+        .bind(&latest.record_key)
+        .bind(&record.content_hash)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if removed == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let version = self.version_record_locator(record);
+        query("DELETE FROM shardline_file_records WHERE record_key = $1")
+            .bind(&version.record_key)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     /// Atomically commits native shard metadata.
+    ///
+    /// This compatibility entry point supplies no additional physical object
+    /// keys. Metadata reference checks cannot discover keys hidden in xorb
+    /// payloads or prove that backing bytes exist. Storage-backed publishers
+    /// should derive physical keys from validated payloads and use the explicit
+    /// reference variant, retaining protection while checking storage presence.
     ///
     /// # Errors
     ///
@@ -420,7 +600,70 @@ impl super::PostgresRecordStore {
         records: &[FileRecord],
         dedupe_mappings: &[DedupeShardMapping],
     ) -> Result<(), PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
+        self.commit_native_shard_metadata_with_remote_delete_references(
+            records,
+            dedupe_mappings,
+            &[],
+        )
+        .await
+    }
+
+    /// Publishes native metadata with the physical references derived from
+    /// validated xorb payloads. Pending-delete checks and all metadata writes
+    /// share one transaction. The existing method retains its signature.
+    /// This checks delete coordination for the supplied keys, not storage
+    /// presence or completeness of the supplied reference set. It acquires a
+    /// connection from this store; use the connection-bound variant to retain
+    /// an existing ownership session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a retryable pending-delete error or a database failure. On
+    /// schemas predating the compatibility guard, behavior remains unchanged;
+    /// guarded GC refuses remote-delete admission until the owner-run upgrade.
+    pub async fn commit_native_shard_metadata_with_remote_delete_references(
+        &self,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut connection = self.pool.acquire().await?;
+        self.commit_native_shard_metadata_on_connection(
+            &mut connection,
+            records,
+            dedupe_mappings,
+            references,
+        )
+        .await
+    }
+
+    /// Publishes native records, mappings and reference checks on one ownership session.
+    ///
+    /// The caller supplies all physical references and validates their backing
+    /// bytes while protection remains held. This metadata-only method does not
+    /// read object storage or establish that the reference set is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns a pending-delete, metadata or database error. A lost connection is
+    /// never replaced by a connection from the store's pool.
+    pub async fn commit_native_shard_metadata_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        if !references.is_empty()
+            && query_scalar::<_, bool>(
+                "SELECT to_regprocedure('shardline_reference_keys_remote_delete_v1(text,text[])') IS NOT NULL",
+            ).fetch_one(&mut *transaction).await?
+        {
+            let keys: Vec<_> = references.iter().map(shardline_storage::ObjectKey::as_str).collect();
+            query("SELECT shardline_reference_keys_remote_delete_v1(current_schema(), $1)")
+                .bind(keys).execute(&mut *transaction).await?;
+        }
         for record in records {
             let locator = self.version_record_locator(record);
             upsert_record_in_transaction(&mut transaction, &locator, record).await?;
@@ -1186,6 +1429,199 @@ mod tests {
             Err(super::super::PostgresMetadataStoreError::RecordNotFound)
         ));
         assert_eq!(store.read_latest_record_bytes(&record).await.unwrap(), None);
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn staged_aliases_remain_private_until_the_publication_transaction_commits() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut record = sample_record(None);
+        record.total_bytes = 50;
+        for commit in [false, true] {
+            let mut publication = pool.begin().await.unwrap();
+            store
+                .stage_file_version_metadata_in_transaction(&mut publication, &record)
+                .await
+                .unwrap();
+            let private_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+                    .fetch_one(&mut *publication)
+                    .await
+                    .unwrap();
+            assert_eq!(private_rows, 2);
+            let visible_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(visible_rows, 0);
+            if commit {
+                publication.commit().await.unwrap();
+            } else {
+                publication.rollback().await.unwrap();
+            }
+            let visible_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(visible_rows, if commit { 2 } else { 0 });
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_latest_alias_trigger_rolls_back_version_and_preserves_parent_transaction() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut previous = sample_record(None);
+        previous.total_bytes = 50;
+        store.commit_file_version_metadata(&previous).await.unwrap();
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_latest_alias() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+               IF NEW.record_kind = 'latest' THEN
+                 RAISE EXCEPTION 'latest alias rejected by fixture';
+               END IF;
+               RETURN NEW;
+             END $$;
+             CREATE TRIGGER reject_latest_alias BEFORE INSERT OR UPDATE
+             ON shardline_file_records FOR EACH ROW EXECUTE FUNCTION reject_latest_alias()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut replacement = previous.clone();
+        replacement.content_hash = "c".repeat(64);
+        let mut parent = pool.begin().await.unwrap();
+        let error = store
+            .commit_file_version_metadata_on_connection(&mut parent, &replacement)
+            .await
+            .unwrap_err();
+        let super::PostgresMetadataStoreError::Sqlx(error) = error else {
+            panic!("unexpected publication error: {error:?}");
+        };
+        assert_eq!(
+            error.as_database_error().unwrap().message(),
+            "latest alias rejected by fixture"
+        );
+        // The failed inner publication must leave the caller's transaction
+        // usable, with neither a replacement version nor a changed latest.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_kind, content_hash FROM shardline_file_records ORDER BY record_kind",
+        )
+        .fetch_all(&mut *parent)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("latest".into(), previous.content_hash.clone()),
+                ("version".into(), previous.content_hash)
+            ]
+        );
+        parent.commit().await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn conditional_file_cleanup_preserves_a_newer_publisher() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut loser = sample_record(None);
+        loser.total_bytes = 50;
+        store.commit_file_version_metadata(&loser).await.unwrap();
+        // Cleanup has read the loser; another node publishes before deletion.
+        let mut winner = loser.clone();
+        winner.content_hash = "c".repeat(64);
+        let mut publication = pool.begin().await.unwrap();
+        let publisher_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *publication)
+            .await
+            .unwrap();
+        store
+            .commit_file_version_metadata_on_connection(&mut publication, &winner)
+            .await
+            .unwrap();
+        let cleanup_pool = pool.clone();
+        let cleanup_record = loser.clone();
+        let cleanup = tokio::spawn(async move {
+            super::super::PostgresRecordStore::new(cleanup_pool)
+                .delete_file_version_metadata_if_latest(&cleanup_record)
+                .await
+        });
+        // Observe the actual database lock wait, rather than assuming a sleep
+        // is long enough for the cleanup transaction to reach its DELETE.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(publisher_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup must wait on the concurrent publication");
+        assert!(!cleanup.is_finished());
+        publication.commit().await.unwrap();
+        assert!(!cleanup.await.unwrap().unwrap());
+        assert!(
+            !store
+                .delete_file_version_metadata_if_latest(&loser)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.read_latest_record_bytes(&loser).await.unwrap(),
+            Some(serde_json::to_vec(&winner).unwrap())
+        );
+        assert_eq!(
+            store
+                .read_record_bytes(&store.version_record_locator(&loser))
+                .await
+                .unwrap(),
+            serde_json::to_vec(&loser).unwrap()
+        );
+        assert!(
+            store
+                .delete_file_version_metadata_if_latest(&winner)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .read_latest_record_bytes(&winner)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store
+                .read_record_bytes(&store.version_record_locator(&winner))
+                .await,
+            Err(super::super::PostgresMetadataStoreError::RecordNotFound)
+        ));
+        assert!(
+            !store
+                .delete_file_version_metadata_if_latest(&winner)
+                .await
+                .unwrap()
+        );
         pool.close().await;
     }
 

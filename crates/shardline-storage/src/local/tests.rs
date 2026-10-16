@@ -1,4 +1,5 @@
 use std::fs;
+mod prefix_traversal;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 #[cfg(unix)]

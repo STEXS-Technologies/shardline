@@ -8,16 +8,16 @@ use shardline_protocol::RepositoryScope;
 use crate::{
     ServerError, ShardMetadataLimits,
     model::UploadFileResponse,
-    protocol_support::reliability_repository_scope,
     upload_ingest::{
         FileUploadIngestor, RequestBodyReader, StagedRequestBody, stage_body_for_object_store,
         upload_attempt_id,
     },
     validation::validate_identifier,
     xet_adapter::{
-        ShardUploadResponse, XorbUploadResponse, register_uploaded_shard_bytes,
-        register_uploaded_shard_file, store_uploaded_xorb_bytes, store_uploaded_xorb_file_path,
-        xorb_object_key,
+        ShardUploadResponse, XorbUploadResponse,
+        register_uploaded_shard_bytes_with_member_references,
+        register_uploaded_shard_file_with_member_references, store_uploaded_xorb_bytes,
+        store_uploaded_xorb_file_path, xorb_object_key,
     },
 };
 
@@ -60,11 +60,16 @@ impl super::PostgresBackend {
         body: Bytes,
         repository_scope: Option<&RepositoryScope>,
     ) -> Result<UploadFileResponse, ServerError> {
-        self.upload_file_stream(
-            file_id,
-            RequestBodyReader::from_bytes(body),
-            repository_scope,
-            None,
+        crate::maintenance_barrier::RequestSession::scope_bounded_if_needed(
+            &self.gc_barrier_pool,
+            &self.request_session_identity,
+            &self.request_session_slots,
+            self.upload_file_stream(
+                file_id,
+                RequestBodyReader::from_bytes(body),
+                repository_scope,
+                None,
+            ),
         )
         .await
     }
@@ -83,7 +88,10 @@ impl super::PostgresBackend {
         expected_sha256: Option<&str>,
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
-        let reliability_repository = reliability_repository_scope(repository_scope);
+        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+            .await?;
+        let reliability_repository =
+            crate::upload_intent_recovery::file_intent_repository_scope(repository_scope)?;
 
         let intent = expected_sha256.map(|expected_hash| {
             UploadIntent::new(
@@ -94,33 +102,40 @@ impl super::PostgresBackend {
             )
         });
         let coordinator = CasCoordinator::new(
-            self.index_store.clone(),
+            super::upload_intents::RequestUploadIntentStore::new(
+                self.index_store.clone(),
+                self.request_session_identity.clone(),
+            ),
             (),
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
-        if let Some(intent) = &intent {
-            coordinator.begin_upload(intent).await?;
-            coordinator
-                .transition_upload_scoped(
-                    "shardline",
-                    &reliability_repository,
-                    intent.intent_id(),
-                    UploadIntentState::Storing,
-                )
-                .await?;
-        }
-        let object_store = self.object_store();
-        let mut ingestor = FileUploadIngestor::new_with_parallelism(
-            self.chunk_size,
-            expected_sha256.is_some(),
-            self.upload_max_in_flight_chunks,
-        );
-        while let Some(bytes) = body.next_bytes().await? {
-            ingestor.ingest_body_chunk(&object_store, &bytes).await?;
-        }
+        let result = async {
+            if let Some(intent) = &intent {
+                coordinator
+                    .begin_upload_scoped(intent, "shardline", &reliability_repository)
+                    .await?;
+                coordinator
+                    .transition_upload_scoped(
+                        "shardline",
+                        &reliability_repository,
+                        intent.intent_id(),
+                        UploadIntentState::Storing,
+                    )
+                    .await?;
+            }
+            let object_store = self.object_store();
+            let mut ingestor = FileUploadIngestor::new_with_parallelism(
+                self.chunk_size,
+                expected_sha256.is_some(),
+                self.upload_max_in_flight_chunks,
+            );
+            while let Some(bytes) = body.next_bytes().await? {
+                ingestor.ingest_body_chunk(&object_store, &bytes).await?;
+            }
 
-        async {
+            crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+                .await?;
             let (record, response) = ingestor
                 .finish(&object_store, file_id, repository_scope, expected_sha256)
                 .await?;
@@ -134,9 +149,27 @@ impl super::PostgresBackend {
                     )
                     .await?;
             }
-            self.record_store
-                .commit_file_version_metadata(&record)
+            if let Some(mut connection) =
+                crate::maintenance_barrier::RequestSession::connection_for(
+                    &self.request_session_identity,
+                )
+                .await
+            {
+                self.commit_staged_file_on_connection(
+                    connection.as_mut().ok_or(ServerError::StaleResourceFence)?,
+                    &record,
+                )
                 .await?;
+            } else {
+                let mut connection = self
+                    .record_store
+                    .pool()
+                    .acquire()
+                    .await
+                    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+                self.commit_staged_file_on_connection(&mut connection, &record)
+                    .await?;
+            }
             if let Some(intent) = &intent {
                 coordinator
                     .transition_upload_scoped(
@@ -157,7 +190,18 @@ impl super::PostgresBackend {
             }
             Ok(response)
         }
-        .await
+        .await;
+        if coordinator.index().owner_lost() {
+            Err(ServerError::StaleResourceFence)
+        } else {
+            if result.is_err() {
+                crate::maintenance_barrier::RequestSession::verify_for(
+                    &self.request_session_identity,
+                )
+                .await?;
+            }
+            result
+        }
     }
 
     /// Stores a raw xorb body under its content hash.
@@ -171,8 +215,13 @@ impl super::PostgresBackend {
         expected_hash: &str,
         body: Bytes,
     ) -> Result<XorbUploadResponse, ServerError> {
-        self.upload_xorb_stream(expected_hash, RequestBodyReader::from_bytes(body))
-            .await
+        crate::maintenance_barrier::RequestSession::scope_bounded_if_needed(
+            &self.gc_barrier_pool,
+            &self.request_session_identity,
+            &self.request_session_slots,
+            self.upload_xorb_stream(expected_hash, RequestBodyReader::from_bytes(body)),
+        )
+        .await
     }
 
     /// Stores a bounded raw xorb body under its content hash.
@@ -186,10 +235,18 @@ impl super::PostgresBackend {
         expected_hash: &str,
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
+        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+            .await?;
         let object_store = self.object_store();
         let staged = stage_body_for_object_store(&mut body, &object_store).await?;
-        let body_length = staged.length();
-        let intent_id = format!("xorb-{expected_hash}");
+        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+            .await?;
+        let (staged, body_length) =
+            crate::upload_identity::xorb_length(expected_hash, staged, &self.stream_work_pool)
+                .await?;
+        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+            .await?;
+        let intent_id = crate::upload_identity::xorb(expected_hash, body_length);
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
             intent_id.clone(),
@@ -198,14 +255,20 @@ impl super::PostgresBackend {
             body_length,
         );
         let coordinator = CasCoordinator::new(
-            self.index_store.clone(),
+            super::upload_intents::RequestUploadIntentStore::new(
+                self.index_store.clone(),
+                self.request_session_identity.clone(),
+            ),
             (),
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
-        coordinator
+        let request_session_identity = self.request_session_identity.clone();
+        let result = coordinator
             .with_upload_intent(&intent, move || async move {
-                match staged {
+                crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
+                    .await?;
+                let result = match staged {
                     StagedRequestBody::Memory { bytes, .. } => {
                         store_uploaded_xorb_bytes(&object_store, expected_hash, &bytes)
                             .await
@@ -216,9 +279,17 @@ impl super::PostgresBackend {
                             .await
                             .map_err(ServerError::from)
                     }
-                }
+                };
+                crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
+                    .await?;
+                result
             })
-            .await
+            .await;
+        if coordinator.index().owner_lost() {
+            Err(ServerError::StaleResourceFence)
+        } else {
+            result
+        }
     }
 
     /// Stores a bounded native Xet shard and indexes the contained file reconstructions.
@@ -237,19 +308,23 @@ impl super::PostgresBackend {
         let staged = stage_body_for_object_store(&mut body, &object_store).await?;
         let body_length = staged.length();
         let body_hash = staged.hash();
-        let intent_id = format!("shard-{}", hex::encode(body_hash.as_bytes()));
         let body_hash_hex = hex::encode(body_hash.as_bytes());
+        let (intent_id, reliability_repository) =
+            crate::upload_identity::native_shard(&body_hash_hex, repository_scope)?;
         let prefix = &body_hash_hex[..2];
         let object_key = format!("shards/{prefix}/{body_hash_hex}.shard");
         let intent = UploadIntent::new(intent_id.clone(), object_key, body_hash_hex, body_length);
-        let record_store = self.record_store.clone();
+        let publication_backend = self.clone();
+        let request_session_identity = self.request_session_identity.clone();
         let coordinator = CasCoordinator::new(
-            self.index_store.clone(),
+            super::upload_intents::RequestUploadIntentStore::new(
+                self.index_store.clone(),
+                self.request_session_identity.clone(),
+            ),
             (),
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
-        let reliability_repository = reliability_repository_scope(repository_scope);
         let result = coordinator
             .with_upload_intent_scoped(
                 "shardline",
@@ -258,36 +333,80 @@ impl super::PostgresBackend {
                 move || async move {
                     match staged {
                         StagedRequestBody::Memory { bytes, .. } => {
-                            let record_store = record_store.clone();
-                            register_uploaded_shard_bytes(
+                            let publication_backend = publication_backend.clone();
+                            register_uploaded_shard_bytes_with_member_references(
                                 &object_store,
                                 &bytes,
                                 repository_scope,
                                 shard_metadata_limits,
-                                move |records: Vec<shardline_index::FileRecord>,
-                                      mappings: Vec<shardline_index::DedupeShardMapping>| async move {
-                                    record_store
-                                        .commit_native_shard_metadata(&records, &mappings)
+                                move |records, mappings, references| async move {
+                                    if let Some(mut connection) =
+                                        crate::maintenance_barrier::RequestSession::connection_for(
+                                            &request_session_identity,
+                                        )
+                                        .await
+                                    {
+                                        publication_backend
+                                            .commit_validated_native_shard_on_connection(
+                                                connection
+                                                    .as_mut()
+                                                    .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                                                &records,
+                                                &mappings,
+                                                &references,
+                                            )
+                                            .await?;
+                                    } else {
+                                        publication_backend
+                                        .commit_validated_native_shard(
+                                            &records,
+                                            &mappings,
+                                            &references,
+                                        )
                                         .await?;
+                                    }
                                     Ok(())
                                 },
                             )
                             .await
                         }
-                        StagedRequestBody::File { file, .. } => register_uploaded_shard_file(
-                            &object_store,
-                            file.path(),
-                            repository_scope,
-                            shard_metadata_limits,
-                            move |records: Vec<shardline_index::FileRecord>,
-                                  mappings: Vec<shardline_index::DedupeShardMapping>| async move {
-                                record_store
-                                    .commit_native_shard_metadata(&records, &mappings)
-                                    .await?;
-                                Ok(())
-                            },
-                        )
-                        .await,
+                        StagedRequestBody::File { file, .. } => {
+                            register_uploaded_shard_file_with_member_references(
+                                &object_store,
+                                file.path(),
+                                repository_scope,
+                                shard_metadata_limits,
+                                move |records, mappings, references| async move {
+                                    if let Some(mut connection) =
+                                        crate::maintenance_barrier::RequestSession::connection_for(
+                                            &request_session_identity,
+                                        )
+                                        .await
+                                    {
+                                        publication_backend
+                                            .commit_validated_native_shard_on_connection(
+                                                connection
+                                                    .as_mut()
+                                                    .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                                                &records,
+                                                &mappings,
+                                                &references,
+                                            )
+                                            .await?;
+                                    } else {
+                                        publication_backend
+                                        .commit_validated_native_shard(
+                                            &records,
+                                            &mappings,
+                                            &references,
+                                        )
+                                        .await?;
+                                    }
+                                    Ok(())
+                                },
+                            )
+                            .await
+                        }
                     }
                     .map_err(ServerError::from)
                 },
@@ -299,7 +418,11 @@ impl super::PostgresBackend {
                 "native shard upload failed after bounded parsing or metadata publication"
             );
         }
-        result
+        if coordinator.index().owner_lost() {
+            Err(ServerError::StaleResourceFence)
+        } else {
+            result
+        }
     }
 }
 
@@ -318,6 +441,204 @@ mod tests {
     use crate::protocol_support::shared_sha256_object_key;
     use crate::test_fixtures::single_chunk_xorb;
     use crate::upload_ingest::RequestBodyReader;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_upload_publication_rejects_lost_request_owner_and_allows_retry() {
+        if postgres_url().is_none() {
+            return;
+        }
+        let cluster = crate::app::build_oci_postgres_test_cluster().await.unwrap();
+        let backend = match &cluster.node_a.backend {
+            crate::backend::ServerBackend::Postgres(backend) => Some(backend),
+            crate::backend::ServerBackend::Local(_) => None,
+        }
+        .unwrap();
+        let pool = backend.index_store().pool();
+        backend
+            .upload_file("owner-loss-file", Bytes::from_static(b"previous"), None)
+            .await
+            .unwrap();
+        let payload = b"owner-loss-native-shard";
+        let (xorb, hash) = single_chunk_xorb(payload);
+        backend.upload_xorb(&hash, xorb).await.unwrap();
+        let (shard, _) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
+        let before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let session = crate::maintenance_barrier::RequestSession::acquire(
+            &backend.gc_barrier_pool,
+            backend.request_session_identity.clone(),
+        )
+        .await
+        .unwrap();
+        let pid: i32 = session
+            .scope(async {
+                let mut owner = crate::maintenance_barrier::RequestSession::connection_for(
+                    &backend.request_session_identity,
+                )
+                .await
+                .unwrap();
+                sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut **owner.as_mut().unwrap())
+                    .await
+                    .unwrap()
+            })
+            .await;
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        );
+        session
+            .scope(async {
+                assert!(
+                    backend
+                        .upload_file("owner-loss-file", Bytes::from_static(b"replacement"), None)
+                        .await
+                        .is_err(),
+                    "file publication replaced its lost request owner"
+                );
+                assert!(
+                    backend
+                        .upload_shard_stream(
+                            RequestBodyReader::from_bytes(shard.clone()),
+                            None,
+                            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+                        )
+                        .await
+                        .is_err(),
+                    "shard publication replaced its lost request owner"
+                );
+            })
+            .await;
+        session.finish().await;
+        let after: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        backend
+            .upload_file("owner-loss-file", Bytes::from_static(b"replacement"), None)
+            .await
+            .unwrap();
+        backend
+            .upload_shard_stream(
+                RequestBodyReader::from_bytes(shard),
+                None,
+                shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            )
+            .await
+            .unwrap();
+        let records: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_file_records")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            records, 5,
+            "retry must publish the new version and shard records"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_shard_publication_rejects_pending_payload_member_despite_empty_cache() {
+        let Some(url) = postgres_url() else {
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("configured PostgreSQL fixture");
+        crate::apply_database_migrations(&pool)
+            .await
+            .expect("owner upgrade");
+        let root = tempfile::tempdir().unwrap();
+        let objects = ServerObjectStore::local(root.path().join("chunks")).unwrap();
+        let backend = PostgresBackend::new_with_object_store_and_upload_parallelism(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap(),
+            NonZeroUsize::new(64).unwrap(),
+            &url,
+            objects.clone(),
+        )
+        .await
+        .unwrap();
+        let payload = b"native shard pending member regression";
+        let (body, hash) = single_chunk_xorb(payload);
+        backend.upload_xorb(&hash, body.clone()).await.unwrap();
+        let validated = crate::xet_adapter::validate_serialized_xorb(
+            &mut std::io::Cursor::new(body),
+            shardline_index::parse_xet_hash_hex(&hash).unwrap(),
+        )
+        .unwrap();
+        let member_hash =
+            shardline_index::xet_hash_hex_string(validated.chunks().first().unwrap().hash());
+        let member_key = shardline_server_core::chunk_object_key(&member_hash).unwrap();
+        let index = shardline_index::PostgresIndexStore::new(pool.clone());
+        let permit = index.begin_remote_delete(&member_key).await.unwrap();
+        let cache =
+            ObjectKey::parse(&format!("_xorb_chunks/{}/{}", hash.get(..2).unwrap(), hash)).unwrap();
+        backend
+            .put_object_bytes_overwrite(&cache, Vec::new())
+            .unwrap();
+        let (shard, file_id) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
+        let error = backend
+            .upload_shard_stream(
+                RequestBodyReader::from_bytes(shard.clone()),
+                None,
+                shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.is_remote_delete_pending(), "{error}");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM shardline_file_records WHERE file_id=$1"
+            )
+            .bind(&file_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(index.finish_remote_delete(&permit).await.unwrap());
+        backend
+            .upload_shard_stream(
+                RequestBodyReader::from_bytes(shard),
+                None,
+                shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM shardline_file_records WHERE file_id=$1"
+            )
+            .bind(&file_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            2
+        );
+        sqlx::query("DELETE FROM shardline_file_records WHERE file_id=$1")
+            .bind(&file_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM shardline_dedupe_shards WHERE chunk_hash=$1")
+            .bind(&member_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 
     trait ObjectStoreFixture {
         fn put_object_bytes_if_absent(

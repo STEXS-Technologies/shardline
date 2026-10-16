@@ -341,6 +341,148 @@ pub(super) async fn metrics(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_shard_http_rejects_owner_loss_and_preserves_two_node_reads() {
+        use axum::body::{Body, Bytes};
+        use std::sync::Arc;
+        use tower::ServiceExt;
+        if std::env::var("DATABASE_URL").is_err() {
+            return;
+        }
+        let mut cluster = crate::app::build_oci_postgres_test_cluster().await.unwrap();
+        let state = Arc::get_mut(&mut cluster.node_a).unwrap();
+        let backend = match &mut state.backend {
+            crate::ServerBackend::Postgres(backend) => Some(backend),
+            crate::ServerBackend::Local(_) => None,
+        }
+        .unwrap();
+        let label = format!("shard_http_owner_{}", std::process::id());
+        let options = backend.index_store().pool().connect_options();
+        backend.gc_barrier_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with((*options).clone().application_name(&label));
+        let pool = backend.index_store().pool().clone();
+        let old = b"previous native HTTP shard";
+        let new = b"replacement native HTTP shard";
+        let (old_xorb, old_hash) = crate::test_fixtures::single_chunk_xorb(old);
+        let (new_xorb, new_hash) = crate::test_fixtures::single_chunk_xorb(new);
+        backend.upload_xorb(&old_hash, old_xorb).await.unwrap();
+        backend.upload_xorb(&new_hash, new_xorb).await.unwrap();
+        let (old_shard, old_file) = crate::test_fixtures::single_file_shard(&[(old, &old_hash)]);
+        let (new_shard, new_file) = crate::test_fixtures::single_file_shard(&[(new, &new_hash)]);
+        let router = |state: Arc<crate::AppState>| {
+            axum::Router::new()
+                .route("/v1/shards", axum::routing::post(super::upload_shard))
+                .route(
+                    "/v1/reconstructions/{file_id}",
+                    axum::routing::get(crate::app::reconstruction_routes::reconstruction),
+                )
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::app::gc_write_barrier_middleware,
+                ))
+                .with_state(state)
+        };
+        let app_a = router(cluster.node_a.clone());
+        let app_b = router(cluster.node_b.clone());
+        let upload = |bytes: Bytes| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/shards")
+                .body(Body::from(bytes))
+                .unwrap()
+        };
+        let read = |file: &str| {
+            axum::http::Request::builder()
+                .uri(format!("/v1/reconstructions/{file}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app_a
+                .clone()
+                .oneshot(upload(old_shard))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE FUNCTION pause_shard_record() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); RETURN NEW; END $$")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER pause_shard_record BEFORE INSERT OR UPDATE ON shardline_file_records FOR EACH ROW EXECUTE FUNCTION pause_shard_record()")
+            .execute(&pool).await.unwrap();
+        let source_app = app_a.clone();
+        let attempt = upload(new_shard.clone());
+        let source = tokio::spawn(async move { source_app.oneshot(attempt).await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let paused: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event='PgSleep')")
+                    .bind(&label).fetch_one(&pool).await.unwrap();
+                if paused { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name=$1"
+            )
+            .bind(&label)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        );
+        assert!(source.await.unwrap().status().is_server_error());
+        sqlx::query("DROP TRIGGER pause_shard_record ON shardline_file_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP FUNCTION pause_shard_record()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let after: Vec<(String, String)> = sqlx::query_as(
+            "SELECT record_key, record::text FROM shardline_file_records ORDER BY record_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        for app in [&app_a, &app_b] {
+            assert_eq!(
+                app.clone().oneshot(read(&old_file)).await.unwrap().status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                app.clone().oneshot(read(&new_file)).await.unwrap().status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(
+            app_a
+                .clone()
+                .oneshot(upload(new_shard))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        for app in [&app_a, &app_b] {
+            assert_eq!(
+                app.clone().oneshot(read(&old_file)).await.unwrap().status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                app.clone().oneshot(read(&new_file)).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+    }
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use serde_json::Value;

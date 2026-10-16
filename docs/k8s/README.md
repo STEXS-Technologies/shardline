@@ -17,6 +17,12 @@ OCI, and S3 multipart sessions use Postgres plus the configured object store, so
 pods are disposable and a retry can land on any replica. API, transfer, and maintenance
 pod roots are local runtime state.
 
+Startup maintenance tracking runs inside each server PID. It needs no tracker
+sidecar, extra Service, new volume or separate configuration. Keep the existing
+GC CronJob: starting or scaling server pods does not start GC. For interrupted
+deletes, safe retries and the integration's current upgrade status, see
+[Maintenance: same commands, clearer results](../MAINTENANCE_INTEGRATION_UX.md).
+
 ## Layout
 
 ```text

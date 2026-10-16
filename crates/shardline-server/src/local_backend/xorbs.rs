@@ -29,6 +29,8 @@ impl LocalBackend {
         expected_hash: &str,
         body: Bytes,
     ) -> Result<XorbUploadResponse, ServerError> {
+        let _barrier =
+            crate::maintenance_barrier::acquire_local_shared(&self.metadata_root).await?;
         self.upload_xorb_stream(expected_hash, RequestBodyReader::from_bytes(body))
             .await
     }
@@ -46,8 +48,10 @@ impl LocalBackend {
     ) -> Result<XorbUploadResponse, ServerError> {
         let object_store = self.object_store();
         let staged = stage_body_for_object_store(&mut body, &object_store).await?;
-        let body_length = staged.length();
-        let intent_id = format!("xorb-{expected_hash}");
+        let (staged, body_length) =
+            crate::upload_identity::xorb_length(expected_hash, staged, &self.stream_work_pool)
+                .await?;
+        let intent_id = crate::upload_identity::xorb(expected_hash, body_length);
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
             intent_id.clone(),

@@ -21,9 +21,22 @@ use crate::{
 };
 
 pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
+    run_inner(args, true).await
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn run_direct(args: impl Iterator<Item = OsString>) -> ExitCode {
+    if let Some(command) = crate::maintenance::configuration::command() {
+        return execute_command(Ok(command)).await;
+    }
+    run_inner(args, false).await
+}
+
+async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> ExitCode {
     // Embedders may already own the process-wide subscriber, and this public
     // entry point can be called more than once. Keep their subscriber in place.
     let _initialization = tracing_subscriber::fmt()
+        .with_writer(crate::logging::CommandLogWriter)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -35,7 +48,116 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         return crate::xet::run_xet(xet_args).await;
     }
 
-    match CliCommand::parse(args) {
+    let command = crate::command::parse_command(args.clone(), true);
+    #[cfg(target_os = "linux")]
+    if _supervised && let Ok(crate::command::ParsedCommand::Existing(parsed)) = &command {
+        match crate::maintenance::prepare_automatic(parsed) {
+            Ok(Some(operation)) => {
+                return maintenance_status(
+                    tokio::task::spawn_blocking(move || {
+                        crate::maintenance::run_automatic(&operation, args)
+                    })
+                    .await,
+                );
+            }
+            Ok(None) => {}
+            // Preparation checks the same configuration and root as the
+            // original handler. Invalid input has not started work and is not
+            // a recording failure; let that handler report its error once.
+            Err(error) => tracing::debug!(
+                "automatic maintenance preparation deferred to the existing command: {error}"
+            ),
+        }
+    }
+    let command = match command {
+        Ok(crate::command::ParsedCommand::History(history_args)) => {
+            let inspection_subject = if history_args.pending_deletes {
+                "Pending-delete state"
+            } else {
+                "Maintenance history"
+            };
+            let inspection = if history_args.pending_deletes {
+                crate::pending_delete_inspection::run(
+                    history_args.root.as_deref(),
+                    history_args.after,
+                    usize::from(history_args.limit),
+                )
+                .await
+            } else if history_args.archive {
+                crate::history_inspection::run_archive(
+                    history_args.root.as_deref(),
+                    history_args.after,
+                    usize::from(history_args.limit),
+                )
+                .await
+            } else if history_args.local {
+                crate::history_inspection::run_local(
+                    history_args.root.as_deref(),
+                    history_args.after,
+                    usize::from(history_args.limit),
+                )
+                .await
+            } else {
+                crate::history_inspection::run(
+                    history_args.root.as_deref(),
+                    history_args.after,
+                    usize::from(history_args.limit),
+                )
+                .await
+            };
+            return match inspection {
+                Ok(page) => match to_string_pretty(&page) {
+                    Ok(text) => stdout_text(format_args!("{text}\n")),
+                    Err(error) => error_chain_status(&error, ExitCode::FAILURE),
+                },
+                Err(error) => {
+                    let _ignored = writeln!(
+                        io::stderr().lock(),
+                        "{inspection_subject} could not be inspected; this does not establish whether work ran or the server is ready."
+                    );
+                    if let Some(guidance) =
+                        crate::history_inspection::failure_guidance(error.as_ref())
+                    {
+                        let _guidance_written = writeln!(io::stderr().lock(), "{guidance}");
+                    }
+                    error_chain_status(error.as_ref(), ExitCode::FAILURE)
+                }
+            };
+        }
+        #[cfg(target_os = "linux")]
+        Ok(crate::command::ParsedCommand::Maintenance {
+            state_dir,
+            task_id,
+            operation,
+        }) => {
+            return maintenance_status(
+                tokio::task::spawn_blocking(move || {
+                    crate::maintenance::run(&state_dir, &task_id, operation)
+                })
+                .await,
+            );
+        }
+        #[cfg(target_os = "linux")]
+        Ok(crate::command::ParsedCommand::MaintenanceWorker {
+            journal,
+            scope,
+            generation,
+        }) => {
+            return maintenance_status(
+                tokio::task::spawn_blocking(move || {
+                    crate::maintenance::run_worker(&journal, scope, generation)
+                })
+                .await,
+            );
+        }
+        Ok(crate::command::ParsedCommand::Existing(command)) => Ok(command),
+        Err(error) => Err(error),
+    };
+    execute_command(command).await
+}
+
+async fn execute_command(command: Result<CliCommand, crate::CliParseError>) -> ExitCode {
+    match command {
         Ok(CliCommand::ProviderlessSetup) => match run_providerless_setup(None) {
             Ok(report) => output_status(
                 report.write_summary(&mut io::stdout().lock()),
@@ -530,6 +652,45 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         },
         Err(error) if error.is_help() => stdout_text(format_args!("{error}")),
         Err(error) => diagnostic_text(format_args!("{error}"), ExitCode::from(2)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn maintenance_status(
+    result: Result<
+        Result<crate::maintenance::CommandOutput, Box<dyn std::error::Error + Send + Sync>>,
+        tokio::task::JoinError,
+    >,
+) -> ExitCode {
+    match result {
+        Ok(Ok(output)) if output.exit_code.is_some() => {
+            ExitCode::from(output.exit_code.unwrap_or(2))
+        }
+        Ok(Ok(mut output)) if output.capture.is_some() => {
+            let Some(mut capture) = output.capture.take() else {
+                return ExitCode::FAILURE;
+            };
+            if let Err(error) = std::io::copy(&mut capture.stdout, &mut io::stdout().lock()) {
+                return report_output_error(&error);
+            }
+            if let Err(error) = std::io::copy(&mut capture.stderr, &mut io::stderr().lock()) {
+                return report_output_error(&error);
+            }
+            ExitCode::from(capture.exit_code)
+        }
+        Ok(Ok(output)) => output_status(
+            write!(io::stdout().lock(), "{}", output.text),
+            if output.success {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            },
+        ),
+        Ok(Err(error)) => {
+            let _written = writeln!(io::stderr().lock(), "maintenance failed: {error}");
+            ExitCode::FAILURE
+        }
+        Err(error) => error_chain_status(&error, ExitCode::FAILURE),
     }
 }
 

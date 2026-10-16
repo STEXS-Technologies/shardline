@@ -83,6 +83,7 @@ pub(super) fn database_initialization(
 #[derive(Debug, Clone)]
 pub struct LocalIndexStore {
     root: PathBuf,
+    read_only: bool,
 }
 
 impl LocalIndexStore {
@@ -91,6 +92,17 @@ impl LocalIndexStore {
     pub fn open(root: PathBuf) -> Self {
         Self {
             root: helpers::normalize_local_root(root),
+            read_only: false,
+        }
+    }
+
+    /// Opens existing metadata for inspection without creation or migrations.
+    /// SQLite rejects mutations through this store's connections.
+    #[must_use]
+    pub fn open_read_only(root: PathBuf) -> Self {
+        Self {
+            root: helpers::normalize_local_root(root),
+            read_only: true,
         }
     }
 
@@ -246,6 +258,14 @@ impl LocalIndexStore {
     }
 
     pub(crate) fn open_connection(&self) -> Result<Connection, LocalIndexStoreError> {
+        if self.read_only {
+            helpers::ensure_directory_path_components_are_not_symlinked(&self.root)?;
+            let path = self.database_path();
+            helpers::ensure_sqlite_database_path_is_safe(&path)?;
+            let connection = Connection::open_with_flags(&path, helpers::sqlite_read_only_flags())?;
+            connection.busy_timeout(std::time::Duration::from_secs(30))?;
+            return Ok(connection);
+        }
         helpers::initialize_local_metadata_root(&self.root)?;
         let database_path = self.database_path();
         helpers::ensure_sqlite_database_path_is_safe(&database_path)?;
@@ -285,6 +305,7 @@ impl LocalIndexStore {
             helpers::ensure_local_schema_migrations_table(&connection)?;
             helpers::apply_pending_local_migrations(&mut connection)?;
             helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
+            super::upload_recovery_guard::install(&connection)?;
             *initialized = true;
         }
         let import_state = connection

@@ -2,6 +2,7 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode, header},
 };
+use shardline_index::OciTagStore as _;
 use tower::ServiceExt;
 
 use super::test_helpers::{build_oci_postgres_test_cluster, build_oci_test_state, oci_test_router};
@@ -9,6 +10,511 @@ use super::test_helpers::{build_oci_postgres_test_cluster, build_oci_test_state,
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const REPO: &str = "team/assets";
 const TAG: &str = "latest";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() {
+    if std::env::var("DATABASE_URL").is_err() {
+        return;
+    }
+    let mut cluster = build_oci_postgres_test_cluster().await.unwrap();
+    let state = std::sync::Arc::get_mut(&mut cluster.node_a).unwrap();
+    let backend = match &mut state.backend {
+        crate::ServerBackend::Postgres(backend) => Some(backend),
+        crate::ServerBackend::Local(_) => None,
+    }
+    .unwrap();
+    let label = format!("oci_barrier_loss_{}", std::process::id());
+    let options = backend.index_store().pool().connect_options();
+    backend.gc_barrier_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*options).clone().application_name(&label));
+    let resource_label = format!("{label}_resource");
+    backend.resource_lock_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*options).clone().application_name(&resource_label));
+    let pool = backend.index_store().pool().clone();
+    backend
+        .index_store()
+        .initialize_remote_delete_guard()
+        .await
+        .unwrap();
+    let app = oci_test_router(&cluster.node_a);
+    let media = "application/vnd.oci.image.index.v1+json";
+    let before = format!(
+        r#"{{"schemaVersion":2,"mediaType":"{media}","manifests":[],"annotations":{{"value":"before"}}}}"#
+    );
+    let after = before.replace("before", "after");
+    let uri = "/v2/ownership/manifest/manifests/latest";
+    assert_eq!(
+        send_with_content_type(&app, Method::PUT, uri, Body::from(before.clone()), media)
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    sqlx::query("CREATE FUNCTION pause_publication() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); RETURN NEW; END $$")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER pause_publication BEFORE INSERT OR UPDATE ON shardline_oci_tags FOR EACH ROW EXECUTE FUNCTION pause_publication()")
+        .execute(&pool).await.unwrap();
+    let upload_app = app.clone();
+    let upload = tokio::spawn(async move {
+        send_with_content_type(&upload_app, Method::PUT, uri, Body::from(after), media).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let paused: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND application_name IN ($1, $2))")
+                .bind(&label).bind(&resource_label).fetch_one(&pool).await.unwrap();
+            if paused { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let terminated: bool = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
+    )
+    .bind(&label)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(terminated);
+    let response = upload.await.unwrap();
+    assert!(
+        response.status().is_server_error(),
+        "upload acknowledged after losing its GC barrier: {}",
+        response.status()
+    );
+    let latest = send(&app, Method::GET, uri, Body::empty()).await;
+    assert_eq!(latest.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(latest.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), before.as_bytes());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_ordinary_gc_reclaims_row_scoped_abandoned_manifest_after_hold_release() {
+    use shardline_index::{AsyncIndexStore as _, OciObjectStore as _};
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&url).await.unwrap();
+    let schema = format!(
+        "staged_gc_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut scoped_url = url::Url::parse(&url).unwrap();
+    let old_options = scoped_url
+        .query_pairs()
+        .find(|(key, _)| key == "options")
+        .map_or_else(String::new, |(_, value)| value.into_owned());
+    let other_parameters: Vec<_> = scoped_url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    scoped_url.set_query(None);
+    scoped_url
+        .query_pairs_mut()
+        .extend_pairs(other_parameters)
+        .append_pair("options", &format!("{old_options} -csearch_path={schema}"));
+    let url = scoped_url.as_str();
+    let bootstrap = sqlx::PgPool::connect(url).await.unwrap();
+    crate::apply_database_migrations(&bootstrap).await.unwrap();
+    bootstrap.close().await;
+    let cluster = super::test_helpers::build_oci_postgres_test_cluster_for_url(url)
+        .await
+        .unwrap();
+    let backend = match &cluster.node_a.backend {
+        crate::ServerBackend::Postgres(backend) => Some(backend),
+        crate::ServerBackend::Local(_) => None,
+    }
+    .unwrap();
+    let store = backend.index_store();
+    store.initialize_remote_delete_guard().await.unwrap();
+    let app = oci_test_router(&cluster.node_a);
+    let repository = format!("abandoned/manifest-{}", std::process::id());
+    let config = upload_blob(&app, &repository, b"{}").await;
+    let layer = upload_blob(&app, &repository, b"layr").await;
+    let document = test_manifest_json(&config, &layer);
+    let digest = sha256_hex(document.as_bytes());
+    let key = shardline_index::OciObjectKey {
+        scope_namespace: "global".to_owned(),
+        repository: repository.clone(),
+        kind: shardline_index::OciObjectKind::Manifest,
+        digest_hex: digest.clone(),
+    };
+    let repository_id = sha256_hex(repository.as_bytes());
+    let physical = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/manifests/{digest}"
+    ))
+    .unwrap();
+    let media = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/manifest-media-types/{digest}"
+    ))
+    .unwrap();
+    let actor_role = format!("staged_actor_{schema}");
+    for statement in [
+        format!("CREATE ROLE {actor_role}"),
+        format!("GRANT USAGE ON SCHEMA {schema} TO {actor_role}"),
+        format!("GRANT SELECT,DELETE ON {schema}.shardline_oci_object_tombstones TO {actor_role}"),
+        format!("GRANT SELECT ON {schema}.shardline_oci_tags TO {actor_role}"),
+        format!(
+            "GRANT SELECT,INSERT,UPDATE ON {schema}.shardline_reliability_events TO {actor_role}"
+        ),
+        format!("ALTER TABLE {schema}.shardline_oci_object_tombstones ENABLE ROW LEVEL SECURITY"),
+        format!(
+            "CREATE POLICY actor_scope ON {schema}.shardline_oci_object_tombstones TO {actor_role} USING(scope_namespace='global') WITH CHECK(scope_namespace='global')"
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    let mut connection = store.pool().acquire().await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET SESSION AUTHORIZATION {actor_role}"
+    )))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    store
+        .stage_oci_object_on_connection(&mut connection, &key, &[])
+        .await
+        .unwrap();
+    sqlx::query("RESET SESSION AUTHORIZATION")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    assert!(store.list_oci_object_tombstones().await.unwrap().is_empty());
+    cluster
+        .node_a
+        .backend
+        .put_object_bytes_if_absent(&physical, document.as_bytes().to_vec())
+        .await
+        .unwrap();
+    cluster
+        .node_a
+        .backend
+        .put_object_bytes_if_absent(&media, MANIFEST_MEDIA_TYPE.as_bytes().to_vec())
+        .await
+        .unwrap();
+    let mut published: serde_json::Value = serde_json::from_str(&document).unwrap();
+    published.as_object_mut().unwrap().insert(
+        "annotations".to_owned(),
+        serde_json::json!({"status": "published"}),
+    );
+    assert_eq!(
+        send_with_content_type(
+            &app,
+            Method::PUT,
+            &format!("/v2/{repository}/manifests/keep"),
+            Body::from(published.to_string()),
+            MANIFEST_MEDIA_TYPE
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    let hold = shardline_index::RetentionHold::new(
+        physical.clone(),
+        "keep staged bytes".to_owned(),
+        shardline_protocol::unix_now_seconds_lossy(),
+        None,
+    )
+    .unwrap();
+    let shared = crate::maintenance_barrier::postgres_shared_work_pool(url)
+        .await
+        .unwrap();
+    shardline_index::PostgresIndexStore::new(shared.clone())
+        .upsert_retention_hold(&hold)
+        .await
+        .unwrap();
+    shared.close().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let options = crate::LocalGcOptions {
+        sweep: true,
+        retention_seconds: 0,
+        ..crate::LocalGcOptions::default()
+    };
+    for held in [true, false] {
+        if !held {
+            let shared = crate::maintenance_barrier::postgres_shared_work_pool(url)
+                .await
+                .unwrap();
+            assert!(
+                shardline_index::PostgresIndexStore::new(shared.clone())
+                    .delete_retention_hold(&physical)
+                    .await
+                    .unwrap()
+            );
+            shared.close().await;
+        }
+        let work = crate::maintenance_barrier::postgres_exclusive_work_pool(url)
+            .await
+            .unwrap();
+        let report = shardline_gc::run_postgres_gc_with_remote_delete_protection(
+            &shardline_index::PostgresRecordStore::new(work.clone()),
+            &shardline_index::PostgresIndexStore::new(work.clone()),
+            &backend.object_store(),
+            &[crate::ServerFrontend::Oci],
+            options,
+        )
+        .await
+        .unwrap();
+        work.close().await;
+        assert_eq!(report.report.reclaimed_oci_tombstones, u64::from(!held));
+        if held {
+            assert!(
+                cluster
+                    .node_a
+                    .backend
+                    .object_length(&physical)
+                    .await
+                    .is_ok()
+            );
+            assert!(cluster.node_a.backend.object_length(&media).await.is_ok());
+        } else {
+            assert!(matches!(
+                cluster.node_a.backend.object_length(&physical).await,
+                Err(crate::ServerError::NotFound)
+            ));
+            assert!(matches!(
+                cluster.node_a.backend.object_length(&media).await,
+                Err(crate::ServerError::NotFound)
+            ));
+        }
+        assert_eq!(
+            send(
+                &app,
+                Method::GET,
+                &format!("/v2/{repository}/manifests/keep"),
+                Body::empty()
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+    assert!(
+        !store
+            .list_oci_object_tombstones()
+            .await
+            .unwrap()
+            .iter()
+            .any(|entry| entry.key == key)
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {actor_role}")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_interrupted_manifest_bytes_stay_hidden_until_publication() {
+    if std::env::var("DATABASE_URL").is_err() {
+        return;
+    }
+    let cluster = build_oci_postgres_test_cluster().await.unwrap();
+    let backend = match &cluster.node_a.backend {
+        crate::ServerBackend::Postgres(backend) => Some(backend),
+        crate::ServerBackend::Local(_) => None,
+    }
+    .unwrap();
+    let store = backend.index_store();
+    store.initialize_remote_delete_guard().await.unwrap();
+    let app_a = oci_test_router(&cluster.node_a);
+    let app_b = oci_test_router(&cluster.node_b);
+    let repository = format!("interrupted/manifest-{}", std::process::id());
+    let config = upload_blob(&app_a, &repository, b"{}").await;
+    let layer = upload_blob(&app_a, &repository, b"layr").await;
+    let document = test_manifest_json(&config, &layer);
+    let digest = sha256_hex(document.as_bytes());
+    let key = shardline_index::OciObjectKey {
+        scope_namespace: "global".to_owned(),
+        repository: repository.clone(),
+        kind: shardline_index::OciObjectKind::Manifest,
+        digest_hex: digest.clone(),
+    };
+    let dependency = shardline_index::OciObjectKey {
+        kind: shardline_index::OciObjectKind::Blob,
+        digest_hex: layer.clone(),
+        ..key.clone()
+    };
+    let mut connection = store.pool().acquire().await.unwrap();
+    store
+        .stage_oci_object_on_connection(&mut connection, &key, std::slice::from_ref(&dependency))
+        .await
+        .unwrap();
+    let repository_id = sha256_hex(repository.as_bytes());
+    let physical = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/manifests/{digest}"
+    ))
+    .unwrap();
+    let media = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/manifest-media-types/{digest}"
+    ))
+    .unwrap();
+    cluster
+        .node_a
+        .backend
+        .put_object_bytes_if_absent(&physical, document.as_bytes().to_vec())
+        .await
+        .unwrap();
+    cluster
+        .node_a
+        .backend
+        .put_object_bytes_if_absent(&media, MANIFEST_MEDIA_TYPE.as_bytes().to_vec())
+        .await
+        .unwrap();
+    let dependency_key = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/blobs/{layer}"
+    ))
+    .unwrap();
+    let permit = store.begin_remote_delete(&dependency_key).await.unwrap();
+    assert!(
+        store
+            .publish_oci_object_with_references_on_connection(
+                &mut connection,
+                &key,
+                &[],
+                &[dependency]
+            )
+            .await
+            .unwrap_err()
+            .is_remote_delete_pending()
+    );
+    drop(connection);
+    let digest_uri = format!("/v2/{repository}/manifests/sha256:{digest}");
+    for app in [&app_a, &app_b] {
+        assert_eq!(
+            send(app, Method::GET, &digest_uri, Body::empty())
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(app, Method::HEAD, &digest_uri, Body::empty())
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert!(store.finish_remote_delete(&permit).await.unwrap());
+    assert_eq!(
+        send_with_content_type(
+            &app_b,
+            Method::PUT,
+            &format!("/v2/{repository}/manifests/latest"),
+            Body::from(document),
+            MANIFEST_MEDIA_TYPE
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        send(&app_a, Method::GET, &digest_uri, Body::empty())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_manifest_dependency_pending_delete_returns_retryable_error() {
+    if std::env::var("DATABASE_URL").is_err() {
+        return;
+    }
+    let cluster = build_oci_postgres_test_cluster().await.unwrap();
+    let backend = match &cluster.node_a.backend {
+        crate::ServerBackend::Postgres(backend) => Some(backend),
+        crate::ServerBackend::Local(_) => None,
+    }
+    .unwrap();
+    let store = backend.index_store();
+    store.initialize_remote_delete_guard().await.unwrap();
+    let app_a = oci_test_router(&cluster.node_a);
+    let app_b = oci_test_router(&cluster.node_b);
+    let repository = format!("pending/dependency-{}", std::process::id());
+    let config = upload_blob(&app_a, &repository, b"{}").await;
+    let layer = upload_blob(&app_a, &repository, b"layr").await;
+    let document = test_manifest_json(&config, &layer);
+    let repository_id = sha256_hex(repository.as_bytes());
+    let physical = shardline_storage::ObjectKey::parse(&format!(
+        "protocols/oci/global/repos/{repository_id}/blobs/{layer}"
+    ))
+    .unwrap();
+    let permit = store.begin_remote_delete(&physical).await.unwrap();
+    let uri = format!("/v2/{repository}/manifests/latest");
+    let response = send_with_content_type(
+        &app_b,
+        Method::PUT,
+        &uri,
+        Body::from(document.clone()),
+        MANIFEST_MEDIA_TYPE,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .unwrap(),
+        "1"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 16_384)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("object has an unresolved remote delete; retry after reconciliation"));
+    let digest_uri = format!(
+        "/v2/{repository}/manifests/sha256:{}",
+        sha256_hex(document.as_bytes())
+    );
+    assert_eq!(
+        send(&app_a, Method::GET, &digest_uri, Body::empty())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        store
+            .oci_tag("global", &repository, "latest")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.finish_remote_delete(&permit).await.unwrap());
+    let response = send_with_content_type(
+        &app_b,
+        Method::PUT,
+        &uri,
+        Body::from(document),
+        MANIFEST_MEDIA_TYPE,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(
+        store
+            .oci_tag("global", &repository, "latest")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
 
 /// A minimal OCI image manifest for testing.
 fn test_manifest_json(config_digest: &str, layer_digest: &str) -> String {

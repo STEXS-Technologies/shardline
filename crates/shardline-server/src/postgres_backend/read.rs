@@ -16,8 +16,8 @@ use crate::{
     ServerError,
     chunk_store::chunk_object_key,
     download_stream::{
-        ServerByteStream, file_record_byte_stream, object_byte_range_stream, object_byte_stream,
-        validated_xorb_byte_range_stream,
+        ServerByteStream, collect_file_record_bytes, file_record_byte_stream,
+        object_byte_range_stream, object_byte_stream, validated_xorb_byte_range_stream,
     },
     error::IndexError,
     object_store::{read_full_object, reconstruct_file_record_bytes, visit_object_prefix},
@@ -44,28 +44,63 @@ impl super::PostgresBackend {
         source_file_id: &str,
         destination_file_id: &str,
     ) -> Result<bool, ServerError> {
-        match self.read_record(destination_file_id, None, None).await {
+        match self
+            .read_record_for_request(destination_file_id, None, None)
+            .await
+        {
             Ok(_record) => return Ok(false),
             Err(ServerError::NotFound) => {}
             Err(error) => return Err(error),
         }
-        let mut record = self.read_record(source_file_id, None, None).await?;
-        record.file_id = destination_file_id.to_owned();
-        self.record_store
-            .commit_file_version_metadata(&record)
+        let mut record = self
+            .read_record_for_request(source_file_id, None, None)
             .await?;
+        record.file_id = destination_file_id.to_owned();
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &self.request_session_identity,
+        )
+        .await
+        {
+            self.record_store
+                .commit_file_version_metadata_on_connection(
+                    connection
+                        .as_mut()
+                        .ok_or_else(|| PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                    &record,
+                )
+                .await?;
+        } else {
+            self.record_store
+                .commit_file_version_metadata(&record)
+                .await?;
+        }
         Ok(true)
     }
 
     pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
-        let record = match self.read_record(file_id, None, None).await {
+        let record = match self.read_record_for_request(file_id, None, None).await {
             Ok(record) => record,
             Err(ServerError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
         };
-        self.record_store
-            .delete_file_version_metadata(&record)
-            .await?;
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &self.request_session_identity,
+        )
+        .await
+        {
+            self.record_store
+                .delete_file_version_metadata_on_connection(
+                    connection
+                        .as_mut()
+                        .ok_or_else(|| PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                    &record,
+                )
+                .await?;
+        } else {
+            self.record_store
+                .delete_file_version_metadata(&record)
+                .await?;
+        }
         Ok(true)
     }
 
@@ -83,14 +118,10 @@ impl super::PostgresBackend {
         file_id: &str,
         expected_content_hash: &str,
     ) -> Result<bool, ServerError> {
-        // Atomic check-and-delete: read the record and verify the hash in one
-        // step, then delete. If a concurrent upload replaced the record between
-        // read and delete, the hash check fails and we skip the deletion —
-        // preserving the winner's latest alias. The read_record + hash check
-        // is the fast-path; the delete_file_version_metadata is the action.
-        // This is NOT fully atomic at the database level, but the hash check
-        // ensures we never delete a record whose content_hash has changed.
-        let record = match self.read_record(file_id, None, None).await {
+        // This read is only a fast path. The transaction repeats the hash
+        // condition in the DELETE so a publisher winning after this read keeps
+        // its latest alias. A failed condition also retains the losing version.
+        let record = match self.read_record_for_request(file_id, None, None).await {
             Ok(record) => record,
             Err(ServerError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
@@ -100,10 +131,26 @@ impl super::PostgresBackend {
             // upload won. Do not delete the winner's record.
             return Ok(false);
         }
-        self.record_store
-            .delete_file_version_metadata(&record)
-            .await?;
-        Ok(true)
+        if let Some(mut connection) = crate::maintenance_barrier::RequestSession::connection_for(
+            &self.request_session_identity,
+        )
+        .await
+        {
+            Ok(self
+                .record_store
+                .delete_file_version_metadata_if_latest_on_connection(
+                    connection
+                        .as_mut()
+                        .ok_or_else(|| PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                    &record,
+                )
+                .await?)
+        } else {
+            Ok(self
+                .record_store
+                .delete_file_version_metadata_if_latest(&record)
+                .await?)
+        }
     }
 
     pub(crate) async fn read_file_stream(
@@ -239,7 +286,6 @@ impl super::PostgresBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
-        let total_bytes = record.total_bytes;
         let object_store = self.object_store();
         let server_frontends = self.server_frontends.clone();
 
@@ -257,17 +303,7 @@ impl super::PostgresBackend {
             .map_err(ServerError::BlockingTask)?;
         }
 
-        // StoredChunks path: stream with LZ4 decompression and xorb-fast-path.
-        let stream =
-            file_record_byte_stream(object_store, record, None, self.stream_work_pool.clone())
-                .await?;
-        let mut output = Vec::with_capacity(usize::try_from(total_bytes)?);
-        tokio::pin!(stream);
-        use futures_util::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            output.extend_from_slice(&chunk?);
-        }
-        Ok(output)
+        collect_file_record_bytes(object_store, record, self.stream_work_pool.clone()).await
     }
 
     /// Reads a stored chunk by hash.
@@ -458,12 +494,12 @@ impl super::PostgresBackend {
         repository_references_hash_in_scope(&self.record_store, hash_hex, repository_scope).await
     }
 
-    pub(super) async fn read_record(
+    fn file_record_locator(
         &self,
         file_id: &str,
         content_hash: Option<&str>,
         repository_scope: Option<&RepositoryScope>,
-    ) -> Result<FileRecord, ServerError> {
+    ) -> Result<shardline_index::PostgresRecordLocator, ServerError> {
         validate_identifier(file_id)?;
         let probe = FileRecord {
             file_id: file_id.to_owned(),
@@ -474,15 +510,54 @@ impl super::PostgresBackend {
             repository_scope: repository_scope.cloned(),
             chunks: Vec::new(),
         };
-        let locator = if let Some(content_hash) = content_hash {
+        Ok(if let Some(content_hash) = content_hash {
             validate_content_hash(content_hash)?;
             self.record_store.version_record_locator(&probe)
         } else {
             self.record_store.latest_record_locator(&probe)
-        };
+        })
+    }
+
+    pub(super) async fn read_record(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<FileRecord, ServerError> {
+        let locator = self.file_record_locator(file_id, content_hash, repository_scope)?;
         let bytes = RecordTraversal::read_record_bytes(&self.record_store, &locator)
             .await
             .map_err(map_record_store_error)?;
+        parse_stored_file_record_bytes(&bytes)
+    }
+
+    // Copy/delete do not hold a ResourceWriteGuard while reading. Ordinary
+    // protocol reads may hold one and must not re-enter its session mutex.
+    async fn read_record_for_request(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<FileRecord, ServerError> {
+        let locator = self.file_record_locator(file_id, content_hash, repository_scope)?;
+        let bytes = if let Some(mut connection) =
+            crate::maintenance_barrier::RequestSession::connection_for(
+                &self.request_session_identity,
+            )
+            .await
+        {
+            self.record_store
+                .read_record_bytes_on_connection(
+                    connection
+                        .as_mut()
+                        .ok_or_else(|| PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
+                    &locator,
+                )
+                .await
+        } else {
+            RecordTraversal::read_record_bytes(&self.record_store, &locator).await
+        }
+        .map_err(map_record_store_error)?;
         parse_stored_file_record_bytes(&bytes)
     }
 

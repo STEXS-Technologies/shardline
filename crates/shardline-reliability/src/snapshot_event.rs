@@ -1,4 +1,4 @@
-use penelope_domain::ContentDigest as PenelopeDigest;
+use crate::PenelopeDigest;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{
@@ -53,7 +53,7 @@ pub struct SnapshotEvidenceEvent<S: SnapshotEvidence> {
     /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
     #[serde(default)]
     pub digest_encoding: DigestEncoding,
-    pub state_digest: statechronicle_core::digest::ContentDigest,
+    pub state_digest: crate::StateChronicleDigest,
     pub process_digest: PenelopeDigest,
 }
 

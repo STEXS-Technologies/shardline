@@ -22,6 +22,8 @@ pub struct PostgresBackend {
     pub(super) index_store: PostgresIndexStore,
     pub(crate) gc_barrier_pool: sqlx::PgPool,
     pub(crate) resource_lock_pool: sqlx::PgPool,
+    pub(crate) request_session_identity: std::sync::Arc<()>,
+    pub(crate) request_session_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub(super) record_store: PostgresRecordStore,
     pub(super) object_store: ServerObjectStore,
     pub(crate) stream_work_pool: crate::admission::BoundedPool,
@@ -100,7 +102,9 @@ impl PostgresBackend {
         object_store: ServerObjectStore,
         server_frontends: &[ServerFrontend],
     ) -> Result<Self, ServerError> {
-        let pool = connect_postgres_metadata_pool(index_postgres_url, 10)?;
+        // Reuse the former 10 metadata + 4 request connections. Admission
+        // leaves four connections available for metadata even under write load.
+        let pool = connect_postgres_metadata_pool(index_postgres_url, 14)?;
 
         Ok(Self {
             public_base_url,
@@ -108,13 +112,13 @@ impl PostgresBackend {
             upload_max_in_flight_chunks,
             server_frontends: server_frontends.to_vec(),
             index_store: PostgresIndexStore::new(pool.clone()),
-            record_store: PostgresRecordStore::new(pool),
-            gc_barrier_pool: crate::maintenance_barrier::postgres_coordination_pool(
-                index_postgres_url,
-            )?,
+            record_store: PostgresRecordStore::new(pool.clone()),
+            gc_barrier_pool: pool,
             resource_lock_pool: crate::maintenance_barrier::postgres_coordination_pool(
                 index_postgres_url,
             )?,
+            request_session_identity: std::sync::Arc::new(()),
+            request_session_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(10)),
             object_store,
             stream_work_pool: crate::admission::ExecutionPools::default_sizes().blocking_io,
         })
@@ -170,17 +174,34 @@ impl PostgresBackend {
         &self,
         minimum_age: std::time::Duration,
     ) -> Result<(), ServerError> {
+        self.reconcile_upload_intents(
+            minimum_age,
+            &crate::upload_intent_recovery::startup::RecoveryPass::Complete,
+        )
+        .await
+        .map(|_pending| ())
+    }
+
+    pub(crate) async fn reconcile_upload_intents(
+        &self,
+        minimum_age: std::time::Duration,
+        pass: &crate::upload_intent_recovery::startup::RecoveryPass,
+    ) -> Result<bool, ServerError> {
         use shardline_index::{UploadIntentState, UploadIntentStore};
         use shardline_storage::{AsyncObjectStore, ObjectKey};
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         let mut reconciled = 0u64;
+        let mut pending_files = false;
         for state in &[
             UploadIntentState::Created,
             UploadIntentState::Storing,
             UploadIntentState::Stored,
             UploadIntentState::MetadataCommitted,
         ] {
+            if pass.stopped() {
+                return Ok(pending_files);
+            }
             let intents = match self.index_store.intents_by_state(*state).await {
                 Ok(intents) => intents,
                 Err(e) => {
@@ -191,6 +212,12 @@ impl PostgresBackend {
                 }
             };
             for intent in &intents {
+                if pass.stopped() {
+                    return Ok(pending_files);
+                }
+                if !pass.visits(intent) {
+                    continue;
+                }
                 let reliability_events = self
                     .index_store
                     .reliability_events(intent.intent_id())
@@ -224,16 +251,54 @@ impl PostgresBackend {
                     age_secs = age.as_secs(),
                     "reconciling stuck intent"
                 );
-                let visible_file_record =
-                    if let Some(file_id) = intent.object_key().strip_prefix("record/") {
-                        match self.read_record(file_id, None, None).await {
-                            Ok(_record) => true,
-                            Err(ServerError::NotFound) => false,
-                            Err(error) => return Err(error),
-                        }
-                    } else {
-                        false
+                let file_intent = intent.object_key().starts_with("record/");
+                if file_intent
+                    && !crate::upload_intent_recovery::file_publication_may_have_completed(intent)
+                {
+                    tracing::warn!(intent_id = %intent.intent_id(), "file upload has no Stored checkpoint; preserving unfinished intent for a fresh validated request");
+                    continue;
+                }
+                let visible_file_record = if let Some(file_id) =
+                    intent.object_key().strip_prefix("record/")
+                {
+                    let crate::upload_intent_recovery::FileRecoveryScope::Known(scope) =
+                        crate::upload_intent_recovery::file_recovery_scope(&reliability_events)
+                    else {
+                        tracing::warn!(intent_id = %intent.intent_id(), "legacy file scope cannot be verified; preserving unfinished intent");
+                        continue;
                     };
+                    match self.read_record(file_id, None, scope.as_ref()).await {
+                        Ok(record) => {
+                            if pass.defers_file_bytes() {
+                                pending_files |= crate::upload_intent_recovery::file_record_has_expected_identity(intent, &reliability_events, &record);
+                                continue;
+                            }
+                            match crate::upload_intent_recovery::file_record_matches_intent(
+                                intent,
+                                &reliability_events,
+                                record,
+                                self.object_store(),
+                                self.stream_work_pool.clone(),
+                                pass,
+                            )
+                            .await
+                            {
+                                Ok(matches) => matches,
+                                Err(error) => {
+                                    tracing::warn!(intent_id = %intent.intent_id(), %error, "file upload verification unavailable; preserving unfinished intent");
+                                    false
+                                }
+                            }
+                        }
+                        Err(ServerError::NotFound) => false,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    false
+                };
+                if pass.stopped() {
+                    return Ok(pending_files);
+                }
                 if visible_file_record {
                     // The atomic file-record commit is the visibility boundary.
                     // Walk every durable boundary so recovery remains valid even
@@ -245,6 +310,9 @@ impl PostgresBackend {
                         UploadIntentState::MetadataCommitted,
                         UploadIntentState::Visible,
                     ] {
+                        if pass.stopped() {
+                            return Ok(pending_files);
+                        }
                         let transitioned = transition_intent_for_recovery(
                             &self.index_store,
                             intent.intent_id(),
@@ -268,6 +336,12 @@ impl PostgresBackend {
                     reconciled = reconciled.saturating_add(1);
                     continue;
                 }
+                if file_intent {
+                    // This is a logical record key, not a physical CAS object.
+                    // Missing or unrelated latest metadata cannot settle it.
+                    tracing::warn!(intent_id = %intent.intent_id(), "file upload outcome cannot be verified; preserving unfinished intent for a fresh validated request");
+                    continue;
+                }
                 let target_state = match ObjectKey::parse(intent.object_key()) {
                     Ok(key) => match AsyncObjectStore::metadata(&self.object_store, &key).await? {
                         Some(metadata) if metadata.length() != intent.object_length() => {
@@ -286,6 +360,10 @@ impl PostgresBackend {
                                 state = ?intent.state(),
                                 "durable object found for in-flight intent; preserving for retry"
                             );
+                            None
+                        }
+                        None if crate::upload_intent_recovery::missing_request_key_is_inconclusive(intent) => {
+                            tracing::warn!(intent_id = %intent.intent_id(), "native shard request key is absent; normalized storage may use another key, preserving for validated retry");
                             None
                         }
                         None => Some(UploadIntentState::Failed),
@@ -315,7 +393,7 @@ impl PostgresBackend {
         if reconciled > 0 {
             tracing::info!(count = reconciled, "intent reconciliation complete");
         }
-        Ok(())
+        Ok(pending_files)
     }
 
     /// Resolves a single canonical path to its tree entry, if any.

@@ -22,7 +22,10 @@ called out where relevant.
 > user and operator surfaces are documented in `docs/XET_NATIVE_CLI.md` and
 > `docs/ARCHITECTURE.md`.
 
-Companion design doc: `docs/XET_NATIVE_CLI.md` (CLI behavior, URL scheme, config, phased stubs).
+For current CLI behavior, URL schemes and configuration, use
+[Xet-Native File Management CLI](XET_NATIVE_CLI.md). API sketches and source-line
+references below preserve design context; use current rustdoc and source for exact
+library signatures.
 
 ## 1. Goal and scope
 
@@ -541,8 +544,8 @@ Mirror `hf-xet/xet_session/` (`download_stream_group.rs`,
     batch=32) → **503** + `Retry-After: 1` (`admission.rs:11-81`)
   - Total request timeout 300s → **503** + `Retry-After: 1` (`app.rs:677-684`)
 - **No `Retry-After` on 429** (only 503s carry `Retry-After: 1`).
-- "Quotas" (per-tenant request/byte rate, storage quota) are listed as
-  **required work, not implemented** (`SHARDLINE_PRODUCTION_READINESS.md:330-340`).
+- Per-tenant request/byte rate limits and storage quotas are outside this client's
+  scope; concurrency admission is not a tenant quota.
 
 ### 6.2 What the protocol requires
 
@@ -743,7 +746,7 @@ record.
    (provider-scoped revisions). Confirm server behavior for non-`main`
    revisions with the metadata endpoints.
 5. **Rate limiting is server-policy-dependent**: shardline has no time-window
-   rate limiting today, but may add it (listed as required work). The library's
+   rate limiting today. The library's
    retry policy must be frontend-agnostic and user-tunable so behavior remains
    correct against any server.
 6. **Crate version drift:** upstream crates publish without semver promises;
@@ -757,5 +760,4 @@ record.
 - `/v2/shards` streaming NDJSON upload (only v1 required by shardline).
 - `/v2/file-chunk-hashes` partial-overwrite support (deferred, see §11 open
   question 1).
-- Storage quotas / per-tenant rate limiting on the server (tracked separately
-  in `docs/SHARDLINE_PRODUCTION_READINESS.md`).
+- Storage quotas / per-tenant rate limiting on the server.

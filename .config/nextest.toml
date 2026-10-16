@@ -2,6 +2,14 @@
 # MinIO containers. Limit their concurrent startup to prevent resource
 # exhaustion and transient connection EOFs on CI runners.
 
+# PostgreSQL advisory locks are database-wide, even when fixtures have distinct
+# schemas. Keep all library tests that can own or install the shared maintenance
+# barrier in one group. Their own tasks/connections still run concurrently, so
+# serialization between tests preserves the concurrency assertions within each.
+[[profile.default.overrides]]
+filter = 'kind(lib) and ((package(shardline-index) and test(postgres)) or (package(shardline-server) and test(/postgres|maintenance_barrier|database_migration|lifecycle_repair|task_tracking|upload_intent_recovery|retention_runtime|gc_runtime|rebuild|hub_secret_upgrade/)))'
+test-group = "postgres-coordination"
+
 [[profile.default.overrides]]
 filter = 'binary(postgres_e2e_http)'
 test-group = "docker-integration"
@@ -32,3 +40,6 @@ test-group = "docker-integration"
 
 [test-groups.docker-integration]
 max-threads = 4
+
+[test-groups.postgres-coordination]
+max-threads = 1

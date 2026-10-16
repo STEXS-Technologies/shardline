@@ -2,6 +2,10 @@
 
 This document describes the production operating model for Shardline.
 
+For ordinary maintenance commands, recorded outcomes and what to check after
+a crash, start with [Maintenance: same commands, clearer results](MAINTENANCE_INTEGRATION_UX.md).
+Normal startup uses an embedded tracker; it requires no additional service.
+
 Shardline is stateless in the request path when it is backed by durable external
 services:
 
@@ -38,6 +42,25 @@ The production Kubernetes package already follows that model:
 - rolling updates with zero unavailable replicas
 - topology spread across nodes
 - externalized S3, Postgres, and Redis-cache dependencies
+
+### Integrity across nodes
+
+Replicas in one deployment must use the same PostgreSQL metadata schema and
+payload bucket/prefix. Local scratch directories and caches can differ.
+PostgreSQL failover must preserve acknowledged commits and prevent two writable
+primaries; Shardline's locks cannot coordinate independent database histories.
+
+Maintenance and guarded publication cannot reconnect after losing database
+ownership and continue as the old owner. An uncertain remote delete blocks
+conflicting publication with a retryable error until its exact attempt is reconciled.
+Neither a process restart nor an elapsed timeout clears that protection.
+Task history reports observed outcomes; it does not grant mutation ownership
+or promise cluster-wide exactly-once execution. These protections run in the
+existing processes and require no additional Shardline service.
+
+During upgrades and rollback, keep the existing
+[GC pause and owner-upgrade procedure](MAINTENANCE_INTEGRATION_UX.md#upgrade-using-the-existing-workflow):
+older GC binaries do not create the new delete markers.
 
 ## Read-only operational API
 

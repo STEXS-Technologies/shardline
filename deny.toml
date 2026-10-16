@@ -42,5 +42,10 @@ multiple-versions = "allow"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+required-git-spec = "rev"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Temporary upstream HTTP/1 shutdown fix, pinned in Cargo.toml and Cargo.lock.
+# https://github.com/hyperium/hyper/pull/4222
+# Remove with the workspace patch once a fixed registry release is available.
+# Crate publication remains blocked by scripts/check-publish-dependencies.py.
+allow-git = ["https://github.com/hyperium/hyper"]

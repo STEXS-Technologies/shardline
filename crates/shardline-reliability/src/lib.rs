@@ -5,12 +5,14 @@
 //! The implementation is split by responsibility; this root only declares
 //! modules and preserves the public compatibility surface through re-exports.
 
+mod compatibility;
 mod digest;
 mod durable;
 mod error;
 mod event;
 mod event_metadata;
 mod lifecycle_log;
+mod lifecycle_profile;
 mod merkle;
 mod merkle_journal;
 mod metadata_evidence;
@@ -18,16 +20,25 @@ mod oci_evidence;
 mod oci_tag_evidence;
 mod operation;
 mod persisted;
+#[cfg(all(feature = "process-runtime", target_os = "linux"))]
+mod process_runtime;
 mod provider_evidence;
 mod quarantine_evidence;
 mod repair_evidence;
 mod retention_evidence;
+mod runtime_merkle;
 mod s3_object_evidence;
 mod session_evidence;
 mod snapshot_event;
 mod snapshot_log;
 mod state_snapshot;
 mod states;
+#[cfg(feature = "task-journal")]
+mod task_artifact;
+#[cfg(feature = "task-journal")]
+mod task_journal;
+#[cfg(feature = "task-journal")]
+mod task_supervision;
 mod webhook_evidence;
 
 #[cfg(test)]
@@ -50,6 +61,10 @@ pub use event::{
 };
 pub use event_metadata::EvidenceEventMetadata;
 pub use lifecycle_log::LifecycleEvidenceLog;
+pub use lifecycle_profile::{
+    LifecycleCommand, ResumableLifecycleProfile, UploadLifecycleProfile, native_lifecycle_registry,
+    native_resumable_profile, native_upload_profile,
+};
 pub use merkle::{
     RELIABILITY_MERKLE_SCHEMA_VERSION, ReliabilityMerkleCommit, build_reliability_merkle_commit,
     build_reliability_merkle_commit_with_previous, reliability_merkle_commit_json,
@@ -77,13 +92,17 @@ pub use operation::{
     OperationIdentity, OperationKind, ResumableSessionSnapshotDomain,
     resumable_session_snapshot_identity,
 };
-pub use penelope_domain::ContentDigest as PenelopeDigest;
+#[cfg(feature = "task-journal")]
+pub use penelope::executor::task::TaskSupervisor;
+pub use penelope_domain_compat::ContentDigest as PenelopeDigest;
 pub use persisted::{
     build_persisted_merkle_commit, build_persisted_merkle_commit_with_previous,
     persisted_event_identity, persisted_event_sequence, verify_persisted_event,
     verify_persisted_event_merkle_chain, verify_persisted_event_merkle_chain_with_sequences,
     verify_persisted_merkle_commit, verify_persisted_merkle_commit_with_previous,
 };
+#[cfg(all(feature = "process-runtime", target_os = "linux"))]
+pub use process_runtime::{BootTaskClock, ProcessTaskRuntime, ProcessWorker};
 pub use provider_evidence::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
     ProviderLifecycleSnapshot, ProviderRepositoryIdentity, ProviderRepositoryOperationId,
@@ -115,8 +134,17 @@ pub use snapshot_log::{
     verify_snapshot_evidence,
 };
 pub use state_snapshot::DigestSnapshot;
-pub use statechronicle_core::digest::ContentDigest as StateChronicleDigest;
+pub use statechronicle_core_compat::digest::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};
+#[cfg(feature = "task-journal")]
+pub use task_artifact::{
+    CheckpointArtifactVerifier, MaintenanceArtifact, MaintenanceArtifactKind,
+    MaintenanceArtifactProof, sign_maintenance_artifact, verify_maintenance_artifact,
+};
+#[cfg(feature = "task-journal")]
+pub use task_journal::SqliteTaskJournal;
+#[cfg(feature = "task-journal")]
+pub use task_supervision::{LocalTaskSupervisor, restore_local_task_supervisor};
 pub use webhook_evidence::{
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
     WebhookDeliveryLifecycleState, WebhookDeliveryOperationId, WebhookDeliverySnapshot,

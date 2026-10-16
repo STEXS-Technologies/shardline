@@ -2132,6 +2132,7 @@ impl UploadIntentStore for super::LocalIndexStore {
         let transitioned = tokio::task::spawn_blocking(move || -> Result<bool, LocalIndexStoreError> {
             let mut conn = store.open_connection()?;
             let transaction = conn.transaction()?;
+            let marked = super::upload_recovery_guard::enter(&transaction, &intent_id, &event.operation.repository)?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
@@ -2159,6 +2160,9 @@ impl UploadIntentStore for super::LocalIndexStore {
                 return Err(LocalIndexStoreError::ReliabilityEventConflict(
                     operation_id,
                 ));
+            }
+            if marked {
+                super::upload_recovery_guard::leave(&transaction, &intent_id)?;
             }
             transaction.commit()?;
             Ok(true)

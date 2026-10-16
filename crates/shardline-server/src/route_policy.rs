@@ -90,6 +90,8 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
         "/api/v1/integrity",
         "/api/v1/nodes",
         "/api/v1/tasks",
+        "/api/v1/tasks/maintenance",
+        "/api/v1/tasks/maintenance/deletes",
         "/api/v1/metrics",
     ] {
         registry.register("GET", path, RouteAuthPolicy::SeparatelyProtected);

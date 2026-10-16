@@ -53,6 +53,17 @@ pub(crate) enum CliDefinitionCommand {
     Admin(AdminCommandArgs),
     /// Verify object-store and metadata integrity.
     Fsck(RootArgs),
+    /// Inspect saved maintenance history without starting work or a worker.
+    History(HistoryArgs),
+    /// Run optional child-process maintenance with deadlines and CPU limits (Linux).
+    #[cfg(target_os = "linux")]
+    #[command(
+        long_about = "Run maintenance in an optional child process with deadlines, CPU limits and saved results (Linux).\n\nNormal fsck, index rebuild, gc, repair and storage migrate commands already track work in their existing process. They need no worker runner, state directory or task ID.\n\nUse a new task ID for a fresh scan. Reusing an ID inspects or resumes its pinned task; it does not replay an uncertain mutation. Inspect interrupted outcomes and storage effects before retrying."
+    )]
+    Maintenance(MaintenanceArgs),
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    MaintenanceWorker(MaintenanceWorkerArgs),
     /// Rebuild mutable indexes from immutable version state.
     Index(IndexCommandArgs),
     /// Repair lifecycle metadata and webhook delivery state.
@@ -73,6 +84,30 @@ pub(crate) enum CliDefinitionCommand {
     Completion(CompletionArgs),
     /// Generate a manpage for packaged or self-hosted deployments.
     Manpage(ManpageArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct MaintenanceArgs {
+    /// Private state directory outside the deployment root; retain for recovery.
+    #[arg(long)]
+    pub(crate) state_dir: PathBuf,
+    /// Identity for this task; use a new ID for fresh work, retain it for recovery.
+    #[arg(long)]
+    pub(crate) task_id: String,
+    #[command(subcommand)]
+    pub(crate) command: crate::maintenance::MaintenanceOperation,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct MaintenanceWorkerArgs {
+    #[arg(long)]
+    pub(crate) journal: PathBuf,
+    #[arg(long)]
+    pub(crate) scope: String,
+    #[arg(long)]
+    pub(crate) generation: u32,
 }
 
 // ── Providerless ────────────────────────────────────────────────────────
@@ -704,6 +739,28 @@ pub(crate) struct RootArgs {
     /// Override the deployment root for local metadata state.
     #[arg(long)]
     pub(crate) root: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HistoryArgs {
+    /// Override the deployment root for local metadata state.
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    /// Inspect a retained private archive as its owner, without a deployment filter.
+    #[arg(long, requires = "root", conflicts_with = "pending_deletes")]
+    pub(crate) archive: bool,
+    /// Inspect host-local SQLite history, ignoring server database settings (Linux).
+    #[arg(long, conflicts_with_all = ["archive", "pending_deletes"])]
+    pub(crate) local: bool,
+    /// Maximum records to show (1–100).
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub(crate) limit: u16,
+    /// Inspect pending delete attempts instead of saved maintenance runs.
+    #[arg(long)]
+    pub(crate) pending_deletes: bool,
+    /// Continue after next_after from the preceding page with the same mode.
+    #[arg(long)]
+    pub(crate) after: Option<String>,
 }
 
 // ── CLI value enums ─────────────────────────────────────────────────────

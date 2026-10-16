@@ -362,25 +362,22 @@ impl CdcChunker {
         // Don't scan past the maximum chunk boundary
         let read_end = n_bytes.min(self.max_chunk);
 
-        // Scan for boundary using Gear hash
-        let mut boundary_index = None;
-        for i in cur_index..read_end {
-            self.hash = (self.hash << 1).wrapping_add({
-                let byte = *data.get(i).unwrap_or(&0);
-                *GEAR_TABLE.get(byte as usize).unwrap_or(&0)
-            });
-
-            // Enforce minimum chunk size — i is an absolute position in the
-            // pending buffer, which equals the position from the current
-            // chunk start (pending is always fresh after a boundary flush).
-            if i >= self.min_chunk && (self.hash & self.mask) == 0 {
-                boundary_index = Some(i);
-                break;
-            }
+        // Warm the same hash window without allowing an early boundary, then
+        // use gearhash's runtime-dispatched SIMD scan (scalar on other CPUs).
+        // next_match counts consumed bytes, including the matching byte.
+        let mut hasher = gearhash::Hasher::new(&GEAR_TABLE);
+        hasher.set_hash(self.hash);
+        let match_start = cur_index.max(self.min_chunk).min(read_end);
+        if let Some(warmup) = data.get(cur_index..match_start) {
+            hasher.update(warmup);
         }
+        let boundary = data
+            .get(match_start..read_end)
+            .and_then(|remaining| hasher.next_match(remaining, self.mask));
+        self.hash = hasher.get_hash();
 
-        if let Some(i) = boundary_index {
-            cur_index = i.wrapping_add(1);
+        if let Some(consumed) = boundary {
+            cur_index = match_start.wrapping_add(consumed);
             create_chunk = true;
         }
 
@@ -423,6 +420,64 @@ impl CdcChunker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scalar_reference(chunker: &mut CdcChunker, data: &[u8]) -> Option<usize> {
+        let mut start = chunker.pending_len;
+        if start.wrapping_add(64) < chunker.min_chunk {
+            let skip = chunker
+                .min_chunk
+                .saturating_sub(start.checked_add(65)?)
+                .min(data.len().saturating_sub(start));
+            start = start.checked_add(skip)?;
+        }
+        let end = data.len().min(chunker.max_chunk);
+        for (index, byte) in data.iter().enumerate().take(end).skip(start) {
+            chunker.hash = (chunker.hash << 1).wrapping_add(GEAR_TABLE[usize::from(*byte)]);
+            if index >= chunker.min_chunk && chunker.hash & chunker.mask == 0 {
+                chunker.reset();
+                return index.checked_add(1);
+            }
+        }
+        if end == chunker.max_chunk {
+            chunker.reset();
+            return Some(end);
+        }
+        chunker.pending_len = end;
+        None
+    }
+
+    #[test]
+    fn accelerated_scan_preserves_scalar_boundaries_and_streaming_state() {
+        let mut random = vec![0_u8; 256 * 1024];
+        let mut seed = 42_u64;
+        for byte in &mut random {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *byte = (seed >> 32) as u8;
+        }
+        for data in [&random[..], &vec![0_u8; random.len()][..]] {
+            for target in [128, 1024, 65536] {
+                for frame in [1, 17, 128, 4096, data.len()] {
+                    let mut accelerated = CdcChunker::new(target);
+                    let mut reference = CdcChunker::new(target);
+                    let mut start = 0;
+                    for available in (frame..data.len()).step_by(frame).chain([data.len()]) {
+                        loop {
+                            let pending = &data[start..available];
+                            let expected = scalar_reference(&mut reference, pending);
+                            let actual = accelerated.find_boundary(pending);
+                            assert_eq!(actual, expected, "target={target}, frame={frame}");
+                            assert_eq!(accelerated.hash, reference.hash);
+                            assert_eq!(accelerated.pending_len, reference.pending_len);
+                            match actual {
+                                Some(consumed) => start += consumed,
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn cdc_target_bounds_reject_invalid_sizes_in_all_builds() {

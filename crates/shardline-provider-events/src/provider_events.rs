@@ -7,7 +7,8 @@ use serde_json::Error as JsonError;
 use shardline_index::{
     AsyncIndexStore, LocalIndexStoreError, MemoryIndexStoreError, MemoryRecordStoreError,
     PostgresIndexStore, PostgresMetadataStoreError, PostgresProviderMutation, PostgresRecordStore,
-    RecordStore, RetentionHoldError, WebhookDelivery, WebhookDeliveryError,
+    ProviderRepositoryState, RecordStore, RetentionHoldError, WebhookDelivery,
+    WebhookDeliveryError,
 };
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_server_core::{ParseStoredFileRecordError, ServerObjectStoreError};
@@ -87,9 +88,9 @@ pub enum ProviderWebhookOutcomeKind {
         /// New repository name.
         new_repo: String,
     },
-    /// Repository access changed without durable state mutation.
+    /// Repository access changed and its durable change timestamp was recorded.
     AccessChanged,
-    /// A revision moved without durable state mutation.
+    /// A revision moved and its durable revision state was recorded.
     RevisionPushed {
         /// Updated revision reference.
         revision: String,
@@ -185,11 +186,11 @@ impl PlannedPostgresProviderWebhook {
     }
 }
 
-/// Plans one Postgres repository rename or deletion without changing durable metadata.
+/// Plans one Postgres repository webhook without changing durable metadata.
 ///
 /// The server commits the returned batch on the resource-lock-owning connection after
-/// locking its fence rows. Other event kinds remain single-row monotonic updates and use
-/// [`apply_provider_webhook_with_stores`].
+/// locking its fence rows. Delivery claims and repository state are committed together
+/// for every event kind; partial state updates preserve existing reconciliation fields.
 ///
 /// # Errors
 ///
@@ -207,6 +208,7 @@ pub async fn plan_postgres_provider_repository_webhook(
         event.delivery_id().as_str().to_owned(),
         unix_now_seconds_lossy(),
     )?;
+    let processed_at = delivery.processed_at_unix_seconds();
     let mut mutation = PostgresProviderMutation::new(delivery);
     let applied_outcome = match event.kind() {
         RepositoryWebhookEventKind::RepositoryDeleted => {
@@ -228,9 +230,27 @@ pub async fn plan_postgres_provider_repository_webhook(
             )
             .await?
         }
-        RepositoryWebhookEventKind::AccessChanged
-        | RepositoryWebhookEventKind::RevisionPushed { .. } => {
-            return Err(ProviderEventsError::InvalidProviderWebhookPayload);
+        RepositoryWebhookEventKind::AccessChanged => {
+            mutation.upsert_provider_repository_state(ProviderRepositoryState::new(
+                event.repository().provider().repository_provider(),
+                event.repository().owner().to_owned(),
+                event.repository().name().to_owned(),
+                Some(processed_at),
+                None,
+                None,
+            ));
+            duplicate_webhook_outcome(event)
+        }
+        RepositoryWebhookEventKind::RevisionPushed { revision } => {
+            mutation.upsert_provider_repository_state(ProviderRepositoryState::new(
+                event.repository().provider().repository_provider(),
+                event.repository().owner().to_owned(),
+                event.repository().name().to_owned(),
+                None,
+                Some(processed_at),
+                Some(revision.as_str().to_owned()),
+            ));
+            duplicate_webhook_outcome(event)
         }
     };
     Ok(PlannedPostgresProviderWebhook {
@@ -247,7 +267,7 @@ pub async fn plan_postgres_provider_repository_webhook(
 /// Runs on the delivery-record path so the table stays bounded without a
 /// dedicated scheduler task. Best-effort: failures are logged and ignored so
 /// a purge hiccup never fails a webhook that has already been applied.
-async fn purge_expired_webhook_deliveries<IndexAdapter>(index_store: &IndexAdapter)
+pub async fn purge_expired_webhook_deliveries<IndexAdapter>(index_store: &IndexAdapter)
 where
     IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<ProviderEventsError>,

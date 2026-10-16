@@ -106,3 +106,8 @@ tempfile = "3.15"
 tracing = "0.1"
 futures-util = "0.3"
 async-trait = "0.1"
+
+[patch.crates-io]
+# Mirror the main workspace's upstream HTTP/1 shutdown fix during acceptance.
+# Remove both overrides when a fixed Hyper registry release is available.
+hyper = { git = "https://github.com/hyperium/hyper", rev = "97fff93e53f9e6a993f2d6a25d50883b7b8752a7" }

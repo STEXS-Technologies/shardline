@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 //! Real Git client coverage for repositories updated through the Hub NDJSON API.
-#[path = "support/common.rs"]
-mod common;
+mod support;
+use support::common;
 
 use axum::{body::Body, http::Request};
 use base64::{Engine, engine::general_purpose::STANDARD};

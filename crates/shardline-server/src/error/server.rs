@@ -57,7 +57,7 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum ServerError {
     /// Local storage IO failed.
-    #[error("local storage operation failed")]
+    #[error("{}", super::publication::io_message(.0))]
     Io(#[from] IoError),
     /// JSON serialization or deserialization failed.
     #[error("json operation failed")]
@@ -90,7 +90,7 @@ pub enum ServerError {
     #[error("object storage operation failed")]
     ObjectStore(#[from] ObjectStoreError),
     /// Metadata index subsystem failure.
-    #[error("index adapter operation failed")]
+    #[error("{}", index_error_message(.0))]
     Index(#[from] IndexError),
     /// Stored file metadata exceeded the bounded parser ceiling.
     #[error("stored file metadata exceeded the bounded parser ceiling")]
@@ -260,7 +260,7 @@ pub enum ServerError {
     #[error("request exceeded the server execution deadline")]
     RequestTimedOut,
     /// A writer lost ownership of its distributed resource fence.
-    #[error("resource write fence is no longer current")]
+    #[error("resource write fence is no longer current; retry with a fresh request")]
     StaleResourceFence,
     /// A test interrupted lifecycle repair after one durable mutation.
     #[error("lifecycle repair interrupted at {boundary:?}")]
@@ -286,6 +286,22 @@ pub enum ServerError {
 }
 
 impl ServerError {
+    pub(crate) fn is_retryable_publication(&self) -> bool {
+        matches!(self, Self::StaleResourceFence)
+            || self.is_remote_delete_pending()
+            || matches!(self, Self::Index(error) if error.is_retryable_transaction())
+            || matches!(self, Self::Io(error) if super::publication::is_content_unavailable(error))
+    }
+
+    /// Returns whether this request must wait for a remote delete to be reconciled.
+    #[must_use]
+    pub fn is_remote_delete_pending(&self) -> bool {
+        if let Self::Index(IndexError::PostgresMetadata(error)) = self {
+            return error.is_remote_delete_pending();
+        }
+        false
+    }
+
     /// Maps this error to the OCI Distribution specification error code.
     ///
     /// When adding a new [`ServerError`] variant, add it explicitly to this match.
@@ -367,7 +383,10 @@ impl ServerError {
         }
     }
 
-    pub(crate) const fn status_code(&self) -> StatusCode {
+    pub(crate) fn status_code(&self) -> StatusCode {
+        if self.is_retryable_publication() {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
         match self {
             Self::InvalidFileId
             | Self::InvalidContentHash
@@ -489,16 +508,33 @@ impl IntoResponse for ServerError {
                 HeaderValue::from_static("Bearer realm=\"shardline\""),
             );
         }
-        if matches!(
-            self,
-            Self::TransferLimiterTimedOut | Self::WorkQueueSaturated | Self::RequestTimedOut
-        ) {
+        if self.is_retryable_publication()
+            || matches!(
+                self,
+                Self::TransferLimiterTimedOut
+                    | Self::WorkQueueSaturated
+                    | Self::RequestTimedOut
+                    | Self::StaleResourceFence
+            )
+        {
             response
                 .headers_mut()
                 .insert(RETRY_AFTER, HeaderValue::from_static("1"));
         }
         response
     }
+}
+
+fn index_error_message(error: &IndexError) -> &'static str {
+    if error.is_retryable_transaction() {
+        return "database transaction snapshot changed; retry the request in a new transaction";
+    }
+    if let IndexError::PostgresMetadata(error) = error
+        && error.is_remote_delete_pending()
+    {
+        return "object has an unresolved remote delete; retry after reconciliation";
+    }
+    "index adapter operation failed"
 }
 
 impl From<HttpRangeParseError> for ServerError {
@@ -749,8 +785,13 @@ impl From<ParseStoredFileRecordError> for ServerError {
 /// - `NotFound` → `404 NoSuchKey`
 /// - authorization failures → `403 AccessDenied`
 /// - request MD5 mismatch → `400 BadDigest`
+/// - retryable publication failures → `503 SlowDown` with actionable guidance
 /// - everything else → `500 InternalError`
 impl shardline_s3_adapter::S3ErrorClassify for ServerError {
+    fn s3_retryable_message(&self) -> Option<String> {
+        self.is_retryable_publication().then(|| self.to_string())
+    }
+
     fn s3_class(&self) -> shardline_s3_adapter::S3ErrorClass {
         use shardline_s3_adapter::S3ErrorClass;
         match self {

@@ -27,16 +27,54 @@ pub(crate) struct OciPostgresTestCluster {
 
 pub(crate) async fn build_oci_postgres_test_cluster() -> Option<OciPostgresTestCluster> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
+    let schema = format!(
+        "oci_fixture_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+    );
+    let admin = sqlx::PgPool::connect(&database_url).await.ok()?;
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .ok()?;
+    admin.close().await;
+    let mut scoped_url = url::Url::parse(&database_url).ok()?;
+    let old_options = scoped_url
+        .query_pairs()
+        .find(|(key, _)| key == "options")
+        .map_or_else(String::new, |(_, value)| value.into_owned());
+    let other_parameters: Vec<_> = scoped_url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    scoped_url.set_query(None);
+    scoped_url
+        .query_pairs_mut()
+        .extend_pairs(other_parameters)
+        .append_pair("options", &format!("{old_options} -csearch_path={schema}"));
+    let bootstrap = sqlx::PgPool::connect(scoped_url.as_str()).await.ok()?;
+    crate::apply_database_migrations(&bootstrap).await.ok()?;
+    bootstrap.close().await;
+    build_oci_postgres_test_cluster_for_url(scoped_url.as_str()).await
+}
+
+pub(crate) async fn build_oci_postgres_test_cluster_for_url(
+    database_url: &str,
+) -> Option<OciPostgresTestCluster> {
     let temp = tempfile::tempdir().ok()?;
     let shared_store = crate::ServerObjectStore::local(temp.path().join("objects")).ok()?;
     let node_a = build_oci_postgres_state(
-        &database_url,
+        database_url,
         temp.path().join("node-a"),
         shared_store.clone(),
     )
     .await?;
     let node_b =
-        build_oci_postgres_state(&database_url, temp.path().join("node-b"), shared_store).await?;
+        build_oci_postgres_state(database_url, temp.path().join("node-b"), shared_store).await?;
     Some(OciPostgresTestCluster {
         _temp: temp,
         node_a,
@@ -136,5 +174,9 @@ pub(crate) async fn build_oci_test_state() -> OciTestContext {
 pub(crate) fn oci_test_router(state: &Arc<AppState>) -> Router {
     Router::new()
         .route("/v2/{*path}", routing::any(oci_dispatch))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state),
+            crate::app::gc_write_barrier_middleware,
+        ))
         .with_state(Arc::clone(state))
 }

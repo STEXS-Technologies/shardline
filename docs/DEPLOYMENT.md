@@ -15,6 +15,12 @@ or `SHARDLINE_SERVER_FRONTENDS=xet,...`. The default frontend is `xet`. `--role 
 `--role transfer` only split that frontend set across processes for scaling; they do not
 choose different protocols.
 
+Normal startup records startup maintenance inside the server process. There is
+no tracker service, extra port or new mount to deploy. Existing maintenance
+commands and GC schedules stay in charge; starting a server does not start GC.
+See [Maintenance: same commands, clearer results](MAINTENANCE_INTEGRATION_UX.md)
+for retry behavior and the integration's current upgrade status.
+
 ## Deployment Profiles
 
 ### Local Single-Node
