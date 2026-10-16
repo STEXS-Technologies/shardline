@@ -89,7 +89,10 @@ args = ["test", "-p", "shardline-reliability", "--all-features", "--locked", "--
 description = "Build the real child-process fixture for reliability runtime contracts"
 workspace = false
 command = "cargo"
-args = ["build", "-p", "shardline-reliability", "--features", "process-runtime", "--locked", "--example", "process_test_worker"]
+# Runtime identity hashes the entire executable. Keep debug sections out of this
+# fixture, as in shipped binaries, so hashing them cannot consume its task budget.
+# The controller tests retain debug information and the runtime limits stay intact.
+args = ["rustc", "-p", "shardline-reliability", "--features", "process-runtime", "--locked", "--example", "process_test_worker", "--", "-C", "strip=debuginfo"]
 
 [tasks.test-postgres]
 description = "Run Postgres-gated tests (requires DATABASE_URL env var)"
