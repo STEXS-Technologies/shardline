@@ -213,6 +213,19 @@ completed 32 identical 36 MiB uploads through both replicas and eight uploads wh
 clients discarded acknowledgements. Both replicas returned the expected content
 after GC. Discarding client acknowledgements does not simulate a lost S3 response.
 
+The packing regression suite separately injects a backend that stores a container
+but returns HTTP 503. Conditional retry must recover the existing object, verify
+it and reconstruct the original bytes without creating individual chunk objects.
+GC regression coverage also deletes a listed orphan before sweep and checks that
+quarantine cleanup and a repeated sweep do not resurrect data. These controlled
+cases complement the deployment drill; they do not cover every network failure.
+
+A release-mode microbenchmark of per-key write coordination measured about
+0.16 µs per acquisition with 128 other keys held, 0.49 µs with 512 and 10.4 µs
+with 8,192 (10,000 acquisitions per size, one thread, no S3 traffic). Cleanup
+cost grows with active keys; these timings alone do not establish end-to-end
+contention or justify replacing the current coordination scheme.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:

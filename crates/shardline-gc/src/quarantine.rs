@@ -11,6 +11,9 @@ use crate::{
 };
 use shardline_server_core::{ServerObjectStore, checked_add, checked_increment, chunk_hash};
 
+#[cfg(test)]
+mod stale_listing_tests;
+
 pub(super) async fn read_quarantine_entries<IndexAdapter>(
     index_store: &IndexAdapter,
 ) -> Result<HashMap<String, QuarantineCandidate>, GcError>

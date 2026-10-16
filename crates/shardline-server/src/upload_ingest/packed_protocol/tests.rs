@@ -39,7 +39,8 @@ impl Provider {
     }
 
     // 0: ordinary storage; 1: deny containers; 2: corrupt containers;
-    // 3: corrupt every new object, including the fallback chunks.
+    // 3: corrupt every new object, including the fallback chunks;
+    // 4: commit containers but return a retryable error instead of success.
     async fn new(mode: u8) -> Self {
         let state = Arc::new(Mutex::new(ProviderState::default()));
         let observed = state.clone();
@@ -76,7 +77,14 @@ impl Provider {
                             } else {
                                 bytes
                             };
+                            let ambiguous_commit = mode == 4 && path.contains("/xorbs/");
                             state.objects.insert(path, bytes);
+                            if ambiguous_commit {
+                                return response
+                                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                                    .body(axum::body::Body::empty())
+                                    .unwrap();
+                            }
                             return response
                                 .status(StatusCode::OK)
                                 .body(axum::body::Body::empty())
@@ -175,6 +183,7 @@ impl Provider {
 
 mod admission;
 mod digest;
+mod lost_ack;
 
 impl Drop for Provider {
     fn drop(&mut self) {
