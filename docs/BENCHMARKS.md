@@ -226,6 +226,22 @@ with 8,192 (10,000 acquisitions per size, one thread, no S3 traffic). Cleanup
 cost grows with active keys; these timings alone do not establish end-to-end
 contention or justify replacing the current coordination scheme.
 
+Partial-overlap files expose a different limit. A separate two-replica comparison
+used 32 versions of one incompressible 4 MiB file, each replacing a distinct 4 KiB
+region, with 16 clients. Main-equivalent code made 4,299 backend requests during
+ingestion; the admission-qualified candidate made 128. Both stored the same 32
+containers totaling 134,336,312 bytes for 134,217,728 logical bytes. Main also kept
+97 individual chunk objects totaling 7,259,864 bytes during quarantine; the
+candidate omitted them. All 128 post-GC cross-replica reads matched across the
+two versions.
+
+This S3 protocol path packs each file's batches independently. Shared CDC chunks
+inside different containers do not by themselves reduce the final container
+footprint. The patch reduces request and temporary-storage amplification, but
+these measurements do not demonstrate better partial-overlap storage savings.
+Measure versioned and partially overlapping customer data separately from exact
+duplicates before estimating a bill reduction.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:
