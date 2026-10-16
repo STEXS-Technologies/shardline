@@ -50,8 +50,10 @@ two interpretations of reliability.
 The StateChronicle and Penelope 0.2.0 dependency upgrade retains the existing
 evidence protocol. `LegacyJson`, `CanonicalBcsV1`, and `CanonicalBcsV2` keep their
 original meaning; the Merkle envelope remains version 1 and continues to use
-the existing synthetic asset projection. This change introduces no database
-migration, new session layout, or signing configuration for existing deployments.
+the existing synthetic asset projection. This change introduces no new migration-ledger
+entry, session layout, or signing configuration for existing deployments. PostgreSQL
+still requires owner-run `db migrate up` to install the additive protection
+functions and triggers, even when no migrations are pending.
 Normal Linux maintenance is tracked in its existing CLI process; server startup
 owns in-process observation of its existing background sweeps. Only the explicit
 protected runner starts managed children. Neither requires a tracker service or
@@ -115,8 +117,9 @@ and lifecycle repair resolve and publish their binding on the already acquired
 barrier-owning work pool, before their metadata scan. Observation creates no
 pool, never replaces a failed session, and warns on binding failures without
 changing the native result or replaying work. Its context is not inherited by
-spawned tasks. Storage-copy jobs, the optional isolated runner and other entry
-points still need integration. Server history association observes startup's
+spawned tasks. This resolved shared-scope binding covers these observed handlers;
+it does not establish a shared PostgreSQL scope for storage-copy endpoints or
+every optional-runner entry point. Server history association observes startup's
 metadata target and does not fence or prove the target of every later database
 operation.
 
@@ -285,8 +288,8 @@ must prevent a later successful hold or reference publication from racing with
 it. Later requests for the affected object must return a clear retryable error
 instead of waiting indefinitely or acknowledging protection. This is the chosen
 behavior. Retention, dedupe and directly named file/reconstruction references
-now enforce it. References hidden inside xorb payloads and other publication
-paths still need their transaction checks. Clearing that
+now enforce it. Native shard publication also checks member-chunk references
+extracted during xorb validation, as described below. Clearing that
 gate requires proof that issued requests have settled, rather
 than merely an expired timer, a dead PID or a lost database session. This must
 also work during mixed-version operation and rollback. An additive database
@@ -334,15 +337,16 @@ definer check uses the caller's existing record-column write privilege, so it
 requires no new retention/fence grant. Existing method signatures and record
 formats remain unchanged. Legacy schemas preserve their previous behavior;
 guarded GC admission requires the installed member-check function. Older
-SQL-only writers do not derive member keys, and other publication paths still
-need equivalent coverage. The member-aware byte and file registration APIs
+SQL-only writers do not derive member keys; embedders must supply complete
+physical references before publication. The member-aware byte and file registration APIs
 collect these references during the existing xorb range-validation pass.
 They preserve the legacy APIs and `ParsedShardUpload` fields, and the server
 no longer rereads xorbs or launches extra blocking work to collect references.
 A real S3 HTTP fixture verifies identical records and HEAD/GET counts, with
 one payload GET for two references to the same xorb. A byte/file regression
-verifies identical metadata to the legacy API. Broader deployment-scale cost
-remains part of the scale gate.
+verifies identical metadata to the legacy API. These fixture results describe
+that workload, not a deployment-wide performance guarantee. See
+[benchmark workloads](BENCHMARKS.md) for contention measurements.
 
 Normal Postgres/S3 GC uses this protocol for quarantine, OCI tombstone and
 resumable-staging deletion. The guarded client sends a single-object DELETE with
@@ -399,8 +403,11 @@ across row-security scopes or requiring direct fence-table access.
 
 A signature records a trusted caller's observed reply; it does not prove provider
 health. A reply never received, or lost before being saved while metadata is
-unavailable, still cannot be recovered automatically. Unresolved storage growth,
-older GC sources and other remote mutation boundaries remain open merge gates.
+unavailable, still cannot be recovered automatically. Such attempts can remain
+blocked indefinitely. Keep their markers; the
+[recovery runbook](DISASTER_RECOVERY.md#unprovable-remote-deletes) describes an
+isolated restore when needed. Older GC binaries must stay paused throughout
+upgrade and rollback, as required by the [rollout guide](ROLLING_UPGRADE.md).
 
 The dedupe trigger checks both the mapped shard key and the physical chunk key
 derived from a canonical 64-character lowercase hash. It locks their distinct
@@ -417,11 +424,12 @@ most 100 rows plus one lookahead row. Globally unique attempt epochs keep
 cursors compact even for long object keys. Inspection neither issues storage
 requests nor settles markers; pending includes normally in-flight deletes.
 
-Other object publication paths need transactional enforcement, and recovery of
-uncertain markers needs a supported proof of settlement. A successful retry
-cannot prove that an earlier request will never apply later. Older GC binaries
-do not create these markers; mixed-version protection for those sources also
-remains a merge requirement. Reserved S3 upload-temp cleanup retains its existing
+Protected publication uses the transaction checks above; library callers remain
+responsible for complete physical references and ownership through publication.
+Saved signed successful replies provide settlement evidence; a successful new
+request cannot prove that an earlier request will never apply later. Older GC
+binaries do not create these markers, so rollout requires pausing those jobs.
+Reserved S3 upload-temp cleanup retains its existing
 path; these generated keys are outside the user-object namespace.
 
 Both modes use PostgreSQL's advisory-lock wait queue. A queued exclusive owner

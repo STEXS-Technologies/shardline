@@ -10,6 +10,12 @@ It does not copy object bytes.
 Large deployments should pair this manifest with the native backup or replication
 mechanism of the selected object store.
 
+This inventory is not an atomic snapshot across metadata and object storage.
+For a consistent recovery point, drain writers and pause destructive GC while
+coordinating the native backups and inventory. Equal counts and byte totals do
+not prove equal content; validate restored data with fsck and representative
+downloads before returning traffic. See [Operations](OPERATIONS.md#backup-strategy).
+
 ## Command
 
 ```bash

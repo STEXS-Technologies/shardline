@@ -187,6 +187,7 @@ processes, replace the drain and restart steps with the equivalent service contr
 
 ```bash
 cd /srv/assets
+mkdir -p reports
 
 shardline backup manifest \
   --output reports/pre-upgrade-manifest.json
@@ -194,22 +195,38 @@ shardline backup manifest \
 shardline db migrate status
 ```
 
-Keep the previous container image tag or binary so rollback is one restart away.
+Also take coordinated native metadata and object-store backups; the manifest
+does not copy bytes or create an atomic snapshot. See [Backup](BACKUP.md).
+Keep the previous image or binary available, subject to the rollback restrictions
+below.
 
 ### 2. Upgrade The Transfer Class
 
-Drain the class so in-flight connections finish and new traffic moves to other
-replicas:
+Set the target image for the transfer server and its config-check init container.
+Use the same immutable image digest that was used for the owner-run migration.
+Changing the image starts the rolling replacement; `rollout restart` alone would
+reuse the currently configured image.
+
+The Deployment must drain terminating replicas while routing new traffic to ready
+peers. Set the runtime termination grace long enough for active transfers.
 
 ```bash
-kubectl -n shardline rollout restart deployment/shardline-transfer
+SHARDLINE_UPGRADE_IMAGE='registry.example.com/shardline@sha256:REPLACE_WITH_IMAGE_DIGEST'
+kubectl -n shardline set image deployment/shardline-transfer \
+  shardline="$SHARDLINE_UPGRADE_IMAGE" config-check="$SHARDLINE_UPGRADE_IMAGE"
 kubectl -n shardline rollout status deployment/shardline-transfer --timeout=10m
 ```
+
+Apply the same image change to your managed manifests or GitOps configuration so
+the controller does not restore the previous image. Keep destructive GC suspended;
+update its job image before resuming the schedule after both role classes finish.
 
 With a single transfer replica, the restart is a brief availability dip for transfer
 traffic. The API class keeps serving throughout.
 
-Confirm the process is up:
+Confirm the upgraded replica is up. The following probe examples assume a
+service-local connection or port-forward to that replica on port 8080; probing a
+load-balanced Service can hit a different replica.
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
@@ -238,7 +255,8 @@ reports the expected `server_role`, `object_backend`, and `cache_backend`.
 Repeat the same steps for the API Deployment:
 
 ```bash
-kubectl -n shardline rollout restart deployment/shardline-api
+kubectl -n shardline set image deployment/shardline-api \
+  shardline="$SHARDLINE_UPGRADE_IMAGE" config-check="$SHARDLINE_UPGRADE_IMAGE"
 kubectl -n shardline rollout status deployment/shardline-api --timeout=10m
 
 curl -fsS http://127.0.0.1:8080/healthz

@@ -40,7 +40,7 @@ write throughput, so Postgres is the production multi-replica metadata backend.
 | LFS PATCH session | ranges, overlap order, quota, promotion, and sweep do not race | Postgres range map and completion fence; immutable object-store fragments |
 | OCI upload session | append/finalize/abort and quota accounting do not race | Postgres part map and completion fence; immutable object-store fragments |
 | S3 multipart session | part replacement, completion, abort, quota, and sweep do not race | Postgres part map and completion fence; immutable object-store parts |
-| destructive GC | no visible writer can re-reference an object between final mark and delete | request-shared/GC-exclusive local or Postgres barrier |
+| destructive GC | no participating writer can acknowledge conflicting protection while a remote delete is uncertain | request-shared/GC-exclusive barrier, non-replaceable Postgres work session, durable exact-attempt remote-delete markers and transactional publication checks |
 
 Unconditional last-writer-wins operations do not promise request-arrival ordering. They
 promise that readers observe one complete committed version, never mixed bytes and
@@ -117,7 +117,11 @@ Physical reclamation is performed only by GC while it owns the exclusive writer
 barrier. After the retention window expires, GC deletes the fixed digest object first
 and CAS-removes the unchanged tombstone second. A crash before tombstone removal leaves
 the object logically deleted and makes the next sweep idempotent; no publisher can race
-the physical delete because all mutations require the shared side of the same barrier.
+the physical delete while that barrier remains owned. If PostgreSQL ownership is
+lost with an S3 request already in flight, the durable pending-delete marker blocks
+conflicting protected publication until that exact attempt is settled. A missing
+successful reply can keep the target blocked indefinitely; follow the
+[recovery runbook](DISASTER_RECOVERY.md#unprovable-remote-deletes).
 
 With all replicas on this fence-aware version, the shared Postgres/S3 writer topology
 has a defined correctness contract. Availability still follows the configured
@@ -125,7 +129,7 @@ Postgres, object-store, and Redis dependencies.
 
 ## Mixed-Version Rule
 
-Older replicas do not participate in newly added resource locks, tombstones, or the GC
+Replicas predating the relevant protection do not participate in its resource locks, tombstones, or the GC
 barrier. During a rolling API upgrade, route OCI reads/writes/deletes and provider
 webhook mutations only to new replicas, and suspend destructive GC. Resume unrestricted
 routing only when all replicas run the new version. This rule is per logical resource:
@@ -133,4 +137,19 @@ an N-1 writer must not overwrite an S3 object, OCI tag, Hub ref, or resumable se
 that an N writer has evidence-bound. A different key being safe does not make a
 same-key mixed-version write safe. See [Rolling Upgrade](ROLLING_UPGRADE.md).
 
-PostgreSQL advisory coordination uses pools separate from metadata work. Each server backend caps its work pool at 10 connections, its GC barrier pool at 4, and its resource lock pool at 4, for a maximum of 18 connections per backend instance. Metadata pool capacity alone does not bound total connections. Administrative GC and retention operations also use an independent bounded coordination pool. Resource bundles (including repository rename) acquire sorted keys on one session, preserving each durable fencing epoch and releasing partial bundles if cancelled. This prevents guard holders and queued GC from consuming the connections needed to finish protected metadata transactions.
+These restrictions depend on the starting version. Released 1.11.3 already has
+the evidence formats, resource locks and barrier; the current integration preserves
+those formats. Its upgrade still requires the owner-run protection installation
+and pausing older destructive GC, which does not create pending-delete markers.
+
+Each server backend shares a pool capped at 14 connections between metadata work
+and request maintenance ownership. Admission allows at most 10 request owners,
+leaving four connections for other metadata work. Resource locks use a separate
+pool capped at four connections, for 18 across these backend pools. This is not
+a process-wide or deployment-wide connection limit: administrative commands,
+maintenance work sessions, and other database consumers have their own pools.
+
+Mutating maintenance uses a private, non-replaceable one-connection work pool so
+its advisory barrier and metadata mutations stay on the same session. Resource
+bundles (including repository rename) acquire sorted keys on one session,
+preserving each durable fencing epoch and releasing partial bundles if cancelled.

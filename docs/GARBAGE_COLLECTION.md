@@ -84,8 +84,12 @@ deployments use an advisory reader/writer barrier shared by every replica.
 Maintenance holds the lock on the same database session it uses for protected
 metadata work. If that session is lost, the run fails and cannot reconnect;
 a fresh invocation must acquire ownership again.
-This closes the final re-reference race between the sweep's delete-time mark
-and physical deletion. Read-only requests and GC dry runs do not take the exclusive
+This excludes participating writers between the sweep's delete-time mark and
+physical deletion while ownership is retained. For PostgreSQL/S3, an already-issued
+delete can outlive a lost database session. Durable pending-delete markers then
+block conflicting protected publication until that exact attempt is reconciled;
+read [pending-delete recovery](CLI.md#reconcile-pending-remote-deletes).
+Read-only requests and GC dry runs do not take the exclusive
 barrier.
 
 When destructive GC owns the barrier, new mutation requests wait up to the normal
@@ -110,6 +114,10 @@ Reclamation is deliberately ordered:
 A crash before step 4 leaves the object logically hidden. The next sweep repeats the
 already-missing physical deletes and finishes the tombstone removal. Removing metadata
 before bytes is forbidden because it could resurrect retained content.
+
+For guarded remote deletes, a later sweep first reconciles saved successful
+replies. An unresolved earlier attempt stays pending and cannot be blindly
+reissued; the tombstone remains until reclamation can safely finish.
 
 Dry runs and mark-only runs inventory tombstones but never reclaim them. Sweep eligibility
 uses the normal GC retention window and forward-clock guard. Reports expose scanned,

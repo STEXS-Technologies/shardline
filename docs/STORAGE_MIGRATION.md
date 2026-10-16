@@ -12,7 +12,8 @@ For an active deployment, use your existing maintenance window for the final
 copy and cutover:
 
 1. Drain writers and stop destructive GC against the source and destination.
-2. Inspect pending deletes using the source deployment's admin API. Run
+2. Inspect pending deletes with `shardline history --pending-deletes` using the
+   source deployment's configuration, or use its authenticated admin API. Run
    `shardline repair` with its existing configuration to reconcile saved replies.
    Investigate any delete that remains pending before switching storage.
 3. Copy payloads and verify them with the destination configuration. Keep the
@@ -133,6 +134,11 @@ shardline storage migrate \
 ```
 
 ## Safety Model
+
+Each source object is buffered for verification and copying, with a 64 MiB
+per-object limit. A larger object fails the real copy; a successful dry-run
+inventory does not establish that every object can be copied. This limit is
+per stored object, not per reconstructed file.
 
 Writes are idempotent.
 If the destination already has an identical object, the command counts it as already

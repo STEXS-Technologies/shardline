@@ -13,6 +13,8 @@ docs that match your use case.
 - [Getting Started](GETTING_STARTED.md)
 - [Deployment](DEPLOYMENT.md)
 - [Operations](OPERATIONS.md)
+- [Rolling Upgrade](ROLLING_UPGRADE.md)
+- [Disaster Recovery](DISASTER_RECOVERY.md)
 - [Maintenance: same commands, clearer results](MAINTENANCE_INTEGRATION_UX.md)
 - [Architecture](ARCHITECTURE.md)
 - [Compatibility Status](COMPATIBILITY_STATUS.md)
@@ -42,6 +44,7 @@ docs that match your use case.
 - [Provider Adapters](PROVIDER_ADAPTERS.md)
 - [Security and Invariants](SECURITY_AND_INVARIANTS.md)
 - [Distributed Correctness](DISTRIBUTED_CORRECTNESS.md)
+- [Reliability Architecture](RELIABILITY_ARCHITECTURE.md)
 - [Chaos Engineering and Reliability Evidence](CHAOS_ENGINEERING.md)
 
 ## Operator Workflows
@@ -60,9 +63,10 @@ docs that match your use case.
 
 - [Performance](PERFORMANCE.md)
 - [Profiling](PROFILING.md)
+- [Benchmark Workloads](BENCHMARKS.md)
 
 ## Planning And Release
 
-- [Production-Readiness Plan](SHARDLINE_PRODUCTION_READINESS.md)
-- [SDX Client Plan](SDX_PLAN.md)
+- [Stability Graduation Policy](STABILITY_GRADUATION.md)
+- [SDX Client Implementation Notes](SDX_PLAN.md)
 - [Coordinated crates.io Release](RELEASE.md)
