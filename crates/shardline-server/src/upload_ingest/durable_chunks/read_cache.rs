@@ -6,15 +6,42 @@ use tokio::sync::OnceCell;
 
 use crate::ServerError;
 
-pub(super) type VerifiedRead = Arc<OnceCell<Arc<Vec<u8>>>>;
+pub(in crate::upload_ingest) type VerifiedRead = Arc<OnceCell<Arc<Vec<u8>>>>;
 
 #[derive(Default)]
-pub(super) struct ReadCache {
+pub(in crate::upload_ingest) struct ReadCache {
     entries: VecDeque<(FileChunkRecord, VerifiedRead)>,
     bytes: u64,
 }
 
 impl ReadCache {
+    /// Only called after S3 has compared the complete existing compressed
+    /// object with the chunk's integrity. Fresh PUT acknowledgements do not
+    /// qualify: those chunks still need their ordinary packing read-back.
+    pub(in crate::upload_ingest) fn remember_verified_existing(
+        &mut self,
+        hash: &str,
+        raw: &[u8],
+        compressed_length: u64,
+    ) -> Result<(), ServerError> {
+        let record = FileChunkRecord {
+            hash: hash.to_owned(),
+            offset: 0,
+            length: u64::try_from(raw.len())?,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: compressed_length,
+        };
+        if let Some(cell) = self.cell(&record, true)?
+            && cell.get().is_none()
+        {
+            // Another verified value for this same identity is equally valid.
+            let _existing = cell.set(Arc::new(raw.to_vec()));
+        }
+        Ok(())
+    }
+
     pub(super) fn cell(
         &mut self,
         record: &FileChunkRecord,

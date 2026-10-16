@@ -12,9 +12,10 @@ use tracing::{debug, instrument, warn};
 use super::body_reader::ChunkBuffer;
 use super::cdc::CdcChunker;
 use super::chunk_store::{
-    SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome, put_if_absent_pooled_chunk_buffer,
+    SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome,
+    put_if_absent_pooled_chunk_buffer, put_if_absent_with_verified_cache,
 };
-use super::durable_chunks::DurableUploadChunks;
+use super::durable_chunks::{DurableUploadChunks, ReadCache, SharedReadCache};
 use super::xorb_packer::{pack_owned_chunks_into_xorb, store_xorb};
 
 #[cfg(test)]
@@ -56,10 +57,12 @@ pub(crate) struct FileUploadIngestor {
     pub(super) cdc_chunker: Box<CdcChunker>,
     /// Local deployments spool raw chunks to their filesystem-backed object
     /// store path. S3 deployments leave this unset and read already durable
-    /// chunks back in bounded batches during finalization.
+    /// chunks back in bounded batches during finalization, reusing bytes
+    /// already verified against S3 when they fit the upload-local cache.
     pub(super) raw_chunk_spool: Option<tempfile::NamedTempFile>,
     pub(super) raw_spool_bytes: u64,
     pub(super) raw_chunk_offsets: Vec<(u64, u64)>,
+    verified_chunks: SharedReadCache,
 }
 
 impl FileUploadIngestor {
@@ -99,6 +102,7 @@ impl FileUploadIngestor {
             raw_chunk_spool: None,
             raw_spool_bytes: 0,
             raw_chunk_offsets: Vec::new(),
+            verified_chunks: SharedReadCache::default(),
         }
     }
 
@@ -171,11 +175,19 @@ impl FileUploadIngestor {
         // Individual chunks remain authoritative fallback for any batch that
         // cannot be packed or stored.
         if matches!(object_store, ServerObjectStore::S3(_)) {
+            let verified_chunks = {
+                let mut cache = self
+                    .verified_chunks
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                mem::take(&mut *cache)
+            };
             pack_and_store_xorb_from_durable_chunks(
                 object_store,
                 file_id,
                 &mut self.records,
                 self.max_in_flight_chunks,
+                verified_chunks,
             )
             .await?;
         } else if !self.raw_chunk_offsets.is_empty() {
@@ -268,10 +280,12 @@ impl FileUploadIngestor {
 
         self.drain_completed_chunks_to_capacity().await?;
         let object_store = object_store.clone();
+        let verified_chunks = self.verified_chunks.clone();
         self.in_flight_chunks.spawn(async move {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
-                put_if_absent_pooled_chunk_buffer(&object_store, chunk).await?;
+                put_if_absent_with_verified_cache(&object_store, chunk, Some(&verified_chunks))
+                    .await?;
             if outcome.inserted {
                 record_chunk_inserted(outcome.chunk_length);
             }
@@ -317,10 +331,12 @@ impl FileUploadIngestor {
 
         self.drain_completed_chunks_to_capacity().await?;
         let object_store = object_store.clone();
+        let verified_chunks = self.verified_chunks.clone();
         self.in_flight_chunks.spawn(async move {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
-                put_if_absent_pooled_chunk_buffer(&object_store, chunk).await?;
+                put_if_absent_with_verified_cache(&object_store, chunk, Some(&verified_chunks))
+                    .await?;
             if outcome.inserted {
                 record_chunk_inserted(outcome.chunk_length);
             }
@@ -482,7 +498,8 @@ impl FileUploadIngestor {
 
 /// Packs S3-backed chunks without creating a pod-local raw upload spool.
 /// Individual chunks are already durable and content-addressed by the time
-/// finalization runs, so they are read back in bounded Xorb batches. Local
+/// finalization runs. Bytes already verified against S3 can be reused from the
+/// bounded upload-local cache; remaining chunks are read back in bounded Xorb batches. Local
 /// deployments retain the filesystem path below because their object store is
 /// itself filesystem-backed.
 async fn pack_and_store_xorb_from_durable_chunks(
@@ -490,11 +507,12 @@ async fn pack_and_store_xorb_from_durable_chunks(
     file_id: &str,
     records: &mut [FileChunkRecord],
     parallelism: usize,
+    cache: ReadCache,
 ) -> Result<(), ServerError> {
     let mut batch = Vec::new();
     let mut batch_raw_bytes = 0usize;
     let mut batch_record_start = 0usize;
-    let mut reader = DurableUploadChunks::new(object_store.clone(), parallelism);
+    let mut reader = DurableUploadChunks::with_cache(object_store.clone(), parallelism, cache);
 
     for record_index in 0..records.len() {
         let (raw, chunk_offset) = reader.next(records).await?.ok_or(ServerError::Overflow)?;

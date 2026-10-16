@@ -1,5 +1,5 @@
 //! Bounded, ordered read-ahead for verified durable upload chunks.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures_util::{StreamExt, future::BoxFuture, stream::FuturesOrdered};
 use shardline_index::{FileChunkRecord, xet_hash_hex_string};
@@ -13,6 +13,8 @@ const MAX_READ_AHEAD_CHUNKS: usize = 32;
 type ChunkRead = BoxFuture<'static, Result<(Vec<u8>, u64), ServerError>>;
 
 mod read_cache;
+pub(super) use read_cache::ReadCache;
+pub(super) type SharedReadCache = Arc<Mutex<ReadCache>>;
 
 pub(super) struct DurableUploadChunks {
     store: ServerObjectStore,
@@ -24,14 +26,23 @@ pub(super) struct DurableUploadChunks {
 }
 
 impl DurableUploadChunks {
+    #[cfg(test)]
     pub(super) fn new(store: ServerObjectStore, parallelism: usize) -> Self {
+        Self::with_cache(store, parallelism, ReadCache::default())
+    }
+
+    pub(super) fn with_cache(
+        store: ServerObjectStore,
+        parallelism: usize,
+        cache: ReadCache,
+    ) -> Self {
         Self {
             store,
             pending: FuturesOrdered::new(),
             next_record: 0,
             pending_bytes: 0,
             parallelism: parallelism.clamp(1, MAX_READ_AHEAD_CHUNKS),
-            cache: read_cache::ReadCache::default(),
+            cache,
         }
     }
 

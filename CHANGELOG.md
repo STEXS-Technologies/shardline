@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   and using conditional writes across servers.
 - Reuse verified repeated chunks during upload packing with a bounded,
   upload-local cache, reducing S3 reads without retaining data across uploads.
+- Carry verified existing S3 chunks from ingestion into that same packing cache
+  to avoid reading them twice, without trusting fresh PUT acknowledgements.
 
 ## [1.12.0] - 2026-10-16
 
