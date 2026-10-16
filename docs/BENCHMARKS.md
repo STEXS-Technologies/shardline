@@ -70,6 +70,70 @@ This measures live-object scanning and publication contention, not deletion-heav
 GC, multiple API nodes, or cloud network latency. CPU/RSS describe Shardline
 processes; PostgreSQL and MinIO resource use is excluded.
 
+## Local S3 cost and replica scaling
+
+Measure real S3-backed HTTP uploads across 1, 2, 4 and 8 Shardline API replicas:
+
+```bash
+python3 -B scripts/shardline/validate_performance.py \
+  /path/to/release/shardline /tmp/shardline-performance \
+  --objects 32 --clients 16 --repeats 2
+```
+
+Use a release binary. The runner requires Linux with readable cgroup v2 counters,
+Docker, Python 3.11+ with `boto3`, the MinIO `mc` client, and a host CA certificate bundle.
+It creates its own PostgreSQL and MinIO containers, limits each Shardline replica
+to one CPU and 1 GiB, and removes its containers afterward. Output must be outside
+the checkout. The default workload is larger: 128 objects and three repetitions.
+
+The three fixtures separate unique incompressible content, four identical copies
+of each incompressible object, and distinct compressible objects. Each file is
+1 MiB by default; change it with `--object-bytes`. Client count and uploaded bytes
+stay fixed as replicas increase. Repetitions alternate replica order and the order
+of the mixed workloads with and without GC.
+
+The example is a smoke matrix, not a sustained-load acceptance run. It gives 32
+samples per HTTP method per lane, so its p99 is the slowest sample. Increase the
+object count and repetitions for tail-latency studies. A successful run means
+the measurements and byte checks passed, not that a scaling target was reached.
+
+Read `summary.md` for throughput, tail latency and scaling efficiency. `results.json`
+also records:
+
+- S3 API attempts, including failed dedupe probes, per uploaded decimal GB;
+- individual chunk, Xorb and evidence bytes before and after GC;
+- PostgreSQL query counts/time, database size, and sampled connection/lock peaks;
+- container CPU and peak memory, plus load-generator CPU/RSS;
+- direct-S3 PUT/GET reference measurements with the same payloads and client count.
+
+Request counts come from MinIO's live S3 trace, including bucket-list operations.
+The trace must acknowledge a probe before each snapshot, and its API totals must
+match MinIO's independent v3 server counters. The direct-S3 reference must observe
+exactly one PUT and GET per object. Response timing includes the entire body.
+Every acknowledged object is read back from every replica after GC. A failed
+request, mismatched byte, missing trace, or failed collector fails the run.
+
+Initial ingestion measures uploads alone, followed by two zero-retention GC runs
+on disposable data. The mixed lanes then add two identical logical copies to
+compare warm deduplication with and without concurrent GC. A completed collector
+must have a CLI process lifetime overlapping the maintenance workload; this does
+not mean every request overlaps the collector's scan or exclusive lock. The
+initial stored/logical ratio excludes
+those later copies. Live individual chunks remain a recovery fallback for packed
+Xorbs; packing does not imply GC removes that retained copy.
+
+This is a **shared-host S3 API baseline**, not evidence of eight-host production
+scaling. S3 routes run on the API role; this does not benchmark native LFS/Xet
+transfer replicas. Stored payload bytes exclude object-store filesystem overhead,
+replication, versioning and PostgreSQL storage. Memory includes container page
+cache; connection/lock samples can miss spikes shorter than 0.5 seconds. The 70%
+scale-out efficiency target is a comparison target, not a supported guarantee.
+
+Separate-host load generators, native LFS/Xet comparisons, node termination during
+load, and 100 TB–1 PB metadata/object cardinality remain separate validation work.
+Increasing a logical byte estimate without creating the corresponding metadata
+and object population does not establish large-scale viability.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:
