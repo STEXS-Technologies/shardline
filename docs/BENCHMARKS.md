@@ -474,6 +474,47 @@ incorrect ranges and concurrent replacement. Fetching an unchecked byte range
 instead of validating the container would weaken the current guarantee. No
 reduction in range-read transfer bytes is claimed by this branch.
 
+An October 17 experiment compared the unchanged 32 MiB raw packing cap with
+a temporary 4 MiB cap, using one incompressible 36 MiB file, PostgreSQL and real
+MinIO. Two pairs reversed execution order and produced identical request and
+transfer counts. The experiment changed packing size, not the read verifier or
+persisted record format. Both binaries still verified each selected container
+in full. The table reports MinIO response bytes and observed API attempts.
+
+| Operation or footprint | 32 MiB cap | Experimental 4 MiB cap |
+| --- | --- | --- |
+| 4 KiB read at offset zero: backend bytes | 33,495,294 | 4,111,970 |
+| 4 KiB read at offset 33 MiB: backend bytes | 4,285,994 | 4,191,077 |
+| Each of those range reads: GETs | 1 | 1 |
+| Full 36 MiB download: GETs | 2 | 10 |
+| Full download: backend bytes | 37,781,288 | 37,782,248 |
+| Upload: PUT / GET / HEAD / cleanup requests | 2 / 2 / 2 / 1 | 10 / 10 / 10 / 1 |
+| Stored containers | 2 | 10 |
+| Stored container bytes before GC | 37,781,288 | 37,782,248 |
+
+The prefix read transferred 87.7% fewer backend bytes, but the later range
+improved by only 2.2%. The 4 MiB cap also increased upload attempts from seven
+to 31 and full-download GETs fivefold. CDC chunk boundaries mean a nominal
+36 MiB file need not fit in nine containers capped at 4 MiB. This is a packing
+trade-off, not selective chunk verification or a universal cost reduction.
+
+All 20 candidate/baseline response comparisons passed, including ranges near
+the 4 MiB and 32 MiB offsets and full downloads. All four deployments passed GC
+and fsck; twelve additional range/full reads with released v1.12.0 passed after
+GC. Trace API counts matched independent MinIO counters. These runs do not
+establish tail latency, crash behavior or a uniformly sampled random-read mean.
+The existing 55 download tests also passed, including rejection of corruption
+outside the requested range. Checking only footer-declared hashes cannot detect
+corruption in payload bytes that were never fetched.
+
+The experiment was reverted; the branch retains the 32 MiB cap. For this file,
+smaller packing adds eight PUTs and sixteen GET/HEADs per upload, plus eight GETs
+per full download, while saving about 29.4 MB per measured prefix read. Whether
+that lowers cost depends on the read mix, chargeable backend transfer and
+compute/I/O costs. Measure those inputs before changing the default. Existing
+objects retain their original layout; changing the cap would affect new writes
+without automatically improving old-object range reads.
+
 ## Operational cost per logical TB
 
 Report operational cost alongside throughput and latency:
