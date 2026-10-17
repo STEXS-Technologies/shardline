@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   to avoid reading them twice, without trusting fresh PUT acknowledgements.
 - Reuse object-listing lengths when checking quarantined orphans during GC,
   avoiding redundant S3 metadata requests while retaining length validation.
+- Reuse one verified container snapshot across adjacent fsck references within
+  each record, reducing object-store reads and temporary-file copies while
+  retaining per-reference range, length and member-object checks.
 - Pack S3-protocol uploads backed by SQLite or PostgreSQL and local or S3 storage directly into
   verified containers, avoiding temporary individual-chunk writes and their later
   collection. Failed container storage retains the verified individual-chunk fallback.

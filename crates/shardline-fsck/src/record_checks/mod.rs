@@ -24,8 +24,7 @@ pub(super) use mapping::map_xorb_visit_error_fsck;
 #[cfg_attr(test, allow(unused_imports))]
 #[cfg(test)]
 pub(super) use scanner::{
-    inspect_chunks, inspect_latest_record, inspect_matching_version_record,
-    inspect_native_xet_term, inspect_record_bytes,
+    inspect_chunks, inspect_latest_record, inspect_matching_version_record, inspect_record_bytes,
 };
 
 #[cfg_attr(test, allow(unused_imports))]

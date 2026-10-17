@@ -322,6 +322,17 @@ staging writes. All resource-run reads, GC, released-v1.12.0 rollback reads and
 SQLite checks passed. These shared-host runs quantify these fixtures, not
 production scale-out or a universal memory ceiling.
 
+An additional fsck comparison against real MinIO used 32 one-MiB direct-packed
+files, including their latest and version records. Reusing one verified
+disk-backed container snapshot for adjacent references reduced container GETs
+and HEADs from 1,080 each to 64 each. Total fsck S3 requests fell from 3,242 to
+1,210, and object-store response traffic from 1,133,627,779 to 67,177,571 bytes.
+All 1,080 member-object HEAD checks remained; range, length and required-member
+validation were retained. The snapshot is discarded between records and when
+the container changes. Both versions completed clean fsck, GC, released-v1.12.0
+reads and SQLite integrity checks. This reduces repeated remote reads and
+temporary-file copies without retaining container payloads in RAM.
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)

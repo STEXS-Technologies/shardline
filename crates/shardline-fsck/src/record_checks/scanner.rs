@@ -23,6 +23,15 @@ pub(super) use crate::{
 
 pub(super) use super::mapping::map_xorb_visit_error_fsck;
 
+struct XorbSnapshot {
+    hash: String,
+    file: tempfile::NamedTempFile,
+    validated: shardline_xet_adapter::ValidatedXorb,
+}
+
+#[cfg(test)]
+mod snapshot_tests;
+
 pub(crate) async fn scan_record_tree<RecordAdapter>(
     record_store: &RecordAdapter,
     record_kind: RecordKind,
@@ -291,18 +300,24 @@ pub(crate) fn inspect_chunks(
         || (record.storage_repr == StorageRepresentation::XorbCdcV1
             && (record.chunks.len() > 1 || single_chunk_xorb_backed));
 
+    // Reuse only the immediately preceding container within this record.
+    // Keep one disk-backed snapshot, never a scan-wide cache of object state.
+    let mut snapshot = None;
     for chunk in &record.chunks {
         report.inspected_chunk_references = checked_increment(report.inspected_chunk_references)?;
 
         if all_chunks_xorb_backed {
             inspect_native_xet_term(
-                object_root,
-                object_store,
+                &FsckObjectContext {
+                    object_root,
+                    object_store,
+                },
                 record_location,
                 chunk,
                 record.chunk_size == 0,
                 reachability,
                 report,
+                &mut snapshot,
             )?;
             continue;
         }
@@ -443,18 +458,21 @@ pub(crate) fn inspect_chunks(
     Ok(())
 }
 
-pub(crate) fn inspect_native_xet_term(
-    object_root: &Path,
-    object_store: &ServerObjectStore,
+fn inspect_native_xet_term(
+    context: &FsckObjectContext<'_>,
     record_location: &str,
     chunk: &FileChunkRecord,
     require_member_chunks: bool,
     reachability: &mut FsckReachability,
     report: &mut FsckReport,
+    snapshot: &mut Option<XorbSnapshot>,
 ) -> Result<(), FsckError> {
+    let object_root = context.object_root;
+    let object_store = context.object_store;
     let object_key = match xorb_object_key(&chunk.hash) {
         Ok(object_key) => object_key,
         Err(_) => {
+            *snapshot = None;
             push_issue(
                 report,
                 FsckIssueKind::InvalidContentHash,
@@ -471,43 +489,57 @@ pub(crate) fn inspect_native_xet_term(
         .insert(object_key.as_str().to_owned());
 
     let xorb_location = object_location_display(object_root, object_store, &object_key);
-    let metadata = match object_store.metadata(&object_key)? {
-        Some(metadata) => metadata,
-        None => {
-            push_issue(
-                report,
-                FsckIssueKind::MissingChunk,
-                xorb_location,
-                FsckIssueDetail::ReferencedByNativeXetRecord {
-                    record_location: record_location.to_owned(),
-                },
-            )?;
-            return Ok(());
-        }
-    };
+    if snapshot
+        .as_ref()
+        .is_none_or(|cached| cached.hash != chunk.hash)
+    {
+        *snapshot = None;
+        let metadata = match object_store.metadata(&object_key)? {
+            Some(metadata) => metadata,
+            None => {
+                push_issue(
+                    report,
+                    FsckIssueKind::MissingChunk,
+                    xorb_location,
+                    FsckIssueDetail::ReferencedByNativeXetRecord {
+                        record_location: record_location.to_owned(),
+                    },
+                )?;
+                return Ok(());
+            }
+        };
 
-    let mut xorb_file =
-        object_store.materialize_object_to_tempfile(&object_key, metadata.length())?;
-    let expected_hash = parse_xet_hash_hex(&chunk.hash)?;
-    let mut reader = xorb_file.as_file_mut();
-    // A stored container whose bytes fail to parse or validate is corrupt:
-    // report it as a chunk hash mismatch instead of failing the whole fsck
-    // run. The reader is backed by a bounded temporary file, so validation
-    // does not scale process memory with the xorb size.
-    let validated = match validate_serialized_xorb(&mut reader, expected_hash) {
-        Ok(validated) => validated,
-        Err(_error) => {
-            push_issue(
-                report,
-                FsckIssueKind::ChunkHashMismatch,
-                xorb_location,
-                FsckIssueDetail::XorbHashMismatch {
-                    expected_hash: chunk.hash.clone(),
-                },
-            )?;
-            return Ok(());
-        }
-    };
+        let mut xorb_file =
+            object_store.materialize_object_to_tempfile(&object_key, metadata.length())?;
+        let expected_hash = parse_xet_hash_hex(&chunk.hash)?;
+        let mut reader = xorb_file.as_file_mut();
+        // A stored container whose bytes fail to parse or validate is corrupt:
+        // report it as a chunk hash mismatch instead of failing the whole fsck
+        // run. The reader is backed by a bounded temporary file, so validation
+        // does not scale process memory with the xorb size.
+        let validated = match validate_serialized_xorb(&mut reader, expected_hash) {
+            Ok(validated) => validated,
+            Err(_error) => {
+                push_issue(
+                    report,
+                    FsckIssueKind::ChunkHashMismatch,
+                    xorb_location,
+                    FsckIssueDetail::XorbHashMismatch {
+                        expected_hash: chunk.hash.clone(),
+                    },
+                )?;
+                return Ok(());
+            }
+        };
+        *snapshot = Some(XorbSnapshot {
+            hash: chunk.hash.clone(),
+            file: xorb_file,
+            validated,
+        });
+    }
+    let cached = snapshot.as_mut().ok_or(FsckError::Overflow)?;
+    let validated = &cached.validated;
+    let mut reader = cached.file.as_file_mut();
     let range_start = usize::try_from(chunk.range_start)?;
     let range_end = usize::try_from(chunk.range_end)?;
     if range_end > validated.chunks().len() {
@@ -526,7 +558,7 @@ pub(crate) fn inspect_native_xet_term(
 
     let mut actual_length = 0_u64;
     let mut chunk_index = 0_usize;
-    try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded_chunk| {
+    try_for_each_serialized_xorb_chunk(&mut reader, validated, |decoded_chunk| {
         if chunk_index < range_start || chunk_index >= range_end {
             chunk_index = chunk_index.checked_add(1).ok_or(FsckError::Overflow)?;
             return Ok::<(), FsckError>(());
