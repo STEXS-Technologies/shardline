@@ -163,7 +163,32 @@ load, and 100 TB–1 PB metadata/object cardinality remain separate validation w
 Increasing a logical byte estimate without creating the corresponding metadata
 and object population does not establish large-scale viability.
 
-### Operational-efficiency measurements (October 16, 2026)
+### Operational-efficiency measurements
+
+The measured savings differ by backend and workload. The detailed fixtures
+below explain the boundaries; none requires weaker durability settings.
+
+| Area | Verified reduction | Important limit |
+| --- | --- | --- |
+| Local object storage | Direct packing reduced process disk writes by 47.9% in the measured upload fixture | Additional verification reads remain; SSD lifetime was not measured |
+| SQLite | Direct packing reduced GC database syncs and writes in the measured fixture | Ordinary publication syncs remain; skipping unchanged payload assignments did not reduce WAL |
+| PostgreSQL | Less WAL for large unchanged records, fewer evidence queries and one fewer query per S3 metadata deletion | Small-record WAL savings were negligible; locks and transactional evidence remain |
+| S3 | Fewer staging objects, requests and repeated fsck reads | Full verification still reads complete content; eventual retained bytes need not decrease |
+| Temporary snapshots | Existing kernel copies can share extents on Btrfs while remaining isolated | Filesystem and scratch placement matter; this was already present before the patch |
+
+These savings must not be added as percentages of a single bill. Uploads,
+downloads, metadata publication and maintenance have different costs and
+frequencies. Use the [cost-per-TB method](#operational-cost-per-logical-tb) to
+combine measured quantities for an actual workload.
+
+The final server library regression against product code at `e2661a64` passed
+3,403 tests with no failures. Six explicit task-history capacity drills were
+ignored by the normal suite and were not rerun in that check. The preceding
+storage regression passed 492 tests; the index regression passed 780 with a
+disposable PostgreSQL instance configured. These regressions complement the
+workload-specific evidence below; they do not certify every deployment shape.
+
+#### Shared-host replica and latency qualification
 
 These local PostgreSQL/MinIO measurements compare main-equivalent product code
 (`c2301dac`, based on `01f2c9e3`) with `48727f81`. Each lane uploaded 32 objects
@@ -239,6 +264,8 @@ with p99 of 117.9 ms. Both configurations made one backend GET per read, all
 8,192 body checks passed, and traces matched independent counters. This is an
 artificial-delay diagnostic, not a cloud-provider or production benchmark.
 
+#### Temporary storage and retention
+
 A separate retention check uploaded 384 MiB of logical content (128 one-MiB
 files each of unique, repeated and compressible data) through two replicas per
 version. Repeated-data identities were separated from the unique dataset. The
@@ -254,6 +281,8 @@ sweep made 17,641 backend requests before and 1,189 after. This fixture therefor
 demonstrates lower temporary storage and cleanup request costs, with an unchanged
 eventual stored footprint; it does not demonstrate additional compression or
 deduplication savings.
+
+#### Local filesystem and SQLite writes
 
 Before the local direct-packing extension, an October 17 filesystem/SQLite check compared the same main-equivalent and
 candidate binaries in three pairs on an NVMe-backed Btrfs filesystem, rather
@@ -322,6 +351,8 @@ they do not establish a drive-lifetime multiplier or annual replacement saving.
 An endurance estimate needs longer isolated runs, the drive's rated write
 endurance and replacement cost, and the deployment's complete write workload.
 
+#### Local snapshot copies
+
 An October 17 local-snapshot audit found that the current production
 `materialize_object_to_tempfile` already uses Rust's file-to-file `std::io::copy`
 fast path. A syscall trace of its existing large-object regression on Btrfs
@@ -361,6 +392,8 @@ tmpfs avoids direct SSD scratch writes but consumes memory and may use swap.
 Measure the chosen layout's memory, disk accounting and capacity before applying
 the numbers to a deployment. Durable object and SQLite sync policies are unchanged.
 
+#### S3 requests and upload resources
+
 With SQLite metadata and real MinIO, direct packing reduced upload requests for
 32 unique one-MiB objects from 1,144 to 96. It replaced 540 individual chunk
 PUTs and 540 chunk GETs with 32 container PUTs and 32 complete verification GETs;
@@ -392,6 +425,8 @@ staging writes. All resource-run reads, GC, released-v1.12.0 rollback reads and
 SQLite checks passed. These shared-host runs quantify these fixtures, not
 production scale-out or a universal memory ceiling.
 
+#### Fsck reads and validation reuse
+
 An additional fsck comparison against real MinIO used 32 one-MiB direct-packed
 files, including their latest and version records. Reusing one verified
 disk-backed container snapshot for adjacent references reduced container GETs
@@ -419,6 +454,8 @@ eight concurrent 36 MiB uploads, identical overwrites, GC and fsck. It retained
 including eight reads using released v1.12.0 after maintenance. This is a
 single-host compatibility/correctness check, not a cluster scaling result.
 
+#### Small metadata reads
+
 Small-object reads used for OCI media types and legacy metadata now obtain
 length and bytes from one S3 GET instead of HEAD plus GET. An HTTP-provider
 fixture checks GET-only behavior for success, oversized objects, missing
@@ -429,6 +466,8 @@ No application-throughput improvement has been
 measured for this separate change. Local object reads retain their existing
 path, and no disk staging or additional payload copy is introduced.
 
+#### PostgreSQL publication
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)
@@ -436,6 +475,8 @@ reduced database calls from 155,648 to 147,456 per 4,096 small-object PUT/GET pa
 In sequential four-replica runs, median server CPU fell from 9.14 to 8.56 seconds
 and PostgreSQL CPU from 15.20 to 11.86 seconds, with unchanged backend requests
 and 16,384 verified post-GC reads per version. Timing remains host-dependent.
+
+#### Duplicate S3 file and copy verification
 
 An October 17 comparison targeted repeated file-backed S3 uploads, which still
 compared an existing object with a local file through separate 256 KiB GETs.
@@ -495,6 +536,8 @@ Comparison retains one transport frame per object, adds no temporary file and
 does not buffer whole objects. Each response must declare the expected complete
 length and range, and both bodies must reach EOF at that length.
 
+#### PostgreSQL deletion
+
 An October 17 PostgreSQL deletion comparison replaced a listing-row SELECT
 followed by DELETE with `DELETE ... RETURNING` in both S3 metadata deletion
 paths. The removed row still supplies the complete before-state for reliability
@@ -514,12 +557,16 @@ saving. It does not establish a production latency improvement. The S3 evidence
 corruption regression exercises both deletion entry points and checks that the
 listing row survives their failed transactions.
 
+#### Unchanged SQLite payloads
+
 A separate SQLite SQL probe with sixteen unchanged one-MiB payloads produced
 the same 65,952 WAL bytes for the current payload-plus-timestamp upsert and a
 timestamp-only update. Both used WAL, `synchronous=FULL`, disabled automatic
 checkpointing and a truncated WAL before measurement, and passed integrity
 checks. This narrow probe does not measure complete Shardline publication;
 it provides no evidence for changing SQLite publication SQL to reduce writes.
+
+#### Admission, compatibility and failure qualification
 
 Packing-admission qualification used 64 concurrent unique 36 MiB uploads against
 one API replica with 1 CPU and a 1 GiB memory limit. All uploads and 64 post-GC
@@ -556,6 +603,8 @@ GC regression coverage also deletes a listed orphan before sweep and checks that
 quarantine cleanup and a repeated sweep do not resurrect data. These controlled
 cases complement the deployment drill; they do not cover every network failure.
 
+#### Workload limits and remaining costs
+
 A release-mode microbenchmark of per-key write coordination measured about
 0.16 µs per acquisition with 128 other keys held, 0.49 µs with 512 and 10.4 µs
 with 8,192 (10,000 acquisitions per size, one thread, no S3 traffic). Cleanup
@@ -591,9 +640,9 @@ fewer requests do not necessarily mean fewer backend bytes.
 
 This is a remaining optimization opportunity: the offset-zero fixture transferred
 about 8,178 backend bytes per logical byte returned. It is not a measured average
-for random reads. Reducing this amplification must preserve verification of the
-requested content against a trusted commitment, including corruption, truncation,
-incorrect ranges and concurrent replacement. Fetching an unchecked byte range
+for random reads. Reducing this amplification must preserve the current complete
+selected-container verification, including rejection of corruption outside the
+requested range, truncation, incorrect ranges and concurrent replacement. Fetching an unchecked byte range
 instead of validating the container would weaken the current guarantee. No
 reduction in range-read transfer bytes is claimed by this branch.
 
