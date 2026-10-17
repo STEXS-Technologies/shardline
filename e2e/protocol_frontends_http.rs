@@ -17,14 +17,17 @@ use reqwest::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use shardline_index::parse_xet_hash_hex;
 use tokio::{net::TcpListener, spawn, task::JoinHandle};
 
 use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_server::{
     BazelCacheKind, FileReconstructionResponse, ServerConfig, ServerError, ServerFrontend,
-    ServerObjectStore, bazel_cache_object_key, chunk_hash, lfs_object_key, oci_blob_key,
-    oci_manifest_key, oci_manifest_media_type_key, serve_with_listener,
+    ServerObjectStore, bazel_cache_object_key, chunk_hash, decode_serialized_xorb_chunks,
+    lfs_object_key, oci_blob_key, oci_manifest_key, oci_manifest_media_type_key,
+    serve_with_listener,
     test_fixtures::{single_chunk_xorb, single_file_shard},
+    validate_serialized_xorb,
 };
 use shardline_server_core::{AuthProvider, AuthorizedRepository, LocalHmacProvider};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
@@ -751,19 +754,37 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
         !oci_path.exists(),
         "OCI should not retain a legacy whole object"
     );
-    // The upload is ingested via CDC with target chunk size 128, so the
-    // 24-byte payload is stored as a single chunk keyed by its raw-content
-    // hash (not as 4-byte fixed-size slices from the pre-CDC era).
-    let chunk_hash_hex = shardline_index::xet_hash_hex_string(chunk_hash(shared_bytes));
-    let chunk_path = runtime
+    // The optimized protocol-ingest path stores the shared CDC chunk inside
+    // one content-addressed Xorb, rather than as a standalone chunk object.
+    let xorb_dir = runtime
         .storage_path()
         .join("chunks")
-        .join(&chunk_hash_hex[..2])
-        .join(&chunk_hash_hex);
+        .join("xorbs")
+        .join("default");
+    let mut shared_payload_xorbs = 0;
+    for prefix in fs::read_dir(&xorb_dir)? {
+        let prefix = prefix?;
+        for entry in fs::read_dir(prefix.path())? {
+            let entry = entry?;
+            if entry.path().extension().is_some_and(|extension| extension == "xorb") {
+                let path = entry.path();
+                let hash = path
+                    .file_stem()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .ok_or("stored Xorb filename should contain a UTF-8 hash")?;
+                let expected_hash = parse_xet_hash_hex(hash)?;
+                let mut serialized = std::io::Cursor::new(fs::read(path)?);
+                let validated = validate_serialized_xorb(&mut serialized, expected_hash)?;
+                let decoded = decode_serialized_xorb_chunks(&mut serialized, &validated)?;
+                if decoded.iter().any(|chunk| chunk.data() == shared_bytes) {
+                    shared_payload_xorbs += 1;
+                }
+            }
+        }
+    }
     assert!(
-        chunk_path.exists(),
-        "shared frontend chunk should exist at {}",
-        chunk_path.display()
+        shared_payload_xorbs == 1,
+        "identical LFS, Bazel, and OCI uploads should share exactly one packed Xorb containing their payload"
     );
 
     let hub_repo = client

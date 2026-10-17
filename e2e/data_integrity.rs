@@ -11056,9 +11056,12 @@ async fn sqlite_dedupe_mapping_roundtrip() {
         .await
         .unwrap();
     let before: serde_json::Value = stats_before.json().await.unwrap();
-    let chunks_before = before["chunks"].as_u64().unwrap_or(0);
+    let objects_before = before["objects"].as_u64().expect("objects field missing");
+    let object_bytes_before = before["object_bytes"]
+        .as_u64()
+        .expect("object_bytes field missing");
 
-    // Upload once, then verify duplicate writes do not grow the chunk inventory.
+    // Upload once, then verify duplicate writes do not grow physical storage.
     let content = b"dedupe mapping roundtrip content";
     let oid = hex::encode(sha2::Sha256::digest(content));
 
@@ -11081,9 +11084,19 @@ async fn sqlite_dedupe_mapping_roundtrip() {
         .await
         .unwrap();
     let chunks_after_first = stats_after_first["chunks"].as_u64().unwrap_or(0);
+    let objects_after_first = stats_after_first["objects"]
+        .as_u64()
+        .expect("objects field missing");
+    let object_bytes_after_first = stats_after_first["object_bytes"]
+        .as_u64()
+        .expect("object_bytes field missing");
     assert!(
-        chunks_after_first > chunks_before,
-        "first upload should add chunks"
+        objects_after_first > objects_before,
+        "first upload should add stored objects: before={before:?}, after={stats_after_first:?}"
+    );
+    assert!(
+        object_bytes_after_first > object_bytes_before,
+        "first upload should add stored bytes: before={before:?}, after={stats_after_first:?}"
     );
 
     for i in 0..2 {
@@ -11098,7 +11111,7 @@ async fn sqlite_dedupe_mapping_roundtrip() {
         assert_eq!(resp.status(), 200, "upload {i} failed");
     }
 
-    // The duplicate uploads should not add chunks.
+    // The duplicate uploads should not add chunk entries or stored bytes.
     let stats_after = client
         .get(format!("{base_url}/v1/stats"))
         .header("Authorization", format!("Bearer {token}"))
@@ -11107,9 +11120,18 @@ async fn sqlite_dedupe_mapping_roundtrip() {
         .unwrap();
     let after: serde_json::Value = stats_after.json().await.unwrap();
     let chunks_after = after["chunks"].as_u64().unwrap_or(0);
+    let objects_after = after["objects"].as_u64().expect("objects field missing");
+    let object_bytes_after = after["object_bytes"]
+        .as_u64()
+        .expect("object_bytes field missing");
     assert_eq!(
         chunks_after, chunks_after_first,
         "dedupe mapping should prevent chunk growth"
+    );
+    assert_eq!(objects_after, objects_after_first, "duplicate uploads added objects");
+    assert_eq!(
+        object_bytes_after, object_bytes_after_first,
+        "duplicate uploads added stored bytes"
     );
 
     // Query back — content should be intact.
