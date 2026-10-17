@@ -27,6 +27,8 @@ struct State {
     deny_reads: bool,
     insert_after_missing_read: Option<Vec<u8>>,
     new_write_override: Option<Vec<u8>>,
+    response_range: Option<String>,
+    response_length: Option<usize>,
 }
 
 struct Provider {
@@ -104,6 +106,10 @@ impl Provider {
                             }
                         }
                         "GET" if state.deny_reads => ("403 Forbidden", Vec::new()),
+                        "HEAD" => state.objects.get(path).cloned().map_or_else(
+                            || ("404 Not Found", Vec::new()),
+                            |bytes| ("200 OK", bytes),
+                        ),
                         "GET" => state.objects.get(path).cloned().map_or_else(
                             || {
                                 if let Some(bytes) = state.insert_after_missing_read.take() {
@@ -116,12 +122,35 @@ impl Provider {
                         other => panic!("unexpected provider operation: {other}"),
                     }
                 };
+                let state = provider_state.lock().unwrap();
+                let ranged = method == "GET"
+                    && status == "200 OK"
+                    && headers.lines().any(|line| {
+                        line.split_once(':')
+                            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("range"))
+                    });
+                let range_value = state.response_range.clone().or_else(|| {
+                    ranged.then(|| {
+                        format!("bytes 0-{}/{}", bytes.len().saturating_sub(1), bytes.len())
+                    })
+                });
+                let range = range_value
+                    .as_ref()
+                    .map_or(String::new(), |range| format!("Content-Range: {range}\r\n"));
+                let status = if range_value.is_some() && method == "GET" {
+                    "206 Partial Content"
+                } else {
+                    status
+                };
+                let length = state.response_length.unwrap_or(bytes.len());
+                drop(state);
                 let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nConnection: close\r\n\r\n",
-                    bytes.len()
+                    "HTTP/1.1 {status}\r\nContent-Length: {length}\r\n{range}ETag: \"fixture\"\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nConnection: close\r\n\r\n"
                 );
-                stream.write_all(response.as_bytes()).unwrap();
-                stream.write_all(&bytes).unwrap();
+                // Integrity failures may intentionally stop reading early.
+                if stream.write_all(response.as_bytes()).is_ok() && method != "HEAD" {
+                    let _body_result = stream.write_all(&bytes);
+                }
             }
         });
         Self {
@@ -164,6 +193,101 @@ fn integrity(bytes: &[u8]) -> ObjectIntegrity {
         ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes()),
         bytes.len() as u64,
     )
+}
+
+#[test]
+fn existing_file_uploads_compare_complete_objects_with_one_get() {
+    let provider = Provider::new();
+    let store = provider.store();
+    let key = ObjectKey::parse("files/large").unwrap();
+    let bytes = (0..32 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&bytes).unwrap();
+    provider
+        .state
+        .lock()
+        .unwrap()
+        .objects
+        .insert("/fixture/files/large".to_owned(), bytes.clone());
+    let expected = integrity(&bytes);
+    assert_eq!(
+        store
+            .put_content_addressed_file(&key, file.path(), &expected)
+            .unwrap(),
+        PutOutcome::AlreadyExists
+    );
+    assert_eq!(provider.requests(), ["HEAD", "GET"]);
+    provider.state.lock().unwrap().requests.clear();
+    assert_eq!(
+        store
+            .put_file_if_absent(&key, file.path(), &expected)
+            .unwrap(),
+        PutOutcome::AlreadyExists
+    );
+    assert_eq!(provider.requests(), ["HEAD", "GET"]);
+}
+
+#[test]
+fn existing_file_comparison_rejects_corruption_and_invalid_responses() {
+    let bytes = vec![0x42; 1024 * 1024 + 17];
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&bytes).unwrap();
+    let key = ObjectKey::parse("files/invalid").unwrap();
+    for case in [
+        "tail",
+        "short",
+        "long",
+        "denied",
+        "range",
+        "truncated",
+        "missing",
+        "prefix",
+    ] {
+        let provider = Provider::new();
+        let store = provider.store();
+        {
+            let mut state = provider.state.lock().unwrap();
+            let mut stored = bytes.clone();
+            match case {
+                "tail" => *stored.last_mut().unwrap() ^= 1,
+                "short" => {
+                    stored.pop();
+                }
+                "long" => stored.push(0),
+                "denied" => state.deny_reads = true,
+                "range" => {
+                    state.response_range =
+                        Some(format!("bytes 1-{}/{}", bytes.len(), bytes.len() + 1))
+                }
+                "truncated" => {
+                    stored.pop();
+                    state.response_length = Some(bytes.len());
+                }
+                "missing" => {}
+                "prefix" => stored[0] ^= 1,
+                _ => panic!("unknown fixture case"),
+            }
+            if case != "missing" {
+                state
+                    .objects
+                    .insert("/fixture/files/invalid".to_owned(), stored);
+            }
+        }
+        assert!(
+            super::existing_object_outcome_from_file(
+                &store,
+                &key,
+                bytes.len() as u64,
+                file.path(),
+                &integrity(&bytes)
+            )
+            .is_err(),
+            "case {case}"
+        );
+        assert_eq!(provider.requests(), ["GET"]);
+    }
 }
 
 #[test]

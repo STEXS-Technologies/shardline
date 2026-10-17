@@ -398,6 +398,56 @@ In sequential four-replica runs, median server CPU fell from 9.14 to 8.56 second
 and PostgreSQL CPU from 15.20 to 11.86 seconds, with unchanged backend requests
 and 16,384 verified post-GC reads per version. Timing remains host-dependent.
 
+An October 17 comparison targeted repeated file-backed S3 uploads, which still
+compared an existing object with a local file through separate 256 KiB GETs.
+The new path uses one full-range streamed GET, retaining complete byte equality,
+the initial metadata check and conditional creation. Local reads are buffered
+at 256 KiB so transport-frame sizes do not dictate disk read sizes. It adds no
+temporary file and does not retain the complete object in memory.
+
+Three alternating before/after pairs used a disposable MinIO service and three
+duplicate verifications of a seeded 32 MiB object per run. Each verification
+fell from one HEAD plus 128 GETs to one HEAD plus one GET: 129 to two requests
+(98.4% fewer). Object response bytes were unchanged. Including the identical
+seed upload, each run made 398 requests before and 17 after; all aggregate API
+counts matched independent MinIO counters. Median time for the three measured
+verifications, including caller-side SHA-256/BLAKE3 calculation but excluding
+seeding, fell from 297.7 to 91.8 ms. These are shared-host results for this path,
+not a general upload-throughput or disk-endurance measurement.
+
+Three additional pairs measured whole-process peak RSS with GNU time: 43.3–43.6
+MiB before and 43.1–43.9 MiB after. These peaks include fixture construction and
+seed upload; they do not isolate comparison buffers or establish a production
+memory ceiling. The request reduction does not remove the complete local or
+remote byte read needed to prove equality, so no disk-read-byte or SSD-wear
+saving is claimed for this change.
+
+The HTTP-provider regression exercises both file-backed upload entry points
+with a 32 MiB existing object and asserts one HEAD plus one GET. Negative cases
+cover prefix/tail corruption, shorter/longer objects, missing objects, denied
+reads, incorrect response ranges and a body truncated after valid headers.
+File length is checked through the opened handle and at EOF. A single response
+also avoids combining remote ranges fetched from different object revisions.
+
+To reproduce the duplicate-file workload against a disposable bucket:
+
+```bash
+S3_BENCH_ENDPOINT=http://127.0.0.1:9010 \
+S3_BENCH_BUCKET=shardline-bench \
+cargo bench -p shardline-storage --bench s3_put_file_fixed -- existing --iterations 3
+```
+
+Set `S3_BENCH_ACCESS_KEY` and `S3_BENCH_SECRET_KEY` for the fixture. The benchmark
+seeds its own unique key before timing and requires each measured call to find
+that existing object. Delete the disposable bucket after collecting results.
+
+A separate SQLite SQL probe with sixteen unchanged one-MiB payloads produced
+the same 65,952 WAL bytes for the current payload-plus-timestamp upsert and a
+timestamp-only update. Both used WAL, `synchronous=FULL`, disabled automatic
+checkpointing and a truncated WAL before measurement, and passed integrity
+checks. This narrow probe does not measure complete Shardline publication;
+it provides no evidence for changing SQLite publication SQL to reduce writes.
+
 Packing-admission qualification used 64 concurrent unique 36 MiB uploads against
 one API replica with 1 CPU and a 1 GiB memory limit. All uploads and 64 post-GC
 reads passed; process peak RSS was approximately 500 MiB. An earlier run ended

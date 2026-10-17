@@ -2,7 +2,7 @@ use std::{
     fmt,
     fs::File,
     future::Future,
-    io::{Error as IoError, Read},
+    io::Error as IoError,
     ops::Range,
     path::Path,
     sync::{Arc, Mutex, atomic::Ordering},
@@ -35,6 +35,7 @@ use super::{
     is_temp_upload_key,
 };
 
+mod file_compare;
 mod full_read;
 
 /// S3-compatible implementation of [`ObjectStore`].
@@ -1226,38 +1227,10 @@ pub(crate) fn existing_object_outcome_from_file(
     if existing_length != integrity.length() {
         return Err(S3ObjectStoreError::ExistingObjectConflict);
     }
-    let mut file = File::open(path).map_err(S3ObjectStoreError::Io)?;
-    let mut offset = 0_u64;
-    let mut buffer = vec![0_u8; super::STREAM_COMPARE_CHUNK_BYTES];
-    while offset < existing_length {
-        let remaining = existing_length
-            .checked_sub(offset)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let to_read = usize::try_from(remaining.min(super::STREAM_COMPARE_CHUNK_BYTES as u64))
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let chunk = buffer
-            .get_mut(..to_read)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        file.read_exact(chunk).map_err(S3ObjectStoreError::Io)?;
-        let end = offset
-            .checked_add(
-                u64::try_from(to_read)
-                    .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?,
-            )
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let range = ByteRange::new(offset, end)
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let existing = ObjectStore::read_range(store, key, range)?;
-        let expected = buffer
-            .get(..to_read)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        if existing.as_slice() != expected {
-            return Err(S3ObjectStoreError::ExistingObjectConflict);
-        }
-        offset = end.saturating_add(1);
+    if existing_length == 0 {
+        return Ok(PutOutcome::AlreadyExists);
     }
-    Ok(PutOutcome::AlreadyExists)
+    file_compare::compare_existing_file(store, key, path, existing_length)
 }
 
 pub(crate) fn existing_copy_outcome(

@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Verify existing S3 objects for file-backed uploads with one bounded streamed
+  comparison instead of repeated 256 KiB range requests, retaining complete
+  byte comparison and rejecting invalid or incomplete responses.
 - Read small S3-backed metadata objects with one GET instead of HEAD plus GET,
   retaining the 64 MiB buffering limit and complete-response validation.
 - Coordinate concurrent S3 creates for the same object within each server to

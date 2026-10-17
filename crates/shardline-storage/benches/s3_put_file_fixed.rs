@@ -10,7 +10,8 @@ use blake3::Hasher as Blake3Hasher;
 use sha2::{Digest, Sha256};
 use shardline_protocol::{SecretString, ShardlineHash};
 use shardline_storage::{
-    ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, S3ObjectStore, S3ObjectStoreConfig,
+    ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome, S3ObjectStore,
+    S3ObjectStoreConfig,
 };
 use tempfile::TempDir;
 
@@ -80,7 +81,9 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
-            "old" | "generic" | "direct" => mode = Box::leak(argument.into_boxed_str()),
+            "old" | "generic" | "direct" | "existing" => {
+                mode = Box::leak(argument.into_boxed_str())
+            }
             "--bench" => {}
             "--iterations" => {
                 let Some(value) = args.next() else {
@@ -97,7 +100,7 @@ fn main() -> ExitCode {
             }
             _ => {
                 eprintln!(
-                    "usage: cargo bench --bench s3_put_file_fixed -- [old|generic|direct] [--iterations N]"
+                    "usage: cargo bench --bench s3_put_file_fixed -- [old|generic|direct|existing] [--iterations N]"
                 );
                 return ExitCode::FAILURE;
             }
@@ -112,9 +115,20 @@ fn main() -> ExitCode {
         }
     };
 
+    // Seed outside the measured window, then exercise complete duplicate-file
+    // verification rather than timing creation under a new key each time.
+    if mode == "existing" {
+        let seeded = fixture
+            .object_key(mode, 0)
+            .and_then(|key| direct_finalize_s3(&fixture.store, &fixture.source_path, &key));
+        if let Err(error) = seeded {
+            eprintln!("existing-object setup failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
     let start = Instant::now();
     for iteration in 0..iterations {
-        let key = match fixture.object_key(mode, iteration) {
+        let key = match fixture.object_key(mode, if mode == "existing" { 0 } else { iteration }) {
             Ok(key) => key,
             Err(error) => {
                 eprintln!("object key failed: {error}");
@@ -125,6 +139,7 @@ fn main() -> ExitCode {
             "old" => old_finalize_s3(&fixture.store, &fixture.source_path, &key),
             "generic" => generic_finalize_s3(&fixture.store, &fixture.source_path, &key),
             "direct" => direct_finalize_s3(&fixture.store, &fixture.source_path, &key),
+            "existing" => existing_finalize_s3(&fixture.store, &fixture.source_path, &key),
             invalid => {
                 eprintln!("unsupported mode: {invalid}");
                 return ExitCode::FAILURE;
@@ -176,6 +191,18 @@ fn direct_finalize_s3(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_sha256_hex, integrity) = stream_file_integrity(path)?;
     let _stored = store.put_content_addressed_file(key, path, &integrity)?;
+    Ok(())
+}
+
+fn existing_finalize_s3(
+    store: &S3ObjectStore,
+    path: &Path,
+    key: &ObjectKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_sha256_hex, integrity) = stream_file_integrity(path)?;
+    if store.put_content_addressed_file(key, path, &integrity)? != PutOutcome::AlreadyExists {
+        return Err("expected the seeded object to remain present".into());
+    }
     Ok(())
 }
 
