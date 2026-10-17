@@ -442,27 +442,15 @@ impl super::PostgresRecordStore {
         fallback_file_id: &str,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
-        let previous_s3_entry = super::s3_objects::current_s3_object_on_connection(
+        let deleted_entry = super::s3_objects::remove_s3_object_on_connection(
             &mut transaction,
             scope_namespace,
             object_key,
         )
         .await?;
-        let deleted_entry = query(
-            "DELETE FROM shardline_s3_objects
-             WHERE scope_namespace = $1 AND object_key = $2
-             RETURNING file_id, content_hash",
-        )
-        .bind(scope_namespace)
-        .bind(object_key)
-        .fetch_optional(&mut *transaction)
-        .await?;
         let scope_key = shared_repository_scope_key(None);
         let (file_id, visible_hash) = if let Some(row) = deleted_entry.as_ref() {
-            (
-                row.try_get::<String, _>("file_id")?,
-                Some(row.try_get::<String, _>("content_hash")?),
-            )
+            (row.file_id.clone(), Some(row.content_hash.clone()))
         } else {
             let hash = query_scalar::<_, String>(
                 "SELECT content_hash FROM shardline_file_records
@@ -494,7 +482,7 @@ impl super::PostgresRecordStore {
         if deleted_entry.is_some() {
             super::s3_objects::record_s3_object_transition(
                 &mut transaction,
-                previous_s3_entry.as_ref(),
+                deleted_entry.as_ref(),
                 None,
             )
             .await?;

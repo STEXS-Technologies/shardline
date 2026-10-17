@@ -495,6 +495,25 @@ Comparison retains one transport frame per object, adds no temporary file and
 does not buffer whole objects. Each response must declare the expected complete
 length and range, and both bodies must reach EOF at that length.
 
+An October 17 PostgreSQL deletion comparison replaced a listing-row SELECT
+followed by DELETE with `DELETE ... RETURNING` in both S3 metadata deletion
+paths. The removed row still supplies the complete before-state for reliability
+evidence. Existing advisory/ownership locks, transactions, evidence verification,
+deferred database gates and legacy record-deletion fallback remain in place.
+An invalid returned row or invalid evidence aborts the transaction.
+
+Two alternating before/after pairs ran the existing create/delete/delete-absent
+regression against a disposable PostgreSQL 16 instance with
+`pg_stat_statements.track=all`. The two deletion calls used two DELETEs and two
+listing-row SELECTs before, and two returning DELETEs afterward. An unrelated
+SELECT during setup remained. Across the matched listing SELECTs and DELETEs,
+including that setup SELECT, shared-buffer hits fell from 12 to ten; both
+versions recorded zero physical block reads and 54 WAL bytes. This establishes one fewer SQL round trip
+per deletion attempt, including absent objects, rather than a WAL or SSD-wear
+saving. It does not establish a production latency improvement. The S3 evidence
+corruption regression exercises both deletion entry points and checks that the
+listing row survives their failed transactions.
+
 A separate SQLite SQL probe with sixteen unchanged one-MiB payloads produced
 the same 65,952 WAL bytes for the current payload-plus-timestamp upsert and a
 timestamp-only update. Both used WAL, `synchronous=FULL`, disabled automatic

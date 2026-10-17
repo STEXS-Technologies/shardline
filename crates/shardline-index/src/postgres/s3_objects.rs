@@ -232,6 +232,26 @@ pub(super) async fn current_s3_object_on_connection(
     row.map(|row| s3_object_entry_from_row(&row)).transpose()
 }
 
+/// Returns the exact removed row for the transaction's deletion evidence.
+/// Callers retain their existing ownership/locking and must roll back on error.
+pub(super) async fn remove_s3_object_on_connection(
+    connection: &mut PgConnection,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<Option<S3ObjectEntry>, PostgresMetadataStoreError> {
+    let row = query(
+        "DELETE FROM shardline_s3_objects
+         WHERE scope_namespace = $1 AND object_key = $2
+         RETURNING scope_namespace, object_key, file_id, size_bytes, content_hash,
+                   etag, user_metadata, updated_at_unix_seconds",
+    )
+    .bind(scope_namespace)
+    .bind(object_key)
+    .fetch_optional(&mut *connection)
+    .await?;
+    row.as_ref().map(s3_object_entry_from_row).transpose()
+}
+
 pub(super) async fn record_s3_object_transition(
     connection: &mut PgConnection,
     before: Option<&S3ObjectEntry>,
@@ -381,15 +401,8 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         let mut transaction = self.pool.begin().await?;
         lock_s3_object(&mut transaction, scope_namespace, object_key).await?;
         let before =
-            current_s3_object_on_connection(&mut transaction, scope_namespace, object_key).await?;
-        let result = query(
-            "DELETE FROM shardline_s3_objects WHERE scope_namespace = $1 AND object_key = $2",
-        )
-        .bind(scope_namespace)
-        .bind(object_key)
-        .execute(&mut *transaction)
-        .await?;
-        let deleted = result.rows_affected() > 0;
+            remove_s3_object_on_connection(&mut transaction, scope_namespace, object_key).await?;
+        let deleted = before.is_some();
         if deleted {
             record_s3_object_transition(&mut transaction, before.as_ref(), None).await?;
         }
@@ -856,6 +869,31 @@ mod tests {
         .execute(&pool)
         .await
         .expect("tamper evidence");
+
+        assert!(store.delete_s3_object(&scope, "model.bin").await.is_err());
+        let record_store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut connection = pool.acquire().await.expect("delete connection");
+        assert!(
+            record_store
+                .delete_s3_object_on_connection(
+                    &mut connection,
+                    &scope,
+                    "model.bin",
+                    &value.file_id,
+                )
+                .await
+                .is_err()
+        );
+        drop(connection);
+        let remaining: i64 = query_scalar(
+            "SELECT count(*) FROM shardline_s3_objects WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&scope)
+        .bind("model.bin")
+        .fetch_one(&pool)
+        .await
+        .expect("rollback row");
+        assert_eq!(remaining, 1, "both deletion transactions must roll back");
 
         assert!(
             S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "model.bin")

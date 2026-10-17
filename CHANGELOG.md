@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Return deleted PostgreSQL S3 listing rows directly from the deletion statement,
+  avoiding a separate read while retaining transactional recovery evidence.
 - Compare existing S3 copy destinations through two complete streamed reads
   instead of repeated range requests, retaining exact byte equality and
   rejecting incomplete responses without modifying either object.
