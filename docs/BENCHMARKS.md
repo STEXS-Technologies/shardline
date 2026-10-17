@@ -322,6 +322,45 @@ they do not establish a drive-lifetime multiplier or annual replacement saving.
 An endurance estimate needs longer isolated runs, the drive's rated write
 endurance and replacement cost, and the deployment's complete write workload.
 
+An October 17 local-snapshot audit found that the current production
+`materialize_object_to_tempfile` already uses Rust's file-to-file `std::io::copy`
+fast path. A syscall trace of its existing large-object regression on Btrfs
+showed `copy_file_range` copying 2,097,169 bytes, followed by EOF. No replacement
+copy implementation was needed. These private snapshots preserve the bytes
+shared by container validation and later decoding; replacing them with a source
+file handle would change that guarantee.
+
+A separate 32 MiB incompressible-file probe on the same NVMe-backed Btrfs
+filesystem alternated three kernel-copy/buffered-copy pairs. Each output was
+synced before reading `/proc/self/io`, then compared completely with its source:
+
+| Snapshot method | Process `write_bytes` per copy | Elapsed time including output sync |
+| --- | --- | --- |
+| Existing kernel file-copy path | 81,920–114,688 bytes | 0.49–0.57 ms |
+| Explicit 256 KiB buffered copy | 33,619,968–33,669,120 bytes | 11.24–12.67 ms |
+
+All six copies matched; modifying each output left its source unchanged. A
+Shardline regression additionally mutates the source after materialization and
+checks that the snapshot remains unchanged, then checks isolation in the other
+direction. It passes with temporary files on both tmpfs and Btrfs. On this host
+the default `/tmp` is tmpfs; the Btrfs run explicitly set `TMPDIR` to a disposable
+directory on the local-storage filesystem.
+
+To check snapshot isolation with a chosen scratch filesystem, create a private
+directory there and run:
+
+```bash
+TMPDIR=/path/to/private-scratch cargo test -p shardline-server-core --lib materialized_local_snapshot
+```
+
+These are measurements of an existing capability, not a before/after patch
+gain or a physical NAND-wear measurement. Filesystem support, mount boundaries,
+compression and temporary-file placement affect copy behavior. Keeping scratch
+files on the same copy-on-write filesystem can permit cheap isolated copies;
+tmpfs avoids direct SSD scratch writes but consumes memory and may use swap.
+Measure the chosen layout's memory, disk accounting and capacity before applying
+the numbers to a deployment. Durable object and SQLite sync policies are unchanged.
+
 With SQLite metadata and real MinIO, direct packing reduced upload requests for
 32 unique one-MiB objects from 1,144 to 96. It replaced 540 individual chunk
 PUTs and 540 chunk GETs with 32 container PUTs and 32 complete verification GETs;
