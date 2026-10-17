@@ -255,6 +255,33 @@ demonstrates lower temporary storage and cleanup request costs, with an unchange
 eventual stored footprint; it does not demonstrate additional compression or
 deduplication savings.
 
+An October 17 filesystem/SQLite check compared the same main-equivalent and
+candidate binaries in three pairs on an NVMe-backed Btrfs filesystem, rather
+than the host's memory-backed `/tmp`. Each version uploaded 32 unique one-MiB
+files with eight clients, overwrote them with identical content, and read them
+again. Syscall tracing covered those phases; timings under tracing are not
+throughput measurements. The table gives median syscall counts across three
+runs, excluding startup, maintenance and restart.
+
+| Local backend work per 32-file phase | Before → after |
+| --- | --- |
+| Initial object filesystem writes | 579 → 579 |
+| Initial SQLite sync calls | 253 → 256 |
+| Identical-overwrite object filesystem writes | 0 → 0 |
+| Identical-overwrite SQLite sync calls | 253 → 253 |
+| Read-only SQLite database/WAL writes and sync calls | 0 → 0 |
+
+The read-only phase still wrote SQLite's `-shm` coordination file as connections
+opened and closed; these were not database-page or WAL checkpoint writes. This
+fixture establishes no material filesystem/SQLite I/O saving from the patch.
+Identical local objects already avoid rewriting payloads, while verification and
+file/directory syncs remain necessary to acknowledge a durable winner safely.
+SQLite retains WAL mode and `synchronous=FULL`. All 768 full-body comparisons,
+including reads after GC and server restart, passed. Every deployment passed
+Shardline fsck, SQLite `integrity_check` and `foreign_key_check`. Process I/O
+accounting on a cached, compressed filesystem is not a cloud-volume billing
+estimate; S3 and PostgreSQL savings above must not be generalized to local storage.
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)
