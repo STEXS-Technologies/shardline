@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Batch stale S3 temporary-upload cleanup in groups of up to 1,000 objects,
+  retaining age and namespace checks, checking per-object outcomes and falling
+  back to single deletes for providers without usable bulk deletion.
 - Avoid redundant S3 destination HEADs during nonempty copy verification and
   separate PostgreSQL row reads during quarantine and retention-hold deletion,
   retaining complete comparisons and transactional recovery evidence.

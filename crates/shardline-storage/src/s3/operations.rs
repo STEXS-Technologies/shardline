@@ -38,12 +38,13 @@ use super::{
 mod copy_compare;
 mod file_compare;
 mod full_read;
+pub(super) mod temp_cleanup;
 
 /// S3-compatible implementation of [`ObjectStore`].
 #[derive(Clone)]
 pub struct S3ObjectStore {
     pub(crate) inner: AmazonS3,
-    single_attempt_inner: AmazonS3,
+    pub(super) single_attempt_inner: AmazonS3,
     existence_hints: Arc<super::existence_hints::ExistenceHints>,
     write_coordination: Arc<super::write_coordination::WriteCoordination>,
     pub(crate) runtime: Arc<Runtime>,
@@ -910,6 +911,7 @@ impl S3ObjectStore {
             let mut listed = self.inner.list(Some(&location));
             let mut reaped = 0_usize;
             let mut reaped_bytes = 0_u64;
+            let mut batch = Vec::with_capacity(temp_cleanup::BATCH_SIZE);
             while let Some(entry) = listed
                 .try_next()
                 .await
@@ -929,13 +931,19 @@ impl S3ObjectStore {
                     continue;
                 }
                 let temp_location = self.location_for_key(metadata.key())?;
-                self.inner
-                    .delete(&temp_location)
-                    .await
-                    .map_err(S3ObjectStoreError::External)?;
+                batch.push(temp_location);
+                if batch.len() == temp_cleanup::BATCH_SIZE {
+                    temp_cleanup::delete_batch(
+                        &self.inner,
+                        &self.single_attempt_inner,
+                        std::mem::take(&mut batch),
+                    )
+                    .await?;
+                }
                 reaped = reaped.saturating_add(1);
                 reaped_bytes = reaped_bytes.saturating_add(metadata.length());
             }
+            temp_cleanup::delete_batch(&self.inner, &self.single_attempt_inner, batch).await?;
             Ok((reaped, reaped_bytes))
         })
     }

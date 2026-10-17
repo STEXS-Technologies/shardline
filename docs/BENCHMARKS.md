@@ -576,12 +576,22 @@ delta, excluding evidence writes and the rest of the transaction; it is not a
 50% total-WAL reduction or a disk-endurance estimate. No WAL reduction was
 measured for retention-hold deletion separately.
 
-One backlog-dependent S3 opportunity remains: stale temporary-upload cleanup
-deletes eligible objects individually. Batching could lower request counts when
-many abandoned uploads accumulate. It is unchanged here; qualifying per-key
-failures, partial batch success and concurrent cleanup is required before
-claiming that saving. This does not remove the per-upload cleanup operation or
-justify batching destructive user-object deletions across their safety fences.
+Stale temporary-upload cleanup now batches up to 1,000 eligible objects through
+the S3 bulk-delete API. An HTTP fixture checks that 1,000 keys use one POST and
+that a per-key access-denied result cannot be reported as success while the
+single-delete retry is also denied. Providers without usable bulk deletion
+fall back to the existing single-delete API. Repeating deletion is safe only
+for these unique generated temporary keys, including partially deleted batches.
+Stream-result tests
+reject missing, duplicate and unexpected results; concurrent cleanup and retry
+tests preserve unselected objects. Existing MinIO tests retain the age and
+exact reserved-namespace selection checks. Successful counts are returned only
+after every batch succeeds; partial failure may delete some artifacts, with
+remaining artifacts discoverable by the next sweep. Memory holds at most 1,000
+selected paths in addition to listing buffers. This saves cleanup requests when
+abandoned uploads accumulate, not ordinary per-upload cleanup, payload bytes or
+database operations. It does not batch destructive user-object deletions across
+their safety fences or change the 32 MiB packing default.
 
 #### Unchanged SQLite payloads
 

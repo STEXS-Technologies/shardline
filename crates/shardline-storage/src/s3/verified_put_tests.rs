@@ -29,6 +29,10 @@ struct State {
     new_write_override: Option<Vec<u8>>,
     response_range: Option<String>,
     response_length: Option<usize>,
+    delete_response: Option<String>,
+    list_response: Option<String>,
+    delete_sizes: Vec<usize>,
+    deny_deletes: bool,
 }
 
 struct Provider {
@@ -94,6 +98,28 @@ impl Provider {
                         let mut state = provider_state.lock().unwrap();
                         state.requests.push(method.to_owned());
                         match method {
+                            "DELETE" if state.deny_deletes => ("403 Forbidden", Vec::new()),
+                            "DELETE" => ("204 No Content", Vec::new()),
+                            "POST" if path.ends_with("?delete") => {
+                                let body = String::from_utf8_lossy(&request[header_end..body_end]);
+                                let keys: Vec<_> = body
+                                    .split("<Key>")
+                                    .skip(1)
+                                    .map(|part| part.split("</Key>").next().unwrap())
+                                    .collect();
+                                state.delete_sizes.push(keys.len());
+                                let response = state.delete_response.clone().unwrap_or_else(|| {
+                                    let mut response = String::from("<DeleteResult>");
+                                    for key in keys {
+                                        response.push_str(&format!(
+                                            "<Deleted><Key>{key}</Key></Deleted>"
+                                        ));
+                                    }
+                                    response.push_str("</DeleteResult>");
+                                    response
+                                });
+                                ("200 OK", response.into_bytes())
+                            }
                             "PUT" => {
                                 assert!(headers.lines().any(|line| {
                                     line.split_once(':').is_some_and(|(name, value)| {
@@ -113,6 +139,9 @@ impl Provider {
                                 }
                             }
                             "GET" if state.deny_reads => ("403 Forbidden", Vec::new()),
+                            "GET" if path.contains("list-type=2") => {
+                                ("200 OK", state.list_response.clone().unwrap().into_bytes())
+                            }
                             "HEAD" => state.objects.get(path).cloned().map_or_else(
                                 || ("404 Not Found", Vec::new()),
                                 |bytes| ("200 OK", bytes),
@@ -205,6 +234,81 @@ fn integrity(bytes: &[u8]) -> ObjectIntegrity {
         ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes()),
         bytes.len() as u64,
     )
+}
+
+#[test]
+fn temporary_cleanup_batches_requests_and_reports_partial_failure() {
+    let provider = Provider::new();
+    let store = provider.store();
+    let keys: Vec<_> = (0..1_000)
+        .map(|n| object_store::path::Path::from(format!("__tmp/{n}")))
+        .collect();
+    store
+        .runtime
+        .block_on(super::operations::temp_cleanup::delete_batch(
+            &store.inner,
+            &store.single_attempt_inner,
+            keys.clone(),
+        ))
+        .unwrap();
+    assert_eq!(provider.requests(), ["POST"]);
+    provider.state.lock().unwrap().delete_response = Some(
+        "<DeleteResult><Error><Key>__tmp/999</Key><Code>AccessDenied</Code><Message>denied</Message></Error></DeleteResult>".to_owned(),
+    );
+    provider.state.lock().unwrap().deny_deletes = true;
+    assert!(
+        store
+            .runtime
+            .block_on(super::operations::temp_cleanup::delete_batch(
+                &store.inner,
+                &store.single_attempt_inner,
+                keys
+            ))
+            .is_err()
+    );
+    assert_eq!(provider.requests(), ["POST", "POST", "DELETE"]);
+    // A provider rejecting bulk responses can still complete through its
+    // existing single-delete API, including already absent temporary keys.
+    provider.state.lock().unwrap().deny_deletes = false;
+    store
+        .runtime
+        .block_on(super::operations::temp_cleanup::delete_batch(
+            &store.inner,
+            &store.single_attempt_inner,
+            vec![object_store::path::Path::from("__tmp/999")],
+        ))
+        .unwrap();
+    assert_eq!(
+        provider.requests(),
+        ["POST", "POST", "DELETE", "POST", "DELETE"]
+    );
+}
+
+#[test]
+fn stale_temporary_sweep_bounds_batches_and_keeps_fresh_and_user_keys() {
+    let provider = Provider::new();
+    let store = provider.store();
+    let mut xml = String::from("<ListBucketResult><IsTruncated>false</IsTruncated>");
+    for n in 0..1_001 {
+        xml.push_str(&format!("<Contents><Key>__tmp/shardline-stream-upload/1750000000000000000-42-{n}</Key><LastModified>2015-10-21T07:28:00Z</LastModified><Size>7</Size></Contents>"));
+    }
+    for (key, modified) in [
+        (
+            "__tmp/shardline-stream-upload/1750000000000000000-42-2000",
+            "2026-10-17T00:00:00Z",
+        ),
+        ("__tmp/user-object", "2015-10-21T07:28:00Z"),
+    ] {
+        xml.push_str(&format!("<Contents><Key>{key}</Key><LastModified>{modified}</LastModified><Size>9</Size></Contents>"));
+    }
+    xml.push_str("</ListBucketResult>");
+    provider.state.lock().unwrap().list_response = Some(xml);
+    assert_eq!(
+        store.sweep_stale_temp_keys(1_792_195_200).unwrap(),
+        (1_001, 7_007)
+    );
+    assert_eq!(provider.requests(), ["GET", "POST", "POST"]);
+    assert_eq!(provider.state.lock().unwrap().delete_sizes, [1_000, 1]);
 }
 
 #[test]
