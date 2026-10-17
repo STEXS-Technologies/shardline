@@ -157,6 +157,22 @@ impl LocalBackend {
         .await
     }
 
+    /// Internal S3 responses expose no independently downloadable chunk list.
+    pub(crate) async fn upload_s3_protocol_stream(
+        &self,
+        file_id: &str,
+        body: RequestBodyReader,
+    ) -> Result<UploadFileResponse, ServerError> {
+        self.upload_file_stream_with_storage(
+            file_id,
+            body,
+            None,
+            None,
+            UploadStorage::ProtocolContainers,
+        )
+        .await
+    }
+
     /// Internal digest protocols return no independently downloadable chunk list.
     pub(crate) async fn upload_digest_protocol_stream(
         &self,

@@ -1,7 +1,7 @@
 //! Bounded packing for protocol uploads whose public response exposes no raw chunks.
 use axum::body::Bytes;
 use shardline_index::{FileChunkRecord, xet_hash_hex_string};
-use shardline_storage::{ObjectBody, ObjectIntegrity, PutOutcome, S3ObjectStore};
+use shardline_storage::{ObjectBody, ObjectIntegrity, PutOutcome};
 
 use super::{
     body_reader::ChunkBuffer,
@@ -22,7 +22,7 @@ pub(super) struct PackedProtocolResult {
 }
 
 pub(super) struct PackedProtocolUpload {
-    store: S3ObjectStore,
+    store: ServerObjectStore,
     work_pool: crate::admission::BoundedPool,
     pending: Vec<(Vec<u8>, u64)>,
     pending_bytes: usize,
@@ -31,7 +31,7 @@ pub(super) struct PackedProtocolUpload {
 }
 
 impl PackedProtocolUpload {
-    pub(super) fn new(store: S3ObjectStore, work_pool: crate::admission::BoundedPool) -> Self {
+    pub(super) fn new(store: ServerObjectStore, work_pool: crate::admission::BoundedPool) -> Self {
         Self {
             store,
             work_pool,
@@ -84,7 +84,7 @@ impl PackedProtocolUpload {
         // The permit covers raw accumulation, CPU work, read-back and fallback.
         // A cancelled running worker retains it until its buffers are dropped.
         let permit = self.batch_permit.take().ok_or(ServerError::Overflow)?;
-        let ((raw, packed), _permit) =
+        let ((raw, packed), mut _permit) =
             crate::admission::blocking_work_with_permit(permit, move || {
                 let raw = RecoverableXorbBatch::new(chunks);
                 let packed = raw.pack();
@@ -101,14 +101,32 @@ impl PackedProtocolUpload {
                 );
                 // Move the encoded buffer into the request; retaining raw input
                 // must not require another whole-container payload copy.
-                let stored = self
-                    .store
-                    .put_if_absent_with_read_back(
-                        &key,
-                        ObjectBody::from_bytes(Bytes::from(serialized)),
-                        &integrity,
-                    )
-                    .await;
+                let stored = match &self.store {
+                    ServerObjectStore::S3(store) => store
+                        .put_if_absent_with_read_back(
+                            &key,
+                            ObjectBody::from_bytes(Bytes::from(serialized)),
+                            &integrity,
+                        )
+                        .await
+                        .map_err(ServerError::from),
+                    ServerObjectStore::Local(store) => {
+                        let store = store.clone();
+                        let (result, retained) =
+                            crate::admission::blocking_work_with_permit(_permit, move || {
+                                Ok(local_store::store_verified(
+                                    &store,
+                                    &key,
+                                    &serialized,
+                                    &integrity,
+                                ))
+                            })
+                            .await?;
+                        _permit = retained;
+                        result
+                    }
+                    ServerObjectStore::Blackhole => return Err(ServerError::Overflow),
+                };
                 match stored {
                     Ok(outcome) => {
                         let inserted = outcome == PutOutcome::Inserted;
@@ -163,7 +181,7 @@ impl PackedProtocolUpload {
         &mut self,
         chunks: Vec<(Vec<u8>, u64)>,
     ) -> Result<(), ServerError> {
-        let objects = ServerObjectStore::S3(self.store.clone());
+        let objects = self.store.clone();
         for (bytes, offset) in chunks {
             let (outcome, _) = put_if_absent_pooled_chunk_buffer(
                 &objects,
@@ -229,6 +247,8 @@ impl PackedProtocolUpload {
         Ok(())
     }
 }
+
+mod local_store;
 
 #[cfg(test)]
 mod tests;

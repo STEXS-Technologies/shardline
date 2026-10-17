@@ -17,10 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   to avoid reading them twice, without trusting fresh PUT acknowledgements.
 - Reuse object-listing lengths when checking quarantined orphans during GC,
   avoiding redundant S3 metadata requests while retaining length validation.
-- Pack S3-protocol uploads backed by PostgreSQL and S3 storage directly into
+- Pack S3-protocol uploads backed by SQLite or PostgreSQL and local or S3 storage directly into
   verified containers, avoiding temporary individual-chunk writes and their later
   collection. Failed container storage retains the verified individual-chunk fallback.
-- Extend direct packing to LFS, OCI and Bazel digest uploads using S3 storage,
+- Extend direct packing to LFS, OCI and Bazel digest uploads using local or S3 storage,
   retaining SHA-256 validation, upload recovery and public chunk-upload behavior.
 - Compute S3 Content-MD5 validation and ETags in one pass, avoiding duplicate
   checksum work for uploads and multipart parts.

@@ -444,7 +444,7 @@ impl ServerBackend {
         };
         let file_id = protocol_object_file_id(object_key);
         match self {
-            Self::Local(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
+            Self::Local(backend) => backend.upload_s3_protocol_stream(&file_id, body).await,
             Self::Postgres(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
         }
     }

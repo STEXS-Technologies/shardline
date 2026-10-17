@@ -115,7 +115,7 @@ impl FileUploadIngestor {
         store: &ServerObjectStore,
         pool: &crate::admission::BoundedPool,
     ) -> Self {
-        if let ServerObjectStore::S3(store) = store {
+        if !matches!(store, ServerObjectStore::Blackhole) {
             self.packed_protocol = Some(super::packed_protocol::PackedProtocolUpload::new(
                 store.clone(),
                 pool.clone(),
@@ -453,7 +453,7 @@ impl FileUploadIngestor {
         object_store: &ServerObjectStore,
         chunk: &[u8],
     ) -> Result<(), ServerError> {
-        if matches!(object_store, ServerObjectStore::S3(_)) {
+        if self.packed_protocol.is_some() || matches!(object_store, ServerObjectStore::S3(_)) {
             return Ok(());
         }
         if self.raw_chunk_spool.is_none() {

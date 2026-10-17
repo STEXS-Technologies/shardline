@@ -124,14 +124,14 @@ initial stored/logical ratio excludes
 those later copies. Inspect quarantine counts and retention before interpreting
 individual chunk bytes as permanently retained or already reclaimable.
 
-S3-protocol uploads using PostgreSQL metadata and S3 storage now pack each bounded
+S3-protocol uploads using SQLite or PostgreSQL metadata and local or S3 storage pack each bounded
 batch directly into its container. A successful upload verifies the complete stored container before
 publishing metadata, without first writing individual chunk objects. Container
 storage failures fall back to verified individual chunks. Public chunk-upload
 APIs keep their existing behavior. Compare backend request counts and object
 classes as well as bytes: avoiding temporary chunk objects lowers request and
 quarantine costs even when the eventual packed footprint is unchanged.
-LFS, OCI and Bazel digest uploads use the same direct-packing path with S3
+LFS, OCI and Bazel digest uploads use the same direct-packing path with local or S3
 storage, for both SQLite and PostgreSQL metadata. They retain source SHA-256
 validation and upload-intent recovery. Native Xet already uploads containers;
 the public generic upload API still stores its independently downloadable chunks.
@@ -255,7 +255,7 @@ demonstrates lower temporary storage and cleanup request costs, with an unchange
 eventual stored footprint; it does not demonstrate additional compression or
 deduplication savings.
 
-An October 17 filesystem/SQLite check compared the same main-equivalent and
+Before the local direct-packing extension, an October 17 filesystem/SQLite check compared the same main-equivalent and
 candidate binaries in three pairs on an NVMe-backed Btrfs filesystem, rather
 than the host's memory-backed `/tmp`. Each version uploaded 32 unique one-MiB
 files with eight clients, overwrote them with identical content, and read them
@@ -273,7 +273,7 @@ runs, excluding startup, maintenance and restart.
 
 The read-only phase still wrote SQLite's `-shm` coordination file as connections
 opened and closed; these were not database-page or WAL checkpoint writes. This
-fixture establishes no material filesystem/SQLite I/O saving from the patch.
+fixture established no material filesystem/SQLite I/O saving before that extension.
 Identical local objects already avoid rewriting payloads, while verification and
 file/directory syncs remain necessary to acknowledge a durable winner safely.
 SQLite retains WAL mode and `synchronous=FULL`. All 768 full-body comparisons,
@@ -281,6 +281,46 @@ including reads after GC and server restart, passed. Every deployment passed
 Shardline fsck, SQLite `integrity_check` and `foreign_key_check`. Process I/O
 accounting on a cached, compressed filesystem is not a cloud-volume billing
 estimate; S3 and PostgreSQL savings above must not be generalized to local storage.
+
+The subsequent local direct-packing extension was measured separately against
+the preceding branch binary, using the same disk-backed workload in three pairs.
+Median initial object writes fell from 579 to 32 and object sync calls from
+2,477 to 296. Ordinary SQLite publication syncs were essentially unchanged
+(256 to 250). GC SQLite syncs fell from 2,240 to 52 and SQLite write calls from
+18,733 to 664 because redundant raw chunks no longer needed quarantine records.
+All 768 full-body comparisons passed, including reads with released v1.12.0
+after GC; fsck and SQLite integrity checks passed. A separate SIGKILL during a
+72 MiB replacement preserved the old published content; retry, GC and released
+v1.12.0 reads of the replacement also passed. These checks establish tested
+compatibility, rather than an unconditional guarantee against every failure.
+
+With SQLite metadata and real MinIO, direct packing reduced upload requests for
+32 unique one-MiB objects from 1,144 to 96. It replaced 540 individual chunk
+PUTs and 540 chunk GETs with 32 container PUTs and 32 complete verification GETs;
+32 bucket-operation requests remained. Temporary object bytes fell from
+67,277,422 to 33,588,512.
+
+Two untraced pairs per workload measured server RSS at 10 ms intervals and
+process I/O counters, with eight clients and SQLite on NVMe-backed Btrfs:
+
+| Upload workload | Before | Direct packing |
+| --- | --- | --- |
+| 32 × 1 MiB: sampled peak RSS | 50–52 MiB | 45 MiB |
+| 32 × 1 MiB: server CPU | 0.42–0.45 s | 0.25–0.27 s |
+| 8 × 36 MiB: sampled peak RSS | 393–509 MiB | 185–255 MiB |
+| 8 × 36 MiB: server CPU | 2.45–2.49 s | 1.18–1.22 s |
+| 8 × 36 MiB: S3 upload requests | 9,474 | 40 |
+| 8 × 36 MiB: process write traffic (`wchar`) | 587 MiB | 293 MiB |
+| 8 × 36 MiB: process disk-write accounting | 7.7–7.8 MiB | 9.2–9.4 MiB |
+
+The measured request saving did not increase peak RSS, but it did not reduce
+every I/O counter: larger-upload disk-write accounting increased. `wchar`
+includes sockets and files; it is not a disk-only measure. Disk reads were
+cached, so these runs cannot establish cold-storage read savings. Local object
+packing also adds complete-container verification reads while removing raw
+staging writes. All resource-run reads, GC, released-v1.12.0 rollback reads and
+SQLite checks passed. These shared-host runs quantify these fixtures, not
+production scale-out or a universal memory ceiling.
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record

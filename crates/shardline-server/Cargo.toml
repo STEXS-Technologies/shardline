@@ -76,6 +76,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 shardline-cas = { workspace = true, features = ["test-fault-injection"] }
+shardline-storage = { workspace = true, features = ["test-fault-injection"] }
 dotenvy.workspace = true
 ed25519-dalek.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }

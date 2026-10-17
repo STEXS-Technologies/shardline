@@ -30,14 +30,6 @@ struct Provider {
 }
 
 impl Provider {
-    fn s3_store(&self) -> &S3ObjectStore {
-        match &self.objects {
-            ServerObjectStore::S3(store) => Some(store),
-            ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => None,
-        }
-        .expect("test provider must use S3 storage")
-    }
-
     // 0: ordinary storage; 1: deny containers; 2: corrupt containers;
     // 3: corrupt every new object, including the fallback chunks;
     // 4: commit containers but return a retryable error instead of success.
@@ -183,6 +175,7 @@ impl Provider {
 
 mod admission;
 mod digest;
+mod local;
 mod lost_ack;
 
 impl Drop for Provider {
@@ -205,7 +198,7 @@ async fn empty_upload_matches_legacy_without_storage_requests() {
 async fn chunk_count_limit_flushes_before_adding_another_chunk() {
     let provider = Provider::new(0).await;
     let mut upload = PackedProtocolUpload::new(
-        provider.s3_store().clone(),
+        provider.objects.clone(),
         crate::admission::ExecutionPools::default_sizes().hashing,
     );
     for offset in 0..=MAX_XORB_CHUNKS {
@@ -275,7 +268,7 @@ async fn corrupt_container_and_fallback_never_produce_a_publishable_record() {
 async fn bounded_batches_keep_original_container_boundaries_and_release_raw_input() {
     let provider = Provider::new(0).await;
     let mut upload = PackedProtocolUpload::new(
-        provider.s3_store().clone(),
+        provider.objects.clone(),
         crate::admission::BoundedPool::new(NonZeroUsize::new(1).unwrap()),
     );
     let chunk = vec![b'a'; 1024 * 1024];
