@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-10-17
+
+This patch reduces storage, database, and local I/O overhead while preserving
+content verification, conditional writes, and recovery behavior.
+
 ### Improved
 
 - Batch stale S3 temporary-upload cleanup in groups of up to 1,000 objects,
