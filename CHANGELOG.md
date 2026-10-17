@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Read small S3-backed metadata objects with one GET instead of HEAD plus GET,
+  retaining the 64 MiB buffering limit and complete-response validation.
 - Coordinate concurrent S3 creates for the same object within each server to
   reduce failed duplicate PUT requests, while still checking existing content
   and using conditional writes across servers.

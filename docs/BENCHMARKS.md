@@ -336,6 +336,16 @@ the container changes. Both versions completed clean fsck, GC, released-v1.12.0
 reads and SQLite integrity checks. This reduces repeated remote reads and
 temporary-file copies without retaining container payloads in RAM.
 
+Small-object reads used for OCI media types and legacy metadata now obtain
+length and bytes from one S3 GET instead of HEAD plus GET. An HTTP-provider
+fixture checks GET-only behavior for success, oversized objects, missing
+objects and denied reads. The caller retains its 64 MiB buffering limit;
+response tests reject partial ranges and short or overlong bodies. This removes
+one request per successful affected read; missing objects still need one request.
+No application-throughput improvement has been
+measured for this separate change. Local object reads retain their existing
+path, and no disk staging or additional payload copy is introduced.
+
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
 608,616 → 61,472 bytes for sixteen 36 MiB replacements (`48727f81`); small-record
 savings were negligible. Reusing verified Merkle parents (`6fb93b6c` → `8670f51a`)

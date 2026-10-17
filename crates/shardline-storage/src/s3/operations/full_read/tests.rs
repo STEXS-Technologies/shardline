@@ -6,7 +6,35 @@ use std::{
 use bytes::Bytes;
 use object_store::{GetResult, GetResultPayload, ObjectMeta};
 
-use super::copy_payload_to_file;
+use super::{copy_payload_to_writer as copy_payload_to_file, read_payload_bytes};
+
+#[tokio::test]
+async fn buffered_reads_preserve_limits_and_transfer_validation() {
+    assert_eq!(
+        read_payload_bytes(response(3, 0..3, vec![Ok(Bytes::from_static(b"abc"))]), 3)
+            .await
+            .unwrap(),
+        b"abc"
+    );
+    assert!(
+        read_payload_bytes(response(0, 0..0, vec![]), 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for (size, range, body, limit) in [
+        (4, 0..4, "abcd", 3),
+        (3, 0..3, "ab", 3),
+        (3, 0..3, "abcd", 3),
+        (3, 1..3, "bc", 3),
+    ] {
+        assert!(
+            read_payload_bytes(response(size, range, vec![Ok(Bytes::from(body))]), limit)
+                .await
+                .is_err()
+        );
+    }
+}
 
 fn response(size: u64, range: Range<u64>, frames: Vec<object_store::Result<Bytes>>) -> GetResult {
     GetResult {

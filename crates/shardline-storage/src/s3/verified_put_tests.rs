@@ -204,6 +204,29 @@ fn full_object_copy_uses_only_get_and_preserves_provider_errors() {
     assert_eq!(provider.requests(), ["GET", "GET", "GET", "GET"]);
 }
 
+#[test]
+fn buffered_object_read_uses_only_get_and_preserves_absence_and_errors() {
+    let provider = Provider::new();
+    let store = provider.store();
+    let key = ObjectKey::parse("metadata/small").unwrap();
+    provider
+        .state
+        .lock()
+        .unwrap()
+        .objects
+        .insert("/fixture/metadata/small".to_owned(), b"metadata".to_vec());
+    assert_eq!(
+        store.read_object_bytes(&key, 8).unwrap(),
+        Some(b"metadata".to_vec())
+    );
+    assert!(store.read_object_bytes(&key, 7).is_err());
+    provider.state.lock().unwrap().objects.clear();
+    assert_eq!(store.read_object_bytes(&key, 8).unwrap(), None);
+    provider.state.lock().unwrap().deny_reads = true;
+    assert!(store.read_object_bytes(&key, 8).is_err());
+    assert_eq!(provider.requests(), ["GET", "GET", "GET", "GET"]);
+}
+
 #[tokio::test]
 async fn read_back_checks_new_objects_and_does_not_repeat_existing_verification() {
     let provider = Provider::new();
