@@ -4590,9 +4590,12 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     };
 
     let before = get_stats().await;
-    let before_chunks = before["chunks"]
+    let before_objects = before["objects"]
         .as_u64()
-        .expect("chunks field missing in stats");
+        .expect("objects field missing in stats");
+    let before_object_bytes = before["object_bytes"]
+        .as_u64()
+        .expect("object_bytes field missing in stats");
     let before_files = before["files"]
         .as_u64()
         .expect("files field missing in stats");
@@ -4601,7 +4604,7 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     let content = b"dedup storage accounting content";
     let oid = hex::encode(sha2::Sha256::digest(content));
 
-    client
+    let first_upload = client
         .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/octet-stream")
@@ -4609,10 +4612,17 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
         .send()
         .await
         .unwrap();
+    assert_eq!(first_upload.status(), 200, "first LFS upload");
     let after_first = get_stats().await;
     let first_chunks = after_first["chunks"]
         .as_u64()
         .expect("chunks field missing in stats");
+    let first_objects = after_first["objects"]
+        .as_u64()
+        .expect("objects field missing in stats");
+    let first_object_bytes = after_first["object_bytes"]
+        .as_u64()
+        .expect("object_bytes field missing in stats");
     let first_files = after_first["files"]
         .as_u64()
         .expect("files field missing in stats");
@@ -4633,13 +4643,23 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     let after_chunks = after["chunks"]
         .as_u64()
         .expect("chunks field missing in stats");
+    let after_objects = after["objects"]
+        .as_u64()
+        .expect("objects field missing in stats");
+    let after_object_bytes = after["object_bytes"]
+        .as_u64()
+        .expect("object_bytes field missing in stats");
     let after_files = after["files"]
         .as_u64()
         .expect("files field missing in stats");
 
     assert!(
-        first_chunks > before_chunks,
-        "first upload should create chunks"
+        first_objects > before_objects,
+        "first upload should store objects: before={before:?}, after={after_first:?}"
+    );
+    assert!(
+        first_object_bytes > before_object_bytes,
+        "first upload should store object bytes: before={before:?}, after={after_first:?}"
     );
     assert!(
         first_files > before_files,
@@ -4648,6 +4668,14 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     assert_eq!(
         after_chunks, first_chunks,
         "duplicate uploads created additional chunks"
+    );
+    assert_eq!(
+        after_objects, first_objects,
+        "duplicate uploads created additional stored objects"
+    );
+    assert_eq!(
+        after_object_bytes, first_object_bytes,
+        "duplicate uploads increased stored bytes"
     );
     assert_eq!(
         after_files, first_files,
