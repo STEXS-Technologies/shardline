@@ -294,6 +294,34 @@ after GC; fsck and SQLite integrity checks passed. A separate SIGKILL during a
 v1.12.0 reads of the replacement also passed. These checks establish tested
 compatibility, rather than an unconditional guarantee against every failure.
 
+An October 17 follow-up measured local write bytes rather than syscall counts.
+Three before/after pairs compared the preceding branch binary with the local
+direct-packing binary on the host's WD_BLACK SN850X 1 TB NVMe and Btrfs filesystem.
+Each fresh deployment uploaded 32 unique, incompressible one-MiB files through
+eight clients and read every file back. Pair order alternated. Startup was
+excluded; filesystem sync completed before the ending counter sample.
+
+| Local upload measurement per 32 MiB input | Before median | Direct packing median | Reduction |
+| --- | --- | --- | --- |
+| Server kernel-accounted disk writes (`/proc/PID/io: write_bytes`) | 122.2 MiB | 63.6 MiB | 47.9% |
+| Whole-drive NVMe SMART host writes | 211.9 MiB | 126.5 MiB | 40.3% |
+
+All 192 full-body read comparisons and six subsequent fsck checks passed.
+Existing file/directory syncs and SQLite `synchronous=FULL` remained enabled.
+The measurements cover initial ingestion and reads, not the subsequent fsck,
+GC, rollback or a crash drill; those have separate evidence above.
+
+The process counter measures kernel-accounted storage writes, not internal NAND
+programming. SMART host writes include every application on this system drive.
+Three-second idle samples ranged from 27.8 to 237.3 MiB, so the whole-drive
+reduction is a noisy observation, not an isolated Shardline result. No idle-rate
+subtraction was applied. Filesystem compression, allocation and SSD internal
+write amplification also affect the relationship between these counters and
+wear. These results support lower local write pressure for this fixture;
+they do not establish a drive-lifetime multiplier or annual replacement saving.
+An endurance estimate needs longer isolated runs, the drive's rated write
+endurance and replacement cost, and the deployment's complete write workload.
+
 With SQLite metadata and real MinIO, direct packing reduced upload requests for
 32 unique one-MiB objects from 1,144 to 96. It replaced 540 individual chunk
 PUTs and 540 chunk GETs with 32 container PUTs and 32 complete verification GETs;
@@ -437,6 +465,53 @@ responses matched the requested bytes and backend trace totals matched MinIO
 counters. These are provider-reported transfer counts, not cloud billing figures.
 Measure small random reads separately from full downloads when estimating cost;
 fewer requests do not necessarily mean fewer backend bytes.
+
+This is a remaining optimization opportunity: the offset-zero fixture transferred
+about 8,178 backend bytes per logical byte returned. It is not a measured average
+for random reads. Reducing this amplification must preserve verification of the
+requested content against a trusted commitment, including corruption, truncation,
+incorrect ranges and concurrent replacement. Fetching an unchecked byte range
+instead of validating the container would weaken the current guarantee. No
+reduction in range-read transfer bytes is claimed by this branch.
+
+## Operational cost per logical TB
+
+Report operational cost alongside throughput and latency:
+
+`cost per logical TB = attributable operating cost / (verified logical bytes / 10^12)`
+
+Keep upload and download results separate, and give a combined result only for
+an explicitly stated workload mix. Count each acknowledged logical upload once
+and each successfully verified download's returned bytes once. Failed attempts
+and retries contribute cost but no additional successful logical bytes. For
+ranges, count returned bytes, not the full object size or backend transfer.
+
+| Cost component | Evidence to collect |
+| --- | --- |
+| Object storage | Retained and temporary byte-hours over the measured retention/GC cycle |
+| API requests | Attempts by operation and storage class, including retries and failures |
+| Network | Backend and client bytes, separating chargeable routes from free transfer |
+| Database | Query/lock load, WAL and storage I/O, with attributable service cost |
+| Compute | Server and backend CPU/memory consumption with allocated infrastructure cost |
+| Local hardware wear | Isolated host-write deltas and an explicitly stated endurance/replacement model |
+
+Apply provider, region, tier and contract prices to the measured quantities;
+request counts alone are not a bill. Avoid counting database compute twice when
+it is already included in infrastructure cost, or adding estimated SSD wear to
+a rental price that already covers hardware replacement. For owned hardware,
+an endurance-based allocation is a model, not a prediction of drive failure.
+
+Publish the workload's object sizes, uniqueness/compressibility, read ranges,
+protocols, replica count, cache state and retention policy with the result.
+Include maintenance, temporary storage and unsuccessful work over the same time
+window, with correctness checks passing. Storage cost per retained TB-month
+remains a separate useful metric; it cannot be compared directly with cost per
+TB processed without a stated retention period and access frequency.
+
+The measurements above establish individual resource reductions. They do not
+yet establish an all-in production cost per TB, a cluster scaling guarantee or
+an SSD replacement saving. Small-range read amplification must be represented
+in the workload rather than hidden by full-download throughput.
 
 ## Production-shaped incident and recovery
 
