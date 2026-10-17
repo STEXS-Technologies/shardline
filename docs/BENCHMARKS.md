@@ -297,7 +297,10 @@ compatibility, rather than an unconditional guarantee against every failure.
 With SQLite metadata and real MinIO, direct packing reduced upload requests for
 32 unique one-MiB objects from 1,144 to 96. It replaced 540 individual chunk
 PUTs and 540 chunk GETs with 32 container PUTs and 32 complete verification GETs;
-32 bucket-operation requests remained. Temporary object bytes fell from
+32 bucket-operation requests remained: one legacy direct-object cleanup delete
+per successful PUT. This preserves compatibility with older object layouts;
+probing first would replace each absent-object delete with a HEAD rather than
+reduce request count. Temporary object bytes fell from
 67,277,422 to 33,588,512.
 
 Two untraced pairs per workload measured server RSS at 10 ms intervals and
