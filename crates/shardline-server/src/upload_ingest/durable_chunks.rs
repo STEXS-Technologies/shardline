@@ -1,4 +1,6 @@
 //! Bounded, ordered read-ahead for verified durable upload chunks.
+use std::sync::{Arc, Mutex};
+
 use futures_util::{StreamExt, future::BoxFuture, stream::FuturesOrdered};
 use shardline_index::{FileChunkRecord, xet_hash_hex_string};
 use shardline_protocol::ByteRange;
@@ -10,22 +12,37 @@ const MAX_READ_AHEAD_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_READ_AHEAD_CHUNKS: usize = 32;
 type ChunkRead = BoxFuture<'static, Result<(Vec<u8>, u64), ServerError>>;
 
+mod read_cache;
+pub(super) use read_cache::ReadCache;
+pub(super) type SharedReadCache = Arc<Mutex<ReadCache>>;
+
 pub(super) struct DurableUploadChunks {
     store: ServerObjectStore,
     pending: FuturesOrdered<ChunkRead>,
     next_record: usize,
     pending_bytes: u64,
     parallelism: usize,
+    cache: read_cache::ReadCache,
 }
 
 impl DurableUploadChunks {
+    #[cfg(test)]
     pub(super) fn new(store: ServerObjectStore, parallelism: usize) -> Self {
+        Self::with_cache(store, parallelism, ReadCache::default())
+    }
+
+    pub(super) fn with_cache(
+        store: ServerObjectStore,
+        parallelism: usize,
+        cache: ReadCache,
+    ) -> Self {
         Self {
             store,
             pending: FuturesOrdered::new(),
             next_record: 0,
             pending_bytes: 0,
             parallelism: parallelism.clamp(1, MAX_READ_AHEAD_CHUNKS),
+            cache,
         }
     }
 
@@ -46,8 +63,36 @@ impl DurableUploadChunks {
             if !self.pending.is_empty() && bytes > MAX_READ_AHEAD_BYTES {
                 break;
             }
-            self.pending
-                .push_back(Box::pin(read_chunk(self.store.clone(), record.clone())));
+            // Cache only chunks repeated in the bounded look-ahead window.
+            // Unique content keeps its original allocation and read path.
+            let retain = records
+                .iter()
+                .skip(self.next_record)
+                .take(MAX_READ_AHEAD_CHUNKS)
+                .skip(1)
+                .any(|next| {
+                    next.hash == record.hash
+                        && next.length == record.length
+                        && next.packed_start == record.packed_start
+                        && next.packed_end == record.packed_end
+                });
+            let cell = self.cache.cell(record, retain)?;
+            let store = self.store.clone();
+            let record = record.clone();
+            if let Some(cell) = cell {
+                self.pending.push_back(Box::pin(async move {
+                    let raw = cell
+                        .get_or_try_init(|| async {
+                            read_chunk(store, record.clone())
+                                .await
+                                .map(|(raw, _)| Arc::new(raw))
+                        })
+                        .await?;
+                    Ok((raw.as_ref().clone(), record.offset))
+                }));
+            } else {
+                self.pending.push_back(Box::pin(read_chunk(store, record)));
+            }
             self.pending_bytes = bytes;
             self.next_record = self
                 .next_record

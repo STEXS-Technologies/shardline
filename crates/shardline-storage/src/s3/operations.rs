@@ -2,7 +2,7 @@ use std::{
     fmt,
     fs::File,
     future::Future,
-    io::{Error as IoError, Read},
+    io::Error as IoError,
     ops::Range,
     path::Path,
     sync::{Arc, Mutex, atomic::Ordering},
@@ -35,12 +35,18 @@ use super::{
     is_temp_upload_key,
 };
 
+mod copy_compare;
+mod file_compare;
+mod full_read;
+pub(super) mod temp_cleanup;
+
 /// S3-compatible implementation of [`ObjectStore`].
 #[derive(Clone)]
 pub struct S3ObjectStore {
     pub(crate) inner: AmazonS3,
-    single_attempt_inner: AmazonS3,
+    pub(super) single_attempt_inner: AmazonS3,
     existence_hints: Arc<super::existence_hints::ExistenceHints>,
+    write_coordination: Arc<super::write_coordination::WriteCoordination>,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) key_prefix: Option<String>,
 }
@@ -139,6 +145,7 @@ impl S3ObjectStore {
             inner,
             single_attempt_inner,
             existence_hints: Arc::default(),
+            write_coordination: Arc::default(),
             runtime,
             key_prefix: config.key_prefix,
         })
@@ -151,7 +158,14 @@ impl S3ObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
         let location = self.location_for_key(key)?;
+        // A preceding writer can populate the hint before this writer probes.
+        // Every waiter still verifies remote bytes; this is request ordering,
+        // never a substitute for conditional creation or integrity checking.
+        let ownership = self.write_coordination.acquire(key).await;
         if self.existence_hints.contains(key) {
+            // Verification reads can overlap. Only uncertain creates need
+            // ordering; serializing large dedup reads would hurt throughput.
+            drop(ownership);
             match existing_object_outcome(&self.inner, &location, integrity).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(S3ObjectStoreError::ExistingObjectConflict) => {
@@ -179,6 +193,32 @@ impl S3ObjectStore {
             self.existence_hints.remember(key);
         }
         outcome
+    }
+
+    /// Creates an immutable object and verifies its complete stored bytes.
+    ///
+    /// Existing objects retain the ordinary full integrity check. Newly created
+    /// objects are read back before success, so callers can publish a packed
+    /// container without first persisting and verifying its constituent chunks.
+    /// Verification streams the response instead of retaining a second copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or integrity error if creation or read-back fails.
+    /// A failed read-back never establishes that the newly written object is
+    /// safe to publish; it may remain as an unreachable immutable object.
+    pub async fn put_if_absent_with_read_back(
+        &self,
+        key: &ObjectKey,
+        body: ObjectBody<'_>,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, S3ObjectStoreError> {
+        let outcome = AsyncObjectStore::put_if_absent(self, key, body, integrity).await?;
+        if outcome == PutOutcome::Inserted {
+            let location = self.location_for_key(key)?;
+            existing_object_outcome(&self.inner, &location, integrity).await?;
+        }
+        Ok(outcome)
     }
 
     /// Sends one delete without transparently retrying an uncertain mutation.
@@ -845,7 +885,7 @@ impl S3ObjectStore {
     /// and `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>`) are
     /// normally deleted immediately after promotion, but a crash between the
     /// temp write and the copy/delete strands them forever (F-48). The normal
-    /// listing paths skip temp keys, so this sweep does its own raw enumeration
+    /// listing paths skip temp keys, so this sweep enumerates only `__tmp/`
     /// and deletes only keys matching the exact generated-temp grammars
     /// (`is_temp_upload_key`) whose `LastModified` — S3 backend truth, immune
     /// to writer/GC wall-clock divergence — is older than the age bound. User
@@ -865,12 +905,13 @@ impl S3ObjectStore {
             u128::from(now_unix_seconds.saturating_sub(S3_TEMP_ARTIFACT_AGE_SECONDS))
                 * 1_000_000_000;
         let prefix =
-            ObjectPrefix::parse("").map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
+            ObjectPrefix::parse("__tmp/").map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
         let location = self.location_for_prefix(&prefix)?;
         self.block_on_result(async {
             let mut listed = self.inner.list(Some(&location));
             let mut reaped = 0_usize;
             let mut reaped_bytes = 0_u64;
+            let mut batch = Vec::with_capacity(temp_cleanup::BATCH_SIZE);
             while let Some(entry) = listed
                 .try_next()
                 .await
@@ -890,13 +931,19 @@ impl S3ObjectStore {
                     continue;
                 }
                 let temp_location = self.location_for_key(metadata.key())?;
-                self.inner
-                    .delete(&temp_location)
-                    .await
-                    .map_err(S3ObjectStoreError::External)?;
+                batch.push(temp_location);
+                if batch.len() == temp_cleanup::BATCH_SIZE {
+                    temp_cleanup::delete_batch(
+                        &self.inner,
+                        &self.single_attempt_inner,
+                        std::mem::take(&mut batch),
+                    )
+                    .await?;
+                }
                 reaped = reaped.saturating_add(1);
                 reaped_bytes = reaped_bytes.saturating_add(metadata.length());
             }
+            temp_cleanup::delete_batch(&self.inner, &self.single_attempt_inner, batch).await?;
             Ok((reaped, reaped_bytes))
         })
     }
@@ -1189,38 +1236,10 @@ pub(crate) fn existing_object_outcome_from_file(
     if existing_length != integrity.length() {
         return Err(S3ObjectStoreError::ExistingObjectConflict);
     }
-    let mut file = File::open(path).map_err(S3ObjectStoreError::Io)?;
-    let mut offset = 0_u64;
-    let mut buffer = vec![0_u8; super::STREAM_COMPARE_CHUNK_BYTES];
-    while offset < existing_length {
-        let remaining = existing_length
-            .checked_sub(offset)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let to_read = usize::try_from(remaining.min(super::STREAM_COMPARE_CHUNK_BYTES as u64))
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let chunk = buffer
-            .get_mut(..to_read)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        file.read_exact(chunk).map_err(S3ObjectStoreError::Io)?;
-        let end = offset
-            .checked_add(
-                u64::try_from(to_read)
-                    .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?,
-            )
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let range = ByteRange::new(offset, end)
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let existing = ObjectStore::read_range(store, key, range)?;
-        let expected = buffer
-            .get(..to_read)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        if existing.as_slice() != expected {
-            return Err(S3ObjectStoreError::ExistingObjectConflict);
-        }
-        offset = end.saturating_add(1);
+    if existing_length == 0 {
+        return Ok(PutOutcome::AlreadyExists);
     }
-    Ok(PutOutcome::AlreadyExists)
+    file_compare::compare_existing_file(store, key, path, existing_length)
 }
 
 pub(crate) fn existing_copy_outcome(
@@ -1229,36 +1248,14 @@ pub(crate) fn existing_copy_outcome(
     destination: &ObjectKey,
     source_length: u64,
 ) -> Result<PutOutcome, S3ObjectStoreError> {
-    let Some(destination_metadata) = ObjectStore::metadata(store, destination)? else {
-        return Err(S3ObjectStoreError::ExistingObjectConflict);
-    };
-    if destination_metadata.length() != source_length {
-        return Err(S3ObjectStoreError::ExistingObjectConflict);
-    }
     if source_length == 0 {
-        return Ok(PutOutcome::AlreadyExists);
+        return match ObjectStore::metadata(store, destination)? {
+            Some(metadata) if metadata.length() == 0 => Ok(PutOutcome::AlreadyExists),
+            _ => Err(S3ObjectStoreError::ExistingObjectConflict),
+        };
     }
 
-    let mut offset = 0_u64;
-    while offset < source_length {
-        let remaining = source_length
-            .checked_sub(offset)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let to_read = remaining.min(super::STREAM_COMPARE_CHUNK_BYTES as u64);
-        let end = offset
-            .checked_add(to_read)
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let range = ByteRange::new(offset, end)
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let source_bytes = ObjectStore::read_range(store, source, range)?;
-        let destination_bytes = ObjectStore::read_range(store, destination, range)?;
-        if source_bytes != destination_bytes {
-            return Err(S3ObjectStoreError::ExistingObjectConflict);
-        }
-        offset = end.saturating_add(1);
-    }
-    Ok(PutOutcome::AlreadyExists)
+    copy_compare::compare_existing_copy(store, source, destination, source_length)
 }
 
 pub(crate) fn verify_file_length(

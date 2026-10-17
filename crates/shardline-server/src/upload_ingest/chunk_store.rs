@@ -84,11 +84,28 @@ pub(super) async fn put_if_absent_pooled_chunk_buffer(
     object_store: &ServerObjectStore,
     chunk: ChunkBuffer,
 ) -> Result<(StoredChunkOutcome, Option<BytesMut>), ServerError> {
+    put_if_absent_with_verified_cache(object_store, chunk, None).await
+}
+
+pub(super) async fn put_if_absent_with_verified_cache(
+    object_store: &ServerObjectStore,
+    chunk: ChunkBuffer,
+    cache: Option<&super::durable_chunks::SharedReadCache>,
+) -> Result<(StoredChunkOutcome, Option<BytesMut>), ServerError> {
     let request = chunk_object_key_and_integrity(&chunk)?;
     let ChunkBuffer::Pooled(bytes) = chunk;
     let (outcome, _compressed_bytes) =
         put_if_absent_pooled_bytes(object_store, &request, request.compressed.clone()).await?;
     record_dedup_on_already_exists(outcome, request.chunk_length);
+    if outcome == PutOutcome::AlreadyExists
+        && matches!(object_store, ServerObjectStore::S3(_))
+        && let Some(cache) = cache
+    {
+        cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remember_verified_existing(&request.hash_hex, &bytes, request.compressed_length)?;
+    }
     // Return the original (uncompressed) bytes for reuse as a pending buffer
     let reusable_buffer = bytes.try_into_mut().ok();
     Ok((

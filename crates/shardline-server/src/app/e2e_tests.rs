@@ -7836,8 +7836,8 @@ async fn lfs_verify_detects_corrupted_storage() {
         .unwrap();
     assert_eq!(verify_ok.status(), StatusCode::OK);
 
-    // The standalone chunk is still stored alongside the xorb (the dedup
-    // path reads chunks by their data hash).
+    // Internal digest uploads now persist the container directly, without a
+    // redundant standalone chunk. Verify must still detect stored corruption.
     let chunk_hash =
         shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(content));
     let stored_path = tmp
@@ -7846,8 +7846,8 @@ async fn lfs_verify_detects_corrupted_storage() {
         .join(&chunk_hash[..2])
         .join(&chunk_hash);
     assert!(
-        stored_path.exists(),
-        "stored LFS chunk should exist at {:?}",
+        !stored_path.exists(),
+        "direct-packed LFS upload should not store a redundant chunk at {:?}",
         stored_path
     );
 

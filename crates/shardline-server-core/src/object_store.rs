@@ -13,6 +13,8 @@ use shardline_storage::{
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+const MAX_BUFFERED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Object-store backend error.
 #[derive(Debug, Error)]
 pub enum ServerObjectStoreError {
@@ -198,6 +200,25 @@ impl AsyncObjectStore for ServerObjectStore {
 }
 
 impl ServerObjectStore {
+    /// Reads a small object, with a 64 MiB bound and complete-body validation.
+    ///
+    /// S3 uses the GET response's length instead of a preceding HEAD.
+    ///
+    /// # Errors
+    /// Returns an error for oversized objects, invalid transfers or storage failures.
+    pub fn read_object_bytes(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<Option<Vec<u8>>, ServerObjectStoreError> {
+        if let Self::S3(store) = self {
+            return Ok(store.read_object_bytes(key, MAX_BUFFERED_OBJECT_BYTES)?);
+        }
+        let Some(metadata) = ObjectStore::metadata(self, key)? else {
+            return Ok(None);
+        };
+        self.read_full_object(key, metadata.length()).map(Some)
+    }
+
     /// Materializes an object into an unlinked temporary file using bounded
     /// memory and a single streaming GET for S3. This is for random-access
     /// parsers (xorb/shard formats), not for HTTP delivery; callers must stream
@@ -532,7 +553,6 @@ impl ServerObjectStore {
         // Whole-object reads are retained only for small metadata/format
         // records. Large payloads must use `materialize_object_to_tempfile`
         // or a range stream so memory use stays independent of file size.
-        const MAX_BUFFERED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
         if length > MAX_BUFFERED_OBJECT_BYTES {
             return Err(ServerObjectStoreError::Overflow);
         }

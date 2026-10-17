@@ -1,4 +1,3 @@
-mod mapping;
 mod scanner;
 
 #[cfg(test)]
@@ -19,13 +18,8 @@ pub(super) use scanner::scan_record_tree;
 
 #[cfg_attr(test, allow(unused_imports))]
 #[cfg(test)]
-pub(super) use mapping::map_xorb_visit_error_fsck;
-
-#[cfg_attr(test, allow(unused_imports))]
-#[cfg(test)]
 pub(super) use scanner::{
-    inspect_chunks, inspect_latest_record, inspect_matching_version_record,
-    inspect_native_xet_term, inspect_record_bytes,
+    inspect_chunks, inspect_latest_record, inspect_matching_version_record, inspect_record_bytes,
 };
 
 #[cfg_attr(test, allow(unused_imports))]
@@ -57,6 +51,4 @@ pub(super) use shardline_storage::ObjectStore;
 
 #[cfg_attr(test, allow(unused_imports))]
 #[cfg(test)]
-pub(super) use shardline_xet_adapter::{
-    XorbVisitError, try_for_each_serialized_xorb_chunk, validate_serialized_xorb, xorb_object_key,
-};
+pub(super) use shardline_xet_adapter::{validate_serialized_xorb, xorb_object_key};

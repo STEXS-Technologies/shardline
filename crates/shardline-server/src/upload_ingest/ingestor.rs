@@ -12,9 +12,10 @@ use tracing::{debug, instrument, warn};
 use super::body_reader::ChunkBuffer;
 use super::cdc::CdcChunker;
 use super::chunk_store::{
-    SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome, put_if_absent_pooled_chunk_buffer,
+    SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome,
+    put_if_absent_pooled_chunk_buffer, put_if_absent_with_verified_cache,
 };
-use super::durable_chunks::DurableUploadChunks;
+use super::durable_chunks::{DurableUploadChunks, ReadCache, SharedReadCache};
 use super::xorb_packer::{pack_owned_chunks_into_xorb, store_xorb};
 
 #[cfg(test)]
@@ -34,8 +35,8 @@ use crate::{
 // Native Xet permits up to 64 MiB of raw data per xorb. Server-side ingest uses
 // half that ceiling so several independently validated range fetches can be in
 // flight without approaching whole-file memory use.
-const MAX_SERVER_XORB_RAW_BYTES: usize = 32 * 1024 * 1024;
-const MAX_XORB_CHUNKS: usize = 8 * 1024;
+pub(super) const MAX_SERVER_XORB_RAW_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_XORB_CHUNKS: usize = 8 * 1024;
 
 /// Incremental file upload assembler.
 pub(crate) struct FileUploadIngestor {
@@ -56,10 +57,13 @@ pub(crate) struct FileUploadIngestor {
     pub(super) cdc_chunker: Box<CdcChunker>,
     /// Local deployments spool raw chunks to their filesystem-backed object
     /// store path. S3 deployments leave this unset and read already durable
-    /// chunks back in bounded batches during finalization.
+    /// chunks back in bounded batches during finalization, reusing bytes
+    /// already verified against S3 when they fit the upload-local cache.
     pub(super) raw_chunk_spool: Option<tempfile::NamedTempFile>,
     pub(super) raw_spool_bytes: u64,
     pub(super) raw_chunk_offsets: Vec<(u64, u64)>,
+    verified_chunks: SharedReadCache,
+    packed_protocol: Option<super::packed_protocol::PackedProtocolUpload>,
 }
 
 impl FileUploadIngestor {
@@ -99,7 +103,25 @@ impl FileUploadIngestor {
             raw_chunk_spool: None,
             raw_spool_bytes: 0,
             raw_chunk_offsets: Vec::new(),
+            verified_chunks: SharedReadCache::default(),
+            packed_protocol: None,
         }
+    }
+
+    /// Only internal protocol preparation may omit individual chunk objects.
+    /// Public chunk upload responses retain their existing storage behavior.
+    pub(crate) fn with_packed_protocol_storage(
+        mut self,
+        store: &ServerObjectStore,
+        pool: &crate::admission::BoundedPool,
+    ) -> Self {
+        if !matches!(store, ServerObjectStore::Blackhole) {
+            self.packed_protocol = Some(super::packed_protocol::PackedProtocolUpload::new(
+                store.clone(),
+                pool.clone(),
+            ));
+        }
+        self
     }
 
     /// Ingests one body chunk and persists complete content chunks.
@@ -149,7 +171,9 @@ impl FileUploadIngestor {
             self.flush_pending_chunk(object_store).await?;
         }
         self.drain_all_completed_chunks().await?;
-        self.record_completed_chunks()?;
+        if self.packed_protocol.is_none() {
+            self.record_completed_chunks()?;
+        }
 
         if let Some(expected_sha256) = expected_sha256 {
             let Some(sha256) = self.sha256.take() else {
@@ -170,12 +194,40 @@ impl FileUploadIngestor {
         // also bounds integrity validation before a requested range is exposed.
         // Individual chunks remain authoritative fallback for any batch that
         // cannot be packed or stored.
-        if matches!(object_store, ServerObjectStore::S3(_)) {
+        if let Some(packed) = self.packed_protocol.take() {
+            let result = packed.finish().await?;
+            if result.records.len() != usize::try_from(self.next_sequence)? {
+                return Err(ServerError::Overflow);
+            }
+            let mut offset = 0;
+            for record in &result.records {
+                if record.offset != offset {
+                    return Err(ServerError::Overflow);
+                }
+                offset = checked_add(offset, record.length)?;
+            }
+            if offset != self.next_offset {
+                return Err(ServerError::Overflow);
+            }
+            self.records = result.records;
+            self.chunks = result.chunks;
+            self.inserted_chunks = result.inserted;
+            self.reused_chunks = result.reused;
+            self.stored_bytes = result.stored_bytes;
+        } else if matches!(object_store, ServerObjectStore::S3(_)) {
+            let verified_chunks = {
+                let mut cache = self
+                    .verified_chunks
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                mem::take(&mut *cache)
+            };
             pack_and_store_xorb_from_durable_chunks(
                 object_store,
                 file_id,
                 &mut self.records,
                 self.max_in_flight_chunks,
+                verified_chunks,
             )
             .await?;
         } else if !self.raw_chunk_offsets.is_empty() {
@@ -248,6 +300,10 @@ impl FileUploadIngestor {
         let offset = self.next_offset;
         let chunk_length = u64::try_from(chunk.len())?;
         self.next_offset = checked_add(self.next_offset, chunk_length)?;
+        if let Some(packed) = &mut self.packed_protocol {
+            packed.push(&chunk, offset).await?;
+            return Ok(());
+        }
         if matches!(object_store, ServerObjectStore::Blackhole) {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
@@ -268,10 +324,12 @@ impl FileUploadIngestor {
 
         self.drain_completed_chunks_to_capacity().await?;
         let object_store = object_store.clone();
+        let verified_chunks = self.verified_chunks.clone();
         self.in_flight_chunks.spawn(async move {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
-                put_if_absent_pooled_chunk_buffer(&object_store, chunk).await?;
+                put_if_absent_with_verified_cache(&object_store, chunk, Some(&verified_chunks))
+                    .await?;
             if outcome.inserted {
                 record_chunk_inserted(outcome.chunk_length);
             }
@@ -297,6 +355,10 @@ impl FileUploadIngestor {
         let offset = self.next_offset;
         let chunk_length = u64::try_from(chunk.len())?;
         self.next_offset = checked_add(self.next_offset, chunk_length)?;
+        if let Some(packed) = &mut self.packed_protocol {
+            packed.push(&chunk, offset).await?;
+            return Ok(());
+        }
         if matches!(object_store, ServerObjectStore::Blackhole) {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
@@ -317,10 +379,12 @@ impl FileUploadIngestor {
 
         self.drain_completed_chunks_to_capacity().await?;
         let object_store = object_store.clone();
+        let verified_chunks = self.verified_chunks.clone();
         self.in_flight_chunks.spawn(async move {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
-                put_if_absent_pooled_chunk_buffer(&object_store, chunk).await?;
+                put_if_absent_with_verified_cache(&object_store, chunk, Some(&verified_chunks))
+                    .await?;
             if outcome.inserted {
                 record_chunk_inserted(outcome.chunk_length);
             }
@@ -389,7 +453,7 @@ impl FileUploadIngestor {
         object_store: &ServerObjectStore,
         chunk: &[u8],
     ) -> Result<(), ServerError> {
-        if matches!(object_store, ServerObjectStore::S3(_)) {
+        if self.packed_protocol.is_some() || matches!(object_store, ServerObjectStore::S3(_)) {
             return Ok(());
         }
         if self.raw_chunk_spool.is_none() {
@@ -482,7 +546,8 @@ impl FileUploadIngestor {
 
 /// Packs S3-backed chunks without creating a pod-local raw upload spool.
 /// Individual chunks are already durable and content-addressed by the time
-/// finalization runs, so they are read back in bounded Xorb batches. Local
+/// finalization runs. Bytes already verified against S3 can be reused from the
+/// bounded upload-local cache; remaining chunks are read back in bounded Xorb batches. Local
 /// deployments retain the filesystem path below because their object store is
 /// itself filesystem-backed.
 async fn pack_and_store_xorb_from_durable_chunks(
@@ -490,11 +555,12 @@ async fn pack_and_store_xorb_from_durable_chunks(
     file_id: &str,
     records: &mut [FileChunkRecord],
     parallelism: usize,
+    cache: ReadCache,
 ) -> Result<(), ServerError> {
     let mut batch = Vec::new();
     let mut batch_raw_bytes = 0usize;
     let mut batch_record_start = 0usize;
-    let mut reader = DurableUploadChunks::new(object_store.clone(), parallelism);
+    let mut reader = DurableUploadChunks::with_cache(object_store.clone(), parallelism, cache);
 
     for record_index in 0..records.len() {
         let (raw, chunk_offset) = reader.next(records).await?.ok_or(ServerError::Overflow)?;

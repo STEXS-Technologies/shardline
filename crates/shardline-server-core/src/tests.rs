@@ -498,6 +498,46 @@ fn materialize_object_to_tempfile_copies_large_object_in_bounded_chunks() {
 }
 
 #[test]
+fn materialized_local_snapshot_is_independent_of_source_changes() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let storage = shardline_test_support::TempStorage::new();
+    let local = shardline_storage::LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let key = ObjectKey::parse("snapshots/source").unwrap();
+    let body = vec![0x42; 2 * 1024 * 1024 + 17];
+    let integrity = ObjectIntegrity::new(chunk_hash(&body), body.len() as u64);
+    local
+        .put_if_absent(&key, ObjectBody::from_slice(&body), &integrity)
+        .unwrap();
+    let source_path = local.path_for_key(&key);
+    let store = ServerObjectStore::Local(local);
+    let mut snapshot = store
+        .materialize_object_to_tempfile(&key, body.len() as u64)
+        .unwrap();
+
+    // A writable handle must not let a later mutation change the private
+    // snapshot that download validation and decoding share.
+    let mut source = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source_path)
+        .unwrap();
+    source.seek(SeekFrom::End(-1)).unwrap();
+    source.write_all(&[0x43]).unwrap();
+    source.sync_all().unwrap();
+    snapshot.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
+    let mut recovered = Vec::new();
+    snapshot.as_file_mut().read_to_end(&mut recovered).unwrap();
+    assert_eq!(recovered, body);
+
+    snapshot.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
+    snapshot.as_file_mut().write_all(&[0x44]).unwrap();
+    snapshot.as_file().sync_all().unwrap();
+    let source_bytes = std::fs::read(source_path).unwrap();
+    assert_eq!(source_bytes.first(), Some(&0x42));
+    assert_eq!(source_bytes.last(), Some(&0x43));
+}
+
+#[test]
 fn materialize_object_to_tempfile_rejects_length_mismatch() {
     let storage = shardline_test_support::TempStorage::new();
     let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();

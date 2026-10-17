@@ -5,7 +5,7 @@ use super::LocalBackend;
 use crate::{
     ServerError,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
-    object_store::{read_full_object, visit_object_prefix},
+    object_store::visit_object_prefix,
 };
 
 impl LocalBackend {
@@ -25,13 +25,11 @@ impl LocalBackend {
 
     pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
-        let metadata = object_store.metadata(object_key)?;
-        let Some(metadata) = metadata else {
-            return Err(ServerError::NotFound);
-        };
         let object_key = object_key.clone();
         tokio::task::spawn_blocking(move || {
-            read_full_object(&object_store, &object_key, metadata.length())
+            object_store
+                .read_object_bytes(&object_key)?
+                .ok_or(ServerError::NotFound)
         })
         .await
         .map_err(ServerError::BlockingTask)?

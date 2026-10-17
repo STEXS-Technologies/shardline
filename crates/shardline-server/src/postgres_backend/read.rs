@@ -336,13 +336,11 @@ impl super::PostgresBackend {
 
     pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
-        let metadata = AsyncObjectStore::metadata(&object_store, object_key).await?;
-        let Some(metadata) = metadata else {
-            return Err(ServerError::NotFound);
-        };
         let object_key = object_key.clone();
         task::spawn_blocking(move || {
-            read_full_object(&object_store, &object_key, metadata.length())
+            object_store
+                .read_object_bytes(&object_key)?
+                .ok_or(ServerError::NotFound)
         })
         .await
         .map_err(ServerError::BlockingTask)?

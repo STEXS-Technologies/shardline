@@ -9,8 +9,8 @@ use crate::{
     ServerError, ShardMetadataLimits,
     model::UploadFileResponse,
     upload_ingest::{
-        FileUploadIngestor, RequestBodyReader, StagedRequestBody, stage_body_for_object_store,
-        upload_attempt_id,
+        FileUploadIngestor, RequestBodyReader, StagedRequestBody, UploadStorage,
+        stage_body_for_object_store, upload_attempt_id,
     },
     validation::validate_identifier,
     xet_adapter::{
@@ -39,7 +39,8 @@ impl super::PostgresBackend {
             self.chunk_size,
             false,
             self.upload_max_in_flight_chunks,
-        );
+        )
+        .with_packed_protocol_storage(&object_store, &self.packing_work_pool);
         while let Some(bytes) = body.next_bytes().await? {
             ingestor.ingest_body_chunk(&object_store, &bytes).await?;
         }
@@ -83,9 +84,44 @@ impl super::PostgresBackend {
     pub(crate) async fn upload_file_stream(
         &self,
         file_id: &str,
+        body: RequestBodyReader,
+        repository_scope: Option<&RepositoryScope>,
+        expected_sha256: Option<&str>,
+    ) -> Result<UploadFileResponse, ServerError> {
+        self.upload_file_stream_with_storage(
+            file_id,
+            body,
+            repository_scope,
+            expected_sha256,
+            UploadStorage::IndividualChunks,
+        )
+        .await
+    }
+
+    /// Internal digest protocols return no independently downloadable chunk list.
+    pub(crate) async fn upload_digest_protocol_stream(
+        &self,
+        file_id: &str,
+        body: RequestBodyReader,
+        expected_sha256: &str,
+    ) -> Result<UploadFileResponse, ServerError> {
+        self.upload_file_stream_with_storage(
+            file_id,
+            body,
+            None,
+            Some(expected_sha256),
+            UploadStorage::ProtocolContainers,
+        )
+        .await
+    }
+
+    async fn upload_file_stream_with_storage(
+        &self,
+        file_id: &str,
         mut body: RequestBodyReader,
         repository_scope: Option<&RepositoryScope>,
         expected_sha256: Option<&str>,
+        storage: UploadStorage,
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
@@ -130,6 +166,10 @@ impl super::PostgresBackend {
                 expected_sha256.is_some(),
                 self.upload_max_in_flight_chunks,
             );
+            if matches!(storage, UploadStorage::ProtocolContainers) {
+                ingestor =
+                    ingestor.with_packed_protocol_storage(&object_store, &self.packing_work_pool);
+            }
             while let Some(bytes) = body.next_bytes().await? {
                 ingestor.ingest_body_chunk(&object_store, &bytes).await?;
             }

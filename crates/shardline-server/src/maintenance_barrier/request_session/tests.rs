@@ -1,5 +1,26 @@
 use super::*;
+use axum::response::IntoResponse;
 use std::time::Duration;
+
+#[tokio::test]
+async fn exhausted_request_slots_return_retryable_overload_before_checkout() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(10))
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let slots = Arc::new(tokio::sync::Semaphore::new(0));
+    let error = RequestSession::acquire_bounded(&pool, Arc::new(()), &slots)
+        .await
+        .err()
+        .expect("exhausted admission must reject the request");
+    assert!(matches!(error, ServerError::WorkQueueSaturated));
+    let response = error.into_response();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+}
 
 #[tokio::test]
 async fn saturated_request_admission_preserves_metadata_progress() {

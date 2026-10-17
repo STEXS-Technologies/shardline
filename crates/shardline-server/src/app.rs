@@ -36,6 +36,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, head, post},
     serve as serve_http,
+    serve::ListenerExt,
 };
 use shardline_protocol::TokenScope;
 use tokio::net::TcpListener;
@@ -328,7 +329,7 @@ async fn router_with_housekeeping_guard(
         bounded_pool_size_from_env("SHARDLINE_BLOCKING_IO_POOL_SIZE", 16),
     )?;
     let mut backend = backend;
-    backend.set_stream_work_pool(pools.blocking_io.clone());
+    backend.set_work_pools(&pools);
     let state = Arc::new(AppState {
         config,
         role,
@@ -686,6 +687,13 @@ where
         tracing::info!("shutdown signal received, draining connections");
         let _ignored = shutdown_started_tx.send(());
     };
+    // Streamed response headers and small body frames must not wait for a
+    // delayed acknowledgement before the next TCP segment can be sent.
+    let listener = listener.tap_io(|stream| {
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!(%error, "failed to enable TCP_NODELAY on incoming connection");
+        }
+    });
     let serve = serve_http(listener, app).with_graceful_shutdown(graceful_shutdown);
     let result = if let Some(timeout) = shutdown_timeout {
         tokio::select! {

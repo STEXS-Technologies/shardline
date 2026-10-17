@@ -361,11 +361,6 @@ pub(crate) async fn s3_put_object(
         body
     };
 
-    let body = match expected_md5 {
-        Some(expected) => body.with_expected_md5(expected),
-        None => body,
-    };
-
     // Conditional requests (If-Match / If-None-Match) are evaluated against
     // the CURRENT object BEFORE the body is read — a fast-path rejection. The
     // authoritative re-check happens under the per-key lock in
@@ -379,7 +374,7 @@ pub(crate) async fn s3_put_object(
     // checksum-verifying clients (s3cmd, the AWS SDKs) depend on.
     let user_metadata = capture_user_metadata(&headers)?;
     let hasher = Arc::new(Mutex::new(Md5::new()));
-    let body = body.with_md5_tee(hasher.clone());
+    let body = body.with_md5_tee_and_expected(hasher.clone(), expected_md5);
 
     // Stream the new body FIRST (atomic upload-then-swap under the per-key
     // lock). On failure nothing was committed, so the old record version

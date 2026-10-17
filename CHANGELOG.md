@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Improved
+
+- Batch stale S3 temporary-upload cleanup in groups of up to 1,000 objects,
+  retaining age and namespace checks, checking per-object outcomes and falling
+  back to single deletes for providers without usable bulk deletion.
+- Avoid redundant S3 destination HEADs during nonempty copy verification and
+  separate PostgreSQL row reads during quarantine and retention-hold deletion,
+  retaining complete comparisons and transactional recovery evidence.
+- Return deleted PostgreSQL S3 listing rows directly from the deletion statement,
+  avoiding a separate read while retaining transactional recovery evidence.
+- Compare existing S3 copy destinations through two complete streamed reads
+  instead of repeated range requests, retaining exact byte equality and
+  rejecting incomplete responses without modifying either object.
+- Verify existing S3 objects for file-backed uploads with one bounded streamed
+  comparison instead of repeated 256 KiB range requests, retaining complete
+  byte comparison and rejecting invalid or incomplete responses.
+- Read small S3-backed metadata objects with one GET instead of HEAD plus GET,
+  retaining the 64 MiB buffering limit and complete-response validation.
+- Coordinate concurrent S3 creates for the same object within each server to
+  reduce failed duplicate PUT requests, while still checking existing content
+  and using conditional writes across servers.
+- Reuse verified repeated chunks during upload packing with a bounded,
+  upload-local cache, reducing S3 reads without retaining data across uploads.
+- Carry verified existing S3 chunks from ingestion into that same packing cache
+  to avoid reading them twice, without trusting fresh PUT acknowledgements.
+- Reuse object-listing lengths when checking quarantined orphans during GC,
+  avoiding redundant S3 metadata requests while retaining length validation.
+- Reuse one verified container snapshot across adjacent fsck references within
+  each record, reducing object-store reads and temporary-file copies while
+  retaining per-reference range, length and member-object checks.
+- Use fully validated container metadata during fsck reference checks instead
+  of repeatedly decoding the same temporary file, retaining full initial
+  content verification and individual member-object validation.
+- Pack S3-protocol uploads backed by SQLite or PostgreSQL and local or S3 storage directly into
+  verified containers, avoiding temporary individual-chunk writes and their later
+  collection. Failed container storage retains the verified individual-chunk fallback.
+- Extend direct packing to LFS, OCI and Bazel digest uploads using local or S3 storage,
+  retaining SHA-256 validation, upload recovery and public chunk-upload behavior.
+- Compute S3 Content-MD5 validation and ETags in one pass, avoiding duplicate
+  checksum work for uploads and multipart parts.
+- Read packed containers from S3 with one GET instead of HEAD plus GET, while
+  retaining complete integrity checks and bounded-memory streaming.
+- Reuse unchanged PostgreSQL record payloads during publication to reduce
+  write-ahead logging, while retaining timestamp updates and reference checks.
+- Limit S3 temporary-upload cleanup to its reserved namespace, avoiding a full
+  bucket listing while retaining age checks and exact temporary-key matching.
+- Enable TCP_NODELAY on accepted HTTP connections to avoid delayed delivery of
+  small streamed responses.
+- Reuse the verified S3 evidence head during PostgreSQL publication, avoiding a
+  repeated sequence query and parent-commitment reads while retaining history
+  validation and conflict checks.
+- Bound direct upload packing through the existing hashing pool, including raw
+  batch buffering and cancelled blocking work.
+- Return a retryable overload response when PostgreSQL request admission times
+  out, instead of a generic internal error.
+
 ## [1.12.0] - 2026-10-16
 
 This update strengthens maintenance coordination and recovery while preserving

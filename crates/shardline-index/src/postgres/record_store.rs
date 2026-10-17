@@ -86,7 +86,8 @@ async fn prepare_record_upsert(
                 scope_key = EXCLUDED.scope_key,
                 file_id = EXCLUDED.file_id,
                 content_hash = EXCLUDED.content_hash,
-                record = EXCLUDED.record,
+                record = CASE WHEN shardline_file_records.record = EXCLUDED.record
+                    THEN shardline_file_records.record ELSE EXCLUDED.record END,
                 updated_at = now()",
         )
         .bind(locator.record_key)
@@ -101,6 +102,8 @@ async fn prepare_record_upsert(
 
 /// Both aliases carry the same record. Bind its JSON once, while preserving
 /// version-before-latest row processing and the existing per-row triggers.
+/// Unchanged payloads retain their existing TOAST storage; timestamps and
+/// reference-protection triggers still refresh on every publication.
 async fn upsert_file_aliases_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     version: &PostgresRecordLocator,
@@ -122,7 +125,8 @@ async fn upsert_file_aliases_in_transaction(
                 scope_key = EXCLUDED.scope_key,
                 file_id = EXCLUDED.file_id,
                 content_hash = EXCLUDED.content_hash,
-                record = EXCLUDED.record,
+                record = CASE WHEN shardline_file_records.record = EXCLUDED.record
+                    THEN shardline_file_records.record ELSE EXCLUDED.record END,
                 updated_at = now()",
         )
         .bind(version.record_key)
@@ -438,27 +442,15 @@ impl super::PostgresRecordStore {
         fallback_file_id: &str,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
-        let previous_s3_entry = super::s3_objects::current_s3_object_on_connection(
+        let deleted_entry = super::s3_objects::remove_s3_object_on_connection(
             &mut transaction,
             scope_namespace,
             object_key,
         )
         .await?;
-        let deleted_entry = query(
-            "DELETE FROM shardline_s3_objects
-             WHERE scope_namespace = $1 AND object_key = $2
-             RETURNING file_id, content_hash",
-        )
-        .bind(scope_namespace)
-        .bind(object_key)
-        .fetch_optional(&mut *transaction)
-        .await?;
         let scope_key = shared_repository_scope_key(None);
         let (file_id, visible_hash) = if let Some(row) = deleted_entry.as_ref() {
-            (
-                row.try_get::<String, _>("file_id")?,
-                Some(row.try_get::<String, _>("content_hash")?),
-            )
+            (row.file_id.clone(), Some(row.content_hash.clone()))
         } else {
             let hash = query_scalar::<_, String>(
                 "SELECT content_hash FROM shardline_file_records
@@ -490,7 +482,7 @@ impl super::PostgresRecordStore {
         if deleted_entry.is_some() {
             super::s3_objects::record_s3_object_transition(
                 &mut transaction,
-                previous_s3_entry.as_ref(),
+                deleted_entry.as_ref(),
                 None,
             )
             .await?;
@@ -1429,6 +1421,63 @@ mod tests {
             Err(super::super::PostgresMetadataStoreError::RecordNotFound)
         ));
         assert_eq!(store.read_latest_record_bytes(&record).await.unwrap(), None);
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unchanged_record_publication_refreshes_age_and_changed_payloads_remain_visible() {
+        use crate::RecordMutation;
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut record = sample_record(None);
+        record.total_bytes = 50;
+        store.commit_file_version_metadata(&record).await.unwrap();
+        for separate in [false, true] {
+            sqlx::query("UPDATE shardline_file_records SET updated_at = to_timestamp(1)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            if separate {
+                store.write_version_record(&record).await.unwrap();
+                store.write_latest_record(&record).await.unwrap();
+            } else {
+                store.commit_file_version_metadata(&record).await.unwrap();
+            }
+            let refreshed: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shardline_file_records WHERE updated_at > to_timestamp(1)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(refreshed, 2);
+            for locator in [
+                store.latest_record_locator(&record),
+                store.version_record_locator(&record),
+            ] {
+                assert_eq!(
+                    store.read_record_bytes(&locator).await.unwrap(),
+                    serde_json::to_vec(&record).unwrap()
+                );
+            }
+            record.chunk_size += 1;
+            if separate {
+                store.write_version_record(&record).await.unwrap();
+                store.write_latest_record(&record).await.unwrap();
+            } else {
+                store.commit_file_version_metadata(&record).await.unwrap();
+            }
+            for locator in [
+                store.latest_record_locator(&record),
+                store.version_record_locator(&record),
+            ] {
+                assert_eq!(
+                    store.read_record_bytes(&locator).await.unwrap(),
+                    serde_json::to_vec(&record).unwrap()
+                );
+            }
+        }
         pool.close().await;
     }
 

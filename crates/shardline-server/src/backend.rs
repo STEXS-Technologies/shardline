@@ -203,10 +203,16 @@ impl ServerBackend {
         Ok(vec![guard])
     }
 
-    pub(crate) fn set_stream_work_pool(&mut self, pool: crate::admission::BoundedPool) {
+    pub(crate) fn set_work_pools(&mut self, pools: &crate::admission::ExecutionPools) {
         match self {
-            Self::Local(backend) => backend.stream_work_pool = pool,
-            Self::Postgres(backend) => backend.stream_work_pool = pool,
+            Self::Local(backend) => {
+                backend.stream_work_pool = pools.blocking_io.clone();
+                backend.packing_work_pool = pools.hashing.clone();
+            }
+            Self::Postgres(backend) => {
+                backend.stream_work_pool = pools.blocking_io.clone();
+                backend.packing_work_pool = pools.hashing.clone();
+            }
         }
     }
 
@@ -400,12 +406,12 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => {
                 backend
-                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
+                    .upload_digest_protocol_stream(&file_id, body, digest_hex)
                     .await?;
             }
             Self::Postgres(backend) => {
                 backend
-                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
+                    .upload_digest_protocol_stream(&file_id, body, digest_hex)
                     .await?;
             }
         }
@@ -438,7 +444,7 @@ impl ServerBackend {
         };
         let file_id = protocol_object_file_id(object_key);
         match self {
-            Self::Local(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
+            Self::Local(backend) => backend.upload_s3_protocol_stream(&file_id, body).await,
             Self::Postgres(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
         }
     }

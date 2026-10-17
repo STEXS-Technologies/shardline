@@ -27,6 +27,7 @@ use crate::{
 
 mod collect;
 mod xorb_files;
+mod xorb_probe;
 pub(crate) use collect::collect_file_record_bytes;
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
@@ -148,7 +149,7 @@ async fn read_xorb_backed_chunks(
     object_store: ServerObjectStore,
     record: FileRecord,
     range: Option<ByteRange>,
-    known_xorb_length: Option<u64>,
+    prepared: xorb_probe::PreparedXorb,
     pool: BoundedPool,
     decoded_byte_budget: usize,
 ) -> Result<ServerByteStream, ServerError> {
@@ -161,18 +162,16 @@ async fn read_xorb_backed_chunks(
         &pool,
         move || Vec::with_capacity(decoded_byte_budget),
         move |decoded_buffer| {
-            let length = match known_xorb_length {
-                Some(length) => length,
-                None => object_store
-                    .metadata(&key)?
-                    .ok_or(ServerError::NotFound)?
-                    .length(),
+            let mut file = match prepared {
+                xorb_probe::PreparedXorb::Materialized(file) => file,
+                xorb_probe::PreparedXorb::StoredLength(length) => {
+                    #[cfg(test)]
+                    if let ServerObjectStore::Local(local) = &object_store {
+                        run_before_local_object_read_hook(&local.path_for_key(&key));
+                    }
+                    object_store.materialize_object_to_tempfile(&key, length)?
+                }
             };
-            #[cfg(test)]
-            if let ServerObjectStore::Local(local) = &object_store {
-                run_before_local_object_read_hook(&local.path_for_key(&key));
-            }
-            let mut file = object_store.materialize_object_to_tempfile(&key, length)?;
             let (validated, decoded) = shardline_xet_adapter::validate_serialized_xorb_with_data(
                 file.as_file_mut(),
                 expected_hash,
@@ -381,7 +380,7 @@ async fn single_container_file_stream(
     // which lets us skip the probe for legacy records that predate packing.
     let first_hash = record.chunks.first().map(|c| &c.hash);
     let all_same_hash = first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
-    let known_xorb_length = if all_same_hash
+    let prepared_xorb = if all_same_hash
         && record
             .chunks
             .first()
@@ -394,13 +393,11 @@ async fn single_container_file_stream(
             .ok_or(ServerError::Overflow)?
             .hash
             .clone();
-        blocking_stream_work(&pool, move || Ok(xorb_object_length(&store, &hash))).await?
+        blocking_stream_work(&pool, move || xorb_probe::probe(&store, &hash)).await?
     } else {
         None
     };
-    let is_xorb_backed = known_xorb_length.is_some();
-
-    if is_xorb_backed {
+    if let Some(prepared) = prepared_xorb {
         #[allow(clippy::indexing_slicing)]
         let xorb_hash = &record.chunks[0].hash;
         debug!(
@@ -413,7 +410,7 @@ async fn single_container_file_stream(
             object_store,
             record,
             range,
-            known_xorb_length,
+            prepared,
             pool,
             decoded_byte_budget,
         )

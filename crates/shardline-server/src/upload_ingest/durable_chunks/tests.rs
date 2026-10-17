@@ -15,6 +15,86 @@ use super::*;
 
 type Fixture = (Arc<HashMap<String, Bytes>>, Arc<Barrier>);
 
+#[tokio::test]
+async fn repeated_chunks_share_one_verified_read_only_within_the_upload() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let raw = b"one durable chunk repeated at different offsets";
+    let compressed = Bytes::from(lz4_flex::compress_prepend_size(raw));
+    let count = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&count);
+    let response_bytes = compressed.clone();
+    let app = Router::new().fallback(move || {
+        let bytes = response_bytes.clone();
+        observed.fetch_add(1, Ordering::SeqCst);
+        async move {
+            Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header("content-length", bytes.len())
+                .header(
+                    "content-range",
+                    format!("bytes 0-{}/{}", bytes.len() - 1, bytes.len()),
+                )
+                .header("etag", "\"fixture\"")
+                .header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+                .body(Body::from(bytes))
+                .unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let store = ServerObjectStore::s3(
+        S3ObjectStoreConfig::new("fixture".to_owned(), "us-east-1".to_owned())
+            .with_endpoint(Some(endpoint))
+            .with_allow_http(true)
+            .with_credentials(
+                Some(SecretString::from_secret("fixture-access")),
+                Some(SecretString::from_secret("fixture-secret")),
+                None,
+            ),
+    )
+    .unwrap();
+    let hash = xet_hash_hex_string(crate::local_backend::chunk_hash(raw));
+    let mut records: Vec<_> = (0..16)
+        .map(|index| FileChunkRecord {
+            hash: hash.clone(),
+            offset: index * raw.len() as u64,
+            length: raw.len() as u64,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: compressed.len() as u64,
+        })
+        .collect();
+    // Exercise both sequential cache hits and simultaneous read coalescing.
+    for parallelism in [1, 16] {
+        let mut reader = DurableUploadChunks::new(store.clone(), parallelism);
+        for record in &records {
+            assert_eq!(
+                reader.next(&records).await.unwrap().unwrap(),
+                (raw.to_vec(), record.offset)
+            );
+        }
+        assert!(reader.next(&records).await.unwrap().is_none());
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    // A cached hash must not conceal incompatible recorded lengths.
+    records.last_mut().unwrap().length += 1;
+    let mut reader = DurableUploadChunks::new(store, 16);
+    for _ in 0..15 {
+        reader.next(&records).await.unwrap().unwrap();
+    }
+    assert!(matches!(
+        reader.next(&records).await,
+        Err(ServerError::ObjectStore(
+            ObjectStoreError::StoredLengthMismatch
+        ))
+    ));
+    assert_eq!(count.load(Ordering::SeqCst), 4);
+    server.abort();
+}
+
 async fn paired_read(State((objects, barrier)): State<Fixture>, uri: Uri) -> Response {
     let bytes = objects.get(uri.path()).unwrap().clone();
     // Neither response is released until both reads have reached the provider.

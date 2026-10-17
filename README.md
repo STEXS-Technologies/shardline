@@ -13,8 +13,9 @@ entire request path so file size does not become server memory usage.
 
 ## Why teams use it
 
-- **Deduplication across versions**. Shared chunks are stored once, even when
-  many revisions contain the same content.
+- **Deduplication across versions**. Identical uploads reuse stored content.
+  Savings for partially changed files depend on the protocol; see the
+  [measured storage limits](docs/BENCHMARKS.md#operational-efficiency-measurements-october-16-2026).
 - **Streaming by default**. Uploads, downloads, previews, range reads, and
   processing use bounded memory. Large files are never treated as one giant
   in-memory value.
