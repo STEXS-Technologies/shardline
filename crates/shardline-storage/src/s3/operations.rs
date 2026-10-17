@@ -35,6 +35,7 @@ use super::{
     is_temp_upload_key,
 };
 
+mod copy_compare;
 mod file_compare;
 mod full_read;
 
@@ -1249,26 +1250,7 @@ pub(crate) fn existing_copy_outcome(
         return Ok(PutOutcome::AlreadyExists);
     }
 
-    let mut offset = 0_u64;
-    while offset < source_length {
-        let remaining = source_length
-            .checked_sub(offset)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let to_read = remaining.min(super::STREAM_COMPARE_CHUNK_BYTES as u64);
-        let end = offset
-            .checked_add(to_read)
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let range = ByteRange::new(offset, end)
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let source_bytes = ObjectStore::read_range(store, source, range)?;
-        let destination_bytes = ObjectStore::read_range(store, destination, range)?;
-        if source_bytes != destination_bytes {
-            return Err(S3ObjectStoreError::ExistingObjectConflict);
-        }
-        offset = end.saturating_add(1);
-    }
-    Ok(PutOutcome::AlreadyExists)
+    copy_compare::compare_existing_copy(store, source, destination, source_length)
 }
 
 pub(crate) fn verify_file_length(

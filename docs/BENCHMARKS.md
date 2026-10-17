@@ -441,6 +441,21 @@ Set `S3_BENCH_ACCESS_KEY` and `S3_BENCH_SECRET_KEY` for the fixture. The benchma
 seeds its own unique key before timing and requires each measured call to find
 that existing object. Delete the disposable bucket after collecting results.
 
+Existing-copy verification uses the same streaming principle for two remote
+objects. Previously it read each object in separate 256 KiB ranges. A 32 MiB
+comparison therefore required 256 GETs; the new helper uses two complete GETs
+plus the unchanged destination HEAD. The HTTP-provider regression asserts that
+request count on equal 32 MiB objects and rejects a final-byte mismatch without
+changing either object. Separate stream tests cover independent frame sizes,
+empty frames, early/tail mismatches, short/long bodies and transport failures.
+The existing MinIO copy/idempotency/conflict test also passes. These checks
+establish request reduction and comparison behavior, not a measured throughput
+or RSS improvement. Both objects still need to be read completely on success;
+no backend-byte, local-disk-write or SSD-endurance reduction is claimed.
+Comparison retains one transport frame per object, adds no temporary file and
+does not buffer whole objects. Each response must declare the expected complete
+length and range, and both bodies must reach EOF at that length.
+
 A separate SQLite SQL probe with sixteen unchanged one-MiB payloads produced
 the same 65,952 WAL bytes for the current payload-plus-timestamp upsert and a
 timestamp-only update. Both used WAL, `synchronous=FULL`, disabled automatic

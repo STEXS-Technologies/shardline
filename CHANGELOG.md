@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Compare existing S3 copy destinations through two complete streamed reads
+  instead of repeated range requests, retaining exact byte equality and
+  rejecting incomplete responses without modifying either object.
 - Verify existing S3 objects for file-backed uploads with one bounded streamed
   comparison instead of repeated 256 KiB range requests, retaining complete
   byte comparison and rejecting invalid or incomplete responses.

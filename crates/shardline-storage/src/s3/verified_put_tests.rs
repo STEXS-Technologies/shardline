@@ -47,110 +47,122 @@ impl Provider {
         let provider_state = Arc::clone(&state);
         let provider_stopped = Arc::clone(&stopped);
         let worker = std::thread::spawn(move || {
+            let mut connections = Vec::new();
             for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
                 if provider_stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                let header_end = loop {
-                    let read = stream.read(&mut buffer).unwrap();
-                    assert!(read > 0);
-                    request.extend_from_slice(&buffer[..read]);
-                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                        break end.checked_add(4).unwrap();
-                    }
-                };
-                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
-                let mut first = headers.lines().next().unwrap().split_whitespace();
-                let method = first.next().unwrap();
-                let path = first.next().unwrap();
-                let length: usize = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().unwrap())
-                    })
-                    .unwrap_or(0);
-                let body_end = header_end.checked_add(length).unwrap();
-                while request.len() < body_end {
-                    let read = stream.read(&mut buffer).unwrap();
-                    assert!(read > 0);
-                    request.extend_from_slice(&buffer[..read]);
-                }
-                let (status, bytes) = {
-                    let mut state = provider_state.lock().unwrap();
-                    state.requests.push(method.to_owned());
-                    match method {
-                        "PUT" => {
-                            assert!(headers.lines().any(|line| {
-                                line.split_once(':').is_some_and(|(name, value)| {
-                                    name.eq_ignore_ascii_case("if-none-match")
-                                        && value.trim() == "*"
-                                })
-                            }));
-                            if state.objects.contains_key(path) {
-                                ("412 Precondition Failed", Vec::new())
-                            } else {
-                                let stored = state
-                                    .new_write_override
-                                    .take()
-                                    .unwrap_or_else(|| request[header_end..body_end].to_vec());
-                                state.objects.insert(path.to_owned(), stored);
-                                ("200 OK", Vec::new())
-                            }
+                let provider_state = Arc::clone(&provider_state);
+                let connection = move || {
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 4096];
+                    let header_end = loop {
+                        let read = stream.read(&mut buffer).unwrap();
+                        assert!(read > 0);
+                        request.extend_from_slice(&buffer[..read]);
+                        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                        {
+                            break end.checked_add(4).unwrap();
                         }
-                        "GET" if state.deny_reads => ("403 Forbidden", Vec::new()),
-                        "HEAD" => state.objects.get(path).cloned().map_or_else(
-                            || ("404 Not Found", Vec::new()),
-                            |bytes| ("200 OK", bytes),
-                        ),
-                        "GET" => state.objects.get(path).cloned().map_or_else(
-                            || {
-                                if let Some(bytes) = state.insert_after_missing_read.take() {
-                                    state.objects.insert(path.to_owned(), bytes);
+                    };
+                    let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                    let mut first = headers.lines().next().unwrap().split_whitespace();
+                    let method = first.next().unwrap();
+                    let path = first.next().unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    let body_end = header_end.checked_add(length).unwrap();
+                    while request.len() < body_end {
+                        let read = stream.read(&mut buffer).unwrap();
+                        assert!(read > 0);
+                        request.extend_from_slice(&buffer[..read]);
+                    }
+                    let (status, bytes) = {
+                        let mut state = provider_state.lock().unwrap();
+                        state.requests.push(method.to_owned());
+                        match method {
+                            "PUT" => {
+                                assert!(headers.lines().any(|line| {
+                                    line.split_once(':').is_some_and(|(name, value)| {
+                                        name.eq_ignore_ascii_case("if-none-match")
+                                            && value.trim() == "*"
+                                    })
+                                }));
+                                if state.objects.contains_key(path) {
+                                    ("412 Precondition Failed", Vec::new())
+                                } else {
+                                    let stored = state
+                                        .new_write_override
+                                        .take()
+                                        .unwrap_or_else(|| request[header_end..body_end].to_vec());
+                                    state.objects.insert(path.to_owned(), stored);
+                                    ("200 OK", Vec::new())
                                 }
-                                ("404 Not Found", Vec::new())
-                            },
-                            |bytes| ("200 OK", bytes),
-                        ),
-                        other => panic!("unexpected provider operation: {other}"),
+                            }
+                            "GET" if state.deny_reads => ("403 Forbidden", Vec::new()),
+                            "HEAD" => state.objects.get(path).cloned().map_or_else(
+                                || ("404 Not Found", Vec::new()),
+                                |bytes| ("200 OK", bytes),
+                            ),
+                            "GET" => state.objects.get(path).cloned().map_or_else(
+                                || {
+                                    if let Some(bytes) = state.insert_after_missing_read.take() {
+                                        state.objects.insert(path.to_owned(), bytes);
+                                    }
+                                    ("404 Not Found", Vec::new())
+                                },
+                                |bytes| ("200 OK", bytes),
+                            ),
+                            other => panic!("unexpected provider operation: {other}"),
+                        }
+                    };
+                    let state = provider_state.lock().unwrap();
+                    let ranged = method == "GET"
+                        && status == "200 OK"
+                        && headers.lines().any(|line| {
+                            line.split_once(':')
+                                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("range"))
+                        });
+                    let range_value = state.response_range.clone().or_else(|| {
+                        ranged.then(|| {
+                            format!("bytes 0-{}/{}", bytes.len().saturating_sub(1), bytes.len())
+                        })
+                    });
+                    let range = range_value
+                        .as_ref()
+                        .map_or(String::new(), |range| format!("Content-Range: {range}\r\n"));
+                    let status = if range_value.is_some() && method == "GET" {
+                        "206 Partial Content"
+                    } else {
+                        status
+                    };
+                    let length = state.response_length.unwrap_or(bytes.len());
+                    drop(state);
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {length}\r\n{range}ETag: \"fixture\"\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nConnection: close\r\n\r\n"
+                    );
+                    // Integrity failures may intentionally stop reading early.
+                    if stream.write_all(response.as_bytes()).is_ok() && method != "HEAD" {
+                        let _body_result = stream.write_all(&bytes);
                     }
                 };
-                let state = provider_state.lock().unwrap();
-                let ranged = method == "GET"
-                    && status == "200 OK"
-                    && headers.lines().any(|line| {
-                        line.split_once(':')
-                            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("range"))
-                    });
-                let range_value = state.response_range.clone().or_else(|| {
-                    ranged.then(|| {
-                        format!("bytes 0-{}/{}", bytes.len().saturating_sub(1), bytes.len())
-                    })
-                });
-                let range = range_value
-                    .as_ref()
-                    .map_or(String::new(), |range| format!("Content-Range: {range}\r\n"));
-                let status = if range_value.is_some() && method == "GET" {
-                    "206 Partial Content"
-                } else {
-                    status
-                };
-                let length = state.response_length.unwrap_or(bytes.len());
-                drop(state);
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {length}\r\n{range}ETag: \"fixture\"\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nConnection: close\r\n\r\n"
-                );
-                // Integrity failures may intentionally stop reading early.
-                if stream.write_all(response.as_bytes()).is_ok() && method != "HEAD" {
-                    let _body_result = stream.write_all(&bytes);
-                }
+                connections.push(std::thread::spawn(connection));
+            }
+            for connection in connections {
+                connection.join().unwrap();
             }
         });
         Self {
@@ -193,6 +205,53 @@ fn integrity(bytes: &[u8]) -> ObjectIntegrity {
         ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes()),
         bytes.len() as u64,
     )
+}
+
+#[test]
+fn existing_copy_compares_large_objects_with_two_gets() {
+    let provider = Provider::new();
+    let store = provider.store();
+    let source = ObjectKey::parse("copies/source").unwrap();
+    let destination = ObjectKey::parse("copies/destination").unwrap();
+    let bytes = vec![0x42; 32 * 1024 * 1024];
+    {
+        let mut state = provider.state.lock().unwrap();
+        state
+            .objects
+            .insert("/fixture/copies/source".to_owned(), bytes.clone());
+        state
+            .objects
+            .insert("/fixture/copies/destination".to_owned(), bytes.clone());
+    }
+    assert_eq!(
+        super::existing_copy_outcome(&store, &source, &destination, bytes.len() as u64).unwrap(),
+        PutOutcome::AlreadyExists
+    );
+    assert_eq!(provider.requests(), ["HEAD", "GET", "GET"]);
+    {
+        let mut state = provider.state.lock().unwrap();
+        state.requests.clear();
+        *state
+            .objects
+            .get_mut("/fixture/copies/destination")
+            .unwrap()
+            .last_mut()
+            .unwrap() ^= 1;
+    }
+    assert!(
+        super::existing_copy_outcome(&store, &source, &destination, bytes.len() as u64).is_err()
+    );
+    assert_eq!(provider.requests(), ["HEAD", "GET", "GET"]);
+    assert_eq!(
+        provider
+            .state
+            .lock()
+            .unwrap()
+            .objects
+            .get("/fixture/copies/source")
+            .unwrap(),
+        &bytes
+    );
 }
 
 #[test]
