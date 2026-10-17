@@ -523,11 +523,15 @@ that existing object. Delete the disposable bucket after collecting results.
 
 Existing-copy verification uses the same streaming principle for two remote
 objects. Previously it read each object in separate 256 KiB ranges. A 32 MiB
-comparison therefore required 256 GETs; the new helper uses two complete GETs
-plus the unchanged destination HEAD. The HTTP-provider regression asserts that
+comparison therefore required 256 GETs plus a destination HEAD. The current
+helper uses two complete GETs and obtains length from those exact responses,
+without a destination HEAD for nonempty objects. Empty objects retain the
+metadata-only check. A missing destination returns a conflict after one GET,
+without fetching the source. The HTTP-provider regression asserts that
 request count on equal 32 MiB objects and rejects a final-byte mismatch without
 changing either object. Separate stream tests cover independent frame sizes,
 empty frames, early/tail mismatches, short/long bodies and transport failures.
+Invalid-length/range, truncated, denied and missing response cases are rejected.
 The existing MinIO copy/idempotency/conflict test also passes. These checks
 establish request reduction and comparison behavior, not a measured throughput
 or RSS improvement. Both objects still need to be read completely on success;
@@ -556,6 +560,28 @@ per deletion attempt, including absent objects, rather than a WAL or SSD-wear
 saving. It does not establish a production latency improvement. The S3 evidence
 corruption regression exercises both deletion entry points and checks that the
 listing row survives their failed transactions.
+
+The same final audit removed a SELECT-before-DELETE from unconditional
+PostgreSQL quarantine-candidate and retention-hold deletion. Each now returns
+the removed row from DELETE for the unchanged lifecycle evidence checks,
+saving one query per attempt. DELETE retains the row lock until transaction
+completion, and retention-hold advisory locking remains in place. Conditional
+`if_matches` paths retain their existing checks. A real-PostgreSQL regression
+covers deletion, repeated absence, recreation and rollback on corrupt evidence
+for both paths. Two reversed-order PostgreSQL 16 counter comparisons of the
+quarantine baseline-repair regression confirmed one fewer SELECT. Across its
+matched row SELECTs and DELETEs, WAL fell from 108 to 54 bytes because the
+separate `FOR UPDATE` row-lock record was avoided. This is a small fixture-level
+delta, excluding evidence writes and the rest of the transaction; it is not a
+50% total-WAL reduction or a disk-endurance estimate. No WAL reduction was
+measured for retention-hold deletion separately.
+
+One backlog-dependent S3 opportunity remains: stale temporary-upload cleanup
+deletes eligible objects individually. Batching could lower request counts when
+many abandoned uploads accumulate. It is unchanged here; qualifying per-key
+failures, partial batch success and concurrent cleanup is required before
+claiming that saving. This does not remove the per-upload cleanup operation or
+justify batching destructive user-object deletions across their safety fences.
 
 #### Unchanged SQLite payloads
 

@@ -227,7 +227,7 @@ fn existing_copy_compares_large_objects_with_two_gets() {
         super::existing_copy_outcome(&store, &source, &destination, bytes.len() as u64).unwrap(),
         PutOutcome::AlreadyExists
     );
-    assert_eq!(provider.requests(), ["HEAD", "GET", "GET"]);
+    assert_eq!(provider.requests(), ["GET", "GET"]);
     {
         let mut state = provider.state.lock().unwrap();
         state.requests.clear();
@@ -241,7 +241,7 @@ fn existing_copy_compares_large_objects_with_two_gets() {
     assert!(
         super::existing_copy_outcome(&store, &source, &destination, bytes.len() as u64).is_err()
     );
-    assert_eq!(provider.requests(), ["HEAD", "GET", "GET"]);
+    assert_eq!(provider.requests(), ["GET", "GET"]);
     assert_eq!(
         provider
             .state
@@ -252,6 +252,67 @@ fn existing_copy_compares_large_objects_with_two_gets() {
             .unwrap(),
         &bytes
     );
+}
+
+#[test]
+fn existing_copy_uses_get_metadata_and_preserves_empty_object_behavior() {
+    let source = ObjectKey::parse("copies/source").unwrap();
+    let destination = ObjectKey::parse("copies/destination").unwrap();
+    for case in ["missing", "short", "long", "range", "truncated", "denied"] {
+        let provider = Provider::new();
+        let store = provider.store();
+        let bytes = vec![0x42; 512 * 1024 + 17];
+        let mut stored = bytes.clone();
+        {
+            let mut state = provider.state.lock().unwrap();
+            state
+                .objects
+                .insert("/fixture/copies/source".to_owned(), bytes.clone());
+            match case {
+                "short" => {
+                    stored.pop();
+                }
+                "long" => stored.push(0),
+                "range" => {
+                    state.response_range =
+                        Some(format!("bytes 1-{}/{}", bytes.len(), bytes.len() + 1))
+                }
+                "truncated" => {
+                    stored.pop();
+                    state.response_length = Some(bytes.len());
+                }
+                "denied" => state.deny_reads = true,
+                _ => {}
+            }
+            if case != "missing" {
+                state
+                    .objects
+                    .insert("/fixture/copies/destination".to_owned(), stored);
+            }
+        }
+        assert!(
+            super::existing_copy_outcome(&store, &source, &destination, bytes.len() as u64)
+                .is_err(),
+            "{case}"
+        );
+        assert!(provider.requests().iter().all(|method| method == "GET"));
+        if case == "missing" {
+            assert_eq!(provider.requests(), ["GET"]);
+        }
+    }
+    let provider = Provider::new();
+    let store = provider.store();
+    provider
+        .state
+        .lock()
+        .unwrap()
+        .objects
+        .insert("/fixture/copies/destination".to_owned(), Vec::new());
+    assert_eq!(
+        super::existing_copy_outcome(&store, &source, &destination, 0).unwrap(),
+        PutOutcome::AlreadyExists
+    );
+    assert_eq!(provider.requests(), ["HEAD"]);
 }
 
 #[test]

@@ -16,7 +16,9 @@ pub(super) fn compare_existing_copy(
     let destination = store.location_for_key(destination)?;
     store.block_on_result(async {
         let mut streams = Vec::with_capacity(2);
-        for location in [&source, &destination] {
+        // Inspect the destination first: absent/conflicting destinations need
+        // no source GET. The GET supplies the metadata of that exact snapshot.
+        for location in [&destination, &source] {
             let result = store
                 .inner
                 .get_opts(
@@ -24,16 +26,24 @@ pub(super) fn compare_existing_copy(
                     GetOptions::new().with_range(Some(0..expected_length)),
                 )
                 .await
-                .map_err(S3ObjectStoreError::External)?;
+                .map_err(|error| {
+                    if location == &destination
+                        && matches!(error, object_store::Error::NotFound { .. })
+                    {
+                        S3ObjectStoreError::ExistingObjectConflict
+                    } else {
+                        S3ObjectStoreError::External(error)
+                    }
+                })?;
             if result.meta.size != expected_length {
                 return Err(S3ObjectStoreError::ExistingObjectConflict);
             }
             streams.push(stream_payload_for_range(result, 0..expected_length)?);
         }
-        let destination_stream = streams
+        let source_stream = streams
             .pop()
             .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let source_stream = streams
+        let destination_stream = streams
             .pop()
             .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
         compare_streams(source_stream, destination_stream, expected_length).await?;

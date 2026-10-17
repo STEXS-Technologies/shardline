@@ -1240,14 +1240,11 @@ pub(crate) fn existing_copy_outcome(
     destination: &ObjectKey,
     source_length: u64,
 ) -> Result<PutOutcome, S3ObjectStoreError> {
-    let Some(destination_metadata) = ObjectStore::metadata(store, destination)? else {
-        return Err(S3ObjectStoreError::ExistingObjectConflict);
-    };
-    if destination_metadata.length() != source_length {
-        return Err(S3ObjectStoreError::ExistingObjectConflict);
-    }
     if source_length == 0 {
-        return Ok(PutOutcome::AlreadyExists);
+        return match ObjectStore::metadata(store, destination)? {
+            Some(metadata) if metadata.length() == 0 => Ok(PutOutcome::AlreadyExists),
+            _ => Err(S3ObjectStoreError::ExistingObjectConflict),
+        };
     }
 
     copy_compare::compare_existing_copy(store, source, destination, source_length)

@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Avoid redundant S3 destination HEADs during nonempty copy verification and
+  separate PostgreSQL row reads during quarantine and retention-hold deletion,
+  retaining complete comparisons and transactional recovery evidence.
 - Return deleted PostgreSQL S3 listing rows directly from the deletion statement,
   avoiding a separate read while retaining transactional recovery evidence.
 - Compare existing S3 copy destinations through two complete streamed reads

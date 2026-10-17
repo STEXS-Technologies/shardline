@@ -1035,9 +1035,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
             let row = query(
-                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
-                 FROM shardline_quarantine_candidates WHERE object_key = $1
-                 FOR UPDATE",
+                "DELETE FROM shardline_quarantine_candidates WHERE object_key = $1
+                 RETURNING object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds",
             )
             .bind(object_key.as_str())
             .fetch_optional(&mut *transaction)
@@ -1046,10 +1045,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .as_ref()
                 .map(quarantine_candidate_from_row)
                 .transpose()?;
-            let result = query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
-                .bind(object_key.as_str())
-                .execute(&mut *transaction)
-                .await?;
+            let deleted = candidate.is_some();
             if let Some(candidate) = candidate {
                 let active = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
                 let released = quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
@@ -1074,7 +1070,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 }
             }
             transaction.commit().await?;
-            Ok(result.rows_affected() > 0)
+            Ok(deleted)
         })
     }
 
@@ -1310,18 +1306,14 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             super::provider_mutation::lock_retention_hold(&mut transaction, object_key.as_str())
                 .await?;
             let row = query(
-                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
-                 FROM shardline_retention_holds WHERE object_key = $1
-                 FOR UPDATE",
+                "DELETE FROM shardline_retention_holds WHERE object_key = $1
+                 RETURNING object_key, reason, held_at_unix_seconds, release_after_unix_seconds",
             )
             .bind(object_key.as_str())
             .fetch_optional(&mut *transaction)
             .await?;
             let hold = row.as_ref().map(retention_hold_from_row).transpose()?;
-            let result = query("DELETE FROM shardline_retention_holds WHERE object_key = $1")
-                .bind(object_key.as_str())
-                .execute(&mut *transaction)
-                .await?;
+            let deleted = hold.is_some();
             if let Some(hold) = hold {
                 let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
                 let released = retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?;
@@ -1339,7 +1331,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 }
             }
             transaction.commit().await?;
-            Ok(result.rows_affected() > 0)
+            Ok(deleted)
         })
     }
 
@@ -3612,6 +3604,40 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean quarantine evidence fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_maintenance_deletion_returns_rows_and_rolls_back_corrupt_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let key = shardline_storage::ObjectKey::parse("gc/returning-delete").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 4, 100, 200).unwrap();
+        let hold = crate::RetentionHold::new(key.clone(), "retained".into(), 100, None).unwrap();
+        for _ in 0..2 {
+            store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            store.upsert_retention_hold(&hold).await.unwrap();
+            assert!(store.delete_quarantine_candidate(&key).await.unwrap());
+            assert!(store.delete_retention_hold(&key).await.unwrap());
+            assert!(!store.delete_quarantine_candidate(&key).await.unwrap());
+            assert!(!store.delete_retention_hold(&key).await.unwrap());
+        }
+        store.upsert_quarantine_candidate(&candidate).await.unwrap();
+        store.upsert_retention_hold(&hold).await.unwrap();
+        sqlx::query("UPDATE shardline_reliability_events SET event_json = '{}'::jsonb WHERE operation_kind IN ('GarbageCollection', 'RetentionHold') AND operation_id = $1")
+            .bind(key.as_str()).execute(&pool).await.unwrap();
+        assert!(store.delete_quarantine_candidate(&key).await.is_err());
+        assert!(store.delete_retention_hold(&key).await.is_err());
+        let remaining: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM shardline_quarantine_candidates WHERE object_key = $1),
+                    (SELECT count(*) FROM shardline_retention_holds WHERE object_key = $1)",
+        )
+        .bind(key.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, (1, 1));
     }
 
     #[tokio::test(flavor = "multi_thread")]
