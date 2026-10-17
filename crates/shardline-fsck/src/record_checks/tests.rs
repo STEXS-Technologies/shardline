@@ -1,29 +1,5 @@
 use super::*;
 
-// ── map_xorb_visit_error_fsck ─────────────────────────────────────────
-
-#[test]
-fn map_xorb_visit_error_parse_wraps_parse_error() {
-    let err =
-        XorbVisitError::<FsckError>::Parse(shardline_xet_adapter::XorbParseError::HashMismatch);
-    let result = map_xorb_visit_error_fsck(err);
-    assert!(matches!(result, FsckError::Overflow));
-}
-
-#[test]
-fn map_xorb_visit_error_visitor_passthrough() {
-    let err = XorbVisitError::<FsckError>::Visitor(FsckError::Overflow);
-    let result = map_xorb_visit_error_fsck(err);
-    assert!(matches!(result, FsckError::Overflow));
-}
-
-#[test]
-fn map_xorb_visit_error_visitor_passthrough_roundtrip() {
-    let err = XorbVisitError::<FsckError>::Visitor(FsckError::Io(std::io::Error::other("test")));
-    let result = map_xorb_visit_error_fsck(err);
-    assert!(matches!(result, FsckError::Io(_)));
-}
-
 // ── scan_record_tree ──────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]

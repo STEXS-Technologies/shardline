@@ -11,9 +11,7 @@ pub(super) use shardline_server_core::{
     validate_content_hash, validate_identifier,
 };
 pub(super) use shardline_storage::ObjectStore;
-pub(super) use shardline_xet_adapter::{
-    try_for_each_serialized_xorb_chunk, validate_serialized_xorb, xorb_object_key,
-};
+pub(super) use shardline_xet_adapter::{validate_serialized_xorb, xorb_object_key};
 
 pub(super) use crate::{
     FsckError, FsckIssueDetail, FsckIssueKind, FsckObjectContext, FsckReachability, FsckReport,
@@ -21,11 +19,8 @@ pub(super) use crate::{
     push_reconstruction_plan_issue, record_path,
 };
 
-pub(super) use super::mapping::map_xorb_visit_error_fsck;
-
 struct XorbSnapshot {
     hash: String,
-    file: tempfile::NamedTempFile,
     validated: shardline_xet_adapter::ValidatedXorb,
 }
 
@@ -301,7 +296,7 @@ pub(crate) fn inspect_chunks(
             && (record.chunks.len() > 1 || single_chunk_xorb_backed));
 
     // Reuse only the immediately preceding container within this record.
-    // Keep one disk-backed snapshot, never a scan-wide cache of object state.
+    // Retain only fully verified metadata, never a scan-wide cache of object state.
     let mut snapshot = None;
     for chunk in &record.chunks {
         report.inspected_chunk_references = checked_increment(report.inspected_chunk_references)?;
@@ -533,13 +528,11 @@ fn inspect_native_xet_term(
         };
         *snapshot = Some(XorbSnapshot {
             hash: chunk.hash.clone(),
-            file: xorb_file,
             validated,
         });
     }
-    let cached = snapshot.as_mut().ok_or(FsckError::Overflow)?;
+    let cached = snapshot.as_ref().ok_or(FsckError::Overflow)?;
     let validated = &cached.validated;
-    let mut reader = cached.file.as_file_mut();
     let range_start = usize::try_from(chunk.range_start)?;
     let range_end = usize::try_from(chunk.range_end)?;
     if range_end > validated.chunks().len() {
@@ -557,17 +550,17 @@ fn inspect_native_xet_term(
     }
 
     let mut actual_length = 0_u64;
-    let mut chunk_index = 0_usize;
-    try_for_each_serialized_xorb_chunk(&mut reader, validated, |decoded_chunk| {
-        if chunk_index < range_start || chunk_index >= range_end {
-            chunk_index = chunk_index.checked_add(1).ok_or(FsckError::Overflow)?;
-            return Ok::<(), FsckError>(());
-        }
-
-        let unpacked_length = u64::try_from(decoded_chunk.data().len())?;
+    // Full validation already decoded and checked every chunk in this exact
+    // snapshot. Re-reading its payload for each term adds no integrity check.
+    for descriptor in validated
+        .chunks()
+        .get(range_start..range_end)
+        .unwrap_or(&[])
+    {
+        let unpacked_length = descriptor.unpacked_len();
         actual_length = checked_add(actual_length, unpacked_length)?;
 
-        let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
+        let chunk_hash_hex = xet_hash_hex_string(descriptor.hash());
         let chunk_object_key = chunk_object_key(&chunk_hash_hex)?;
         reachability
             .referenced_object_keys
@@ -590,8 +583,7 @@ fn inspect_native_xet_term(
                         },
                     )?;
                 }
-                chunk_index = chunk_index.checked_add(1).ok_or(FsckError::Overflow)?;
-                return Ok(());
+                continue;
             }
         };
 
@@ -606,8 +598,7 @@ fn inspect_native_xet_term(
                     observed_length: chunk_metadata.length(),
                 },
             )?;
-            chunk_index = chunk_index.checked_add(1).ok_or(FsckError::Overflow)?;
-            return Ok(());
+            continue;
         }
         let chunk_bytes =
             read_full_object(object_store, &chunk_object_key, chunk_metadata.length())?;
@@ -634,11 +625,7 @@ fn inspect_native_xet_term(
                 },
             )?;
         }
-
-        chunk_index = chunk_index.checked_add(1).ok_or(FsckError::Overflow)?;
-        Ok(())
-    })
-    .map_err(map_xorb_visit_error_fsck)?;
+    }
     if actual_length != chunk.length {
         push_issue(
             report,

@@ -22,6 +22,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Reuse one verified container snapshot across adjacent fsck references within
   each record, reducing object-store reads and temporary-file copies while
   retaining per-reference range, length and member-object checks.
+- Use fully validated container metadata during fsck reference checks instead
+  of repeatedly decoding the same temporary file, retaining full initial
+  content verification and individual member-object validation.
 - Pack S3-protocol uploads backed by SQLite or PostgreSQL and local or S3 storage directly into
   verified containers, avoiding temporary individual-chunk writes and their later
   collection. Failed container storage retains the verified individual-chunk fallback.

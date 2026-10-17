@@ -17,7 +17,7 @@ fn snapshot_reuses_bytes_but_preserves_term_checks_and_record_freshness() {
     let length = u64::try_from(data.len()).unwrap();
     let member_hash = compute_data_hash(&data);
     let hash = xorb_hash(&[(member_hash, length)]);
-    let encoded = serialized_xorb_object_from_components(
+    let mut encoded = serialized_xorb_object_from_components(
         &hash,
         data,
         vec![(member_hash, length)],
@@ -28,7 +28,7 @@ fn snapshot_reuses_bytes_but_preserves_term_checks_and_record_freshness() {
     let key = xorb_object_key(&hash).unwrap();
     let path = root.join(key.as_str());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, encoded.serialized_data).unwrap();
+    std::fs::write(&path, &encoded.serialized_data).unwrap();
     let context = FsckObjectContext {
         object_root: &root,
         object_store: &store,
@@ -142,5 +142,22 @@ fn snapshot_reuses_bytes_but_preserves_term_checks_and_record_freshness() {
     assert!(matches!(
         report.issues.last().unwrap().detail,
         FsckIssueDetail::ReferencedByNativeXetRecord { .. }
+    ));
+    encoded.serialized_data[10] ^= 1;
+    std::fs::write(&path, &encoded.serialized_data).unwrap();
+    inspect_native_xet_term(
+        &context,
+        "corrupt-record",
+        &term,
+        false,
+        &mut reachability,
+        &mut report,
+        &mut next_record,
+    )
+    .unwrap();
+    assert!(next_record.is_none());
+    assert!(matches!(
+        report.issues.last().unwrap().detail,
+        FsckIssueDetail::XorbHashMismatch { .. }
     ));
 }

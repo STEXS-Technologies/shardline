@@ -1,4 +1,3 @@
-mod mapping;
 mod scanner;
 
 #[cfg(test)]
@@ -16,10 +15,6 @@ pub(super) use scanner::scan_record_tree;
 //
 // This is not an #[allow] on non-test code — it applies only when
 // the items themselves are active.
-
-#[cfg_attr(test, allow(unused_imports))]
-#[cfg(test)]
-pub(super) use mapping::map_xorb_visit_error_fsck;
 
 #[cfg_attr(test, allow(unused_imports))]
 #[cfg(test)]
@@ -56,6 +51,4 @@ pub(super) use shardline_storage::ObjectStore;
 
 #[cfg_attr(test, allow(unused_imports))]
 #[cfg(test)]
-pub(super) use shardline_xet_adapter::{
-    XorbVisitError, try_for_each_serialized_xorb_chunk, validate_serialized_xorb, xorb_object_key,
-};
+pub(super) use shardline_xet_adapter::{validate_serialized_xorb, xorb_object_key};

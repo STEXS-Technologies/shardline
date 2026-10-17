@@ -336,6 +336,22 @@ the container changes. Both versions completed clean fsck, GC, released-v1.12.0
 reads and SQLite integrity checks. This reduces repeated remote reads and
 temporary-file copies without retaining container payloads in RAM.
 
+A further fsck change uses the fully validated chunk descriptors instead of
+decoding the temporary container again for every reference. On a local fixture
+with 1,094 chunk references, process-wide `read()` calls fell from 185,391 to
+17,181; both runs reported zero integrity issues. These are syscall counts,
+not physical disk-byte or cloud-billing measurements. Full initial validation
+still hashes every decoded chunk and verifies boundaries, lengths and the
+container commitment. Per-reference range/length checks and individual member
+object checks remain. Only verified metadata is retained within a record;
+the temporary container file can be removed immediately after validation.
+
+The final binary also passed a PostgreSQL-metadata/local-object drill with
+eight concurrent 36 MiB uploads, identical overwrites, GC and fsck. It retained
+16 containers and no redundant raw objects. All 24 full-body reads passed,
+including eight reads using released v1.12.0 after maintenance. This is a
+single-host compatibility/correctness check, not a cluster scaling result.
+
 Small-object reads used for OCI media types and legacy metadata now obtain
 length and bytes from one S3 GET instead of HEAD plus GET. An HTTP-provider
 fixture checks GET-only behavior for success, oversized objects, missing
