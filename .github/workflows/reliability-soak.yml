@@ -191,8 +191,6 @@ jobs:
         run: |
           docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d
           bash scripts/shardline/wait_for_chaos_stack.sh
-          target/debug/shardline db migrate up \
-            --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline
 
       - name: Exercise real mixed-version rollout and rollback
         env:
