@@ -882,13 +882,15 @@ fn s3_object_count(store: &ServerObjectStore) -> usize {
 
 /// Waits until a new immutable object lands while the slow PUT is still
 /// streaming (provable mid-body evidence for chunks or packed containers).
+/// Chunking and packing can take longer on busy CI runners, so this observes
+/// progress for a bounded interval instead of assuming a local-machine speed.
 async fn wait_s3_object_count_grows(
     store: &ServerObjectStore,
     baseline: usize,
     put_task: &JoinHandle<reqwest::Result<reqwest::Response>>,
 ) {
     let deadline = tokio::time::Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(Duration::from_secs(30))
         .expect("deadline overflow");
     loop {
         let count = s3_object_count(store);
@@ -901,7 +903,7 @@ async fn wait_s3_object_count_grows(
             );
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("no chunk evidence within 5s (object count {count} <= baseline {baseline})");
+            panic!("no chunk evidence within 30s (object count {count} <= baseline {baseline})");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -2185,10 +2187,16 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
         ADMIN_READ_TOKEN,
     )
     .await;
-    assert_eq!(response.status().as_u16(), 200);
-    let predecessor_status: serde_json::Value = response.json().await.unwrap();
-    let predecessor_history_notice = predecessor_status["history_notice"].clone();
-    let predecessor_tasks = predecessor_status["tasks"].clone();
+    let predecessor_history = match response.status().as_u16() {
+        200 => {
+            let status: serde_json::Value = response.json().await.unwrap();
+            Some((status["history_notice"].clone(), status["tasks"].clone()))
+        }
+        // Releases before maintenance history was exposed do not serve this
+        // endpoint. Their explicit migration path is checked below instead.
+        403 | 404 => None,
+        status => panic!("unexpected N-1 task-history status: {status}"),
+    };
 
     // A format-preserving dependency upgrade needs no domain migration window.
     // Test overlap before optional owner setup, then upgraded history and rollback.
@@ -2265,26 +2273,34 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
         .await;
         assert_eq!(response.status().as_u16(), 200);
         let status: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(
-            status["history_notice"], predecessor_history_notice,
-            "starting N must not change the predecessor's task-history availability"
-        );
-        let tasks = status["tasks"].as_array().unwrap();
-        let predecessor_tasks = predecessor_tasks.as_array().unwrap();
-        for predecessor_task in predecessor_tasks {
-            assert!(
-                tasks.iter().any(|task| task == predecessor_task),
-                "starting N must preserve predecessor task history: {predecessor_task}"
+        if let Some((predecessor_history_notice, predecessor_tasks)) = predecessor_history.as_ref()
+        {
+            assert_eq!(
+                &status["history_notice"], predecessor_history_notice,
+                "starting N must not change the predecessor's task-history availability"
             );
-        }
-        for task in tasks.iter().filter(|task| {
-            !predecessor_tasks
-                .iter()
-                .any(|predecessor_task| predecessor_task["id"] == task["id"])
-        }) {
-            assert_eq!(task["operation"], "lfs-startup-session-sweep");
-            assert_eq!(task["state"], "completed");
-            assert_eq!(task["owner"]["pid"], node_a.child.id());
+            let tasks = status["tasks"].as_array().unwrap();
+            let predecessor_tasks = predecessor_tasks.as_array().unwrap();
+            for predecessor_task in predecessor_tasks {
+                assert!(
+                    tasks.iter().any(|task| task == predecessor_task),
+                    "starting N must preserve predecessor task history: {predecessor_task}"
+                );
+            }
+            for task in tasks.iter().filter(|task| {
+                !predecessor_tasks
+                    .iter()
+                    .any(|predecessor_task| predecessor_task["id"] == task["id"])
+            }) {
+                assert_eq!(task["operation"], "lfs-startup-session-sweep");
+                assert_eq!(task["state"], "completed");
+                assert_eq!(task["owner"]["pid"], node_a.child.id());
+            }
+        } else {
+            // Older compatible releases have no history endpoint/schema. N
+            // must keep history unavailable until its explicit owner command.
+            assert!(status["history_notice"].is_string());
+            assert!(status["tasks"].as_array().unwrap().is_empty());
         }
         // The explicit owner command may install optional history even when
         // the domain migration ledger is current. Startup only appends its
