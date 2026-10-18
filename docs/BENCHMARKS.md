@@ -722,6 +722,49 @@ the experiment above did not measure this anchor policy against MinIO. Its
 storage savings and request cost therefore remain unmeasured, and should not be
 estimated from that earlier fixed-cap experiment.
 
+### Why the new-write layout favors retained storage
+
+A disposable MinIO overlap run subsequently tested the content-anchored policy
+with two 4 MiB versions differing in one 4 KiB region. Each version produced
+five container hashes; four were shared. Keeping both versions stored 5,455,096
+container bytes, compared with 8,393,023 bytes when each version was stored
+independently: 2,937,927 fewer bytes, or about 35% for this fixture. This is a
+small synthetic example, not a promise for arbitrary customer data.
+
+That saving uses more S3 operations. For this fixture, comparing the prior
+32 MiB batching policy with the new anchored layout is estimated to add four
+container PUTs and eight GETs per version pair. The estimate follows the current
+write/read-back path and object hashes; those operation counts were not captured
+as a provider billing trace in this MinIO run. Using rates checked on 2026-10-18,
+one million such pairs would add about $23 in AWS S3 Standard request charges
+($0.005/1,000 PUTs and $0.0004/1,000 GETs) or about $21 in R2 Standard charges
+($4.50/million Class A writes and $0.36/million Class B reads). The same million
+pairs would avoid about 2.94 TB of stored bytes: approximately $63/month on
+S3 Standard at $0.023/GiB-month, or $44/month on R2 Standard at $0.015/GB-month.
+If the saved bytes remain stored for a full year, the estimated net storage
+saving after those one-time request charges is about $732 on S3 or $508 on R2.
+Storage alone repays the extra requests after roughly 11 days on S3 or 14 days
+on R2. AWS rates vary by region; R2's free monthly allowances can lower the
+bill further. See [AWS S3 pricing](https://aws.amazon.com/s3/pricing/) and
+[R2 pricing](https://developers.cloudflare.com/r2/pricing/) for current rates.
+
+Hetzner charges no fee for S3 PUT, GET, or DELETE operations. Its base Object
+Storage price includes up to 1 TB-month of storage and 1 TB of egress; reducing
+storage lowers the invoice only when it reduces usage above that included quota.
+See [Hetzner Object Storage pricing](https://docs.hetzner.com/storage/object-storage/overview/).
+
+This is why the layout accepts a modest increase in object requests to reduce
+bytes that would otherwise remain stored for months or years. The choice is
+about provider request fees versus retained storage; it does not establish that
+Shardline's own API-server CPU or hosting cost falls. Full-download request
+counts, retention, actual cross-version overlap, and backend behavior still
+belong in workload-specific cost measurements.
+
+The change affects how new uploads are grouped, not the serialized xorb format
+or the index representation. Existing 32 MiB containers are left untouched and
+remain readable by the new version. A regression test packs a legacy-sized
+32 MiB container and verifies a complete read through the current path.
+
 For S3 range reads of supported footer versions, the candidate reads the footer,
 checks its xorb commitment against the trusted index hash, checks the index's
 chunk ranges against the committed footer descriptors, then fetches and hashes

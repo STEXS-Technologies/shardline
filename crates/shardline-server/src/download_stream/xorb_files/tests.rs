@@ -131,6 +131,32 @@ async fn collected_validation_reuses_complete_payload_but_preserves_logical_term
 }
 
 #[tokio::test]
+async fn legacy_32_mib_container_remains_readable_with_smaller_new_write_batches() {
+    const LEGACY_BATCH_BYTES: usize = 32 * 1024 * 1024;
+    const CHUNK_BYTES: usize = 1024 * 1024;
+
+    let storage = shardline_test_support::TempStorage::new();
+    let store = ServerObjectStore::local(storage.path()).unwrap();
+    // The prior server grouped a batch up to 32 MiB before serializing it.
+    // Build that same one-container shape from valid 1 MiB CDC-sized terms.
+    let pieces: Vec<Vec<u8>> = (0..LEGACY_BATCH_BYTES / CHUNK_BYTES)
+        .map(|chunk| {
+            (0..CHUNK_BYTES)
+                .map(|offset| ((chunk * 31 + offset * 17) % 251) as u8)
+                .collect()
+        })
+        .collect();
+    let piece_refs: Vec<_> = pieces.iter().map(Vec::as_slice).collect();
+    let terms = container(&store, &piece_refs).await;
+    let record = file(terms.clone());
+
+    assert_eq!(record.total_bytes, LEGACY_BATCH_BYTES as u64);
+    assert!(terms.iter().all(|term| term.hash == terms[0].hash));
+    let expected = pieces.into_iter().flatten().collect::<Vec<_>>();
+    assert_eq!(collect(&store, &record, None).await.unwrap(), expected);
+}
+
+#[tokio::test]
 #[allow(
     clippy::panic,
     reason = "a non-local store violates this test's fixture"
