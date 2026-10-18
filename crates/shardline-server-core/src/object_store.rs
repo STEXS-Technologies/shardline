@@ -150,6 +150,22 @@ impl AsyncObjectStore for ServerObjectStore {
         }
     }
 
+    async fn read_suffix(
+        &self,
+        key: &ObjectKey,
+        length: u64,
+    ) -> Result<Option<(Vec<u8>, u64)>, Self::Error> {
+        match self {
+            Self::Local(store) => AsyncObjectStore::read_suffix(store, key, length)
+                .await
+                .map_err(Into::into),
+            Self::S3(store) => AsyncObjectStore::read_suffix(store, key, length)
+                .await
+                .map_err(Into::into),
+            Self::Blackhole => Ok(None),
+        }
+    }
+
     async fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
         match self {
             Self::Local(store) => AsyncObjectStore::contains(store, key)

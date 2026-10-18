@@ -25,6 +25,7 @@ use crate::{
     object_store::run_before_local_object_read_hook,
 };
 
+mod authenticated_range;
 mod collect;
 mod xorb_files;
 mod xorb_probe;
@@ -380,7 +381,26 @@ async fn single_container_file_stream(
     // which lets us skip the probe for legacy records that predate packing.
     let first_hash = record.chunks.first().map(|c| &c.hash);
     let all_same_hash = first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
-    let prepared_xorb = if all_same_hash
+    let mut missing_xorb = false;
+    if let (Some(requested), ServerObjectStore::S3(_)) = (range, &object_store)
+        && record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
+        && all_same_hash
+        && record
+            .chunks
+            .first()
+            .is_some_and(|chunk| chunk.packed_end > 0)
+    {
+        match authenticated_range::read(&object_store, &record, requested).await? {
+            authenticated_range::RangeRead::Served(bytes) => {
+                return Ok(Box::pin(stream::once(async move { Ok(bytes) })));
+            }
+            authenticated_range::RangeRead::MissingObject => missing_xorb = true,
+            authenticated_range::RangeRead::Fallback => {}
+        }
+    }
+    let prepared_xorb = if !missing_xorb
+        && record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
+        && all_same_hash
         && record
             .chunks
             .first()

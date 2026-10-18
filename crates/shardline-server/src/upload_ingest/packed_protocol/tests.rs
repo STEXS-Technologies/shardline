@@ -101,9 +101,13 @@ impl Provider {
                         };
                         if let Some(range) = headers.get("range") {
                             let range = range.to_str().unwrap().strip_prefix("bytes=").unwrap();
-                            let (start, end) = range.split_once('-').unwrap();
-                            let start: usize = start.parse().unwrap();
-                            let end: usize = end.parse().unwrap();
+                            let (start, end) = if let Some(suffix) = range.strip_prefix('-') {
+                                let suffix: usize = suffix.parse().unwrap();
+                                (bytes.len().saturating_sub(suffix), bytes.len() - 1)
+                            } else {
+                                let (start, end) = range.split_once('-').unwrap();
+                                (start.parse().unwrap(), end.parse().unwrap())
+                            };
                             response = response.status(StatusCode::PARTIAL_CONTENT).header(
                                 "content-range",
                                 format!("bytes {start}-{end}/{}", bytes.len()),
@@ -265,7 +269,7 @@ async fn corrupt_container_and_fallback_never_produce_a_publishable_record() {
 }
 
 #[tokio::test]
-async fn bounded_batches_keep_original_container_boundaries_and_release_raw_input() {
+async fn content_anchored_batches_are_bounded_and_release_raw_input() {
     let provider = Provider::new(0).await;
     let mut upload = PackedProtocolUpload::new(
         provider.objects.clone(),
@@ -274,19 +278,84 @@ async fn bounded_batches_keep_original_container_boundaries_and_release_raw_inpu
     let chunk = vec![b'a'; 1024 * 1024];
     for index in 0..33 {
         upload.push(&chunk, index * 1024 * 1024).await.unwrap();
-        assert!(upload.pending_bytes <= MAX_SERVER_XORB_RAW_BYTES);
+        assert!(upload.pending_bytes <= MAX_PACKED_XORB_RAW_BYTES);
         assert!(upload.pending.len() <= MAX_XORB_CHUNKS);
     }
-    assert_eq!(upload.pending.len(), 1);
     let result = upload.finish().await.unwrap();
     assert_eq!(result.records.len(), 33);
-    let expected_first = crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(
-        &(0..32)
-            .map(|index| (chunk.clone(), index * 1024 * 1024))
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    assert_eq!(result.records[0].hash, expected_first.xorb_hash_hex);
-    assert_eq!(result.records[31].hash, expected_first.xorb_hash_hex);
-    assert_ne!(result.records[32].hash, expected_first.xorb_hash_hex);
+    assert!(
+        result
+            .records
+            .iter()
+            .all(|record| record.packed_end > 0 && record.range_end > record.range_start)
+    );
+}
+
+#[tokio::test]
+async fn overlapping_versions_reuse_content_anchored_containers() {
+    let mut original = Vec::with_capacity(4 * 1024 * 1024);
+    for counter in 0..(4 * 1024 * 1024 / 32) {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&u64::try_from(counter).unwrap().to_le_bytes());
+        original.extend_from_slice(hasher.finalize().as_bytes());
+    }
+    let mut changed = original.clone();
+    changed[2 * 1024 * 1024..2 * 1024 * 1024 + 4096].fill(0xe7);
+
+    let shared = Provider::new(0).await;
+    let (first, _) = shared.ingest(&original, true, 256 * 1024).await.unwrap();
+    let (second, _) = shared.ingest(&changed, true, 256 * 1024).await.unwrap();
+    let first_xorbs: std::collections::HashSet<_> = first
+        .chunks
+        .iter()
+        .map(|chunk| chunk.hash.clone())
+        .collect();
+    let shared_xorbs = second
+        .chunks
+        .iter()
+        .filter(|chunk| first_xorbs.contains(&chunk.hash))
+        .count();
+    assert!(
+        shared_xorbs > 0,
+        "unchanged file regions should reuse xorbs"
+    );
+
+    let shared_bytes: usize = shared
+        .state
+        .lock()
+        .unwrap()
+        .objects
+        .iter()
+        .filter(|(key, _)| key.contains("/xorbs/"))
+        .map(|(_, bytes)| bytes.len())
+        .sum();
+
+    let baseline_first = Provider::new(0).await;
+    baseline_first
+        .ingest(&original, true, 256 * 1024)
+        .await
+        .unwrap();
+    let baseline_second = Provider::new(0).await;
+    baseline_second
+        .ingest(&changed, true, 256 * 1024)
+        .await
+        .unwrap();
+    let separate_bytes: usize = [&baseline_first, &baseline_second]
+        .into_iter()
+        .map(|provider| {
+            provider
+                .state
+                .lock()
+                .unwrap()
+                .objects
+                .iter()
+                .filter(|(key, _)| key.contains("/xorbs/"))
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>()
+        })
+        .sum();
+    assert!(
+        shared_bytes < separate_bytes,
+        "shared footprint {shared_bytes} should be below separate footprint {separate_bytes}"
+    );
 }

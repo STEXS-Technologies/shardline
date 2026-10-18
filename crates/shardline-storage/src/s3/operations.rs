@@ -12,7 +12,7 @@ use std::{
 use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::{
-    CopyMode, CopyOptions, Error as ExternalObjectStoreError, GetOptions, GetResult,
+    CopyMode, CopyOptions, Error as ExternalObjectStoreError, GetOptions, GetRange, GetResult,
     ObjectStore as ExternalObjectStore, ObjectStoreExt, PutMode, PutPayload, WriteMultipart,
     aws::AmazonS3, multipart::MultipartStore, path::Path as ObjectStorePath,
 };
@@ -1116,6 +1116,54 @@ impl AsyncObjectStore for S3ObjectStore {
             acc.extend_from_slice(&chunk);
         }
         Ok(acc)
+    }
+
+    async fn read_suffix(
+        &self,
+        key: &ObjectKey,
+        length: u64,
+    ) -> Result<Option<(Vec<u8>, u64)>, Self::Error> {
+        if length == 0 {
+            let total_length = AsyncObjectStore::metadata(self, key)
+                .await?
+                .map_or(0, |metadata| metadata.length());
+            return Ok(Some((Vec::new(), total_length)));
+        }
+        let location = self.location_for_key(key)?;
+        let result = match self
+            .inner
+            .get_opts(
+                &location,
+                GetOptions::new().with_range(Some(GetRange::Suffix(length))),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(S3ObjectStoreError::External(error)),
+        };
+        let total_length = result.meta.size;
+        let expected_start = total_length.saturating_sub(length);
+        if result.range != (expected_start..total_length) {
+            return Err(S3ObjectStoreError::RangeOutOfBounds);
+        }
+        let expected_length = total_length.saturating_sub(expected_start);
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(expected_length)
+                .map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?,
+        );
+        let mut stream = result.into_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(S3ObjectStoreError::External)?;
+            bytes.extend_from_slice(&chunk);
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > expected_length {
+                return Err(S3ObjectStoreError::RangeOutOfBounds);
+            }
+        }
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != expected_length {
+            return Err(S3ObjectStoreError::RangeOutOfBounds);
+        }
+        Ok(Some((bytes, total_length)))
     }
 
     async fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {

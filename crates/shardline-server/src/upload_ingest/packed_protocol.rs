@@ -7,10 +7,18 @@ use super::{
     body_reader::ChunkBuffer,
     chunk_store::put_if_absent_pooled_chunk_buffer,
     durable_chunks::{DurableUploadChunks, ReadCache},
-    ingestor::{MAX_SERVER_XORB_RAW_BYTES, MAX_XORB_CHUNKS},
+    ingestor::MAX_XORB_CHUNKS,
     xorb_packer::RecoverableXorbBatch,
 };
 use crate::{ServerError, model::UploadChunkResult, object_store::ServerObjectStore};
+
+// The prior fixed 32 MiB batches caused even nearly identical file versions
+// to receive different object identities. Cut containers at content-derived
+// CDC chunk anchors so shared runs get the same immutable xorb hash. The cap
+// bounds damage when an input has no useful anchors.
+const MIN_PACKED_XORB_RAW_BYTES: usize = 512 * 1024;
+const MAX_PACKED_XORB_RAW_BYTES: usize = 4 * 1024 * 1024;
+const XORB_ANCHOR_MASK: u8 = 0x0f;
 
 #[derive(Default)]
 pub(super) struct PackedProtocolResult {
@@ -48,7 +56,7 @@ impl PackedProtocolUpload {
             .checked_add(chunk.len())
             .ok_or(ServerError::Overflow)?;
         if !self.pending.is_empty()
-            && (next > MAX_SERVER_XORB_RAW_BYTES || self.pending.len() >= MAX_XORB_CHUNKS)
+            && (next > MAX_PACKED_XORB_RAW_BYTES || self.pending.len() >= MAX_XORB_CHUNKS)
         {
             self.flush().await?;
         }
@@ -65,6 +73,9 @@ impl PackedProtocolUpload {
             .checked_add(chunk.len())
             .ok_or(ServerError::Overflow)?;
         self.pending.push((chunk.to_vec(), offset));
+        if self.pending_bytes >= MIN_PACKED_XORB_RAW_BYTES && is_xorb_anchor(chunk) {
+            self.flush().await?;
+        }
         Ok(())
     }
 
@@ -246,6 +257,10 @@ impl PackedProtocolUpload {
         });
         Ok(())
     }
+}
+
+fn is_xorb_anchor(chunk: &[u8]) -> bool {
+    blake3::hash(chunk).as_bytes()[0] & XORB_ANCHOR_MASK == 0
 }
 
 mod local_store;

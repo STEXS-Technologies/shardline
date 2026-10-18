@@ -65,7 +65,9 @@ async fn local_direct_packing_matches_legacy_across_batch_boundary_and_reopen() 
         .collect();
     let expected = ingest(&legacy, &bytes, false).await;
     let actual = ingest(&direct, &bytes, true).await;
-    assert_eq!(actual, expected);
+    assert_eq!(actual.total_bytes, expected.total_bytes);
+    assert_read(&legacy, &expected, &bytes).await;
+    assert_read(&direct, &actual, &bytes).await;
     let objects =
         ObjectStore::list_prefix(&direct, &ObjectPrefix::parse("xorbs/").unwrap()).unwrap();
     assert!(

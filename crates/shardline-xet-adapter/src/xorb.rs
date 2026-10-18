@@ -9,7 +9,7 @@ use std::{
 use shardline_protocol::ShardlineHash;
 use shardline_xet_core::{
     error::CoreError,
-    merklehash::{MerkleHash, compute_data_hash},
+    merklehash::{MerkleHash, compute_data_hash, xorb_hash},
     xorb_object::{
         XorbObject, constants::MAX_CHUNK_SIZE, deserialize_chunk, deserialize_chunk_header,
     },
@@ -256,6 +256,136 @@ pub fn validate_serialized_xorb<R: Read + Seek>(
 ) -> Result<ValidatedXorb, XorbParseError> {
     validate_serialized_xorb_with_data(reader, expected_hash, 0, Vec::new())
         .map(|(validated, _data)| validated)
+}
+
+/// Validates the commitment metadata at the end of a serialized xorb without
+/// reading its packed chunk payloads. This is suitable for authenticated
+/// subrange reads: callers must still fetch and hash every chunk they return.
+/// Legacy footers without unpacked chunk boundaries are rejected so callers
+/// can fall back to full-container validation.
+///
+/// # Errors
+/// Returns [`XorbParseError`] when the footer is malformed, does not commit to
+/// `expected_hash`, or its offsets do not describe `total_length`.
+pub fn validate_serialized_xorb_footer(
+    footer: &[u8],
+    total_length: u64,
+    expected_hash: ShardlineHash,
+) -> Result<Option<ValidatedXorb>, XorbParseError> {
+    let mut cursor = Cursor::new(footer);
+    let parsed = XorbObject::deserialize(&mut cursor).map_err(|error| map_core_error(&error))?;
+    let footer_length = parsed
+        .info_length
+        .checked_add(u64::try_from(std::mem::size_of::<u64>())?)
+        .ok_or(XorbInvalidFormatError::MetadataSectionLengthMismatch)?;
+    if footer_length != u64::try_from(footer.len())? {
+        return Err(XorbInvalidFormatError::MetadataSectionLengthMismatch.into());
+    }
+
+    let info = parsed.info;
+    let count = usize::try_from(info.num_chunks)?;
+    if info.boundaries_version != 1 {
+        return Ok(None);
+    }
+    if count == 0
+        || info.chunk_hashes.len() != count
+        || info.chunk_boundary_offsets.len() != count
+        || info.unpacked_chunk_offsets.len() != count
+    {
+        return Err(XorbInvalidFormatError::StructuralValidationFailed.into());
+    }
+
+    let expected_merkle_hash = shardline_hash_to_merkle_hash(expected_hash)?;
+    if info.xorb_hash != expected_merkle_hash {
+        return Err(XorbParseError::HashMismatch);
+    }
+
+    let mut packed_start = 0_u64;
+    let mut unpacked_start = 0_u64;
+    let mut chunks = Vec::with_capacity(count);
+    let mut hash_chunks = Vec::with_capacity(count);
+    for index in 0..count {
+        let packed_end = *info
+            .chunk_boundary_offsets
+            .get(index)
+            .ok_or(XorbInvalidFormatError::StructuralValidationFailed)?;
+        let unpacked_end = *info
+            .unpacked_chunk_offsets
+            .get(index)
+            .ok_or(XorbInvalidFormatError::StructuralValidationFailed)?;
+        let hash = *info
+            .chunk_hashes
+            .get(index)
+            .ok_or(XorbInvalidFormatError::StructuralValidationFailed)?;
+        if packed_end <= packed_start || unpacked_end <= unpacked_start {
+            return Err(XorbInvalidFormatError::NonMonotonicChunkBoundaries.into());
+        }
+        let unpacked_length = unpacked_end
+            .checked_sub(unpacked_start)
+            .ok_or(XorbInvalidFormatError::NonMonotonicChunkBoundaries)?;
+        hash_chunks.push((hash, unpacked_length));
+        chunks.push(ValidatedXorbChunk::new(
+            merkle_hash_to_shardline_hash(hash),
+            packed_start,
+            packed_end,
+            unpacked_start,
+            unpacked_end,
+        ));
+        packed_start = packed_end;
+        unpacked_start = unpacked_end;
+    }
+
+    let total_length_from_footer = packed_start
+        .checked_add(footer_length)
+        .ok_or(XorbInvalidFormatError::PackedContentLengthMismatch)?;
+    if total_length_from_footer != total_length || xorb_hash(&hash_chunks) != expected_merkle_hash {
+        return Err(XorbInvalidFormatError::PackedContentLengthMismatch.into());
+    }
+
+    Ok(Some(ValidatedXorb::new(
+        expected_hash,
+        total_length,
+        packed_start,
+        unpacked_start,
+        chunks,
+    )))
+}
+
+/// Decodes one packed payload and verifies it against an authenticated footer
+/// descriptor. `packed_bytes` must contain exactly the descriptor's serialized
+/// chunk, including its chunk header.
+///
+/// # Errors
+/// Returns [`XorbParseError`] if the payload is malformed, has an unexpected
+/// size, or does not match the committed chunk hash.
+pub fn decode_authenticated_xorb_chunk(
+    validated: &ValidatedXorb,
+    index: usize,
+    packed_bytes: &[u8],
+) -> Result<DecodedXorbChunk, XorbParseError> {
+    let descriptor = validated
+        .chunks()
+        .get(index)
+        .ok_or(XorbInvalidFormatError::MetadataSectionLengthMismatch)?;
+    let expected_packed_length = descriptor
+        .packed_end()
+        .checked_sub(descriptor.packed_start())
+        .ok_or(XorbInvalidFormatError::NonMonotonicChunkBoundaries)?;
+    if u64::try_from(packed_bytes.len())? != expected_packed_length {
+        return Err(XorbInvalidFormatError::ChunkPayloadMetadataMismatch.into());
+    }
+
+    let mut cursor = Cursor::new(packed_bytes);
+    let (data, packed_length, unpacked_length) =
+        deserialize_chunk(&mut cursor).map_err(|error| map_core_error(&error))?;
+    if u64::try_from(packed_length)? != expected_packed_length
+        || u64::from(unpacked_length) != descriptor.unpacked_len()
+        || merkle_hash_to_shardline_hash(compute_data_hash(&data)) != descriptor.hash()
+    {
+        return Err(XorbInvalidFormatError::ChunkPayloadHashMismatch.into());
+    }
+
+    Ok(DecodedXorbChunk::new(descriptor.clone(), data))
 }
 
 /// Fully validates a container and retains its decoded payload only when it
@@ -679,9 +809,10 @@ mod tests {
 
     use super::{
         DecodedXorbChunk, MAX_XORB_UNPACKED_BYTES, ValidatedXorb, ValidatedXorbChunk,
-        XorbInvalidFormatError, XorbParseError, XorbVisitError, decode_serialized_xorb_chunks,
-        merkle_hash_to_shardline_hash, try_for_each_serialized_xorb_chunk,
-        try_for_each_serialized_xorb_chunk_trusted, validate_serialized_xorb,
+        XorbInvalidFormatError, XorbParseError, XorbVisitError, decode_authenticated_xorb_chunk,
+        decode_serialized_xorb_chunks, merkle_hash_to_shardline_hash,
+        try_for_each_serialized_xorb_chunk, try_for_each_serialized_xorb_chunk_trusted,
+        validate_serialized_xorb, validate_serialized_xorb_footer,
     };
     use crate::XetAdapterError;
     use shardline_protocol::ShardlineHash;
@@ -1317,6 +1448,74 @@ mod tests {
         let result = validate_serialized_xorb(&mut reader, hash);
         // Should get an error - either MalformedData (from deserialize) or other
         assert!(result.is_err(), "expected error for tiny buffer");
+    }
+
+    #[test]
+    fn footer_authenticates_selected_payload_chunks_without_full_container_bytes() {
+        let chunks = [
+            b"prefix bytes".as_slice(),
+            b"selected chunk",
+            b"unselected tail",
+        ];
+        let data: Vec<_> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        let mut boundary = 0_u64;
+        let indexed_chunks: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                boundary += u64::try_from(chunk.len()).unwrap();
+                (compute_data_hash(chunk), boundary)
+            })
+            .collect();
+        let mut previous = 0_u64;
+        let hash_chunks: Vec<_> = indexed_chunks
+            .iter()
+            .map(|(hash, end)| {
+                let length = end.checked_sub(previous).unwrap();
+                previous = *end;
+                (*hash, length)
+            })
+            .collect();
+        let root = xorb_hash(&hash_chunks);
+        let serialized = serialized_xorb_object_from_components(
+            &root,
+            data,
+            indexed_chunks,
+            CompressionScheme::LZ4,
+        )
+        .unwrap();
+        let footer_start = usize::try_from(serialized.footer_start.unwrap()).unwrap();
+        let footer = &serialized.serialized_data[footer_start..];
+        let validated = validate_serialized_xorb_footer(
+            footer,
+            u64::try_from(serialized.serialized_data.len()).unwrap(),
+            merkle_hash_to_shardline_hash(root),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(validated.chunks().len(), chunks.len());
+        let selected = validated.chunks().get(1).unwrap();
+        let packed = &serialized.serialized_data[usize::try_from(selected.packed_start()).unwrap()
+            ..usize::try_from(selected.packed_end()).unwrap()];
+        let decoded = decode_authenticated_xorb_chunk(&validated, 1, packed).unwrap();
+        assert_eq!(decoded.data(), chunks[1]);
+
+        let mut forged_footer = footer.to_vec();
+        forged_footer[8] ^= 1;
+        assert!(
+            validate_serialized_xorb_footer(
+                &forged_footer,
+                u64::try_from(serialized.serialized_data.len()).unwrap(),
+                merkle_hash_to_shardline_hash(root),
+            )
+            .is_err()
+        );
+
+        let mut corrupted_payload = packed.to_vec();
+        corrupted_payload[8] ^= 1;
+        assert!(decode_authenticated_xorb_chunk(&validated, 1, &corrupted_payload).is_err());
     }
 
     #[test]

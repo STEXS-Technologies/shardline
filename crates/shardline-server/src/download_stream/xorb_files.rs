@@ -81,7 +81,10 @@ pub(super) async fn file_stream_with_decode_budget(
                 end.checked_sub(base).ok_or(ServerError::Overflow)?,
             )
             .map_err(|_error| ServerError::RangeNotSatisfiable)?;
-            groups.push((group, Some(relative)));
+            // Keep a full download distinguishable from a client range. The
+            // latter may use authenticated subrange reads; the former must
+            // validate the complete selected container.
+            groups.push((group, range.map(|_requested| relative)));
         }
     }
 

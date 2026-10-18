@@ -45,6 +45,31 @@ pub trait AsyncObjectStore: Send + Sync {
     /// be served, or storage fails.
     async fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error>;
 
+    /// Reads up to the last `length` bytes and returns them with the full object
+    /// length. S3 implementations use a suffix range in one request; other
+    /// adapters may compose metadata and range reads.
+    async fn read_suffix(
+        &self,
+        key: &ObjectKey,
+        length: u64,
+    ) -> Result<Option<(Vec<u8>, u64)>, Self::Error> {
+        let Some(metadata) = self.metadata(key).await? else {
+            return Ok(None);
+        };
+        let total_length = metadata.length();
+        if length == 0 || total_length == 0 {
+            return Ok(Some((Vec::new(), total_length)));
+        }
+        let start = total_length.saturating_sub(length);
+        let Some(end) = total_length.checked_sub(1) else {
+            return Ok(Some((Vec::new(), total_length)));
+        };
+        let Ok(range) = ByteRange::new(start, end) else {
+            return Ok(Some((Vec::new(), total_length)));
+        };
+        Ok(Some((self.read_range(key, range).await?, total_length)))
+    }
+
     /// Returns whether an object exists.
     ///
     /// # Errors

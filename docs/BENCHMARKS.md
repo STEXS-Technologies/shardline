@@ -676,11 +676,8 @@ fewer requests do not necessarily mean fewer backend bytes.
 
 This is a remaining optimization opportunity: the offset-zero fixture transferred
 about 8,178 backend bytes per logical byte returned. It is not a measured average
-for random reads. Reducing this amplification must preserve the current complete
-selected-container verification, including rejection of corruption outside the
-requested range, truncation, incorrect ranges and concurrent replacement. Fetching an unchecked byte range
-instead of validating the container would weaken the current guarantee. No
-reduction in range-read transfer bytes is claimed by this branch.
+for random reads. The baseline path verifies the complete selected container,
+including payload bytes outside the requested range.
 
 An October 17 experiment compared the unchanged 32 MiB raw packing cap with
 a temporary 4 MiB cap, using one incompressible 36 MiB file, PostgreSQL and real
@@ -715,13 +712,27 @@ The existing 55 download tests also passed, including rejection of corruption
 outside the requested range. Checking only footer-declared hashes cannot detect
 corruption in payload bytes that were never fetched.
 
-The experiment was reverted; the branch retains the 32 MiB cap. For this file,
-smaller packing adds eight PUTs and sixteen GET/HEADs per upload, plus eight GETs
-per full download, while saving about 29.4 MB per measured prefix read. Whether
-that lowers cost depends on the read mix, chargeable backend transfer and
-compute/I/O costs. Measure those inputs before changing the default. Existing
-objects retain their original layout; changing the cap would affect new writes
-without automatically improving old-object range reads.
+The fixed-cap experiment was reverted after these measurements. The current
+candidate uses content-derived chunk anchors to end containers, with a 4 MiB
+maximum raw size. The intent is to let unchanged runs in overlapping versions
+produce the same immutable container hashes, while bounding container size for
+small reads. This changes packing boundaries for new writes; existing objects
+keep their layout. Synthetic overlap tests exercise shared container reuse, but
+the experiment above did not measure this anchor policy against MinIO. Its
+storage savings and request cost therefore remain unmeasured, and should not be
+estimated from that earlier fixed-cap experiment.
+
+For S3 range reads of supported footer versions, the candidate reads the footer,
+checks its xorb commitment against the trusted index hash, checks the index's
+chunk ranges against the committed footer descriptors, then fetches and hashes
+the selected packed chunks before returning bytes. A 4 KiB response therefore
+does not require downloading every payload byte in its container. Full downloads
+still validate every payload chunk. Range reads no longer inspect unrelated
+payload bytes, so corruption confined to an unrequested chunk is detected by a
+full read or integrity scan, not by that range request. Unsupported legacy
+footers use the existing full-container path. The implementation test measures
+the HTTP mock's response bytes only; a MinIO run is still needed to confirm real
+backend transfer, request charges, latency and the resulting workload cost.
 
 ## Operational cost per logical TB
 
