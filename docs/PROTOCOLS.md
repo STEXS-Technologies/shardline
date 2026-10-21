@@ -45,11 +45,13 @@ OCI-specific knobs:
 Current route families:
 
 - Xet: reconstructions, shard upload, xorb upload, chunk transfer, xorb transfer
-- Git LFS: `POST /v1/lfs/objects/batch`, `GET|HEAD|PUT /v1/lfs/objects/{oid}`
+- Git LFS: `POST /v1/lfs/objects/batch`, `GET|HEAD|PUT /v1/lfs/objects/{oid}`,
+  lock creation/listing, lock verification and unlock under `/v1/lfs/locks`
 - Bazel HTTP remote cache: `GET|PUT /v1/bazel/cache/ac/{hash}`,
   `GET|PUT /v1/bazel/cache/cas/{hash}`
 - OCI Distribution: `GET /v2/`, blob upload and download routes, manifest
-  `PUT|GET|HEAD|DELETE`, `GET /v2/{repository}/tags/list`, and `GET /v2/token`
+  `PUT|GET|HEAD|DELETE`, `GET /v2/{repository}/tags/list`,
+  `GET /v2/{repository}/referrers/{digest}`, and `GET /v2/token`
 - HuggingFace Hub API: `/api/whoami-v2`, `/api/repos/create`, `/api/{type}/{ns}/{repo}`,
   `/api/{type}/{ns}/{repo}/commit/{rev}`, `/objects/batch`, `/lfs/objects/{oid}`
 - S3: `GET /` (ListBuckets), `/{bucket}` bucket stubs (`?location=`, `?list-type=2`,
@@ -80,6 +82,19 @@ git config lfs.url http://127.0.0.1:8080/v1/lfs
 git config http.extraHeader "Authorization: Bearer $SHARDLINE_TOKEN"
 git lfs push origin main
 ```
+
+The same LFS URL supports `git lfs lock`, `git lfs locks`, and `git lfs unlock`.
+Locks are repository-wide and survive restart. SQLite serializes changes in a
+transaction; PostgreSQL coordinates owners across replicas. A write token is
+required to create, verify or remove locks. Forced unlock is available to other
+writers. Locks guide cooperating Git LFS clients; direct object uploads remain
+content-addressed and do not enforce Git working-tree locks.
+
+SQLite installs the new lock table when opening metadata. For PostgreSQL, run
+the normal `shardline db migrate up` step before starting the updated servers.
+This adds metadata tables and leaves existing object bytes unchanged. Finish
+upgrading API replicas before relying on locking: an older server does not serve
+the locking API, and clients configured to skip verification can still push.
 
 Chunked `PATCH` uploads in a Postgres deployment keep their range map and completion
 fence in Postgres and immutable fragments in object storage, so any replica can accept
@@ -118,6 +133,17 @@ currently reclaimed by online GC.
 Incomplete OCI upload sessions use the same shared API staging root and a
 cross-process session lock. Completed blobs remain authoritative in the configured
 object store.
+
+Referrers are discovered from verified, visible manifests, so artifacts uploaded
+before upgrading are discoverable too. Results support `artifactType`, `n` and
+`Link` pagination. Discovery currently scans the repository's manifests; large
+repositories therefore incur more backend reads even for a small result page.
+
+Run `bash scripts/verify-protocol-conformance.sh` to check native Git LFS locking
+and transfers plus the pinned OCI Distribution v1.1.1 upstream suite. Set
+`DATABASE_URL` to a disposable PostgreSQL database to include replica lock races.
+The upstream suite has mutually exclusive setup and cross-mount cases, so a
+successful run includes explicitly skipped alternative cases.
 
 For local plain-HTTP registries, OCI clients may require their own insecure-registry
 flags or local client configuration.

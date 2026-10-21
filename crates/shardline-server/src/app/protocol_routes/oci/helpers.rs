@@ -142,7 +142,9 @@ const fn oci_required_scope(method: &Method, path: &OciPath) -> Option<TokenScop
         (&Method::GET | &Method::HEAD, OciPath::Blob { .. } | OciPath::Manifest { .. }) => {
             Some(TokenScope::Read)
         }
-        (&Method::GET, OciPath::TagsList { .. }) => Some(TokenScope::Read),
+        (&Method::GET, OciPath::TagsList { .. } | OciPath::Referrers { .. }) => {
+            Some(TokenScope::Read)
+        }
         (&Method::DELETE, OciPath::Blob { .. } | OciPath::Manifest { .. }) => {
             Some(TokenScope::Write)
         }
@@ -271,7 +273,7 @@ pub(crate) const fn oci_route_served_by_api(method: &Method, path: &OciPath) -> 
         (method, path),
         (
             &Method::GET,
-            OciPath::Manifest { .. } | OciPath::TagsList { .. }
+            OciPath::Manifest { .. } | OciPath::TagsList { .. } | OciPath::Referrers { .. }
         ) | (&Method::HEAD, OciPath::Manifest { .. })
             | (&Method::PUT, OciPath::Manifest { .. })
             | (&Method::DELETE, OciPath::Manifest { .. })

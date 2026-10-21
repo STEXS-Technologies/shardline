@@ -5253,7 +5253,7 @@ async fn bazel_put_ac_invalid_hash_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oci_referrers_api_not_supported() {
+async fn oci_referrers_for_unknown_subject_returns_empty_index() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
@@ -5266,7 +5266,10 @@ async fn oci_referrers_api_not_supported() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "referrers API not implemented");
+    assert_eq!(resp.status(), 200);
+    let index: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(index["schemaVersion"], 2);
+    assert!(index["manifests"].as_array().unwrap().is_empty());
 
     server.abort();
 }

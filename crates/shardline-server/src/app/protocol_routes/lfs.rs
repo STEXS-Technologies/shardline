@@ -1,4 +1,6 @@
 use super::super::reconstruction_helpers::single_range_header;
+mod locks;
+pub(crate) use locks::{lfs_create_lock, lfs_list_locks, lfs_unlock, lfs_verify_locks};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};

@@ -307,7 +307,7 @@ const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
     ),
 ];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 36] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 37] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -541,12 +541,14 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 36] = [
     DatabaseMigration {
         version: "20261021000000",
         name: "xet_file_identities",
-        up_sql: include_str!(
-            "../../shardline-index/migrations/20261021000000_xet_file_identities.up.sql"
-        ),
-        down_sql: include_str!(
-            "../../shardline-index/migrations/20261021000000_xet_file_identities.down.sql"
-        ),
+        up_sql: include_str!("../migrations/20261021000000_xet_file_identities.up.sql"),
+        down_sql: include_str!("../migrations/20261021000000_xet_file_identities.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261022000000",
+        name: "lfs_locks",
+        up_sql: include_str!("../migrations/20261022000000_lfs_locks.up.sql"),
+        down_sql: include_str!("../migrations/20261022000000_lfs_locks.down.sql"),
     },
 ];
 
@@ -2872,7 +2874,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 36);
+        assert_eq!(bundled_database_migrations().len(), 37);
     }
 
     #[test]

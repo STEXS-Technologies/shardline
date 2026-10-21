@@ -86,76 +86,98 @@ async fn oci_dispatch_parsed(
     body: Body,
     repo: OciRepository,
 ) -> Result<Response, ServerError> {
-    match (method, repo.path()) {
-        (Method::GET, OciPath::Blob { digest_hex, .. }) => {
-            ensure_oci_object_visible(
-                state,
-                &oci_blob_index_key(repo.repository(), digest_hex, repo.capability()),
-            )
-            .await?;
-            let object_key = oci_blob_key(repo.repository(), digest_hex, repo.capability())?;
-            metrics().protocol.record_oci_download();
-            direct_object_response(
-                state,
-                &headers,
-                &object_key,
-                "application/octet-stream",
-                Some(format!("sha256:{digest_hex}")),
-                "oci",
-            )
-            .await
+    let not_found_code = match repo.path() {
+        OciPath::Blob { .. } => "BLOB_UNKNOWN",
+        OciPath::BlobUploadSession { .. } => "BLOB_UPLOAD_UNKNOWN",
+        OciPath::BlobUploads { .. }
+        | OciPath::Manifest { .. }
+        | OciPath::TagsList { .. }
+        | OciPath::Referrers { .. } => "MANIFEST_UNKNOWN",
+    };
+    let outcome = async {
+        match (method, repo.path()) {
+            (Method::GET, OciPath::Blob { digest_hex, .. }) => {
+                ensure_oci_object_visible(
+                    state,
+                    &oci_blob_index_key(repo.repository(), digest_hex, repo.capability()),
+                )
+                .await?;
+                let object_key = oci_blob_key(repo.repository(), digest_hex, repo.capability())?;
+                metrics().protocol.record_oci_download();
+                direct_object_response(
+                    state,
+                    &headers,
+                    &object_key,
+                    "application/octet-stream",
+                    Some(format!("sha256:{digest_hex}")),
+                    "oci",
+                )
+                .await
+            }
+            (Method::HEAD, OciPath::Blob { digest_hex, .. }) => {
+                ensure_oci_object_visible(
+                    state,
+                    &oci_blob_index_key(repo.repository(), digest_hex, repo.capability()),
+                )
+                .await?;
+                let object_key = oci_blob_key(repo.repository(), digest_hex, repo.capability())?;
+                let total_length = state.backend.object_length(&object_key).await?;
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(axum::http::header::CONTENT_LENGTH, total_length.to_string())
+                    .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+                    .header("Docker-Content-Digest", format!("sha256:{digest_hex}"))
+                    .body(Body::empty())
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "failed to build head blob response");
+                        ServerError::Overflow
+                    })?)
+            }
+            (Method::GET, OciPath::Manifest { reference, .. }) => {
+                oci_get_manifest(state, &headers, &repo, reference, false).await
+            }
+            (Method::HEAD, OciPath::Manifest { reference, .. }) => {
+                oci_get_manifest(state, &headers, &repo, reference, true).await
+            }
+            (Method::GET, OciPath::TagsList { .. }) => oci_tags_list(state, &uri, &repo).await,
+            (Method::GET, OciPath::Referrers { digest_hex, .. }) => {
+                super::referrers::oci_referrers(state, &uri, &repo, digest_hex).await
+            }
+            (Method::POST, OciPath::BlobUploads { .. }) => {
+                oci_post_blob_upload(state, &headers, &uri, &repo, body).await
+            }
+            (Method::PATCH, OciPath::BlobUploadSession { session_id, .. }) => {
+                oci_patch_blob_upload(state, &headers, &repo, session_id, body).await
+            }
+            (Method::PUT, OciPath::BlobUploadSession { session_id, .. }) => {
+                oci_put_blob_upload(state, &headers, &uri, &repo, session_id, body).await
+            }
+            (Method::GET, OciPath::BlobUploadSession { session_id, .. }) => {
+                oci_get_blob_upload(state, &headers, &repo, session_id).await
+            }
+            (Method::DELETE, OciPath::BlobUploadSession { session_id, .. }) => {
+                oci_delete_blob_upload(state, &headers, &repo, session_id).await
+            }
+            (Method::PUT, OciPath::Manifest { reference, .. }) => {
+                oci_put_manifest(state, &headers, &uri, &repo, reference, body).await
+            }
+            (Method::DELETE, OciPath::Manifest { reference, .. }) => {
+                oci_delete_manifest(state, &headers, &repo, reference).await
+            }
+            (Method::DELETE, OciPath::Blob { digest_hex, .. }) => {
+                oci_delete_blob(state, &headers, &repo, digest_hex).await
+            }
+            _ => Err(ServerError::NotFound),
         }
-        (Method::HEAD, OciPath::Blob { digest_hex, .. }) => {
-            ensure_oci_object_visible(
-                state,
-                &oci_blob_index_key(repo.repository(), digest_hex, repo.capability()),
-            )
-            .await?;
-            let object_key = oci_blob_key(repo.repository(), digest_hex, repo.capability())?;
-            let total_length = state.backend.object_length(&object_key).await?;
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header(axum::http::header::CONTENT_LENGTH, total_length.to_string())
-                .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-                .header("Docker-Content-Digest", format!("sha256:{digest_hex}"))
-                .body(Body::empty())
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "failed to build head blob response");
-                    ServerError::Overflow
-                })?)
-        }
-        (Method::GET, OciPath::Manifest { reference, .. }) => {
-            oci_get_manifest(state, &headers, &repo, reference, false).await
-        }
-        (Method::HEAD, OciPath::Manifest { reference, .. }) => {
-            oci_get_manifest(state, &headers, &repo, reference, true).await
-        }
-        (Method::GET, OciPath::TagsList { .. }) => oci_tags_list(state, &uri, &repo).await,
-        (Method::POST, OciPath::BlobUploads { .. }) => {
-            oci_post_blob_upload(state, &headers, &uri, &repo, body).await
-        }
-        (Method::PATCH, OciPath::BlobUploadSession { session_id, .. }) => {
-            oci_patch_blob_upload(state, &headers, &repo, session_id, body).await
-        }
-        (Method::PUT, OciPath::BlobUploadSession { session_id, .. }) => {
-            oci_put_blob_upload(state, &headers, &uri, &repo, session_id, body).await
-        }
-        (Method::GET, OciPath::BlobUploadSession { session_id, .. }) => {
-            oci_get_blob_upload(state, &headers, &repo, session_id).await
-        }
-        (Method::DELETE, OciPath::BlobUploadSession { session_id, .. }) => {
-            oci_delete_blob_upload(state, &headers, &repo, session_id).await
-        }
-        (Method::PUT, OciPath::Manifest { reference, .. }) => {
-            oci_put_manifest(state, &headers, &uri, &repo, reference, body).await
-        }
-        (Method::DELETE, OciPath::Manifest { reference, .. }) => {
-            oci_delete_manifest(state, &headers, &repo, reference).await
-        }
-        (Method::DELETE, OciPath::Blob { digest_hex, .. }) => {
-            oci_delete_blob(state, &headers, &repo, digest_hex).await
-        }
-        _ => Err(ServerError::NotFound),
+    }
+    .await;
+    match outcome {
+        Err(ServerError::NotFound) => Ok(crate::error::oci_protocol_error_response(
+            StatusCode::NOT_FOUND,
+            not_found_code,
+            "requested content not found",
+        )),
+        other => other,
     }
 }
 

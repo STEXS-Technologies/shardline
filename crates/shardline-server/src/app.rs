@@ -83,11 +83,12 @@ use operational::{
 };
 use protocol_routes::{
     bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
-    bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
-    lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
-    oci_registry_token, oci_transfer_dispatch, oci_v2_root, s3_create_bucket, s3_delete_bucket,
-    s3_delete_object, s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object,
-    s3_list_buckets, s3_post_bucket, s3_post_object, s3_put_object,
+    bazel_put_ac, bazel_put_cas, lfs_batch, lfs_create_lock, lfs_delete_object, lfs_get_object,
+    lfs_head_object, lfs_list_locks, lfs_patch_object, lfs_put_object, lfs_unlock,
+    lfs_verify_locks, lfs_verify_object, oci_api_dispatch, oci_dispatch, oci_registry_token,
+    oci_transfer_dispatch, oci_v2_root, s3_create_bucket, s3_delete_bucket, s3_delete_object,
+    s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object, s3_list_buckets, s3_post_bucket,
+    s3_post_object, s3_put_object,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
@@ -804,7 +805,11 @@ fn register_xet_routes(
 
 fn register_lfs_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
     if role.serves_api() {
-        app = app.route("/v1/lfs/objects/batch", post(lfs_batch));
+        app = app
+            .route("/v1/lfs/objects/batch", post(lfs_batch))
+            .route("/v1/lfs/locks", get(lfs_list_locks).post(lfs_create_lock))
+            .route("/v1/lfs/locks/verify", post(lfs_verify_locks))
+            .route("/v1/lfs/locks/{id}/unlock", post(lfs_unlock));
     }
     if role.serves_transfer() {
         app = app

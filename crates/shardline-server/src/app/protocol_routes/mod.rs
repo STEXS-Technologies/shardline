@@ -15,8 +15,9 @@ pub(crate) use helpers::{
     parse_upload_content_range,
 };
 pub(crate) use lfs::{
-    lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_object,
-    lfs_put_object, lfs_verify_object, sweep_lfs_patch_sessions,
+    lfs_batch, lfs_create_lock, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_list_locks,
+    lfs_patch_object, lfs_put_object, lfs_unlock, lfs_verify_locks, lfs_verify_object,
+    sweep_lfs_patch_sessions,
 };
 pub use lfs_patch_evidence::{LfsPatchEvidenceRepairInput, repair_lfs_patch_evidence};
 #[cfg(feature = "fuzzing")]

@@ -39,6 +39,10 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
+    pub(crate) const fn record_store(&self) -> &LocalRecordStore {
+        &self.record_store
+    }
+
     pub(crate) fn xet_file_identity(
         &self,
         repository_scope: &shardline_protocol::RepositoryScope,

@@ -52,6 +52,11 @@ tests therefore show available coverage, not a guarantee that those client flows
 every CI job. Review the workflow logs for actual client execution before treating a
 specific run as protocol qualification.
 
+The required protocol-conformance step separately runs native Git LFS locking and
+transfers and the official OCI Distribution v1.1.1 suite. It fails if its client
+tools are missing. PostgreSQL contracts also exercise lock races across two
+servers and referrer discovery after restart and deletion.
+
 ## Versioning and Deduplication Semantics
 
 The shared CAS core stores immutable content and reuses identical content whenever a
@@ -73,11 +78,13 @@ reachable record remain protected.
 
 ## Validated Route Surface
 
-- Git LFS: batch negotiation plus direct object `GET`, `HEAD`, and `PUT`
+- Git LFS: batch negotiation plus direct object `GET`, `HEAD`, and `PUT`;
+  durable lock create/list/verify/unlock at `/v1/lfs/locks`
 - Bazel HTTP remote cache: `ac` and `cas` object `GET` and `PUT`
 - OCI Distribution: blob `GET`, `HEAD`, upload, mount, and ranged read paths; manifest
   `PUT`, `GET`, `HEAD`, and digest delete; tag listing with pagination; token-service
-  flow at `/v2/token`; upload cancellation and scoped upload-session handling
+  flow at `/v2/token`; upload cancellation and scoped upload-session handling;
+  OCI referrers with artifact-type filtering and pagination
 - Hugging Face Hub API: repository create/info/delete, revision and tree lookup,
   preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search,
   webhooks, Git Smart HTTP clone/fetch/push, SDK live-reference listing, and SDK
@@ -98,7 +105,7 @@ reachable record remain protected.
   resolve an old revision to obtain its corresponding Git ID before comparison.
 - The compatibility claim applies to the documented route surfaces and native client
   workflows above. It does not imply implementation of unrelated upstream products or
-  optional APIs such as Bazel Remote Execution, OCI referrers, Hugging Face
+  optional APIs such as Bazel Remote Execution, Hugging Face
   collections/profile/jobs/inference APIs, or every third-party client-version
   extension.
 - Xet and OCI currently have the deepest native-client coverage in this repository.

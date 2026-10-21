@@ -19,6 +19,10 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Added
 
+- Added durable Git LFS locking with owner checks and PostgreSQL replica
+  coordination, plus OCI referrers with filtering and pagination.
+- Added an upstream OCI Distribution v1.1.1 conformance gate and native Git LFS
+  locking checks.
 - Added embedded maintenance tracking and administrative task history without
   requiring another service or changing existing command output and exit behavior.
 - Added opt-in Linux `shardline maintenance` supervision with verified checkpoint

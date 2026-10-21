@@ -825,11 +825,13 @@ impl FileUploadIngestor {
             file_id,
             &batch,
             0,
-            &mut self.records,
-            &mut self.chunks,
             record_start,
             batch_len,
-            &mut outcomes,
+            PackingBatchOutput {
+                records: &mut self.records,
+                response_chunks: &mut self.chunks,
+                outcomes: &mut outcomes,
+            },
         )
         .await?;
         self.record_deferred_chunk_outcomes(record_start, outcomes, false)?;
@@ -866,11 +868,13 @@ impl FileUploadIngestor {
             file_id,
             &batch,
             0,
-            &mut self.records,
-            &mut self.chunks,
             record_start,
             batch_len,
-            &mut outcomes,
+            PackingBatchOutput {
+                records: &mut self.records,
+                response_chunks: &mut self.chunks,
+                outcomes: &mut outcomes,
+            },
         )
         .await?;
         if !packed {
@@ -1019,11 +1023,13 @@ async fn pack_and_store_xorb_spool(
                     object_store,
                     file,
                     offsets,
-                    records,
-                    response_chunks,
                     batch_record_start,
                     batch_len,
-                    &mut outcomes,
+                    PackingBatchOutput {
+                        records,
+                        response_chunks,
+                        outcomes: &mut outcomes,
+                    },
                 )
                 .await?;
             }
@@ -1064,11 +1070,13 @@ async fn pack_and_store_xorb_spool(
                 object_store,
                 file,
                 offsets,
-                records,
-                response_chunks,
                 batch_record_start,
                 batch_len,
-                &mut outcomes,
+                PackingBatchOutput {
+                    records,
+                    response_chunks,
+                    outcomes: &mut outcomes,
+                },
             )
             .await?;
         }
@@ -1076,17 +1084,26 @@ async fn pack_and_store_xorb_spool(
     Ok(outcomes)
 }
 
+struct PackingBatchOutput<'batch> {
+    records: &'batch mut [FileChunkRecord],
+    response_chunks: &'batch mut [UploadChunkResult],
+    outcomes: &'batch mut Vec<(bool, u64)>,
+}
+
 async fn store_memory_batch(
     object_store: &ServerObjectStore,
     file_id: &str,
     raw_chunks: &[(Bytes, u64)],
     raw_start: usize,
-    records: &mut [FileChunkRecord],
-    response_chunks: &mut [UploadChunkResult],
     record_start: usize,
     count: usize,
-    outcomes: &mut Vec<(bool, u64)>,
+    output: PackingBatchOutput<'_>,
 ) -> Result<bool, ServerError> {
+    let PackingBatchOutput {
+        records,
+        response_chunks,
+        outcomes,
+    } = output;
     let end = record_start
         .checked_add(count)
         .ok_or(ServerError::Overflow)?;
@@ -1143,12 +1160,15 @@ async fn store_local_chunk_fallback(
     object_store: &ServerObjectStore,
     spool: &mut std::fs::File,
     offsets: &[(u64, u64)],
-    records: &mut [FileChunkRecord],
-    response_chunks: &mut [UploadChunkResult],
     record_start: usize,
     count: usize,
-    outcomes: &mut Vec<(bool, u64)>,
+    output: PackingBatchOutput<'_>,
 ) -> Result<(), ServerError> {
+    let PackingBatchOutput {
+        records,
+        response_chunks,
+        outcomes,
+    } = output;
     let end = record_start
         .checked_add(count)
         .ok_or(ServerError::Overflow)?;

@@ -146,7 +146,23 @@ pub(crate) async fn oci_put_manifest(
         .acquire_resource_write_lock(state.config.root_dir(), &lock_key)
         .await?;
     let references =
-        validate_oci_manifest_document(state, repository, auth, &media_type, &bytes).await?;
+        match validate_oci_manifest_document(state, repository, auth, &media_type, &bytes).await {
+            Ok(references) => references,
+            Err(ManifestValidationError::MissingDependency) => {
+                return Ok(crate::error::oci_protocol_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "MANIFEST_BLOB_UNKNOWN",
+                    "manifest references content not present in this repository",
+                ));
+            }
+            Err(ManifestValidationError::Server(error)) => return Err(error),
+        };
+    let document: Value = serde_json::from_slice(&bytes)?;
+    let subject_digest = document
+        .get("subject")
+        .and_then(|subject| subject.get("digest"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
     state
@@ -191,6 +207,9 @@ pub(crate) async fn oci_put_manifest(
     if !accepted_tags.is_empty() {
         let joined = accepted_tags.join(", ");
         builder = builder.header("OCI-Tag", joined);
+    }
+    if let Some(subject_digest) = subject_digest {
+        builder = builder.header("OCI-Subject", subject_digest);
     }
     builder.body(Body::empty()).map_err(|e| {
         tracing::warn!(error = %e, "failed to build put manifest response body");
@@ -244,9 +263,23 @@ async fn resolve_manifest_digest(
     reference: &str,
     auth: &AuthorizedRepository,
 ) -> Result<String, ServerError> {
-    match parse_reference(reference)? {
+    // A syntactically invalid lookup reference cannot identify a stored
+    // manifest. OCI clients expect MANIFEST_UNKNOWN for these reads too.
+    match parse_reference(reference).map_err(|_invalid_reference| ServerError::NotFound)? {
         OciReference::Digest(digest_hex) => Ok(digest_hex),
         OciReference::Tag(tag) => resolve_oci_tag_digest(state, repository, auth, &tag).await,
+    }
+}
+
+#[derive(Debug)]
+enum ManifestValidationError {
+    MissingDependency,
+    Server(ServerError),
+}
+
+impl From<ServerError> for ManifestValidationError {
+    fn from(error: ServerError) -> Self {
+        Self::Server(error)
     }
 }
 
@@ -256,7 +289,7 @@ async fn validate_oci_manifest_document(
     auth: &AuthorizedRepository,
     media_type: &str,
     bytes: &[u8],
-) -> Result<Vec<shardline_index::OciObjectKey>, ServerError> {
+) -> Result<Vec<shardline_index::OciObjectKey>, ManifestValidationError> {
     let document: Value = serde_json::from_slice(bytes).map_err(|e| {
         tracing::warn!(error = %e, "invalid manifest json");
         ServerError::InvalidManifestReference
@@ -266,7 +299,7 @@ async fn validate_oci_manifest_document(
     if let Some(document_media_type) = document.get("mediaType").and_then(Value::as_str)
         && normalize_media_type(document_media_type) != normalized_media_type
     {
-        return Err(ServerError::InvalidManifestReference);
+        return Err(ServerError::InvalidManifestReference.into());
     }
     let mut references = Vec::new();
     if let Some(subject) = document.get("subject") {
@@ -284,7 +317,7 @@ async fn validate_oci_manifest_document(
         OCI_IMAGE_INDEX_MEDIA_TYPE | DOCKER_SCHEMA2_MANIFEST_LIST_MEDIA_TYPE => {
             validate_oci_image_index_document(state, repository, auth, &document).await?
         }
-        _ => return Err(ServerError::InvalidManifestReference),
+        _ => return Err(ServerError::InvalidManifestReference.into()),
     });
     Ok(references)
 }
@@ -301,7 +334,7 @@ async fn validate_oci_image_manifest_document(
     repository: &str,
     auth: &AuthorizedRepository,
     document: &Value,
-) -> Result<Vec<shardline_index::OciObjectKey>, ServerError> {
+) -> Result<Vec<shardline_index::OciObjectKey>, ManifestValidationError> {
     let config = document
         .get("config")
         .ok_or(ServerError::InvalidManifestReference)?;
@@ -317,7 +350,7 @@ async fn validate_oci_image_manifest_document(
         let (digest_hex, size) = validate_oci_descriptor(layer)?;
         if let Some(verified_size) = verified_sizes.get(&digest_hex) {
             if *verified_size != size {
-                return Err(ServerError::InvalidManifestReference);
+                return Err(ServerError::InvalidManifestReference.into());
             }
         } else {
             ensure_oci_blob_exists(state, repository, auth, &digest_hex, size).await?;
@@ -336,7 +369,7 @@ async fn validate_oci_image_index_document(
     repository: &str,
     auth: &AuthorizedRepository,
     document: &Value,
-) -> Result<Vec<shardline_index::OciObjectKey>, ServerError> {
+) -> Result<Vec<shardline_index::OciObjectKey>, ManifestValidationError> {
     let manifests = document
         .get("manifests")
         .and_then(Value::as_array)
@@ -346,7 +379,7 @@ async fn validate_oci_image_index_document(
         let (digest_hex, size) = validate_oci_descriptor(manifest)?;
         if let Some(verified_size) = verified_sizes.get(&digest_hex) {
             if *verified_size != size {
-                return Err(ServerError::InvalidManifestReference);
+                return Err(ServerError::InvalidManifestReference.into());
             }
         } else {
             ensure_oci_manifest_exists(state, repository, auth, &digest_hex, size).await?;
@@ -388,20 +421,20 @@ async fn ensure_oci_blob_exists(
     auth: &AuthorizedRepository,
     digest_hex: &str,
     expected_size: u64,
-) -> Result<(), ServerError> {
+) -> Result<(), ManifestValidationError> {
     if state
         .backend
         .oci_object_is_deleted(&oci_blob_index_key(repository, digest_hex, auth))
         .await?
     {
-        return Err(ServerError::InvalidManifestReference);
+        return Err(ManifestValidationError::MissingDependency);
     }
     let object_key = oci_blob_key(repository, digest_hex, auth)?;
     match state.backend.object_length(&object_key).await {
         Ok(length) if length == expected_size => Ok(()),
-        Ok(_) => Err(ServerError::InvalidManifestReference),
-        Err(ServerError::NotFound) => Err(ServerError::InvalidManifestReference),
-        Err(error) => Err(error),
+        Ok(_) => Err(ServerError::InvalidManifestReference.into()),
+        Err(ServerError::NotFound) => Err(ManifestValidationError::MissingDependency),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -411,20 +444,20 @@ async fn ensure_oci_manifest_exists(
     auth: &AuthorizedRepository,
     digest_hex: &str,
     expected_size: u64,
-) -> Result<(), ServerError> {
+) -> Result<(), ManifestValidationError> {
     if state
         .backend
         .oci_object_is_deleted(&oci_manifest_index_key(repository, digest_hex, auth))
         .await?
     {
-        return Err(ServerError::InvalidManifestReference);
+        return Err(ManifestValidationError::MissingDependency);
     }
     let object_key = oci_manifest_key(repository, digest_hex, auth)?;
     match state.backend.object_length(&object_key).await {
         Ok(length) if length == expected_size => Ok(()),
-        Ok(_) => Err(ServerError::InvalidManifestReference),
-        Err(ServerError::NotFound) => Err(ServerError::InvalidManifestReference),
-        Err(error) => Err(error),
+        Ok(_) => Err(ServerError::InvalidManifestReference.into()),
+        Err(ServerError::NotFound) => Err(ManifestValidationError::MissingDependency),
+        Err(error) => Err(error.into()),
     }
 }
 

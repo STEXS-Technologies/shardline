@@ -64,6 +64,9 @@ jobs:
           sudo apt-get install -y rclone
           rclone --version
 
+      - name: Qualify Git LFS locking and OCI Distribution v1.1.1
+        run: bash scripts/verify-protocol-conformance.sh
+
       - name: Run e2e tests
         env:
           USE_BAZEL_VERSION: "8.7.0"

@@ -36,6 +36,8 @@ use crate::{
     xet_adapter::{FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse},
 };
 
+mod lfs_locks;
+
 #[cfg(test)]
 pub(crate) mod s3_delete_fault_injection {
     use std::sync::{LazyLock, Mutex};

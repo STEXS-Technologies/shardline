@@ -1,4 +1,5 @@
 mod index_store;
+mod lfs_locks;
 mod oci_objects;
 mod oci_tags;
 mod provider_mutation;

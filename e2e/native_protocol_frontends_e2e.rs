@@ -304,7 +304,7 @@ async fn exercise_native_git_lfs_flow_on_runtime(
     run_git_with_home(
         worktree.path(),
         git_home.path(),
-        &["config", "lfs.locksverify", "false"],
+        &["config", "lfs.locksverify", "true"],
     )?;
     run_git_with_home(
         worktree.path(),
@@ -363,7 +363,7 @@ async fn exercise_native_git_lfs_flow_on_runtime(
     run_git_with_home(
         clone.path(),
         git_home.path(),
-        &["config", "lfs.locksverify", "false"],
+        &["config", "lfs.locksverify", "true"],
     )?;
     run_git_with_home(
         clone.path(),
@@ -495,7 +495,7 @@ async fn exercise_native_git_lfs_pull_and_fetch_all_flow() -> Result<(), TestErr
         .arg("-c")
         .arg(format!("lfs.url={}/v1/lfs", runtime.base_url()))
         .arg("-c")
-        .arg("lfs.locksverify=false")
+        .arg("lfs.locksverify=true")
         .arg("-c")
         .arg(format!(
             "http.extraHeader=Authorization: Bearer {read_token}"
@@ -1681,7 +1681,11 @@ async fn wait_for_health(base_url: &str) -> Result<(), TestError> {
 
 fn command_available(program: &str) -> bool {
     Command::new(program)
-        .arg("--version")
+        .arg(if program == "helm" {
+            "version"
+        } else {
+            "--version"
+        })
         .output()
         .is_ok_and(|output| output.status.success())
 }
@@ -1790,7 +1794,7 @@ fn configure_lfs_client_repo(
         home,
         &["config", "lfs.url", &format!("{base_url}/v1/lfs")],
     )?;
-    run_git_with_home(repo, home, &["config", "lfs.locksverify", "false"])?;
+    run_git_with_home(repo, home, &["config", "lfs.locksverify", "true"])?;
     run_git_with_home(
         repo,
         home,
