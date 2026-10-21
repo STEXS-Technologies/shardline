@@ -322,7 +322,20 @@ impl S3ObjectIndexStore for PostgresIndexStore {
                 content_hash = EXCLUDED.content_hash,
                 etag = EXCLUDED.etag,
                 user_metadata = EXCLUDED.user_metadata,
-                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds",
+                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds
+             WHERE (shardline_s3_objects.file_id,
+                    shardline_s3_objects.size_bytes,
+                    shardline_s3_objects.content_hash,
+                    shardline_s3_objects.etag,
+                    shardline_s3_objects.user_metadata,
+                    shardline_s3_objects.updated_at_unix_seconds)
+                   IS DISTINCT FROM
+                   (EXCLUDED.file_id,
+                    EXCLUDED.size_bytes,
+                    EXCLUDED.content_hash,
+                    EXCLUDED.etag,
+                    EXCLUDED.user_metadata,
+                    EXCLUDED.updated_at_unix_seconds)",
         )
         .bind(&entry.scope_namespace)
         .bind(&entry.object_key)
@@ -352,6 +365,36 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             &replacement.object_key,
         )
         .await?;
+        if expected == Some(replacement) {
+            // Keep the row lock until the evidence commits, including against
+            // writers outside the adapter's advisory-lock protocol. Avoid a
+            // new tuple version only when every value, including time, matches.
+            let matches: bool = query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1 FROM shardline_s3_objects
+                     WHERE scope_namespace = $1 AND object_key = $2
+                       AND file_id = $3 AND size_bytes = $4 AND content_hash = $5
+                       AND etag = $6 AND user_metadata = $7
+                       AND updated_at_unix_seconds = $8
+                     FOR UPDATE
+                 )",
+            )
+            .bind(&replacement.scope_namespace)
+            .bind(&replacement.object_key)
+            .bind(&replacement.file_id)
+            .bind(u64_to_i64(replacement.size_bytes)?)
+            .bind(&replacement.content_hash)
+            .bind(&replacement.etag)
+            .bind(&replacement_metadata)
+            .bind(replacement.updated_at_unix_seconds)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if matches {
+                record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
+            }
+            transaction.commit().await?;
+            return Ok(matches);
+        }
         let result = if let Some(expected) = expected {
             let expected_metadata = user_metadata_to_json(&expected.user_metadata)?;
             query(
@@ -743,6 +786,94 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn pg_identical_s3_object_upsert_and_cas_skip_row_update_and_keep_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-replay-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        let value = entry(&scope, "data/replay.pt", "file");
+
+        store.upsert_s3_object(&value).await.unwrap();
+        let initial_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_s3_objects
+             WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&scope)
+        .bind("data/replay.pt")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        store.upsert_s3_object(&value).await.unwrap();
+        let replay_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_s3_objects
+             WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&scope)
+        .bind("data/replay.pt")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(initial_xmin, replay_xmin);
+        assert!(
+            store
+                .compare_and_swap_s3_object(Some(&value), &value)
+                .await
+                .unwrap()
+        );
+        let cas_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_s3_objects WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&scope)
+        .bind("data/replay.pt")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(initial_xmin, cas_xmin);
+        assert_eq!(
+            store
+                .scan_s3_object_exact(&scope, "data/replay.pt")
+                .await
+                .unwrap(),
+            Some(value.clone())
+        );
+        let event_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'S3Object'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            event_count, 4,
+            "the replay should still be recorded in evidence"
+        );
+        let mut newer = value.clone();
+        newer.updated_at_unix_seconds = 1001;
+        assert!(
+            store
+                .compare_and_swap_s3_object(Some(&value), &newer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .compare_and_swap_s3_object(Some(&value), &value)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .scan_s3_object_exact(&scope, "data/replay.pt")
+                .await
+                .unwrap(),
+            Some(newer)
+        );
+        cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn pg_s3_object_delete_then_absent() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -807,6 +938,12 @@ mod tests {
         );
         assert!(
             S3ObjectIndexStore::scan_s3_objects(&store, &scope, "", None, 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .compare_and_swap_s3_object(Some(&value), &value)
                 .await
                 .is_err()
         );

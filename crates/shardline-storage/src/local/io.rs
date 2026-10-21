@@ -22,12 +22,12 @@ pub fn verify_file_integrity(
     integrity: &ObjectIntegrity,
 ) -> Result<File, LocalObjectStoreError> {
     let file = open_existing_object_file(path)?;
-    verify_open_file_integrity(file.try_clone()?, integrity)?;
+    verify_open_file_integrity(&file, integrity)?;
     Ok(file)
 }
 
 pub fn verify_open_file_integrity(
-    mut file: File,
+    mut file: &File,
     integrity: &ObjectIntegrity,
 ) -> Result<(), LocalObjectStoreError> {
     file.seek(SeekFrom::Start(0))?;

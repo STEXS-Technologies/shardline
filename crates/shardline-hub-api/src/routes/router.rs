@@ -8,9 +8,8 @@ use crate::git::{info_refs, receive_pack, upload_pack};
 
 /// Builds the Hub API router with [`HubState`] as the shared state.
 ///
-/// When `register_xet_token_routes` is `false`, the xet-read-token and
-/// xet-write-token routes are omitted to avoid conflicts with the Xet
-/// protocol frontend when both are enabled simultaneously.
+/// Xet token routes use explicit Hub repo-type paths so they can coexist with
+/// the native Xet frontend's provider-scoped paths.
 pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
     router_with_dataset_query(
         register_xet_token_routes,
@@ -27,20 +26,31 @@ pub fn router_with_dataset_query(
 ) -> Router<HubState> {
     let mut r = Router::new()
         .route("/health", get(super::health))
+        .route("/api/agent-harnesses", get(super::agent_harnesses))
         .route("/api/whoami-v2", get(super::whoami));
     if register_xet_token_routes {
-        r = r
-            .route(
-                "/api/{type}/{ns}/{repo}/xet-read-token/{rev}",
-                get(super::xet_read_token),
-            )
-            .route(
-                "/api/{type}/{ns}/{repo}/xet-write-token/{rev}",
-                get(super::xet_write_token),
-            );
+        for repo_type in ["models", "datasets", "spaces"] {
+            r = r
+                .route(
+                    &format!("/api/{repo_type}/{{ns}}/{{repo}}/xet-read-token/{{rev}}"),
+                    get(super::xet_read_token),
+                )
+                .route(
+                    &format!("/api/{repo_type}/{{ns}}/{{repo}}/xet-write-token/{{rev}}"),
+                    get(super::xet_write_token),
+                );
+        }
     }
     r = r
         .route("/api/repos/create", post(super::repo_create))
+        .route(
+            "/api/{type}/{ns}/{repo}/branch/{name}",
+            post(super::branch_create).delete(super::branch_delete),
+        )
+        .route(
+            "/api/{type}/{ns}/{repo}/tag/{name}",
+            post(super::tag_create).delete(super::tag_delete),
+        )
         .route("/api/repos/delete", delete(super::repo_delete_compat))
         .route("/api/repos", get(super::repo_list))
         .route("/api/{type}/search", get(super::repo_search))
@@ -63,11 +73,16 @@ pub fn router_with_dataset_query(
             "/api/{type}/{ns}/{repo}/revisions",
             get(super::repo_revisions),
         )
+        .route("/api/{type}/{ns}/{repo}/refs", get(super::repo_refs))
         .route(
             "/api/{type}/{ns}/{repo}/preupload/{rev}",
             post(super::preupload),
         )
         .route("/api/{type}/{ns}/{repo}/commit/{rev}", post(super::commit))
+        .route(
+            "/api/{type}/{ns}/{repo}/commits/{rev}",
+            get(super::repo_commits),
+        )
         .route(
             "/api/{type}/{ns}/{repo}/tree/{rev}",
             get(super::file_tree_at_root),
@@ -77,8 +92,17 @@ pub fn router_with_dataset_query(
             get(super::file_tree),
         )
         .route("/objects/batch", post(super::lfs_batch))
+        .route(
+            "/{ns}/{repo}/info/lfs/objects/batch",
+            post(super::lfs_batch_git),
+        )
+        .route(
+            "/{repo_type}/{ns}/{repo}/info/lfs/objects/batch",
+            post(super::lfs_batch_git_typed),
+        )
         .route("/lfs/objects/{oid}", put(super::lfs_upload))
         .route("/lfs/objects/{oid}", get(super::lfs_download))
+        .route("/lfs/objects/{oid}/verify", post(super::lfs_verify))
         // Dataset viewer endpoints
         .route(
             "/api/datasets/{ns}/{repo}/parquet",
@@ -106,11 +130,11 @@ pub fn router_with_dataset_query(
         // serves everything a registered route does not claim).
         .route(
             "/{type}/{ns}/{repo}/resolve/{rev}/{*path}",
-            get(super::resolve_file),
+            get(super::resolve_file).head(super::resolve_file_head),
         )
         .route(
             "/{ns}/{repo}/resolve/{rev}/{*path}",
-            get(super::resolve_model_file),
+            get(super::resolve_model_file).head(super::resolve_model_file_head),
         )
         .route("/{type}/{ns}/{repo}/info/refs", get(info_refs))
         .route("/{type}/{ns}/{repo}/HEAD", get(super::git_head))

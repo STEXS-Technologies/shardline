@@ -197,6 +197,9 @@ pub enum PostgresMetadataStoreError {
     /// An S3 listing entry did not identify the record being published.
     #[error("S3 publication entry does not match its file record")]
     S3PublicationMismatch,
+    /// A Hub SHA-256 identity conflicts with an existing file size.
+    #[error("Hub Xet file identity conflicts with an existing SHA-256 mapping")]
+    XetFileIdentityConflict,
 }
 
 impl From<SqlxError> for PostgresMetadataStoreError {

@@ -84,6 +84,9 @@ pub(super) fn database_initialization(
 pub struct LocalIndexStore {
     root: PathBuf,
     read_only: bool,
+    // Idle connection only: operations keep their independent connections and
+    // transactions. Clones share its lifetime without holding a read snapshot.
+    _persistent_connection: Option<Arc<Mutex<Connection>>>,
 }
 
 impl LocalIndexStore {
@@ -93,6 +96,7 @@ impl LocalIndexStore {
         Self {
             root: helpers::normalize_local_root(root),
             read_only: false,
+            _persistent_connection: None,
         }
     }
 
@@ -103,6 +107,7 @@ impl LocalIndexStore {
         Self {
             root: helpers::normalize_local_root(root),
             read_only: true,
+            _persistent_connection: None,
         }
     }
 
@@ -115,6 +120,21 @@ impl LocalIndexStore {
     pub fn new(root: PathBuf) -> Result<Self, LocalIndexStoreError> {
         let store = Self::open(root);
         let _connection = store.open_connection()?;
+        Ok(store)
+    }
+
+    /// Initializes metadata and keeps one idle connection attached until the
+    /// last clone is dropped. Long-lived servers can avoid repeated WAL
+    /// checkpoint/recovery cycles without changing transaction concurrency,
+    /// commit durability, or automatic checkpoint settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalIndexStoreError`] if initialization or connection setup fails.
+    pub fn new_with_persistent_connection(root: PathBuf) -> Result<Self, LocalIndexStoreError> {
+        let mut store = Self::open(root);
+        let connection = store.open_connection()?;
+        store._persistent_connection = Some(Arc::new(Mutex::new(connection)));
         Ok(store)
     }
 
@@ -516,9 +536,26 @@ impl LocalRecordStore {
         records: &[FileRecord],
         dedupe_mappings: &[DedupeShardMapping],
     ) -> Result<(), LocalIndexStoreError> {
+        self.commit_native_shard_metadata_with_identities(records, dedupe_mappings, &[])
+            .await
+    }
+
+    /// Atomically publishes native shard metadata and Hub SHA-256 identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalIndexStoreError`] if a row cannot be written or an
+    /// existing SHA-256 identity conflicts with the supplied identity.
+    pub async fn commit_native_shard_metadata_with_identities(
+        &self,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        identities: &[crate::XetFileIdentity],
+    ) -> Result<(), LocalIndexStoreError> {
         let store = self.clone();
         let records = records.to_vec();
         let dedupe_mappings = dedupe_mappings.to_vec();
+        let identities = identities.to_vec();
         tokio::task::spawn_blocking(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
@@ -531,6 +568,45 @@ impl LocalRecordStore {
                 for mapping in &dedupe_mappings {
                     helpers::upsert_dedupe_mapping_row(&transaction, mapping, now)?;
                 }
+                for identity in &identities {
+                    let scope_key = identity.repository_key();
+                    let total_bytes = helpers::u64_to_i64(identity.total_bytes)?;
+                    let changed = transaction.execute(
+                        "INSERT INTO shardline_xet_file_identities
+                            (scope_key, sha256, file_id, total_bytes)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT (scope_key, sha256) DO UPDATE SET
+                            file_id = excluded.file_id,
+                            total_bytes = excluded.total_bytes
+                         WHERE total_bytes = excluded.total_bytes
+                           AND file_id <> excluded.file_id",
+                        rusqlite::params![
+                            scope_key,
+                            identity.sha256,
+                            identity.file_id,
+                            total_bytes
+                        ],
+                    )?;
+                    if changed == 0 {
+                        // The attempted upsert retains the transaction's write
+                        // lock. Distinguish an exact replay from a size conflict
+                        // without rewriting the accepted identity.
+                        let replay: bool = transaction.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM shardline_xet_file_identities
+                             WHERE scope_key=?1 AND sha256=?2 AND file_id=?3 AND total_bytes=?4)",
+                            rusqlite::params![
+                                scope_key,
+                                identity.sha256,
+                                identity.file_id,
+                                total_bytes
+                            ],
+                            |row| row.get(0),
+                        )?;
+                        if !replay {
+                            return Err(LocalIndexStoreError::XetFileIdentityConflict);
+                        }
+                    }
+                }
                 for record in &records {
                     let latest_locator = store.latest_record_locator(record);
                     helpers::upsert_file_record_row(&transaction, &latest_locator, record, now)?;
@@ -541,6 +617,37 @@ impl LocalRecordStore {
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    /// Looks up a native Xet file identity by its Hub SHA-256 and repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalIndexStoreError`] if SQLite cannot read or decode the row.
+    pub fn xet_file_identity(
+        &self,
+        repository_scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, LocalIndexStoreError> {
+        let connection = self.open_connection()?;
+        let scope_key = crate::XetFileIdentity::repository_key_for_scope(repository_scope);
+        connection
+            .query_row(
+                "SELECT file_id, total_bytes FROM shardline_xet_file_identities
+                 WHERE scope_key = ?1 AND sha256 = ?2",
+                rusqlite::params![scope_key, sha256],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .map(|(file_id, total_bytes)| {
+                Ok(crate::XetFileIdentity {
+                    repository_scope: repository_scope.clone(),
+                    sha256: sha256.to_owned(),
+                    file_id,
+                    total_bytes: helpers::i64_to_u64(total_bytes)?,
+                })
+            })
+            .transpose()
     }
 
     fn version_record_locator(&self, record: &FileRecord) -> LocalRecordLocator {

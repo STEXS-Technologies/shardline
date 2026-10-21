@@ -442,6 +442,28 @@ impl HubStore for LocalIndexStore {
             .unwrap_or_default())
     }
 
+    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, Self::Error> {
+        let conn = open_hub_connection(self.root())?;
+        conn.query_row(
+            "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+             FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2",
+            params![repo_id, sha],
+            |row| {
+                Ok(HubRevision {
+                    repo_id: row.get(0)?,
+                    ref_name: row.get(1)?,
+                    sha: row.get(2)?,
+                    parent_sha: row.get(3)?,
+                    message: row.get(4)?,
+                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
+                        .map_err(|e| sqlite_store_error(&e))?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     fn list_revisions_bounded(
         &self,
         repo_id: &str,
@@ -534,7 +556,7 @@ impl HubStore for LocalIndexStore {
                 commit_sha.to_owned(),
             ));
         }
-        if commit_sha == EMPTY_HUB_REVISION {
+        if commit_sha == EMPTY_HUB_REVISION || files.is_empty() {
             return Ok(());
         }
         let root = self.root().to_owned();
@@ -545,8 +567,15 @@ impl HubStore for LocalIndexStore {
             let tx = conn.transaction()?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT (commit_sha, path) DO UPDATE SET
+                         size = excluded.size,
+                         sha = excluded.sha,
+                         is_lfs = excluded.is_lfs
+                     WHERE shardline_hub_file_entries.size IS NOT excluded.size
+                        OR shardline_hub_file_entries.sha IS NOT excluded.sha
+                        OR shardline_hub_file_entries.is_lfs IS NOT excluded.is_lfs",
                 )?;
                 for file in &files {
                     stmt.execute(params![
@@ -1445,6 +1474,30 @@ mod tests {
         assert_eq!(rev.ref_name, "main");
         assert!(rev.parent_sha.is_none());
         assert_eq!(rev.message.as_deref(), Some("initial commit"));
+        let boxed = BoxedHubStore::from_store(store);
+        let loaded = boxed.get_revision("org/model", "abc123").unwrap().unwrap();
+        assert_eq!(
+            (
+                loaded.repo_id,
+                loaded.sha,
+                loaded.parent_sha,
+                loaded.message,
+                loaded.created_at_unix_seconds
+            ),
+            (
+                rev.repo_id,
+                rev.sha,
+                rev.parent_sha,
+                rev.message,
+                rev.created_at_unix_seconds
+            )
+        );
+        assert!(
+            boxed
+                .get_revision("other/model", "abc123")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1849,6 +1902,50 @@ mod tests {
         assert_eq!(files[0].sha, "new");
         assert_eq!(files[0].size, 20);
         assert!(files[0].is_lfs);
+    }
+
+    #[test]
+    fn replaying_identical_files_does_not_replace_sqlite_rows() {
+        let (ts, store) = make_store();
+        let files = vec![HubFileEntry {
+            path: "f.txt".into(),
+            size: 10,
+            sha: "same-sha".into(),
+            is_lfs: false,
+        }];
+        store.store_files("c-replay", &files).unwrap();
+        store
+            .store_files(
+                "c-replay",
+                &[HubFileEntry {
+                    path: "sentinel.txt".into(),
+                    size: 1,
+                    sha: "sentinel".into(),
+                    is_lfs: false,
+                }],
+            )
+            .unwrap();
+
+        let row_id = |path: &str| {
+            Connection::open(ts.path().join("metadata.sqlite3"))
+                .unwrap()
+                .query_row(
+                    "SELECT rowid FROM shardline_hub_file_entries
+                     WHERE commit_sha = ?1 AND path = ?2",
+                    params!["c-replay", path],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let before = row_id("f.txt");
+        store.store_files("c-replay", &files).unwrap();
+        let after = row_id("f.txt");
+
+        assert_eq!(
+            before, after,
+            "identical replay must not delete/reinsert row"
+        );
+        assert_eq!(store.get_files("c-replay").unwrap().len(), 2);
     }
 
     // === Full lifecycle: create repo → commit → files ===
@@ -2484,7 +2581,7 @@ mod tests {
     }
 
     #[test]
-    fn store_files_partial_failure_rollback() {
+    fn empty_store_files_preserves_existing_entries() {
         use crate::hub::HubStore;
 
         let (_ts, store) = make_store();
@@ -2505,17 +2602,10 @@ mod tests {
         let files = store.get_files("commit_rollback").unwrap();
         assert_eq!(files.len(), 1);
 
-        // Now try to store files where one has a path that violates the PK constraint
-        // (same commit_sha + path) — but with INSERT OR REPLACE that would succeed.
-        // Instead, we test that the transaction works correctly by storing to a
-        // non-existent commit (which is fine since there's no FK on commit_sha).
-        //
-        // The real test: store_files with an empty list succeeds and doesn't affect prior data.
+        // An empty input appends no entries and must not replace the stored tree.
         store
             .store_files("commit_rollback", &[])
             .expect("empty store should succeed");
-        // The existing files are still there because the prior store already committed,
-        // and this empty store is a new transaction (INSERT OR REPLACE with no rows = no-op).
         let files = store.get_files("commit_rollback").unwrap();
         assert_eq!(
             files.len(),

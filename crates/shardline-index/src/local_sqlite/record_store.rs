@@ -631,6 +631,73 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn version_replay_refreshes_row_and_latest_replay_updates() {
+        let store = make_store();
+        let record = sample_record();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE audit_record_updates (record_kind TEXT NOT NULL);
+                 CREATE TRIGGER audit_file_record_updates
+                 AFTER UPDATE ON shardline_file_records
+                 BEGIN
+                   INSERT INTO audit_record_updates(record_kind) VALUES (NEW.record_kind);
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        let version_updates: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM audit_record_updates WHERE record_kind = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_updates, 1);
+        drop(connection);
+
+        let mut changed_record = record.clone();
+        changed_record.total_bytes += 1;
+        RecordMutation::write_version_record(&store, &changed_record)
+            .await
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        let version_updates: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM audit_record_updates WHERE record_kind = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_updates, 2);
+        drop(connection);
+
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        let latest_updates: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM audit_record_updates WHERE record_kind = 'latest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest_updates, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_version_record_locators_empty_initially() {
         let store = make_store();
         let locators = RecordTraversal::list_version_record_locators(&store)

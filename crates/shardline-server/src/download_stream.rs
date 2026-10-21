@@ -1,6 +1,7 @@
 use std::{
     io::{Error as IoError, ErrorKind, Seek, SeekFrom},
     pin::Pin,
+    sync::{Arc, OnceLock},
 };
 
 use axum::body::Bytes;
@@ -8,10 +9,12 @@ use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use lz4_flex;
 use shardline_index::{FileRecord, parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ByteRange;
+use shardline_server_core::MaterializedObject;
 use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
+    sync::{OwnedSemaphorePermit, Semaphore},
 };
 use tracing::{debug, trace, warn};
 
@@ -31,10 +34,35 @@ pub(crate) use collect::collect_file_record_bytes;
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
+const MAX_IN_MEMORY_S3_XORB_BYTES: u64 = 1024 * 1024;
+const MAX_IN_MEMORY_S3_XORB_READS: usize = 16;
+
+static IN_MEMORY_S3_XORB_READS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn try_acquire_s3_xorb_memory() -> Option<OwnedSemaphorePermit> {
+    IN_MEMORY_S3_XORB_READS
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_IN_MEMORY_S3_XORB_READS)))
+        .clone()
+        .try_acquire_owned()
+        .ok()
+}
+
+fn retain_memory_permit_for_materialized_object(
+    object: &MaterializedObject,
+    permit: Option<OwnedSemaphorePermit>,
+) -> Option<OwnedSemaphorePermit> {
+    if matches!(object, MaterializedObject::Memory(_)) {
+        permit
+    } else {
+        drop(permit);
+        None
+    }
+}
+
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
 
 struct SerializedXorbStreamState {
-    file: tempfile::NamedTempFile,
+    file: XorbReadFile,
     offset: u64,
     end: u64,
     pool: BoundedPool,
@@ -66,9 +94,50 @@ pub(crate) async fn validated_xorb_byte_range_stream(
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
     let store = object_store.clone();
     let key = object_key.clone();
+    let memory_permit = matches!(&store, ServerObjectStore::S3(_))
+        .then(try_acquire_s3_xorb_memory)
+        .flatten();
+    let maximum_memory_length = if memory_permit.is_some() {
+        MAX_IN_MEMORY_S3_XORB_BYTES
+    } else {
+        0
+    };
     let file = blocking_stream_work(&pool, move || {
-        let mut file = store.materialize_object_to_tempfile(&key, total_length)?;
-        crate::xet_adapter::validate_serialized_xorb(file.as_file_mut(), expected_hash)?;
+        let (materialized, observed_length) = match &store {
+            ServerObjectStore::Local(local) => {
+                let metadata = store
+                    .metadata(&key)?
+                    .ok_or(crate::object_store::ServerObjectStoreError::NotFound)?;
+                run_before_local_object_read_hook(&local.path_for_key(&key));
+                let file = local.open_object_file(&key)?;
+                let observed_length = file.metadata()?.len();
+                if observed_length != metadata.length() {
+                    return Err(
+                        crate::object_store::ServerObjectStoreError::StoredObjectLengthMismatch
+                            .into(),
+                    );
+                }
+                (MaterializedObject::Local(file), observed_length)
+            }
+            ServerObjectStore::S3(_) => store
+                .materialize_bounded_object_if_present(&key, maximum_memory_length)?
+                .ok_or(crate::object_store::ServerObjectStoreError::NotFound)?,
+            ServerObjectStore::Blackhole => {
+                return Err(crate::object_store::ServerObjectStoreError::NotFound.into());
+            }
+        };
+        if observed_length != total_length {
+            return Err(
+                crate::object_store::ServerObjectStoreError::StoredObjectLengthMismatch.into(),
+            );
+        }
+        let memory_permit =
+            retain_memory_permit_for_materialized_object(&materialized, memory_permit);
+        let mut file = XorbReadFile {
+            object: materialized,
+            _memory_permit: memory_permit,
+        };
+        crate::xet_adapter::validate_serialized_xorb(&mut file, expected_hash)?;
         Ok(file)
     })
     .await?;
@@ -94,10 +163,9 @@ pub(crate) async fn validated_xorb_byte_range_stream(
                     .ok_or(ServerError::Overflow)?
                     .min(STREAM_READ_BUFFER_BYTES);
                 let length = usize::try_from(length)?;
-                let cursor = state.file.as_file_mut();
-                cursor.seek(SeekFrom::Start(state.offset))?;
+                state.file.seek(SeekFrom::Start(state.offset))?;
                 let mut bytes = vec![0_u8; length];
-                cursor.read_exact(&mut bytes)?;
+                state.file.read_exact(&mut bytes)?;
                 state.offset = state
                     .offset
                     .checked_add(u64::try_from(length)?)
@@ -117,18 +185,8 @@ pub(crate) async fn validated_xorb_byte_range_stream(
 /// checking storage. A metadata miss (or an error) means the record is treated
 /// as individual-chunk-backed; the subsequent read then surfaces any real
 /// storage failure.
-fn xorb_object_length(object_store: &ServerObjectStore, hash_hex: &str) -> Option<u64> {
-    let Ok(object_key) = crate::xet_adapter::xorb_object_key(hash_hex) else {
-        return None;
-    };
-    match object_store.metadata(&object_key) {
-        Ok(Some(metadata)) if metadata.length() != 0 => Some(metadata.length()),
-        Ok(_) | Err(_) => None,
-    }
-}
-
 struct DecodedXorbStreamState {
-    file: tempfile::NamedTempFile,
+    file: XorbReadFile,
     descriptors: Vec<shardline_xet_adapter::ValidatedXorbChunk>,
     chunks: Vec<shardline_index::FileChunkRecord>,
     next_chunk_index: usize,
@@ -136,6 +194,23 @@ struct DecodedXorbStreamState {
     requested_start: u64,
     requested_end: u64,
     pool: BoundedPool,
+}
+
+struct XorbReadFile {
+    object: MaterializedObject,
+    _memory_permit: Option<OwnedSemaphorePermit>,
+}
+
+impl std::io::Read for XorbReadFile {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, IoError> {
+        std::io::Read::read(&mut self.object, buffer)
+    }
+}
+
+impl Seek for XorbReadFile {
+    fn seek(&mut self, position: SeekFrom) -> Result<u64, IoError> {
+        Seek::seek(&mut self.object, position)
+    }
 }
 
 /// Reads logical terms from one authenticated container, decoding one bounded
@@ -148,41 +223,75 @@ async fn read_xorb_backed_chunks(
     object_store: ServerObjectStore,
     record: FileRecord,
     range: Option<ByteRange>,
-    known_xorb_length: Option<u64>,
     pool: BoundedPool,
     decoded_byte_budget: usize,
-) -> Result<ServerByteStream, ServerError> {
+) -> Result<Option<ServerByteStream>, ServerError> {
     let chunk_zero = record.chunks.first().ok_or(ServerError::Overflow)?;
     let expected_hash = parse_xet_hash_hex(&chunk_zero.hash)?;
     let key = crate::xet_adapter::xorb_object_key(&chunk_zero.hash)?;
+    let memory_permit = matches!(&object_store, ServerObjectStore::S3(_))
+        .then(try_acquire_s3_xorb_memory)
+        .flatten();
+    let maximum_memory_length = if memory_permit.is_some() {
+        MAX_IN_MEMORY_S3_XORB_BYTES
+    } else {
+        0
+    };
     // Allocate the caller's result on its runtime worker, rather than growing
     // large retained allocator arenas across blocking validation workers.
-    let (file, validated, decoded) = crate::admission::blocking_work_with_setup(
+    let Some((file, validated, decoded)) = crate::admission::blocking_work_with_setup(
         &pool,
         move || Vec::with_capacity(decoded_byte_budget),
         move |decoded_buffer| {
-            let length = match known_xorb_length {
-                Some(length) => length,
-                None => object_store
-                    .metadata(&key)?
-                    .ok_or(ServerError::NotFound)?
-                    .length(),
+            let mut file = match &object_store {
+                ServerObjectStore::Local(local) => {
+                    let Some(metadata) = object_store.metadata(&key)? else {
+                        return Ok(None);
+                    };
+                    let length = metadata.length();
+                    // Local objects are immutable and atomically published. Keep
+                    // the already-open inode as the validation/read snapshot rather
+                    // than copying the full container into a second scratch file.
+                    run_before_local_object_read_hook(&local.path_for_key(&key));
+                    let file = local.open_object_file(&key)?;
+                    if file.metadata()?.len() != length {
+                        return Err(ServerError::ObjectStore(
+                            ObjectStoreError::StoredLengthMismatch,
+                        ));
+                    }
+                    XorbReadFile {
+                        object: MaterializedObject::Local(file),
+                        _memory_permit: None,
+                    }
+                }
+                ServerObjectStore::S3(_) => {
+                    let Some((object, _length)) = object_store
+                        .materialize_bounded_object_if_present(&key, maximum_memory_length)?
+                    else {
+                        return Ok(None);
+                    };
+                    let memory_permit =
+                        retain_memory_permit_for_materialized_object(&object, memory_permit);
+                    XorbReadFile {
+                        object,
+                        _memory_permit: memory_permit,
+                    }
+                }
+                ServerObjectStore::Blackhole => return Ok(None),
             };
-            #[cfg(test)]
-            if let ServerObjectStore::Local(local) = &object_store {
-                run_before_local_object_read_hook(&local.path_for_key(&key));
-            }
-            let mut file = object_store.materialize_object_to_tempfile(&key, length)?;
             let (validated, decoded) = shardline_xet_adapter::validate_serialized_xorb_with_data(
-                file.as_file_mut(),
+                &mut file,
                 expected_hash,
                 decoded_byte_budget,
                 decoded_buffer,
             )?;
-            Ok((file, validated, decoded))
+            Ok(Some((file, validated, decoded)))
         },
     )
-    .await?;
+    .await?
+    else {
+        return Ok(None);
+    };
     let requested_start = range.map_or(0, |value| value.start());
     let requested_end = range.map_or_else(
         || {
@@ -202,9 +311,9 @@ async fn read_xorb_backed_chunks(
         if bytes.get(start..end).is_none() {
             return Err(ServerError::Overflow);
         }
-        return Ok(Box::pin(stream::once(async move {
+        return Ok(Some(Box::pin(stream::once(async move {
             Ok(bytes.slice(start..end))
-        })));
+        }))));
     }
     let state = DecodedXorbStreamState {
         file,
@@ -216,7 +325,7 @@ async fn read_xorb_backed_chunks(
         requested_end,
         pool,
     };
-    Ok(Box::pin(stream::try_unfold(
+    Ok(Some(Box::pin(stream::try_unfold(
         state,
         |mut state| async move {
             if state.next_chunk_index >= state.chunks.len() {
@@ -291,15 +400,17 @@ async fn read_xorb_backed_chunks(
                     {
                         return Err(ServerError::Overflow);
                     }
-                    let cursor = state.file.as_file_mut();
-                    cursor.seek(SeekFrom::Start(descriptor.packed_start()))?;
+                    state
+                        .file
+                        .seek(SeekFrom::Start(descriptor.packed_start()))?;
                     // Full container integrity was verified before these bytes. The private
                     // temporary file is immutable; still check each decoder length
                     // against the validated footer before applying the output slice.
                     let (data, packed_len, unpacked_len) =
-                        shardline_xet_core::xorb_object::deserialize_chunk(cursor).map_err(
-                            |error| ServerError::Io(IoError::new(ErrorKind::InvalidData, error)),
-                        )?;
+                        shardline_xet_core::xorb_object::deserialize_chunk(&mut state.file)
+                            .map_err(|error| {
+                                ServerError::Io(IoError::new(ErrorKind::InvalidData, error))
+                            })?;
                     if u64::try_from(packed_len)?
                         != descriptor
                             .packed_end()
@@ -322,7 +433,7 @@ async fn read_xorb_backed_chunks(
             })
             .await
         },
-    )))
+    ))))
 }
 
 /// Streams a chunk-backed file record without materializing the complete object.
@@ -372,35 +483,19 @@ async fn single_container_file_stream(
         }
     }
 
-    // Fast path: if all chunks are in the same xorb, read it once.
-    // For a single chunk the record hash is either the chunk's data hash
-    // (individual-chunk storage) or the xorb's hash (xorb-backed storage);
-    // both are opaque 64-hex values, so we probe the object store for a
-    // stored xorb object under that hash. Xorb-backed chunks always carry a
-    // nonzero packed_end (the chunk's serialized length inside the xorb),
-    // which lets us skip the probe for legacy records that predate packing.
+    // Fast path: when all chunks reference one packed xorb, read and validate
+    // that object once. The direct GET also establishes object existence, so
+    // S3 avoids a separate HEAD. If the xorb is absent, preserve compatibility
+    // by falling back to individually stored chunks.
     let first_hash = record.chunks.first().map(|c| &c.hash);
     let all_same_hash = first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
-    let known_xorb_length = if all_same_hash
+    let is_xorb_candidate = all_same_hash
         && record
             .chunks
             .first()
-            .is_some_and(|chunk| chunk.packed_end > 0)
-    {
-        let store = object_store.clone();
-        let hash = record
-            .chunks
-            .first()
-            .ok_or(ServerError::Overflow)?
-            .hash
-            .clone();
-        blocking_stream_work(&pool, move || Ok(xorb_object_length(&store, &hash))).await?
-    } else {
-        None
-    };
-    let is_xorb_backed = known_xorb_length.is_some();
+            .is_some_and(|chunk| chunk.packed_end > 0);
 
-    if is_xorb_backed {
+    if is_xorb_candidate {
         #[allow(clippy::indexing_slicing)]
         let xorb_hash = &record.chunks[0].hash;
         debug!(
@@ -409,15 +504,17 @@ async fn single_container_file_stream(
             xorb_hash = %xorb_hash,
             "reading xorb-backed file"
         );
-        return read_xorb_backed_chunks(
-            object_store,
-            record,
+        if let Some(stream) = read_xorb_backed_chunks(
+            object_store.clone(),
+            record.clone(),
             range,
-            known_xorb_length,
-            pool,
+            pool.clone(),
             decoded_byte_budget,
         )
-        .await;
+        .await?
+        {
+            return Ok(stream);
+        }
     }
 
     debug!(
@@ -759,7 +856,7 @@ async fn s3_store_byte_range_stream(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::{io::Write, sync::Arc};
 
     use futures_util::{StreamExt, TryStreamExt};
     use shardline_index::FileRecord;
@@ -767,11 +864,33 @@ mod tests {
     use shardline_storage::{LocalObjectStore, ObjectKey};
     use tokio::fs;
 
-    use super::{local_object_byte_range_stream, local_object_byte_stream};
+    use super::{
+        MaterializedObject, local_object_byte_range_stream, local_object_byte_stream,
+        retain_memory_permit_for_materialized_object,
+    };
     use crate::ServerError;
     use crate::error::ObjectStoreError;
     use crate::object_store::ServerObjectStore;
     use crate::object_store::set_before_local_object_read_hook;
+
+    #[test]
+    fn spilled_xorb_releases_its_memory_admission_permit() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.clone().try_acquire_owned().unwrap();
+        let object = MaterializedObject::Memory(std::io::Cursor::new(Vec::new()));
+        let retained = retain_memory_permit_for_materialized_object(&object, Some(permit));
+        assert!(retained.is_some());
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(retained);
+        assert_eq!(semaphore.available_permits(), 1);
+
+        let permit = semaphore.clone().try_acquire_owned().unwrap();
+        let temporary = tempfile::NamedTempFile::new().unwrap();
+        let object = MaterializedObject::Temporary(temporary);
+        assert!(retain_memory_permit_for_materialized_object(&object, Some(permit)).is_none());
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_stream_reads_object_in_segments() {
         let storage = shardline_test_support::TempStorage::new();
@@ -2001,10 +2120,8 @@ mod tests {
         // 3. Create FileRecord with one xorb-backed entry.
         //    Use the xorb hash as the chunk hash with the real packed offsets
         //    (packed_start is 0 — the sole chunk is the first in the xorb).
-        //    The is_xorb_backed guard detects the record as xorb-backed by
-        //    probing for the stored xorb object under the record hash. The
-        //    xorb fast path reads the entire xorb and indexes decoded chunks
-        //    by range_start — it does not use packed_start for data access.
+        //    The xorb candidate path fetches and validates the whole object;
+        //    the recorded chunk index selects the requested logical bytes.
         let entry = &packed.chunk_entries[0];
         let raw_len = content.len() as u64;
         let next_index = entry.chunk_index.checked_add(1).unwrap();

@@ -945,7 +945,11 @@ impl LifecycleStore for LocalIndexStore {
                 first_seen_unreachable_at_unix_seconds =
                     excluded.first_seen_unreachable_at_unix_seconds,
                 delete_after_unix_seconds = excluded.delete_after_unix_seconds,
-                updated_at_unix_seconds = excluded.updated_at_unix_seconds",
+                updated_at_unix_seconds = excluded.updated_at_unix_seconds
+             WHERE observed_length != excluded.observed_length
+                OR first_seen_unreachable_at_unix_seconds !=
+                    excluded.first_seen_unreachable_at_unix_seconds
+                OR delete_after_unix_seconds != excluded.delete_after_unix_seconds",
             params![
                 candidate.object_key().as_str(),
                 u64_to_i64(candidate.observed_length())?,
@@ -2554,6 +2558,45 @@ mod tests {
     }
 
     #[test]
+    fn replaying_identical_reconstruction_skips_sqlite_row_update() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([11; 32]));
+        let reconstruction = FileReconstruction::new(vec![]);
+        let connection = store.open_connection().expect("open test connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE reconstruction_update_audit (updates INTEGER NOT NULL);
+                 INSERT INTO reconstruction_update_audit VALUES (0);
+                 CREATE TRIGGER count_reconstruction_updates
+                 AFTER UPDATE ON shardline_file_reconstructions
+                 BEGIN
+                     UPDATE reconstruction_update_audit SET updates = updates + 1;
+                 END;",
+            )
+            .expect("install update counter");
+
+        store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .expect("initial insert should succeed");
+        store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .expect("identical replay should succeed");
+
+        let updates: i64 = connection
+            .query_row(
+                "SELECT updates FROM reconstruction_update_audit",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read update counter");
+        assert_eq!(updates, 0);
+        assert_eq!(
+            ReconstructionStore::reconstruction(&store, &file_id).unwrap(),
+            Some(reconstruction)
+        );
+    }
+
+    #[test]
     fn reconstruction_returns_none_for_missing_file_id() {
         let store = make_store();
         let file_id = FileId::new(ShardlineHash::from_bytes([99; 32]));
@@ -2658,6 +2701,46 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_dedupe_mapping_does_not_rewrite_its_timestamp() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([17; 32]);
+        let original = DedupeShardMapping::new(
+            chunk_hash,
+            ObjectKey::parse("shards/aa/unchanged.shard").unwrap(),
+        );
+        let replacement = DedupeShardMapping::new(
+            chunk_hash,
+            ObjectKey::parse("shards/bb/replacement.shard").unwrap(),
+        );
+        let connection = store.open_connection().unwrap();
+
+        super::super::helpers::upsert_dedupe_mapping_row(&connection, &original, 10).unwrap();
+        super::super::helpers::upsert_dedupe_mapping_row(&connection, &original, 20).unwrap();
+        let (stored_key, stored_at): (String, i64) = connection
+            .query_row(
+                "SELECT shard_object_key, updated_at_unix_seconds
+                 FROM shardline_dedupe_shards WHERE chunk_hash = ?1",
+                [xet_hash_hex_string(chunk_hash)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_key, original.shard_object_key().as_str());
+        assert_eq!(stored_at, 10);
+
+        super::super::helpers::upsert_dedupe_mapping_row(&connection, &replacement, 30).unwrap();
+        let (stored_key, stored_at): (String, i64) = connection
+            .query_row(
+                "SELECT shard_object_key, updated_at_unix_seconds
+                 FROM shardline_dedupe_shards WHERE chunk_hash = ?1",
+                [xet_hash_hex_string(chunk_hash)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_key, replacement.shard_object_key().as_str());
+        assert_eq!(stored_at, 30);
+    }
+
+    #[test]
     fn dedupe_shard_mapping_returns_none_for_missing_hash() {
         let store = make_store();
         let chunk_hash = ShardlineHash::from_bytes([99; 32]);
@@ -2737,6 +2820,70 @@ mod tests {
         let loaded =
             LifecycleStore::quarantine_candidate(&store, &key).expect("lookup should succeed");
         assert_eq!(loaded, Some(candidate));
+    }
+
+    #[test]
+    fn identical_quarantine_observation_skips_row_rewrite_but_keeps_evidence() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/aa/replayed-candidate").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 100, 1000, 2000).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE quarantine_candidate_update_audit (updates INTEGER NOT NULL);
+                 INSERT INTO quarantine_candidate_update_audit VALUES (0);
+                 CREATE TRIGGER count_quarantine_candidate_updates
+                 AFTER UPDATE ON shardline_quarantine_candidates
+                 BEGIN
+                     UPDATE quarantine_candidate_update_audit SET updates = updates + 1;
+                 END;",
+            )
+            .unwrap();
+
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+        let original_updated_at: i64 = connection
+            .query_row(
+                "SELECT updated_at_unix_seconds FROM shardline_quarantine_candidates WHERE object_key = ?1",
+                [key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let original_event_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'GarbageCollection' AND operation_id = ?1",
+                [key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+
+        let updates: i64 = connection
+            .query_row(
+                "SELECT updates FROM quarantine_candidate_update_audit",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let updated_at: i64 = connection
+            .query_row(
+                "SELECT updated_at_unix_seconds FROM shardline_quarantine_candidates WHERE object_key = ?1",
+                [key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'GarbageCollection' AND operation_id = ?1",
+                [key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updates, 0);
+        assert_eq!(updated_at, original_updated_at);
+        assert_eq!(event_count, original_event_count + 1);
     }
 
     #[test]

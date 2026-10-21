@@ -94,6 +94,53 @@ pub(crate) fn read_full_object(
     Ok(object_store.read_range(object_key, range)?)
 }
 
+/// Reads small records with one storage operation where the backend can return
+/// the object's size alongside its body. S3 uses a single full GET instead of
+/// a metadata HEAD followed by a ranged GET. The bound preserves the existing
+/// limit for callers that materialize records in memory.
+pub(crate) async fn read_small_object(
+    object_store: ServerObjectStore,
+    object_key: ObjectKey,
+) -> Result<Vec<u8>, ServerError> {
+    const MAX_SMALL_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+
+    tokio::task::spawn_blocking(move || {
+        let object = object_store
+            .read_object_if_present(&object_key, MAX_SMALL_OBJECT_BYTES)
+            .map_err(|error| match error {
+                shardline_server_core::BoundedObjectReadError::ObjectTooLarge => {
+                    ServerError::RequestBodyTooLarge
+                }
+                shardline_server_core::BoundedObjectReadError::Store(error) => error.into(),
+            })?
+            .map(|(bytes, _length)| bytes);
+        object.ok_or(ServerError::NotFound)
+    })
+    .await
+    .map_err(ServerError::BlockingTask)?
+}
+
+/// Opens a local immutable object without a scratch copy, checking the opened
+/// inode's length. Remote stores return `None` for the caller's streaming path.
+pub(crate) async fn open_local_object_for_read(
+    object_store: &ServerObjectStore,
+    object_key: &ObjectKey,
+    expected_length: u64,
+) -> Result<Option<tokio::fs::File>, ServerError> {
+    let ServerObjectStore::Local(store) = object_store else {
+        return Ok(None);
+    };
+    let store = store.clone();
+    let key = object_key.clone();
+    tokio::task::spawn_blocking(move || {
+        let file = store.open_object_file(&key)?;
+        validate_local_object_length(&file, expected_length)?;
+        Ok(Some(tokio::fs::File::from_std(file)))
+    })
+    .await
+    .map_err(ServerError::BlockingTask)?
+}
+
 /// Streams one object into a pod-local ephemeral file without materializing it in memory.
 ///
 /// The destination is never authoritative. Callers own its cleanup and must
@@ -152,13 +199,32 @@ pub(crate) async fn materialize_object_to_file(
 /// source of truth; each ranged read is bounded to its recorded length and
 /// checked against the content digest in its immutable staging key.
 ///
-/// Local deployments return `None` so their filesystem-backed staging path is
-/// preserved. The caller must retain its completion/session guards while the
-/// returned reader is consumed.
+/// Local stores retain open immutable part files instead of copying them into
+/// scratch files. The caller must retain its completion/session guards while
+/// the returned reader is consumed.
 pub(crate) async fn s3_resumable_parts_reader(
     object_store: &ServerObjectStore,
     parts: &[ResumableSessionPart],
 ) -> Result<Option<RequestBodyReader>, ServerError> {
+    if let ServerObjectStore::Local(store) = object_store {
+        let store = store.clone();
+        let descriptors = parts.to_vec();
+        let files = tokio::task::spawn_blocking(move || {
+            descriptors
+                .iter()
+                .map(|part| {
+                    let key = ObjectKey::parse(part.staging_key())
+                        .map_err(|_error| ServerError::InvalidPath)?;
+                    let file = store.open_object_file(&key)?;
+                    validate_local_object_length(&file, part.size_bytes())?;
+                    Ok(tokio::fs::File::from_std(file))
+                })
+                .collect::<Result<Vec<_>, ServerError>>()
+        })
+        .await
+        .map_err(ServerError::BlockingTask)??;
+        return local_s3_resumable_parts_reader(files, parts, 64 * 1024).map(Some);
+    }
     let ServerObjectStore::S3(store) = object_store else {
         return Ok(None);
     };
@@ -537,8 +603,7 @@ pub(crate) async fn put_reader_if_absent_s3(
     Ok(Some((outcome, integrity)))
 }
 
-/// Promotes bounded bytes through a pod-local temporary file into an immutable
-/// object-store staging key below `prefix`.
+/// Durably stages bounded bytes under an immutable content-addressed key.
 pub(crate) async fn stage_bytes_content_addressed(
     object_store: &ServerObjectStore,
     prefix: &str,
@@ -551,29 +616,15 @@ pub(crate) async fn stage_bytes_content_addressed(
         ShardlineHash::from_bytes(*digest.as_bytes()),
         u64::try_from(bytes.len())?,
     );
-    if matches!(
+    // The local byte writer already verifies retries and performs anchored,
+    // synced publication. Spooling first adds an unnecessary payload write.
+    shardline_storage::AsyncObjectStore::put_if_absent(
         object_store,
-        ServerObjectStore::S3(_) | ServerObjectStore::Blackhole
-    ) {
-        shardline_storage::AsyncObjectStore::put_if_absent(
-            object_store,
-            &key,
-            ObjectBody::from_slice(bytes),
-            &integrity,
-        )
-        .await?;
-        return Ok((key, integrity));
-    }
-    let temporary = tempfile::NamedTempFile::new()?;
-    tokio::fs::write(temporary.path(), bytes).await?;
-    let store = object_store.clone();
-    let path = temporary.path().to_path_buf();
-    let durable_key = key.clone();
-    tokio::task::spawn_blocking(move || {
-        store.put_content_addressed_file(&durable_key, &path, &integrity)
-    })
-    .await
-    .map_err(|error| ServerError::Io(std::io::Error::other(error)))??;
+        &key,
+        ObjectBody::from_slice(bytes),
+        &integrity,
+    )
+    .await?;
     Ok((key, integrity))
 }
 
@@ -825,6 +876,107 @@ mod tests {
     use crate::chunk_store::chunk_object_key;
     use crate::error::ObjectStoreError;
     use crate::object_store::ServerObjectStore;
+
+    #[tokio::test]
+    async fn local_byte_staging_replay_verifies_existing_content() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(root.path()).unwrap();
+        let bytes = b"durable upload part";
+        let (key, integrity) = super::stage_bytes_content_addressed(&store, "staging/test", bytes)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join(key.as_str())).unwrap(),
+            bytes
+        );
+        let replay = super::stage_bytes_content_addressed(&store, "staging/test", bytes)
+            .await
+            .unwrap();
+        assert_eq!(replay, (key.clone(), integrity));
+        // A matching key and length must never hide corrupted persisted bytes.
+        std::fs::write(root.path().join(key.as_str()), vec![0; bytes.len()]).unwrap();
+        assert!(
+            super::stage_bytes_content_addressed(&store, "staging/test", bytes)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(key.as_str())).unwrap(),
+            vec![0; bytes.len()]
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_local_parts_stream_open_files_without_scratch_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(root.path()).unwrap();
+        let bytes = b"durable-original";
+        let key = ObjectKey::parse(&format!(
+            "staging/resumable/s3/upload/1/{}",
+            blake3::hash(bytes).to_hex()
+        ))
+        .unwrap();
+        let path = root.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let part = shardline_index::ResumableSessionPart::new(
+            std::num::NonZeroU64::MIN,
+            std::num::NonZeroU64::MIN,
+            key.as_str().to_owned(),
+            bytes.len() as u64,
+            None,
+        );
+        let mut reader = super::s3_resumable_parts_reader(&store, std::slice::from_ref(&part))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut local_file = super::open_local_object_for_read(&store, &key, bytes.len() as u64)
+            .await
+            .unwrap()
+            .unwrap();
+        // The opened inode remains readable after its name is removed. No
+        // replacement lookup or temporary payload is needed during ingestion.
+        std::fs::remove_file(&path).unwrap();
+        let mut output = Vec::new();
+        while let Some(chunk) = reader.next_bytes().await.unwrap() {
+            output.extend_from_slice(&chunk);
+        }
+        assert_eq!(output, bytes);
+        let mut local_output = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut local_file, &mut local_output)
+            .await
+            .unwrap();
+        assert_eq!(local_output, bytes);
+
+        std::fs::write(&path, vec![0; bytes.len()]).unwrap();
+        let mut reader = super::s3_resumable_parts_reader(&store, std::slice::from_ref(&part))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut rejected = false;
+        loop {
+            match reader.next_bytes().await {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    rejected = true;
+                    break;
+                }
+            }
+        }
+        assert!(rejected, "same-length corruption must fail verification");
+        std::fs::write(&path, b"short").unwrap();
+        assert!(
+            super::open_local_object_for_read(&store, &key, bytes.len() as u64)
+                .await
+                .is_err()
+        );
+        assert!(
+            super::s3_resumable_parts_reader(&store, &[part])
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn durable_s3_parts_reject_same_length_corruption() {

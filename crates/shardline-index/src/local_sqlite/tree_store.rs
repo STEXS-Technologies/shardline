@@ -91,7 +91,10 @@ fn upsert_tree_entry_sql(
          DO UPDATE SET
             file_id = excluded.file_id,
             size_bytes = excluded.size_bytes,
-            updated_at_unix_seconds = excluded.updated_at_unix_seconds",
+            updated_at_unix_seconds = excluded.updated_at_unix_seconds
+         WHERE file_id != excluded.file_id
+            OR size_bytes != excluded.size_bytes
+            OR updated_at_unix_seconds != excluded.updated_at_unix_seconds",
         params![
             entry.provider,
             entry.owner,
@@ -232,7 +235,8 @@ fn upsert_revision_sql(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT (provider, owner, repo, revision)
          DO UPDATE SET
-            updated_at_unix_seconds = excluded.updated_at_unix_seconds",
+            updated_at_unix_seconds = excluded.updated_at_unix_seconds
+         WHERE updated_at_unix_seconds != excluded.updated_at_unix_seconds",
         params![
             rev.provider,
             rev.owner,
@@ -730,6 +734,87 @@ mod tests {
         assert!(first.created);
         let second = TreeStore::upsert_tree_entry(&store, &e).await.unwrap();
         assert!(!second.created);
+    }
+
+    #[tokio::test]
+    async fn identical_tree_and_revision_replays_skip_row_updates() {
+        let store = make_store();
+        store
+            .open_connection()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE tree_store_update_audit (table_name TEXT NOT NULL);
+                 CREATE TRIGGER audit_tree_entry_update AFTER UPDATE ON shardline_tree_entries
+                 BEGIN INSERT INTO tree_store_update_audit VALUES ('tree'); END;
+                 CREATE TRIGGER audit_revision_update AFTER UPDATE ON shardline_revisions
+                 BEGIN INSERT INTO tree_store_update_audit VALUES ('revision'); END;",
+            )
+            .unwrap();
+
+        let original = entry("main", "a.txt", &file_id(1), 10, 100);
+        assert!(
+            TreeStore::upsert_tree_entry(&store, &original)
+                .await
+                .unwrap()
+                .created
+        );
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &original)
+                .await
+                .unwrap()
+                .created
+        );
+        let updated = entry("main", "a.txt", &file_id(2), 20, 200);
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &updated)
+                .await
+                .unwrap()
+                .created
+        );
+
+        let revision = RevisionRecord {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: "main".to_owned(),
+            created_at_unix_seconds: 1,
+            updated_at_unix_seconds: 1,
+        };
+        assert!(TreeStore::upsert_revision(&store, &revision).await.unwrap());
+        assert!(!TreeStore::upsert_revision(&store, &revision).await.unwrap());
+        let refreshed = RevisionRecord {
+            updated_at_unix_seconds: 2,
+            ..revision
+        };
+        assert!(
+            !TreeStore::upsert_revision(&store, &refreshed)
+                .await
+                .unwrap()
+        );
+
+        let connection = store.open_connection().unwrap();
+        let tree_updates: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM tree_store_update_audit WHERE table_name = 'tree'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let revision_updates: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM tree_store_update_audit WHERE table_name = 'revision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tree_updates, 1,
+            "only changed tree metadata should be updated"
+        );
+        assert_eq!(
+            revision_updates, 1,
+            "only a changed revision timestamp should be updated"
+        );
     }
 
     #[tokio::test]

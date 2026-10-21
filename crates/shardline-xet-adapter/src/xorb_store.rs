@@ -9,10 +9,11 @@ use std::{
 
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ShardlineHash;
-use shardline_server_core::{ServerObjectStore, chunk_hash, read_full_object};
+#[cfg(test)]
+use shardline_server_core::read_full_object;
+use shardline_server_core::{ServerObjectStore, chunk_hash};
 use shardline_storage::{
-    AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore,
-    PutOutcome,
+    AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome,
 };
 use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer;
 
@@ -117,71 +118,28 @@ where
         return Ok(());
     };
 
-    // Try a cached listing of chunk hashes first.  Xorbs are immutable
-    // (content-addressed), so the cache never needs invalidation.
-    let cache_key = xorb_chunks_cache_key(xorb_hash_hex)?;
-    if let Ok(Some(cache_meta)) = ObjectStore::metadata(object_store, &cache_key)
-        && let Ok(cache_bytes) = read_full_object(object_store, &cache_key, cache_meta.length())
-    {
-        let body = String::from_utf8_lossy(&cache_bytes);
-        for line in body.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                visitor(trimmed.to_owned())?;
-            }
-        }
-        return Ok(());
-    }
-
-    let Some(metadata) = ObjectStore::metadata(object_store, object_key)? else {
+    // Persisted member sidecars are derived data without an authenticated leaf
+    // structure. Always validate the source container before exposing members.
+    let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
+    let Some((mut cursor, _length)) =
+        object_store.materialize_bounded_object_if_present(object_key, 0)?
+    else {
         return Ok(());
     };
-    let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let mut xorb_file = object_store
-        .materialize_object_to_tempfile(object_key, metadata.length())
-        .map_err(XetAdapterError::from)?;
-    let mut cursor = xorb_file.as_file_mut();
     let validated = validate_serialized_xorb(&mut cursor, expected_hash)?;
 
-    // Collect chunk hashes, call the visitor, and write the cache sidecar.
-    let mut chunk_hashes = Vec::new();
+    // Visit only fully validated container members.
     try_for_each_serialized_xorb_chunk_trusted(&mut cursor, &validated, |decoded_chunk| {
         let hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
-        visitor(hash_hex.clone())?;
-        chunk_hashes.push(hash_hex);
+        visitor(hash_hex)?;
         Ok(())
     })
     .map_err(map_xorb_visit_error)?;
 
-    // Persist the cache sidecar for future GC runs.
-    let cache_body = chunk_hashes.join("\n");
-    let integrity =
-        ObjectIntegrity::new(chunk_hash(cache_body.as_bytes()), cache_body.len() as u64);
-    ObjectStore::put_if_absent(
-        object_store,
-        &cache_key,
-        ObjectBody::from_bytes(cache_body.into_bytes().into()),
-        &integrity,
-    )
-    .ok();
-
     Ok(())
 }
 
-/// Cache key for a xorb's chunk-hash listing.
-/// Stored alongside the xorb as a lightweight sidecar so the GC can
-/// discover chunk references without re-parsing the xorb container.
-fn xorb_chunks_cache_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
-    shardline_server_core::validate_content_hash_with(hash_hex, || {
-        XetAdapterError::InvalidContentHash
-    })?;
-    let prefix = hash_hex
-        .get(..2)
-        .ok_or(XetAdapterError::InvalidContentHash)?;
-    ObjectKey::parse(&format!("_xorb_chunks/{prefix}/{hash_hex}")).map_err(map_object_key_error)
-}
-
-/// Extracts a xorb hash from a cache sidecar key (`_xorb_chunks/{prefix}/{hash}`).
+/// Extracts a Xorb hash from a legacy member-cache sidecar key.
 /// Returns `None` when the key does not match the cache-namespace pattern.
 ///
 /// # Errors
@@ -521,7 +479,7 @@ mod tests {
 
     use super::{
         canonicalize_uploaded_xorb, normalize_serialized_xorb, read_full_object,
-        validate_serialized_xorb, visit_stored_xorb_chunk_hashes, xorb_chunks_cache_key,
+        validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
         xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::error::XetAdapterError;
@@ -2121,7 +2079,7 @@ mod tests {
     }
 
     #[test]
-    fn visit_stored_xorb_chunk_hashes_cache_written_and_read() {
+    fn persisted_member_cache_cannot_hide_members_or_bypass_container_validation() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
         let raw = build_raw_xorb(3, ChunkSize::Fixed(128));
@@ -2130,47 +2088,64 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
         async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-
-        let xorb_key = xorb_object_key(&hash).unwrap();
-        let cache_key = xorb_chunks_cache_key(&hash).unwrap();
-
-        // First visit: parses the xorb and writes the cache sidecar.
-        let mut first_hashes = Vec::new();
-        visit_stored_xorb_chunk_hashes(&object_store, &xorb_key, |h| {
-            first_hashes.push(h);
+        let key = xorb_object_key(&hash).unwrap();
+        let cache_key =
+            shardline_storage::ObjectKey::parse(&format!("_xorb_chunks/{}/{}", &hash[..2], hash))
+                .unwrap();
+        let mut expected = Vec::new();
+        visit_stored_xorb_chunk_hashes(&object_store, &key, |hash| {
+            expected.push(hash);
             Ok(())
         })
         .unwrap();
-        assert_eq!(first_hashes.len(), 3, "xorb has 3 chunks");
-
-        // Verify the cache sidecar was written.
-        let cache_meta = ObjectStore::metadata(&object_store, &cache_key)
-            .unwrap()
-            .expect("cache sidecar must exist");
-        assert!(cache_meta.length() > 0, "cache file non-empty");
-
-        // Second visit: reads from cache instead of re-parsing the xorb.
-        let mut second_hashes = Vec::new();
-        visit_stored_xorb_chunk_hashes(&object_store, &xorb_key, |h| {
-            second_hashes.push(h);
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(second_hashes.len(), 3, "cached visit returns 3 hashes");
-        assert_eq!(
-            first_hashes, second_hashes,
-            "cached hashes match xorb hashes"
+        assert_eq!(expected.len(), 3);
+        assert!(
+            object_store.metadata(&cache_key).unwrap().is_none(),
+            "a scan must not write an unverified sidecar"
         );
-
-        // Verify the cache file contains the expected hash strings.
-        let cache_bytes = read_full_object(&object_store, &cache_key, cache_meta.length()).unwrap();
-        let cache_text = String::from_utf8(cache_bytes).unwrap();
-        for hash in &first_hashes {
-            assert!(
-                cache_text.contains(hash.as_str()),
-                "cache must contain chunk hash {hash}"
-            );
+        for cache in [
+            Vec::new(),
+            expected.first().unwrap().as_bytes().to_vec(),
+            b"invalid cache".to_vec(),
+        ] {
+            object_store
+                .put_overwrite(
+                    &cache_key,
+                    ObjectBody::Borrowed(&cache),
+                    &ObjectIntegrity::new(
+                        shardline_server_core::chunk_hash(&cache),
+                        cache.len() as u64,
+                    ),
+                )
+                .unwrap();
+            let mut actual = Vec::new();
+            visit_stored_xorb_chunk_hashes(&object_store, &key, |hash| {
+                actual.push(hash);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(actual, expected);
         }
+        let corrupt = b"invalid container";
+        object_store
+            .put_overwrite(
+                &key,
+                ObjectBody::Borrowed(corrupt),
+                &ObjectIntegrity::new(
+                    shardline_server_core::chunk_hash(corrupt),
+                    corrupt.len() as u64,
+                ),
+            )
+            .unwrap();
+        let mut visited = 0;
+        assert!(
+            visit_stored_xorb_chunk_hashes(&object_store, &key, |_hash| {
+                visited += 1;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(visited, 0);
     }
 
     // ── store_uploaded_xorb with LZ4 and footer ─────────────────────────

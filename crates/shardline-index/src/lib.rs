@@ -114,7 +114,7 @@ pub use reconstruction::{FileReconstruction, ReconstructionTerm};
 pub use record::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout, RecordMutation,
     RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope, StorageRepresentation,
-    StoredRecord,
+    StoredRecord, XetFileIdentity,
 };
 pub use resource_fence::{ResourceLockDomain, ResourceLockKey};
 pub use resumable_session::{

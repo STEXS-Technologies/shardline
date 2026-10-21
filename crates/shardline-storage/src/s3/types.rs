@@ -138,18 +138,18 @@ pub(crate) fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreEr
 }
 
 /// Returns `true` if `key` matches one of the EXACT temp-upload grammars this
-/// adapter generates — never a loose substring heuristic, so a user object
+/// adapter generates or generated in earlier versions — never a loose substring heuristic, so a user object
 /// whose key merely contains `.tmp.<digits>` (dots are legal in S3 keys, e.g.
 /// `data.tmp.1`) is not shadowed from listings or GC enumeration (F-49).
 ///
-/// The generated grammars are both inside the RESERVED `__tmp/` namespace that
+/// Both grammars are inside the RESERVED `__tmp/` namespace that
 /// user keys can never reach:
 /// (a) `__tmp/shardline-overwrite/<key-digest>.<counter>.<pid>.<nanos>` — the
-///     `put_overwrite` and content-addressed multipart temp key
+///     `put_overwrite` temp key
 ///     ([`temp_key_for`]), where the key digest is 64 lowercase hex chars and
 ///     the three trailing groups are decimal digit groups; and
 /// (b) `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>` — the
-///     stream-upload temp path ([`temporary_upload_location`]).
+///     legacy file-stream-upload temp path, retained for cleanup after upgrades.
 ///
 /// Because the reserved prefix is the discriminator (F-80), the numeric-range
 /// heuristics of the old `<base>.tmp.<counter>.<pid>.<nanos>` grammar are

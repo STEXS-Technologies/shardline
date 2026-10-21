@@ -77,7 +77,8 @@ pub use auth_capability::{AuthorizedRepository, scope_allows};
 
 // Object store
 pub use object_store::{
-    OpsRecordKind, OpsRecordStore, ServerObjectStore, ServerObjectStoreError, read_full_object,
+    BoundedObjectReadError, MaterializedObject, OpsRecordKind, OpsRecordStore, ServerObjectStore,
+    ServerObjectStoreError, read_full_object,
 };
 
 // Validation (leftover functions that depend on server_core types)

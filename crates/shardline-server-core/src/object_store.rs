@@ -1,4 +1,4 @@
-use std::io::{Error as IoError, Read};
+use std::io::{Cursor, Error as IoError, Read, Seek, SeekFrom, Write};
 use std::num::TryFromIntError;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,129 @@ pub enum ServerObjectStoreError {
     /// Numeric conversion exceeded supported bounds.
     #[error("numeric conversion exceeded supported bounds")]
     NumericConversion(#[from] TryFromIntError),
+}
+
+/// Failure from a bounded object read, kept separate from the established
+/// object-store error enum so adding this API does not break exhaustive matches.
+#[derive(Debug, Error)]
+pub enum BoundedObjectReadError {
+    /// The object exceeds the requested in-memory limit.
+    #[error("object exceeds the configured in-memory read limit")]
+    ObjectTooLarge,
+    /// Storage access or response verification failed.
+    #[error(transparent)]
+    Store(#[from] ServerObjectStoreError),
+}
+
+/// An object materialized for random-access validation.
+///
+/// Small S3 objects can stay in memory; larger objects use a streamed temporary
+/// file. Local objects retain their existing inode and require no copy.
+pub enum MaterializedObject {
+    /// A local immutable object file.
+    Local(std::fs::File),
+    /// A streamed S3 object that exceeded the caller's in-memory limit.
+    Temporary(NamedTempFile),
+    /// A bounded S3 object read directly into memory.
+    Memory(Cursor<Vec<u8>>),
+}
+
+impl Read for MaterializedObject {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, IoError> {
+        match self {
+            Self::Local(file) => file.read(buffer),
+            Self::Temporary(file) => file.as_file_mut().read(buffer),
+            Self::Memory(cursor) => cursor.read(buffer),
+        }
+    }
+}
+
+impl Seek for MaterializedObject {
+    fn seek(&mut self, position: SeekFrom) -> Result<u64, IoError> {
+        match self {
+            Self::Local(file) => file.seek(position),
+            Self::Temporary(file) => file.as_file_mut().seek(position),
+            Self::Memory(cursor) => cursor.seek(position),
+        }
+    }
+}
+
+/// Accumulates a bounded S3 response in memory and creates a scratch file only
+/// if the response crosses the in-memory limit. This keeps eligible reads
+/// independent of temporary-directory availability.
+struct BoundedObjectSink {
+    maximum_memory_length: usize,
+    memory: Vec<u8>,
+    temporary: Option<NamedTempFile>,
+}
+
+impl BoundedObjectSink {
+    fn new(maximum_memory_length: u64) -> Result<Self, ServerObjectStoreError> {
+        Ok(Self {
+            maximum_memory_length: usize::try_from(maximum_memory_length)?,
+            memory: Vec::new(),
+            temporary: None,
+        })
+    }
+
+    fn spill_to_temporary(&mut self) -> Result<(), IoError> {
+        let mut temporary = NamedTempFile::new()?;
+        temporary.write_all(&self.memory)?;
+        self.memory.clear();
+        self.temporary = Some(temporary);
+        Ok(())
+    }
+
+    fn into_object(self) -> Result<MaterializedObject, IoError> {
+        match self.temporary {
+            Some(mut temporary) => {
+                temporary.as_file_mut().seek(SeekFrom::Start(0))?;
+                Ok(MaterializedObject::Temporary(temporary))
+            }
+            None => Ok(MaterializedObject::Memory(Cursor::new(self.memory))),
+        }
+    }
+}
+
+impl Write for BoundedObjectSink {
+    fn write(&mut self, buffer: &[u8]) -> Result<usize, IoError> {
+        if let Some(temporary) = &mut self.temporary {
+            return temporary.as_file_mut().write(buffer);
+        }
+        let next_length = self
+            .memory
+            .len()
+            .checked_add(buffer.len())
+            .ok_or_else(|| IoError::other("bounded object length overflow"))?;
+        if next_length <= self.maximum_memory_length {
+            if self.memory.capacity() < next_length {
+                let target_capacity = next_length
+                    .max(self.memory.capacity().saturating_mul(2).max(4096))
+                    .min(self.maximum_memory_length);
+                let additional = target_capacity.saturating_sub(self.memory.len());
+                self.memory.try_reserve_exact(additional).map_err(|error| {
+                    IoError::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        format!("failed to reserve bounded object memory: {error}"),
+                    )
+                })?;
+            }
+            self.memory.extend_from_slice(buffer);
+            return Ok(buffer.len());
+        }
+        self.spill_to_temporary()?;
+        self.temporary
+            .as_mut()
+            .ok_or_else(|| IoError::other("bounded object spill was not created"))?
+            .as_file_mut()
+            .write(buffer)
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        self.temporary
+            .as_mut()
+            .map_or(Ok(()), |temporary| temporary.as_file_mut().flush())
+    }
 }
 
 /// Unified object-store backend that delegates to local, S3, or blackhole storage.
@@ -238,6 +361,84 @@ impl ServerObjectStore {
             Self::Blackhole => return Err(ServerObjectStoreError::NotFound),
         }
         Ok(output)
+    }
+
+    /// Materializes an object into a temporary file when it exists, returning
+    /// the length observed with the object bytes. For S3 this uses one full GET
+    /// instead of a HEAD followed by a ranged GET.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage access, length verification, or temporary
+    /// file I/O fails.
+    pub fn materialize_object_to_tempfile_if_present(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<Option<(NamedTempFile, u64)>, ServerObjectStoreError> {
+        let mut output = NamedTempFile::new().map_err(ServerObjectStoreError::Io)?;
+        match self {
+            Self::Local(store) => {
+                let Some(metadata) = ObjectStore::metadata(store, object_key)? else {
+                    return Ok(None);
+                };
+                let mut input = store.open_object_file(object_key)?;
+                let length = input.metadata()?.len();
+                if length != metadata.length() {
+                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+                }
+                std::io::copy(&mut input, output.as_file_mut())
+                    .map_err(ServerObjectStoreError::Io)?;
+                Ok(Some((output, length)))
+            }
+            Self::S3(store) => store
+                .copy_object_to_file_if_present(object_key, output.as_file_mut())?
+                .map(|length| (output, length))
+                .map_or(Ok(None), |object| Ok(Some(object))),
+            Self::Blackhole => Ok(None),
+        }
+    }
+
+    /// Materializes an object for random-access validation while avoiding
+    /// scratch-file data writes for small S3 objects. The S3 response itself
+    /// chooses memory or file output from its length, so large objects are not
+    /// probed or downloaded twice. Local objects remain open at their durable
+    /// path without a copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when object access, response-length validation, or
+    /// temporary-file I/O fails.
+    pub fn materialize_bounded_object_if_present(
+        &self,
+        object_key: &ObjectKey,
+        maximum_memory_length: u64,
+    ) -> Result<Option<(MaterializedObject, u64)>, ServerObjectStoreError> {
+        match self {
+            Self::Local(store) => {
+                let Some(metadata) = ObjectStore::metadata(store, object_key)? else {
+                    return Ok(None);
+                };
+                let file = store.open_object_file(object_key)?;
+                let length = file.metadata()?.len();
+                if length != metadata.length() {
+                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+                }
+                Ok(Some((MaterializedObject::Local(file), length)))
+            }
+            Self::S3(store) => {
+                let mut output = BoundedObjectSink::new(maximum_memory_length)?;
+                let Some(length) =
+                    store.copy_object_to_writer_if_present(object_key, &mut output)?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((
+                    output.into_object().map_err(ServerObjectStoreError::Io)?,
+                    length,
+                )))
+            }
+            Self::Blackhole => Ok(None),
+        }
     }
 
     /// Creates a local filesystem object store rooted at the given path.
@@ -445,6 +646,51 @@ impl ServerObjectStore {
         }
     }
 
+    /// Opens an existing local object for a streaming duplicate check.
+    /// Remote and blackhole stores return `None` so callers retain their usual
+    /// staging and publication path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a local object exists but cannot be safely opened.
+    #[cfg(unix)]
+    pub fn open_local_object_file_if_present(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<Option<std::fs::File>, ServerObjectStoreError> {
+        match self {
+            Self::Local(store) => store
+                .open_object_file_if_present(object_key)
+                .map_err(Into::into),
+            Self::S3(_) | Self::Blackhole => Ok(None),
+        }
+    }
+
+    /// Confirms the pinned object is still published at `object_key` and
+    /// synchronizes its bytes and parent directory before duplicate
+    /// acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the object was removed or replaced, or if the local
+    /// filesystem could not establish durability.
+    #[cfg(unix)]
+    pub fn verify_local_object_file_is_durable(
+        &self,
+        object_key: &ObjectKey,
+        pinned: &std::fs::File,
+    ) -> Result<(), ServerObjectStoreError> {
+        match self {
+            Self::Local(store) => store
+                .verify_open_object_is_still_durable(object_key, pinned)
+                .map_err(Into::into),
+            Self::S3(_) | Self::Blackhole => Err(ServerObjectStoreError::Io(IoError::new(
+                std::io::ErrorKind::Unsupported,
+                "durable pinned-object verification requires local storage",
+            ))),
+        }
+    }
+
     /// Returns the backend name for this object store.
     #[must_use]
     pub const fn backend_name(&self) -> &'static str {
@@ -562,6 +808,60 @@ impl ServerObjectStore {
         let range = ByteRange::new(0, end).map_err(|_error| ServerObjectStoreError::Overflow)?;
         ObjectStore::read_range(self, object_key, range)
     }
+
+    /// Reads a bounded object when present and returns the length observed with
+    /// the bytes. For S3 this is one full GET instead of a HEAD followed by a
+    /// ranged GET.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage access or length verification fails, or
+    /// when the object exceeds `maximum_length`.
+    pub fn read_object_if_present(
+        &self,
+        object_key: &ObjectKey,
+        maximum_length: u64,
+    ) -> Result<Option<(Vec<u8>, u64)>, BoundedObjectReadError> {
+        match self {
+            Self::Local(store) => {
+                let Some(metadata) = ObjectStore::metadata(store, object_key)
+                    .map_err(ServerObjectStoreError::from)?
+                else {
+                    return Ok(None);
+                };
+                let file = store
+                    .open_object_file(object_key)
+                    .map_err(ServerObjectStoreError::from)?;
+                let length = file.metadata().map_err(ServerObjectStoreError::from)?.len();
+                if length != metadata.length() {
+                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch.into());
+                }
+                if length > maximum_length {
+                    return Err(BoundedObjectReadError::ObjectTooLarge);
+                }
+                let capacity = usize::try_from(length).map_err(ServerObjectStoreError::from)?;
+                let mut output = Vec::with_capacity(capacity);
+                let mut limited = file.take(length);
+                Read::read_to_end(&mut limited, &mut output)
+                    .map_err(ServerObjectStoreError::from)?;
+                if output.len() != capacity {
+                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch.into());
+                }
+                Ok(Some((output, length)))
+            }
+            Self::S3(store) => store
+                .read_object_if_present(object_key, maximum_length)
+                .map_err(|error| match error {
+                    shardline_storage::S3ObjectReadError::ObjectTooLarge => {
+                        BoundedObjectReadError::ObjectTooLarge
+                    }
+                    shardline_storage::S3ObjectReadError::Store(error) => {
+                        BoundedObjectReadError::Store(ServerObjectStoreError::S3(error))
+                    }
+                }),
+            Self::Blackhole => Ok(None),
+        }
+    }
 }
 
 /// Reads the full contents of an object from the store.
@@ -657,5 +957,40 @@ impl OpsRecordStore for PostgresRecordStore {
         }
 
         locator.content_hash().map(ToOwned::to_owned)
+    }
+}
+
+#[cfg(test)]
+mod bounded_object_sink_tests {
+    use std::io::{Read, Write};
+
+    use super::{BoundedObjectSink, MaterializedObject};
+
+    #[test]
+    fn small_object_sink_never_creates_a_temporary_file() {
+        let mut sink = BoundedObjectSink::new(32).unwrap();
+        sink.write_all(b"small validated object").unwrap();
+
+        assert!(sink.temporary.is_none());
+        let mut object = sink.into_object().unwrap();
+        assert!(matches!(object, MaterializedObject::Memory(_)));
+        let mut actual = Vec::new();
+        object.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, b"small validated object");
+    }
+
+    #[test]
+    fn object_sink_spills_at_the_limit_and_preserves_all_bytes() {
+        let mut sink = BoundedObjectSink::new(4).unwrap();
+        sink.write_all(b"abcd").unwrap();
+        assert!(sink.temporary.is_none());
+        sink.write_all(b"ef").unwrap();
+        assert!(sink.temporary.is_some());
+
+        let mut object = sink.into_object().unwrap();
+        assert!(matches!(object, MaterializedObject::Temporary(_)));
+        let mut actual = Vec::new();
+        object.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, b"abcdef");
     }
 }

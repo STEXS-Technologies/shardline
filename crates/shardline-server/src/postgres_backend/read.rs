@@ -20,7 +20,7 @@ use crate::{
         object_byte_range_stream, object_byte_stream, validated_xorb_byte_range_stream,
     },
     error::IndexError,
-    object_store::{read_full_object, reconstruct_file_record_bytes, visit_object_prefix},
+    object_store::{reconstruct_file_record_bytes, visit_object_prefix},
     record_store::parse_stored_file_record_bytes,
     validation::{ensure_directory, validate_content_hash, validate_identifier},
     xet_adapter::{
@@ -314,16 +314,7 @@ impl super::PostgresBackend {
     pub async fn read_chunk(&self, hash_hex: &str) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
         let object_key = chunk_object_key(hash_hex)?;
-        let metadata = AsyncObjectStore::metadata(&object_store, &object_key).await?;
-        let Some(metadata) = metadata else {
-            return Err(ServerError::NotFound);
-        };
-
-        task::spawn_blocking(move || {
-            read_full_object(&object_store, &object_key, metadata.length())
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?
+        crate::object_store::read_small_object(object_store, object_key).await
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
@@ -336,16 +327,7 @@ impl super::PostgresBackend {
 
     pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
-        let metadata = AsyncObjectStore::metadata(&object_store, object_key).await?;
-        let Some(metadata) = metadata else {
-            return Err(ServerError::NotFound);
-        };
-        let object_key = object_key.clone();
-        task::spawn_blocking(move || {
-            read_full_object(&object_store, &object_key, metadata.length())
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?
+        crate::object_store::read_small_object(object_store, object_key.clone()).await
     }
 
     pub(crate) async fn read_object_stream(
@@ -805,6 +787,7 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::IntegerOutOfRange(_)
         | PostgresMetadataStoreError::Reliability(_)
         | PostgresMetadataStoreError::ReliabilityEventConflict(_)
+        | PostgresMetadataStoreError::XetFileIdentityConflict
         | PostgresMetadataStoreError::InvalidRecordKind
         | PostgresMetadataStoreError::InvalidOciObjectKind(_)
         | PostgresMetadataStoreError::InvalidRepoType(_)

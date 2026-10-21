@@ -223,25 +223,29 @@ where
         report.scanned_retained_shards = checked_increment(report.scanned_retained_shards)?;
         let shard_key = metadata.key().clone();
         let shard_location = shard_key.as_str().to_owned();
-        let mut shard_file = object_store
-            .materialize_object_to_tempfile(&shard_key, metadata.length())
-            .map_err(RebuildError::from)?;
-        let chunk_hashes = match retained_shard_chunk_hashes_from_reader(
-            shard_file.as_file_mut(),
-            shard_metadata_limits,
-        ) {
-            Ok(chunk_hashes) => chunk_hashes,
-            Err(XetAdapterError::InvalidSerializedShard(detail)) => {
-                push_issue(
-                    report,
-                    IndexRebuildIssueKind::InvalidRetainedShard,
-                    shard_location,
-                    IndexRebuildIssueDetail::InvalidRetainedShard(detail),
-                )?;
-                return Ok(());
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let (mut shard_reader, length) = object_store
+            .materialize_bounded_object_if_present(&shard_key, 0)?
+            .ok_or(shardline_server_core::ServerObjectStoreError::NotFound)?;
+        if length != metadata.length() {
+            return Err(
+                shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch.into(),
+            );
+        }
+        let chunk_hashes =
+            match retained_shard_chunk_hashes_from_reader(&mut shard_reader, shard_metadata_limits)
+            {
+                Ok(chunk_hashes) => chunk_hashes,
+                Err(XetAdapterError::InvalidSerializedShard(detail)) => {
+                    push_issue(
+                        report,
+                        IndexRebuildIssueKind::InvalidRetainedShard,
+                        shard_location,
+                        IndexRebuildIssueDetail::InvalidRetainedShard(detail),
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
 
         for chunk_hash_hex in chunk_hashes {
             let mapping =

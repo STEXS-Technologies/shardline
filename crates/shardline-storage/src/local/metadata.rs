@@ -36,12 +36,18 @@ pub fn ensure_parent_directories_are_not_symlinked(
     root: &Path,
     path: &Path,
 ) -> Result<(), LocalObjectStoreError> {
-    ensure_directory_path_components_are_not_symlinked(root)?;
     let parent = if path == root {
         root
     } else {
         path.parent().unwrap_or(root)
     };
+    // For object paths inside the root, validating the parent already checks
+    // every root component. Do not walk that same prefix twice. Keep the
+    // separate root validation for callers supplying an unrelated parent.
+    // No validation result is cached across operations or filesystem changes.
+    if !parent.starts_with(root) {
+        ensure_directory_path_components_are_not_symlinked(root)?;
+    }
     ensure_directory_path_components_are_not_symlinked(parent)?;
 
     Ok(())

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows};
@@ -11,8 +9,7 @@ use crate::{
     },
 };
 use shardline_reliability::{
-    OciTagLifecycleEvent, OperationKind, SnapshotEvidence, persisted_event_sequence,
-    verify_and_append_snapshot_transition, verify_persisted_merkle_commit_with_previous,
+    OciTagLifecycleEvent, OperationKind, SnapshotEvidence, verify_and_append_snapshot_transition,
     verify_snapshot_event,
 };
 
@@ -101,89 +98,17 @@ fn verify_oci_tag_listing_evidence_chunk(
         .iter()
         .map(|operation| operation.operation_id.clone())
         .collect::<Vec<_>>();
-    let placeholders = (0..operation_ids.len())
-        .map(|index| format!("?{}", index.saturating_add(2)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT current.operation_id, current.sequence, current.event_json,
-                current.merkle_commit_json,
-                CASE WHEN EXISTS (
-                    SELECT 1 FROM shardline_reliability_events AS missing
-                    WHERE missing.operation_kind = ?1
-                      AND missing.operation_id = current.operation_id
-                      AND missing.sequence < current.sequence
-                      AND missing.merkle_commit_json IS NULL
-                ) THEN '{{\"missing_previous_merkle_commit\":true}}' ELSE (
-                    SELECT previous.merkle_commit_json
-                    FROM shardline_reliability_events AS previous
-                    WHERE previous.operation_kind = ?1
-                      AND previous.operation_id = current.operation_id
-                      AND previous.sequence < current.sequence
-                    ORDER BY previous.sequence DESC LIMIT 1
-                ) END AS previous_merkle_json
-         FROM shardline_reliability_events AS current
-         WHERE current.operation_kind = ?1
-           AND current.operation_id IN ({placeholders})
-           AND current.sequence = (
-               SELECT MAX(latest.sequence)
-               FROM shardline_reliability_events AS latest
-               WHERE latest.operation_kind = ?1
-                 AND latest.operation_id = current.operation_id
-           )"
-    );
-    let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
-    parameters.push(OperationKind::OciTag.as_str().to_owned());
-    parameters.extend(operation_ids.iter().cloned());
-    let mut statement = transaction.prepare(&sql)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-        ))
-    })?;
-    let mut latest = HashMap::with_capacity(values.len());
-    for row in rows {
-        let (operation_id, sequence, event_json, merkle_json, previous_json) = row?;
-        latest.insert(
-            operation_id,
-            (
-                sequence,
-                serde_json::from_str::<serde_json::Value>(&event_json)?,
-                merkle_json
-                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
-                    .transpose()?,
-                previous_json
-                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
-                    .transpose()?,
-            ),
-        );
-    }
+    let mut latest = super::helpers::load_latest_verified_event_json_batch(
+        transaction,
+        OperationKind::OciTag,
+        &operation_ids,
+    )?;
     for (value, operation) in values.iter().zip(operations) {
-        let Some((row_sequence, event_json, merkle_json, previous_json)) =
-            latest.remove(&operation.operation_id)
-        else {
+        let Some(event_json) = latest.remove(&operation.operation_id) else {
             return Err(LocalIndexStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         };
-        let event_sequence = persisted_event_sequence(OperationKind::OciTag, event_json.clone())?;
-        if u64::try_from(row_sequence).ok() != Some(event_sequence) {
-            return Err(LocalIndexStoreError::Reliability(
-                shardline_reliability::ReliabilityError::Merkle(
-                    "OCI tag listing evidence sequence mismatch".into(),
-                ),
-            ));
-        }
-        verify_persisted_merkle_commit_with_previous(
-            OperationKind::OciTag,
-            event_json.clone(),
-            merkle_json,
-            previous_json,
-        )?;
         let event: OciTagLifecycleEvent = serde_json::from_value(event_json)?;
         let expected = oci_tag_snapshot(
             &value.scope_namespace,
@@ -223,7 +148,8 @@ impl OciTagStore for LocalIndexStore {
                     "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                      VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT (scope_namespace, repository, tag)
-                     DO UPDATE SET digest_hex = excluded.digest_hex",
+                     DO UPDATE SET digest_hex = excluded.digest_hex
+                     WHERE digest_hex != excluded.digest_hex",
                     params![
                         entry.scope_namespace,
                         entry.repository,
@@ -515,6 +441,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identical_oci_tag_replay_keeps_evidence_without_rewriting_tag_row() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        store
+            .open_connection()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE oci_tag_update_audit (tag TEXT NOT NULL);
+                 CREATE TRIGGER audit_oci_tag_update AFTER UPDATE ON shardline_oci_tags
+                 WHEN OLD.scope_namespace = 'oci-local-test'
+                 BEGIN INSERT INTO oci_tag_update_audit VALUES (NEW.tag); END;",
+            )
+            .unwrap();
+
+        let original = entry("latest", &"a".repeat(64));
+        store.upsert_oci_tag(&original).await.unwrap();
+        let operation = oci_tag_snapshot(
+            &original.scope_namespace,
+            &original.repository,
+            &original.tag,
+            Some(original.digest_hex.clone()),
+        )
+        .unwrap()
+        .evidence_operation()
+        .unwrap();
+        let event_count = || {
+            let connection = store.open_connection().unwrap();
+            connection
+                .query_row(
+                    "SELECT count(*) FROM shardline_reliability_events
+                     WHERE operation_kind = ?1 AND operation_id = ?2",
+                    rusqlite::params![operation.kind.as_str(), operation.operation_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let before_replay_events = event_count();
+        store.upsert_oci_tag(&original).await.unwrap();
+        assert_eq!(
+            event_count(),
+            before_replay_events + 1,
+            "the idempotent operation must still append lifecycle evidence"
+        );
+        assert_eq!(
+            store
+                .open_connection()
+                .unwrap()
+                .query_row("SELECT count(*) FROM oci_tag_update_audit", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0,
+            "identical digest must not rewrite the materialized tag row"
+        );
+        assert_eq!(
+            store
+                .oci_tag("oci-local-test", "team/assets", "latest")
+                .await
+                .unwrap(),
+            Some(original.clone()),
+            "the materialized state and appended evidence still verify"
+        );
+
+        let changed = entry("latest", &"b".repeat(64));
+        store.upsert_oci_tag(&changed).await.unwrap();
+        assert_eq!(
+            store
+                .open_connection()
+                .unwrap()
+                .query_row("SELECT count(*) FROM oci_tag_update_audit", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            1,
+            "a changed digest must still update the materialized tag row"
+        );
+    }
+
+    #[tokio::test]
     async fn local_oci_tag_read_rejects_tampered_evidence() {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalIndexStore::new(storage.path_buf()).unwrap();
@@ -763,9 +770,12 @@ mod tests {
             let error = verify_oci_tag_listing_evidence(&transaction, &values)
                 .expect_err("late corrupt evidence must abort the complete listing");
             if sql.contains("SET sequence=3") {
-                assert!(
-                    format!("{error:?}").contains("OCI tag listing evidence sequence mismatch")
-                );
+                assert!(matches!(
+                    error,
+                    LocalIndexStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::Merkle(_)
+                    )
+                ));
             }
             transaction
                 .execute_batch("ROLLBACK TO corruption; RELEASE corruption")

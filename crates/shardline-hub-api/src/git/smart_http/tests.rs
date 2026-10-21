@@ -264,11 +264,38 @@ fn is_valid_refname_valid() {
     assert!(is_valid_refname("refs/heads/feature/foo"));
     assert!(is_valid_refname("refs/heads/feature/foo/bar"));
     assert!(is_valid_refname("refs/pull/42/head"));
+    assert!(is_valid_refname("refs/heads/foo./bar"));
+    assert!(is_valid_refname("refs/heads/@"));
 }
 
 #[test]
 fn is_valid_refname_empty() {
     assert!(!is_valid_refname(""));
+}
+
+#[test]
+fn is_valid_refname_rejects_git_reserved_spellings() {
+    for reference in [
+        "refs/heads/a..b",
+        "refs/heads/.hidden",
+        "refs/heads/a.lock",
+        "refs/heads/a.",
+        "refs/heads/a//b",
+        "refs/heads/a/",
+        "refs/heads/a@{b",
+        "refs/heads/a~b",
+        "refs/heads/a^b",
+        "refs/heads/a:b",
+        "refs/heads/a?b",
+        "refs/heads/a*b",
+        "refs/heads/a[b",
+        "refs/heads/a\\b",
+    ] {
+        assert!(
+            !is_valid_refname(reference),
+            "invalid Git ref accepted: {reference}"
+        );
+    }
 }
 
 #[test]

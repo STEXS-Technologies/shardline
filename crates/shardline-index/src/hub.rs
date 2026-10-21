@@ -504,6 +504,18 @@ pub trait HubStore: Send + Sync {
     /// Returns an error when the storage backend operation fails.
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error>;
 
+    /// Looks up immutable revision metadata within one repository.
+    /// Built-in stores use an indexed lookup; custom stores retain a compatible default.
+    ///
+    /// # Errors
+    /// Returns an error when metadata storage fails.
+    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, Self::Error> {
+        Ok(self
+            .list_revisions(repo_id)?
+            .into_iter()
+            .find(|revision| revision.sha == sha))
+    }
+
     /// Lists revisions only when the complete result fits `limit`; `None` means overflow.
     ///
     /// Built-in adapters apply the ceiling in SQL before row decoding. Custom
@@ -772,6 +784,11 @@ trait ErasedHubStore: Send + Sync {
         &self,
         repo_id: &str,
     ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
     fn list_revisions_bounded(
         &self,
         repo_id: &str,
@@ -858,6 +875,14 @@ trait ErasedHubStore: Send + Sync {
 }
 
 impl<T: HubStore> ErasedHubStore for T {
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_revision(self, repo_id, sha)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
     fn create_repo(
         &self,
         repo_type: HubRepoType,
@@ -1129,6 +1154,17 @@ impl<T: HubStore> ErasedHubStore for T {
 }
 
 impl BoxedHubStore {
+    /// Reads one immutable, repository-scoped revision without listing history.
+    ///
+    /// # Errors
+    /// Returns an error on metadata storage failure.
+    pub fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.get_revision(repo_id, sha)
+    }
     /// Creates a new `BoxedHubStore` from any `HubStore` implementation.
     pub fn new(
         store: impl HubStore<Error = Box<dyn std::error::Error + Send + Sync>> + 'static,
@@ -1512,6 +1548,13 @@ impl<T: HubStore> ErasedHubStore for ErasedAdapter<T>
 where
     T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_revision(&self.0, repo_id, sha).map_err(Into::into)
+    }
     fn create_repo(
         &self,
         repo_type: HubRepoType,

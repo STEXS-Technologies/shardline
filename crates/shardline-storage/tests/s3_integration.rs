@@ -837,6 +837,62 @@ async fn minio_put_overwrite_integrity_rejects_bad_hash() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn minio_direct_file_upload_checks_empty_boundaries_and_replays() {
+    use shardline_protocol::ByteRange;
+    use shardline_storage::S3ObjectStoreError;
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let store =
+        S3ObjectStore::new(s3_config(&stack, Some("direct-file-boundaries")).unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("upload");
+    for length in [
+        0,
+        1,
+        8 * 1024 * 1024,
+        8 * 1024 * 1024 + 1,
+        32 * 1024 * 1024 + 17,
+    ] {
+        let content = vec![0x5a; length];
+        std::fs::write(&file, &content).unwrap();
+        let integrity = ObjectIntegrity::new(chunk_hash(&content), length as u64);
+        let key = ObjectKey::parse(&format!("file-{length}")).unwrap();
+        assert_eq!(
+            store.put_file_if_absent(&key, &file, &integrity).unwrap(),
+            PutOutcome::Inserted
+        );
+        assert_eq!(
+            store.metadata(&key).unwrap().unwrap().length(),
+            length as u64
+        );
+        if length != 0 {
+            let range = ByteRange::new(0, length as u64 - 1).unwrap();
+            assert_eq!(store.read_range(&key, range).unwrap(), content);
+        }
+        assert_eq!(
+            store
+                .put_content_addressed_file(&key, &file, &integrity)
+                .unwrap(),
+            PutOutcome::AlreadyExists
+        );
+        if length != 0 {
+            let mut changed = content;
+            *changed.first_mut().unwrap() = 0;
+            std::fs::write(&file, &changed).unwrap();
+            let changed_integrity = ObjectIntegrity::new(chunk_hash(&changed), length as u64);
+            assert!(matches!(
+                store.put_file_if_absent(&key, &file, &changed_integrity),
+                Err(S3ObjectStoreError::ExistingObjectConflict)
+            ));
+        }
+        store.delete_if_present(&key).unwrap();
+    }
+    eprintln!("MinIO direct file uploads verified through five-part and empty-object boundaries");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_content_addressed_upload_roundtrip() {
     let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");

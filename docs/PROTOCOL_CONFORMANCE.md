@@ -17,6 +17,19 @@ Primary external references:
 
 ## Required CAS Endpoints
 
+### `POST /v1/reconstructions`
+
+Accepts the Xet CAS batch-reconstruction JSON request (`[{"prefix":"default","hash":"…"}]`)
+and returns the same `files` response shape as the legacy query-string batch route. Unknown
+file IDs are omitted. The request is bounded by the configured body and item-count limits.
+The existing `GET /v1/reconstructions?...` form remains available for older clients.
+
+Requirements:
+- Require read scope.
+- Validate every prefix and file hash before lookup.
+- Deduplicate repeated file IDs within one request.
+- Preserve the same repository scoping and reconstruction response as the single-file route.
+
 ### `GET /v1/reconstructions/{file_id}`
 
 Returns reconstruction terms and fetch information for a file.

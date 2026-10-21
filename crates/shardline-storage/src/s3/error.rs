@@ -54,3 +54,14 @@ pub enum S3ObjectStoreError {
     #[error("s3 object store operation failed")]
     External(#[from] ExternalObjectStoreError),
 }
+
+/// Failure from a bounded in-memory S3 object read.
+#[derive(Debug, Error)]
+pub enum S3ObjectReadError {
+    /// The object exceeds the requested in-memory limit.
+    #[error("object exceeds the configured in-memory read limit")]
+    ObjectTooLarge,
+    /// The S3 operation or response verification failed.
+    #[error(transparent)]
+    Store(#[from] S3ObjectStoreError),
+}

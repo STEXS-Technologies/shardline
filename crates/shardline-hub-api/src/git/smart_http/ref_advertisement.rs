@@ -77,17 +77,26 @@ use shardline_protocol::TokenScope;
 /// Rejects empty refnames, refnames with ASCII control characters,
 /// refnames that do not start with `refs/`, and refnames containing
 /// `..` path components (path traversal).
-pub(super) fn is_valid_refname(refname: &str) -> bool {
-    if refname.is_empty() || refname.contains(' ') {
+pub(crate) fn is_valid_refname(refname: &str) -> bool {
+    if refname.is_empty()
+        || refname.ends_with('.')
+        || refname.contains("..")
+        || refname.contains("@{")
+    {
         return false;
     }
-    if refname.bytes().any(|b| b < 0x20 || b == 0x7f) {
+    if refname
+        .bytes()
+        .any(|b| b <= 0x20 || b == 0x7f || b"~^:?*[\\".contains(&b))
+    {
         return false;
     }
     if !refname.starts_with("refs/") {
         return false;
     }
-    !refname.split('/').any(|c| c == "..")
+    !refname
+        .split('/')
+        .any(|c| c.is_empty() || c.starts_with('.') || c.ends_with(".lock"))
 }
 
 /// Collects all refs from the HubStore for a given repo.

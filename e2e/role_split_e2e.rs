@@ -146,7 +146,11 @@ async fn exercise_role(
 
     // /readyz reports health only; runtime topology comes from the
     // authenticated admin status endpoint.
-    let readyz = client.get(format!("{base_url}/readyz")).send().await?.error_for_status()?;
+    let readyz = client
+        .get(format!("{base_url}/readyz"))
+        .send()
+        .await?
+        .error_for_status()?;
     assert_eq!(readyz.status(), StatusCode::OK, "readyz should be healthy");
     let ready = client
         .get(format!("{base_url}/api/v1/status"))

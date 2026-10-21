@@ -2307,7 +2307,8 @@ pub(crate) fn upsert_reconstruction_row(
          ON CONFLICT (file_id)
          DO UPDATE SET
             terms = excluded.terms,
-            updated_at_unix_seconds = excluded.updated_at_unix_seconds",
+            updated_at_unix_seconds = excluded.updated_at_unix_seconds
+         WHERE shardline_file_reconstructions.terms IS NOT excluded.terms",
         params![
             xet_hash_hex_string(file_id.hash()),
             json,
@@ -2332,7 +2333,8 @@ pub(crate) fn upsert_dedupe_mapping_row(
          ON CONFLICT (chunk_hash)
          DO UPDATE SET
             shard_object_key = excluded.shard_object_key,
-            updated_at_unix_seconds = excluded.updated_at_unix_seconds",
+            updated_at_unix_seconds = excluded.updated_at_unix_seconds
+         WHERE shardline_dedupe_shards.shard_object_key IS NOT excluded.shard_object_key",
         params![
             xet_hash_hex_string(mapping.chunk_hash()),
             mapping.shard_object_key().as_str(),
@@ -2840,6 +2842,7 @@ pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::QuarantineCandidate(_)
         | other @ LocalIndexStoreError::WebhookDelivery(_)
         | other @ LocalIndexStoreError::UploadIntentConflict(_)
+        | other @ LocalIndexStoreError::XetFileIdentityConflict
         | other @ LocalIndexStoreError::IntegerOutOfRange(_)
         | other @ LocalIndexStoreError::ReliabilityEventConflict(_)
         | other @ LocalIndexStoreError::Reliability(_)

@@ -302,7 +302,8 @@ impl PostgresIndexStore {
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES ($1, $2, $3, $4)
                  ON CONFLICT (scope_namespace, repository, tag)
-                 DO UPDATE SET digest_hex = EXCLUDED.digest_hex",
+                 DO UPDATE SET digest_hex = EXCLUDED.digest_hex
+                 WHERE shardline_oci_tags.digest_hex IS DISTINCT FROM EXCLUDED.digest_hex",
             )
             .bind(&tag.scope_namespace)
             .bind(&tag.repository)
@@ -393,7 +394,8 @@ impl PostgresIndexStore {
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES ($1, $2, $3, $4)
                  ON CONFLICT (scope_namespace, repository, tag)
-                 DO UPDATE SET digest_hex = EXCLUDED.digest_hex",
+                 DO UPDATE SET digest_hex = EXCLUDED.digest_hex
+                 WHERE shardline_oci_tags.digest_hex IS DISTINCT FROM EXCLUDED.digest_hex",
             )
             .bind(&tag.scope_namespace)
             .bind(&tag.repository)

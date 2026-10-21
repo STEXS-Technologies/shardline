@@ -1,5 +1,5 @@
 use shardline_index::{FileChunkRecord, parse_xet_hash_hex};
-use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_storage::ObjectKey;
 
 use crate::{
     InvalidSerializedShardError, ServerError,
@@ -68,13 +68,14 @@ pub(super) fn append_referenced_term_bytes(
     }
 
     let xorb_key = xorb_object_key(&term.hash)?;
-    let Some(metadata) = object_store.metadata(&xorb_key)? else {
+    // Local objects retain their verified file handle without a scratch copy.
+    // A zero memory budget keeps remote materialization streamed to disk.
+    let Some((mut reader, _length)) =
+        object_store.materialize_bounded_object_if_present(&xorb_key, 0)?
+    else {
         return Err(ServerError::MissingReferencedXorb);
     };
-    let mut xorb_file =
-        object_store.materialize_object_to_tempfile(&xorb_key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(&term.hash)?;
-    let mut reader = xorb_file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     let range_start = usize::try_from(term.range_start)?;
     let range_end = usize::try_from(term.range_end)?;
@@ -238,6 +239,52 @@ mod tests {
     // -----------------------------------------------------------------------
     // append_referenced_term_bytes — early error paths
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn referenced_term_reads_validate_the_container_before_appending_selected_bytes() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity};
+
+        let root = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(root.path()).unwrap();
+        let packed = crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&[
+            (b"first chunk".to_vec(), 0),
+            (b"second chunk".to_vec(), 11),
+        ])
+        .unwrap();
+        let key = xorb_object_key(&packed.xorb_hash_hex).unwrap();
+        let term = FileChunkRecord {
+            hash: packed.xorb_hash_hex,
+            offset: 0,
+            length: 12,
+            range_start: 1,
+            range_end: 2,
+            packed_start: 0,
+            packed_end: packed.serialized.len() as u64,
+        };
+        let write = |bytes: &[u8]| {
+            store
+                .put_overwrite(
+                    &key,
+                    ObjectBody::Borrowed(bytes),
+                    &ObjectIntegrity::new(
+                        crate::local_backend::chunk_hash(bytes),
+                        bytes.len() as u64,
+                    ),
+                )
+                .unwrap();
+        };
+        write(&packed.serialized);
+        let mut output = b"prefix:".to_vec();
+        append_referenced_term_bytes(&store, &term, &mut output).unwrap();
+        assert_eq!(output, b"prefix:second chunk");
+
+        let mut corrupt = packed.serialized;
+        *corrupt.first_mut().unwrap() ^= 0xff;
+        write(&corrupt);
+        let mut output = b"unchanged".to_vec();
+        assert!(append_referenced_term_bytes(&store, &term, &mut output).is_err());
+        assert_eq!(output, b"unchanged");
+    }
 
     #[test]
     fn append_referenced_term_bytes_empty_range_returns_error() {

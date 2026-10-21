@@ -1,7 +1,6 @@
 mod body_reader;
 pub mod cdc;
 mod chunk_store;
-mod durable_chunks;
 mod ingestor;
 mod upload_attempt;
 pub mod xorb_packer;

@@ -155,6 +155,38 @@ pub struct FileRecord {
     pub chunks: Vec<FileChunkRecord>,
 }
 
+/// Maps a Hub/LFS SHA-256 identity to its native Xet file identity.
+///
+/// This bridge is populated from Xet shard metadata and lets Hub commit and
+/// read paths resolve ordinary LFS pointers to native CAS content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XetFileIdentity {
+    /// Repository scope that owns this file. Revision is ignored for lookup.
+    pub repository_scope: RepositoryScope,
+    /// Standard SHA-256 used by Hub LFS pointers.
+    pub sha256: String,
+    /// Native Xet file identifier used by reconstruction requests.
+    pub file_id: String,
+    /// Reconstructed file size in bytes.
+    pub total_bytes: u64,
+}
+
+impl XetFileIdentity {
+    /// Returns the stable repository key used for identity persistence.
+    #[must_use]
+    pub fn repository_key(&self) -> String {
+        Self::repository_key_for_scope(&self.repository_scope)
+    }
+
+    /// Returns the stable repository key for any revision of a repository.
+    #[must_use]
+    pub fn repository_key_for_scope(scope: &RepositoryScope) -> String {
+        crate::record_key::repository_record_scope_key(
+            &RepositoryRecordScope::from_repository_scope(scope),
+        )
+    }
+}
+
 /// File-record reconstruction storage layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileRecordStorageLayout {

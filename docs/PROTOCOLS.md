@@ -147,5 +147,5 @@ The maturity tiers are defined in [Compatibility Status](COMPATIBILITY_STATUS.md
 | Git LFS | `lfs` | **Beta** | Large file versioning in standard Git workflows | SHA-256 digest | HTTP and JSON | Native interoperability with standard Git LFS clients. |
 | Remote HTTP (Bazel) | `bazel-http` | **Beta** | Developer and CI remote caching | SHA-256 digest paths today | HTTP `GET` and `PUT` | Straightforward shared cache protocol for build artifacts. |
 | OCI Distribution | `oci` | **Stable** | Container images and OCI artifacts | SHA-256 digest | HTTP and REST | Standard registry protocol for Docker, Kubernetes, and OCI artifacts. |
-| Hugging Face Hub API | `hub` | **Beta** | ML model and dataset distribution | Repository paths | HTTP and REST | Drop-in alternative for huggingface-cli workflows. |
-| S3-compatible object API | `s3` | **Stable** | Lakehouse and `s3://` object workflows | Content-addressed storage with standard S3-style MD5 ETags | HTTP and REST (SigV4) | Validated real-client surface with database-linearized conditional writes. |
+| Hugging Face Hub API | `hub` | **Beta** | ML model and dataset distribution | Repository paths | HTTP and REST | Tested `hf` CLI uploads, downloads, and `hf_xet` CAS transfer with Hub/Xet frontends enabled together. |
+| S3-compatible object API | `s3` | **Stable** | Lakehouse and `s3://` object workflows | Content-addressed storage with standard S3-style MD5 ETags | HTTP with SigV4-shaped requests | Validated real-client surface with database-linearized conditional writes; the SigV4 signature is not verified. |

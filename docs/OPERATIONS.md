@@ -100,7 +100,8 @@ Back up the durable boundaries, not the cache.
 
 Required backups:
 
-- Postgres-compatible metadata database
+- metadata database: native PostgreSQL backups, or native SQLite backups for
+  each local metadata database as described in [Disaster Recovery](DISASTER_RECOVERY.md)
 - provider catalog configuration and webhook secrets
 - token-signing key material
 - provider bootstrap API key

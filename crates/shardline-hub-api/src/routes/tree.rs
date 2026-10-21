@@ -50,11 +50,9 @@ async fn file_tree_for_path(
     shardline_metrics::record_hub_api_request("file_tree", "GET", 200);
     // The extractor has already authorized this request and minted `repo`.
     let name = format!("{ns}/{repo_name}");
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &rev)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
+    let commit_sha =
+        crate::git::smart_http::resolve_commit_id(&state, &name, &rev, _repo.capability())?
+            .ok_or(HubApiError::RevisionNotFound)?;
     if let Some(limit) = query.limit {
         let page = state
             .store
@@ -85,8 +83,9 @@ async fn file_tree_for_path(
                     size: Some(file.size),
                     oid: Some(file.sha.clone()),
                     lfs: file.is_lfs.then_some(TreeEntryLfs {
-                        oid: file.sha,
+                        oid: file.sha.clone(),
                         size: file.size,
+                        pointer_size: lfs_pointer_size(&file.sha, file.size),
                     }),
                 },
             })
@@ -136,6 +135,7 @@ pub(crate) fn tree_entries_at_path(files: &[HubFileEntry], path: &str) -> Vec<Tr
                 Some(TreeEntryLfs {
                     oid: file.sha.clone(),
                     size: file.size,
+                    pointer_size: lfs_pointer_size(&file.sha, file.size),
                 })
             } else {
                 None
@@ -182,6 +182,7 @@ pub(crate) fn tree_entries_recursive(files: &[HubFileEntry], path: &str) -> Vec<
             Some(TreeEntryLfs {
                 oid: file.sha.clone(),
                 size: file.size,
+                pointer_size: lfs_pointer_size(&file.sha, file.size),
             })
         } else {
             None
@@ -197,4 +198,9 @@ pub(crate) fn tree_entries_recursive(files: &[HubFileEntry], path: &str) -> Vec<
 
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     entries
+}
+
+fn lfs_pointer_size(oid: &str, size: u64) -> u64 {
+    format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n").len()
+        as u64
 }

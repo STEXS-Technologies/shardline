@@ -6,7 +6,8 @@ use std::{
 };
 
 use shardline_index::{
-    AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileRecord, parse_xet_hash_hex,
+    AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileRecord, XetFileIdentity,
+    parse_xet_hash_hex,
 };
 use shardline_protocol::RepositoryScope;
 use shardline_server_core::{
@@ -51,6 +52,7 @@ fn shard_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> 
 pub struct ParsedShardUpload {
     pub result: u8,
     pub records: Vec<FileRecord>,
+    pub file_identities: Vec<XetFileIdentity>,
     pub shard_key: ObjectKey,
     pub dedupe_chunk_hashes: Vec<String>,
 }
@@ -117,6 +119,7 @@ pub(crate) fn parse_uploaded_shard_from_reader<R: Read + Seek>(
             1
         },
         records: parsed_shard.records,
+        file_identities: parsed_shard.file_identities,
         shard_key,
         dedupe_chunk_hashes: parsed_shard.dedupe_chunk_hashes,
     })
@@ -198,6 +201,7 @@ struct NormalizedShardUpload {
     shard_hash_hex: String,
     normalized_bytes: Vec<u8>,
     records: Vec<FileRecord>,
+    file_identities: Vec<XetFileIdentity>,
     dedupe_chunk_hashes: Vec<String>,
 }
 
@@ -234,7 +238,7 @@ fn parse_shard_records_from_reader<R: Read + Seek>(
         .to_bytes()
         .map_err(|error| invalid_serialized_shard(&error))?;
     let shard_hash_hex = compute_data_hash(&normalized_bytes).hex();
-    let records = build_file_records_from_infos(
+    let (records, file_identities) = build_file_records_from_infos(
         bounded_shard.file_infos,
         object_store,
         repository_scope,
@@ -245,6 +249,7 @@ fn parse_shard_records_from_reader<R: Read + Seek>(
         shard_hash_hex,
         normalized_bytes,
         records,
+        file_identities,
         dedupe_chunk_hashes: bounded_shard.dedupe_chunk_hashes,
     })
 }
@@ -501,12 +506,17 @@ fn build_file_records_from_infos(
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     mut member_references: Option<&mut HashSet<ObjectKey>>,
-) -> Result<Vec<FileRecord>, XetAdapterError> {
+) -> Result<(Vec<FileRecord>, Vec<XetFileIdentity>), XetAdapterError> {
     let mut xorb_cache = HashMap::<String, XorbRangeInfo>::new();
     let mut records = Vec::with_capacity(file_infos.len());
+    let mut file_identities = Vec::new();
 
     for file_info in file_infos {
         let file_id = file_info.metadata.file_hash.hex();
+        let sha256 = file_info
+            .metadata_ext
+            .as_ref()
+            .map(|metadata| metadata.sha256.hex());
         let mut offset = 0_u64;
         let mut chunks = Vec::with_capacity(file_info.segments.len());
 
@@ -550,7 +560,7 @@ fn build_file_records_from_infos(
         }
 
         records.push(FileRecord {
-            file_id,
+            file_id: file_id.clone(),
             content_hash: content_hash(offset, 0, &chunks),
             total_bytes: offset,
             chunk_size: 0,
@@ -558,9 +568,20 @@ fn build_file_records_from_infos(
             repository_scope: repository_scope.cloned(),
             chunks,
         });
+        if let (Some(repository_scope), Some(sha256)) = (repository_scope, sha256) {
+            shardline_server_core::validate_content_hash_with(&sha256, || {
+                XetAdapterError::InvalidContentHash
+            })?;
+            file_identities.push(XetFileIdentity {
+                repository_scope: repository_scope.clone(),
+                sha256,
+                file_id,
+                total_bytes: offset,
+            });
+        }
     }
 
-    Ok(records)
+    Ok((records, file_identities))
 }
 
 fn validate_referenced_xorb_count(
@@ -586,12 +607,12 @@ fn load_xorb_range_info(
     member_references: Option<&mut HashSet<ObjectKey>>,
 ) -> Result<XorbRangeInfo, XetAdapterError> {
     let key = xorb_object_key(hash_hex)?;
-    let Some(metadata) = object_store.metadata(&key)? else {
+    let Some((mut reader, _length)) =
+        object_store.materialize_bounded_object_if_present(&key, 0)?
+    else {
         return Err(XetAdapterError::MissingReferencedXorb);
     };
-    let mut file = object_store.materialize_object_to_tempfile(&key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let mut reader = file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     if let Some(references) = member_references {
         for chunk in validated.chunks() {
@@ -809,7 +830,7 @@ mod tests {
                 metadata_ext: None,
             };
             let mut references = std::collections::HashSet::new();
-            let records = super::build_file_records_from_infos(
+            let (records, identities) = super::build_file_records_from_infos(
                 vec![info],
                 &objects,
                 None,
@@ -820,6 +841,7 @@ mod tests {
                 },
             )
             .unwrap();
+            assert!(identities.is_empty());
             stop.store(true, Ordering::Relaxed);
             let reads = server.join().unwrap().unwrap();
             assert_eq!(

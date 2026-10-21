@@ -170,11 +170,15 @@ pub struct TreeEntry {
 
 /// LFS metadata for a tree entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TreeEntryLfs {
     /// SHA-256 OID.
     pub oid: String,
     /// File size in bytes.
     pub size: u64,
+    /// Size of the Git LFS pointer blob stored in the repository tree.
+    #[serde(default)]
+    pub pointer_size: u64,
 }
 
 /// Preupload request body.
@@ -203,6 +207,9 @@ pub struct PreuploadRequest {
 pub struct PreuploadFile {
     /// Relative path.
     pub path: String,
+    /// File size reported by the Hub client. Older clients may omit it.
+    #[serde(default)]
+    pub size: u64,
     /// Whether the file is an LFS pointer.
     #[serde(default)]
     pub lfs: bool,
@@ -275,7 +282,7 @@ pub struct CommitDeletedEntry {
 /// Commit response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitResponse {
-    /// New commit SHA.
+    /// Legacy internal revision ID; remains accepted alongside the Git ID.
     pub commit_id: String,
     /// Official Hugging Face commit object identifier field.
     #[serde(rename = "commitOid")]
@@ -335,11 +342,21 @@ pub struct WhoamiAccount {
     pub name: String,
 }
 
-/// Token exchange response.
+/// JSON body for the Hub token-exchange endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenExchangeResponse {
-    /// Access token.
+    /// Legacy signed bearer token for clients using Shardline's original response.
     pub token: String,
+    /// CAS bearer token used by native Hugging Face Xet clients.
+    #[serde(default)]
+    pub access_token: String,
+    /// Unix-seconds expiry for `access_token`.
+    #[serde(default)]
+    pub exp: u64,
+    /// CAS base URL used by native Hugging Face Xet clients.
+    #[serde(default)]
+    pub cas_url: String,
 }
 
 /// LFS batch request.
@@ -652,6 +669,16 @@ pub struct LfsObjectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_xet_token_response_still_deserializes() {
+        let response: TokenExchangeResponse =
+            serde_json::from_str(r#"{"token":"legacy-cas-token"}"#).unwrap();
+        assert_eq!(response.token, "legacy-cas-token");
+        assert_eq!(response.access_token, "");
+        assert_eq!(response.exp, 0);
+        assert_eq!(response.cas_url, "");
+    }
 
     // -----------------------------------------------------------------------
     // RepoType::from_api_str

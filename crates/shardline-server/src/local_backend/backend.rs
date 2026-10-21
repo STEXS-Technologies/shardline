@@ -39,6 +39,16 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
+    pub(crate) fn xet_file_identity(
+        &self,
+        repository_scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<shardline_index::XetFileIdentity>, ServerError> {
+        self.record_store
+            .xet_file_identity(repository_scope, sha256)
+            .map_err(ServerError::from)
+    }
+
     /// Creates a local backend and initializes its directory structure.
     ///
     /// Initialization prepares the existing GC lock file when permissions allow.
@@ -130,7 +140,7 @@ impl LocalBackend {
             // Initialize and migrate SQLite before the server begins accepting
             // concurrent protocol requests. Lazy first-use initialization lets
             // simultaneous uploads race while creating the schema/import marker.
-            index_store: LocalIndexStore::new(root.clone())?,
+            index_store: LocalIndexStore::new_with_persistent_connection(root.clone())?,
             metadata_root: std::path::absolute(&root)?,
             record_store: LocalRecordStore::open(root),
             public_base_url,

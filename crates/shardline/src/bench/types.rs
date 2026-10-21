@@ -54,11 +54,14 @@ pub struct ByteMetrics {
     pub concurrent_downloaded_bytes: u64,
     /// Bytes uploaded by concurrent upload workers.
     pub concurrent_uploaded_bytes: u64,
-    /// New bytes written by concurrent upload workers.
+    /// Uncompressed chunk bytes reported as newly inserted by concurrent upload
+    /// workers. This is not the encoded physical-storage delta.
     pub concurrent_newly_stored_bytes: u64,
-    /// New bytes written to storage in this iteration.
+    /// Uncompressed chunk bytes reported as newly inserted in this iteration.
+    /// This is not the encoded physical-storage delta.
     pub newly_stored_bytes: u64,
-    /// New bytes written during the cross-repository upload.
+    /// Uncompressed chunk bytes reported as newly inserted during the
+    /// cross-repository upload. This is not the encoded physical-storage delta.
     pub cross_repository_newly_stored_bytes: u64,
 }
 

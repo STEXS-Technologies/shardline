@@ -85,7 +85,7 @@ pub use local_path::{
 pub use object::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
 #[cfg(feature = "s3")]
 pub use s3::{
-    BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectStore,
-    S3ObjectStoreConfig, S3ObjectStoreError,
+    BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectReadError,
+    S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
 };
 pub use store::ObjectStore;

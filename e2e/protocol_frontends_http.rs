@@ -751,20 +751,51 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
         !oci_path.exists(),
         "OCI should not retain a legacy whole object"
     );
-    // The upload is ingested via CDC with target chunk size 128, so the
-    // 24-byte payload is stored as a single chunk keyed by its raw-content
-    // hash (not as 4-byte fixed-size slices from the pre-CDC era).
-    let chunk_hash_hex = shardline_index::xet_hash_hex_string(chunk_hash(shared_bytes));
-    let chunk_path = runtime
-        .storage_path()
-        .join("chunks")
-        .join(&chunk_hash_hex[..2])
-        .join(&chunk_hash_hex);
-    assert!(
-        chunk_path.exists(),
-        "shared frontend chunk should exist at {}",
-        chunk_path.display()
-    );
+    // Qualify the durable records, including direct-packed local ingestion.
+    // A loose raw chunk is no longer required when a verified Xorb owns it.
+    let connection = rusqlite::Connection::open_with_flags(
+        runtime.storage_path().join("metadata.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = connection
+        .prepare("SELECT record FROM shardline_file_records WHERE record_kind = 'latest'")?;
+    let records = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|record| serde_json::from_str::<shardline_index::FileRecord>(&record))
+        .collect::<Result<Vec<_>, _>>()?;
+    // The native Xet upload above has its own independent eight-byte record.
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|record| record.total_bytes == shared_bytes.len() as u64)
+        .collect();
+    assert_eq!(records.len(), 3, "each frontend must publish its record");
+    let shared_record = records.first().ok_or("missing shared file record")?;
+    assert_eq!(shared_record.total_bytes, shared_bytes.len() as u64);
+    assert_eq!(shared_record.chunks.len(), 1);
+    for record in &records {
+        assert_eq!(record.chunks, shared_record.chunks);
+        assert_eq!(record.content_hash, shared_record.content_hash);
+    }
+    for chunk in &shared_record.chunks {
+        let prefix = chunk.hash.get(..2).ok_or("invalid stored chunk hash")?;
+        let loose_path = runtime
+            .storage_path()
+            .join("chunks")
+            .join(prefix)
+            .join(&chunk.hash);
+        let packed_path = runtime
+            .storage_path()
+            .join("chunks")
+            .join("xorbs/default")
+            .join(prefix)
+            .join(format!("{}.xorb", chunk.hash));
+        assert!(
+            loose_path.is_file() || packed_path.is_file(),
+            "published shared content must have a durable backing object"
+        );
+    }
 
     let hub_repo = client
         .post(format!("{}/api/repos/create", runtime.base_url()))

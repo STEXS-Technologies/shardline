@@ -90,6 +90,101 @@ impl Drop for StopServer {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn packed_xorb_read_uses_one_full_object_get() {
+    let provider = Arc::new(Mutex::new(Provider::default()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().fallback(request).with_state(provider.clone());
+    let _server = StopServer(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    let store = ServerObjectStore::s3(
+        S3ObjectStoreConfig::new("fixture".to_owned(), "us-east-1".to_owned())
+            .with_endpoint(Some(endpoint))
+            .with_allow_http(true)
+            .with_credentials(
+                Some(SecretString::new("fixture-access".to_owned())),
+                Some(SecretString::new("fixture-secret".to_owned())),
+                None,
+            ),
+    )
+    .unwrap();
+    let pieces: [&[u8]; 2] = [b"packed xorb first", b"packed xorb second"];
+    let raw_chunks = pieces
+        .iter()
+        .scan(0_u64, |offset, bytes| {
+            let current = *offset;
+            *offset = offset.checked_add(bytes.len() as u64)?;
+            Some((bytes.to_vec(), current))
+        })
+        .collect::<Vec<_>>();
+    let packed = crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&raw_chunks).unwrap();
+    let key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
+    let serialized = packed.serialized;
+    let total_length = u64::try_from(serialized.len()).unwrap();
+    let xorb_hash = packed.xorb_hash_hex.clone();
+    provider.lock().unwrap().objects.insert(
+        format!("/fixture/{}", key.as_str()),
+        Bytes::from(serialized.clone()),
+    );
+    let terms = packed
+        .chunk_entries
+        .iter()
+        .map(|entry| shardline_index::FileChunkRecord {
+            hash: packed.xorb_hash_hex.clone(),
+            offset: entry.raw_offset,
+            length: entry.raw_length,
+            range_start: u64::from(entry.chunk_index),
+            range_end: u64::from(entry.chunk_index.checked_add(1).unwrap()),
+            packed_start: u64::from(entry.packed_offset),
+            packed_end: u64::from(
+                entry
+                    .packed_offset
+                    .checked_add(entry.packed_length)
+                    .unwrap(),
+            ),
+        })
+        .collect();
+    provider.lock().unwrap().requests.clear();
+
+    let bytes = super::collect(&store, &super::file(terms), None)
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"packed xorb firstpacked xorb second");
+    let requests = provider.lock().unwrap().requests.clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.first().unwrap().0, Method::GET);
+
+    // A range covering only the first serialized byte still validates the
+    // complete in-memory Xorb before returning a response stream.
+    let mut corrupted = serialized;
+    let last = corrupted.len().checked_sub(1).unwrap();
+    corrupted[last] ^= 1;
+    provider
+        .lock()
+        .unwrap()
+        .objects
+        .insert(format!("/fixture/{}", key.as_str()), Bytes::from(corrupted));
+    provider.lock().unwrap().requests.clear();
+    let result = crate::download_stream::validated_xorb_byte_range_stream(
+        &store,
+        &key,
+        &xorb_hash,
+        total_length,
+        ByteRange::new(0, 0).unwrap(),
+        crate::admission::ExecutionPools::default_sizes().blocking_io,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "corruption outside the selected range must fail"
+    );
+    let requests = provider.lock().unwrap().requests.clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.first().unwrap().0, Method::GET);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_chunk_reads_report_bounded_s3_request_cost() {
     for compressed in [false, true] {
         let provider = Arc::new(Mutex::new(Provider::default()));
@@ -156,10 +251,14 @@ async fn legacy_chunk_reads_report_bounded_s3_request_cost() {
             .iter()
             .filter(|(_, path)| path.contains("/xorbs/"))
             .count();
-        assert_eq!(gets, pieces.len());
+        // A legacy single-chunk record can be either individually stored or
+        // Xorb-backed, including records labeled FixedChunkV1. Probe the Xorb
+        // once, then read the individual chunk only when the Xorb is absent.
+        let expected_gets = 2 * pieces.len();
+        assert_eq!(gets, expected_gets);
         assert!(
             full.len() <= 2 * pieces.len(),
-            "legacy reads exceed the released HEAD-plus-GET request budget"
+            "legacy reads exceed the one-Xorb-probe plus one-data-GET request budget"
         );
         eprintln!(
             "legacy compressed={compressed}: {} HTTP requests, {gets} data GETs, {probes} xorb probes",
@@ -179,7 +278,7 @@ async fn legacy_chunk_reads_report_bounded_s3_request_cost() {
                 .iter()
                 .filter(|(method, _)| *method == Method::GET)
                 .count(),
-            1
+            2
         );
         let second_key =
             crate::chunk_store::chunk_object_key(&record.chunks.get(1).unwrap().hash).unwrap();

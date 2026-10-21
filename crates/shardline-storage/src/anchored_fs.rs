@@ -1,7 +1,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, DirBuilder, File, OpenOptions},
-    io::{self, ErrorKind, Write},
+    io::{self, ErrorKind, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -290,6 +290,64 @@ pub fn write_anchored_temporary_file(
                     file.sync_all()?;
                     local_publish_failpoint(
                         &logical_path,
+                        LocalPublishBoundary::AfterTemporaryDurable,
+                    )
+                })();
+                match write_result {
+                    Ok(()) => return Ok(temporary),
+                    Err(error) => {
+                        remove_if_present(&temporary).ok();
+                        return Err(error);
+                    }
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Copies an already-open source file to a new temporary file beside the target.
+///
+/// This is used when the source and destination are on different filesystems and
+/// cannot be hard-linked. The temporary is fully synchronized before it can be
+/// published.
+///
+/// # Errors
+///
+/// Returns an error if the source cannot be read or the temporary cannot be
+/// fully written and synchronized.
+pub fn copy_anchored_temporary_file(
+    anchored: &AnchoredTarget,
+    source: &File,
+    file_mode: Option<u32>,
+) -> io::Result<PathBuf> {
+    local_publish_failpoint(
+        &anchored.logical_path(),
+        LocalPublishBoundary::BeforeTemporaryWrite,
+    )?;
+    loop {
+        let temporary = fd_child_path(
+            anchored.parent_dir(),
+            &temporary_file_name(anchored.file_name()),
+        );
+        match open_new_file(&temporary, file_mode) {
+            Ok(mut destination) => {
+                let write_result = (|| {
+                    let mut source = source.try_clone()?;
+                    source.seek(SeekFrom::Start(0))?;
+                    io::copy(&mut source, &mut destination)?;
+                    local_publish_failpoint(
+                        &anchored.logical_path(),
+                        LocalPublishBoundary::DuringTemporaryWrite,
+                    )?;
+                    local_publish_failpoint(
+                        &anchored.logical_path(),
+                        LocalPublishBoundary::BeforeTemporarySync,
+                    )?;
+                    destination.sync_all()?;
+                    local_publish_failpoint(
+                        &anchored.logical_path(),
                         LocalPublishBoundary::AfterTemporaryDurable,
                     )
                 })();

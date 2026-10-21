@@ -70,6 +70,50 @@ This measures live-object scanning and publication contention, not deletion-heav
 GC, multiple API nodes, or cloud network latency. CPU/RSS describe Shardline
 processes; PostgreSQL and MinIO resource use is excluded.
 
+## Measuring local disk savings
+
+Avoided scratch bytes are not the same as writes reaching an SSD. For a disk
+comparison, put object storage, temporary files, and the database on identified
+disk-backed volumes; `/tmp` may be tmpfs. Use the same corpus, concurrency, cache
+conditions, and backend configuration for alternating before/after runs. Include
+database and object-store processes when reporting total deployment cost.
+
+On an otherwise idle benchmark device, capture `/sys/block/<device>/stat` before
+and after each run, including completion of its pending writes. The Linux kernel
+[documents these counters](https://docs.kernel.org/admin-guide/iostats.html):
+they cover the whole device, so unrelated workloads invalidate attribution.
+Report device-write bytes per logical TB processed alongside throughput, tail
+latency, RSS, and integrity results. Keep syscall scratch-byte counts separate.
+Device-write reduction alone does not establish NAND wear or extra years of drive
+life; report those only with appropriate drive telemetry and endurance assumptions.
+
+## S3-backed upload packing
+
+Shardline keeps each S3 upload's raw CDC chunks in a bounded in-memory batch and
+tries to store the packed Xorb first. On the successful path, it no longer PUTs
+each compressed CDC chunk before packing. That removes one chunk-object PUT
+attempt per CDC chunk and avoids new temporary chunk objects (and their later
+GC deletes) when those chunk objects did not already exist. It also removes the
+chunk-level existence checks. A batch whose Xorb already exists is still read
+back and fully verified by the S3 conditional-write path before Shardline
+reuses it.
+
+If packing or Xorb storage fails, Shardline writes the individual chunks, reads
+them back, and verifies their content before publishing a chunk-based fallback.
+The fallback record format and its integrity checks remain unchanged. A crash
+before a file record is published can leave either Xorbs or fallback chunks for
+garbage collection, as before; an in-progress upload is not acknowledged as a
+stored file.
+
+Raw chunk retention is bounded to roughly 32 MiB per active upload batch (a
+single chunk can exceed that target within the existing chunk limit). Concurrent
+uploads multiply this memory use; this bound is not a process-wide S3 memory
+budget. The request-count unit test verifies one PUT and no GETs for successful
+packing of a multi-chunk batch, plus chunk PUTs and verified GETs after a forced
+Xorb failure. Those tests establish request behavior, not MinIO/cloud latency,
+peak RSS, or billed cost. Actual storage savings depend on how many chunk
+objects the old path would have newly created and later collected.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:

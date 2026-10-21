@@ -828,6 +828,39 @@ impl ServerBackend {
         }
     }
 
+    /// Resolves a Hub SHA-256 to its repository-scoped native Xet identity.
+    pub(crate) async fn xet_file_identity(
+        &self,
+        repository_scope: &RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<shardline_index::XetFileIdentity>, ServerError> {
+        match self {
+            Self::Local(backend) => backend.xet_file_identity(repository_scope, sha256),
+            Self::Postgres(backend) => backend.xet_file_identity(repository_scope, sha256).await,
+        }
+    }
+
+    /// Downloads one logical file version using the active metadata backend.
+    pub(crate) async fn download_file(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<Vec<u8>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .download_file(file_id, content_hash, repository_scope)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .download_file(file_id, content_hash, repository_scope)
+                    .await
+            }
+        }
+    }
+
     /// Resolves the authoritative size and BLAKE3 content hash for a protocol
     /// object, for the S3 `HeadObject` response.
     ///

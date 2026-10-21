@@ -105,8 +105,32 @@ impl IntoResponse for HubApiError {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
         };
+        let hub_error_code = match &self {
+            Self::RepoNotFound => Some("RepoNotFound"),
+            Self::RevisionNotFound => Some("RevisionNotFound"),
+            Self::NotFound => Some("EntryNotFound"),
+            Self::Io(_)
+            | Self::Json(_)
+            | Self::Unauthorized
+            | Self::Forbidden
+            | Self::Conflict(_)
+            | Self::InvalidToken
+            | Self::SigningKeyError(_)
+            | Self::PathValidation(_)
+            | Self::BadRequest(_)
+            | Self::CasError(_)
+            | Self::PktLine(_)
+            | Self::Pack(_)
+            | Self::WebhookSecret(_) => None,
+        };
         let body = ErrorBody { error: message };
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if let Some(code) = hub_error_code {
+            response
+                .headers_mut()
+                .insert("x-error-code", axum::http::HeaderValue::from_static(code));
+        }
+        response
     }
 }
 

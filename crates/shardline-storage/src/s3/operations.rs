@@ -2,19 +2,18 @@ use std::{
     fmt,
     fs::File,
     future::Future,
-    io::{Error as IoError, Read},
+    io::{Error as IoError, Write},
     ops::Range,
     path::Path,
-    sync::{Arc, Mutex, atomic::Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::{
     CopyMode, CopyOptions, Error as ExternalObjectStoreError, GetOptions, GetResult,
-    ObjectStore as ExternalObjectStore, ObjectStoreExt, PutMode, PutPayload, WriteMultipart,
-    aws::AmazonS3, multipart::MultipartStore, path::Path as ObjectStorePath,
+    ObjectStore as ExternalObjectStore, ObjectStoreExt, PutMode, PutPayload, aws::AmazonS3,
+    multipart::MultipartStore, path::Path as ObjectStorePath,
 };
 use shardline_protocol::{ByteRange, ShardlineHash};
 use tokio::{
@@ -31,15 +30,24 @@ use crate::{
 
 use super::{
     LARGE_COPY_CHUNK_BYTES, MAX_SINGLE_COPY_BYTES, S3_TEMP_ARTIFACT_AGE_SECONDS, S3ByteStream,
-    S3ObjectStoreConfig, S3ObjectStoreError, STREAM_UPLOAD_CHUNK_BYTES, TEMP_UPLOAD_COUNTER,
+    S3ObjectReadError, S3ObjectStoreConfig, S3ObjectStoreError, STREAM_UPLOAD_CHUNK_BYTES,
     is_temp_upload_key,
 };
+
+mod file_upload;
+
+#[cfg(test)]
+mod conditional_upload_tests;
+
+#[cfg(test)]
+mod temp_cleanup_tests;
 
 /// S3-compatible implementation of [`ObjectStore`].
 #[derive(Clone)]
 pub struct S3ObjectStore {
     pub(crate) inner: AmazonS3,
     single_attempt_inner: AmazonS3,
+    conditional_completion_inner: AmazonS3,
     existence_hints: Arc<super::existence_hints::ExistenceHints>,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) key_prefix: Option<String>,
@@ -110,6 +118,8 @@ impl S3ObjectStore {
         super::credentials::validate_s3_config(&config)?;
         let inner = super::client::build_amazon_s3_client(&config)?;
         let single_attempt_inner = super::client::build_single_attempt_client(&config)?;
+        let conditional_completion_inner =
+            super::client::build_conditional_completion_client(&config)?;
 
         // Process-wide ownership keeps the bridge independent of the runtime in
         // which an adapter was constructed and avoids dropping a Tokio runtime
@@ -138,6 +148,7 @@ impl S3ObjectStore {
         Ok(Self {
             inner,
             single_attempt_inner,
+            conditional_completion_inner,
             existence_hints: Arc::default(),
             runtime,
             key_prefix: config.key_prefix,
@@ -410,6 +421,141 @@ impl S3ObjectStore {
         })
     }
 
+    /// Copies a complete object into a file with one GET, returning `None` when
+    /// the key does not exist. The response metadata and bytes belong to the
+    /// same GET, so callers do not need a separate HEAD that could observe a
+    /// different object state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the GET or file write fails, or the streamed body
+    /// length disagrees with the length reported by that GET.
+    pub fn copy_object_to_file_if_present(
+        &self,
+        key: &ObjectKey,
+        output: &mut File,
+    ) -> Result<Option<u64>, S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        self.block_on_result(async {
+            let result = match self.inner.get(&location).await {
+                Ok(result) => result,
+                Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
+                Err(error) => return Err(S3ObjectStoreError::External(error)),
+            };
+            let expected_length = result.meta.size;
+            let mut written = 0_u64;
+            let mut stream = result.into_stream();
+            while let Some(bytes) = stream.next().await {
+                let bytes = bytes.map_err(S3ObjectStoreError::External)?;
+                written = written
+                    .checked_add(
+                        u64::try_from(bytes.len())
+                            .map_err(|_error| S3ObjectStoreError::IntegrityLengthMismatch)?,
+                    )
+                    .filter(|length| *length <= expected_length)
+                    .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
+                std::io::Write::write_all(output, &bytes).map_err(S3ObjectStoreError::Io)?;
+            }
+            if written != expected_length {
+                return Err(S3ObjectStoreError::IntegrityLengthMismatch);
+            }
+            Ok(Some(written))
+        })
+    }
+
+    /// Reads an object into memory only when the response declares it is within
+    /// `maximum_memory_length`; larger objects are streamed to `output` using
+    /// the same GET. Returns the observed length and either the bounded bytes or
+    /// `None` when the object was written to the file.
+    ///
+    /// This lets callers avoid scratch-file payload writes for small objects
+    /// without a size-probe request or a second GET for large objects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the GET fails or the streamed length disagrees
+    /// with response metadata.
+    pub fn copy_object_to_writer_if_present<W: Write + Send>(
+        &self,
+        key: &ObjectKey,
+        output: &mut W,
+    ) -> Result<Option<u64>, S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        self.block_on_result(async {
+            let result = match self.inner.get(&location).await {
+                Ok(result) => result,
+                Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
+                Err(error) => return Err(S3ObjectStoreError::External(error)),
+            };
+            let expected_length = result.meta.size;
+            let mut written = 0_u64;
+            let mut stream = result.into_stream();
+            while let Some(bytes) = stream.next().await {
+                let bytes = bytes.map_err(S3ObjectStoreError::External)?;
+                written = written
+                    .checked_add(
+                        u64::try_from(bytes.len())
+                            .map_err(|_error| S3ObjectStoreError::IntegrityLengthMismatch)?,
+                    )
+                    .filter(|length| *length <= expected_length)
+                    .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
+                output.write_all(&bytes).map_err(S3ObjectStoreError::Io)?;
+            }
+            if written != expected_length {
+                return Err(S3ObjectStoreError::IntegrityLengthMismatch);
+            }
+            Ok(Some(expected_length))
+        })
+    }
+
+    /// Reads a bounded object with one full GET, returning `None` when the key
+    /// does not exist. The response metadata and bytes belong to the same GET,
+    /// avoiding a separate HEAD request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the GET fails, the object exceeds `maximum_length`,
+    /// or the streamed body length disagrees with the GET response metadata.
+    pub fn read_object_if_present(
+        &self,
+        key: &ObjectKey,
+        maximum_length: u64,
+    ) -> Result<Option<(Vec<u8>, u64)>, S3ObjectReadError> {
+        let location = self.location_for_key(key)?;
+        self.block_on_result(async {
+            let result = match self.inner.get(&location).await {
+                Ok(result) => result,
+                Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
+                Err(error) => {
+                    return Err(S3ObjectStoreError::External(error).into());
+                }
+            };
+            let expected_length = result.meta.size;
+            if expected_length > maximum_length {
+                return Err(S3ObjectReadError::ObjectTooLarge);
+            }
+            let capacity = usize::try_from(expected_length)
+                .map_err(|_error| S3ObjectReadError::ObjectTooLarge)?;
+            let mut output = Vec::with_capacity(capacity);
+            let mut stream = result.into_stream();
+            while let Some(bytes) = stream.next().await {
+                let bytes = bytes.map_err(S3ObjectStoreError::External)?;
+                let next_length = output
+                    .len()
+                    .checked_add(bytes.len())
+                    .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
+                if next_length > capacity {
+                    return Err(S3ObjectStoreError::IntegrityLengthMismatch.into());
+                }
+                output.extend_from_slice(&bytes);
+            }
+            if output.len() != capacity {
+                return Err(S3ObjectStoreError::IntegrityLengthMismatch.into());
+            }
+            Ok(Some((output, expected_length)))
+        })
+    }
+
     pub(crate) fn metadata_from_external(
         &self,
         metadata: &object_store::ObjectMeta,
@@ -480,21 +626,11 @@ impl S3ObjectStore {
     /// Streams a caller-validated local file into S3-compatible storage if the destination
     /// key is absent.
     ///
-    /// # TOCTOU Race Window
+    /// # Concurrency
     ///
-    /// This method has a two-stage TOCTOU window.  First, the `metadata()` probe
-    /// checks whether the destination key exists.  Second, the temporary
-    /// upload is copied to the final key with `CopyMode::Create`.
-    /// Between these two points, a concurrent writer may insert an object at the
-    /// same destination key.  The `CopyMode::Create` atomic copy then fails with
-    /// `AlreadyExists`, and the method falls through to the conflict-resolution
-    /// path which compares existing bytes against the local file.  For
-    /// content-addressed callers this is safe because all writers for the same
-    /// digest key write identical bytes.  The conflict-resolution path validates
-    /// this.  For non-content-addressed callers (e.g. `put_overwrite` paths), a
-    /// concurrent overwrite between the check and the copy could be silently
-    /// reverted by the `CopyMode::Create` failure — the older writer's object
-    /// survives and the newer writer's copy is rejected.
+    /// Multipart completion atomically requires the final key to be absent.
+    /// If another writer wins, compare its bytes against the local file before
+    /// accepting an identical replay. No partial object becomes visible.
     ///
     /// # Errors
     ///
@@ -511,57 +647,30 @@ impl S3ObjectStore {
         path: &Path,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
-        verify_file_length(path, integrity)?;
-        if let Some(existing) = ObjectStore::metadata(self, key)? {
-            return existing_object_outcome_from_file(
-                self,
-                key,
-                existing.length(),
-                path,
-                integrity,
-            );
+        if let Some(outcome) = existing_object_outcome_from_file(self, key, path, integrity)? {
+            return Ok(outcome);
         }
 
         let location = self.location_for_key(key)?;
-        let temporary = temporary_upload_location(&self.key_prefix);
-        let upload_result = self.stream_file_to_location(&temporary, path);
-        if let Err(error) = upload_result {
-            self.delete_location_if_present(&temporary).ok();
-            return Err(error);
-        }
-
-        let copy_result = self.block_on(self.inner.copy_opts(
-            &temporary,
-            &location,
-            CopyOptions::new().with_mode(CopyMode::Create),
-        ));
-        // Best-effort cleanup of temp object — ignore failure, the canonical
-        // copy already succeeded.
-        self.delete_location_if_present(&temporary).ok();
-        match copy_result {
+        match self.stream_file_if_absent(&location, path, integrity.length()) {
             Ok(()) => Ok(PutOutcome::Inserted),
             Err(S3ObjectStoreError::External(ExternalObjectStoreError::AlreadyExists {
                 ..
             }))
             | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
-            })) => {
-                let existing_length = ObjectStore::metadata(self, key)?
-                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
-                    .length();
-                existing_object_outcome_from_file(self, key, existing_length, path, integrity)
-            }
+            })) => existing_object_outcome_from_file(self, key, path, integrity)?
+                .ok_or(S3ObjectStoreError::ExistingObjectConflict),
             Err(error) => Err(error),
         }
     }
 
-    /// Streams a caller-validated content-addressed local file to a temp key and
-    /// atomically promotes it to the final key.
+    /// Streams a caller-validated content-addressed local file directly into an
+    /// unpublished multipart upload and conditionally publishes the final key.
     ///
     /// This path is intended for immutable digest-addressed objects, where concurrent
-    /// writers for the same key can only be writing the same bytes.  A temp key +
-    /// conditional copy eliminates the TOCTOU window between the existence check
-    /// and the write.
+    /// writers for the same key can only be writing the same bytes. Conditional
+    /// completion preserves competing writers; existing bytes are compared.
     ///
     /// # Errors
     ///
@@ -578,46 +687,7 @@ impl S3ObjectStore {
         path: &Path,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
-        verify_file_length(path, integrity)?;
-        if let Some(existing) = ObjectStore::metadata(self, key)? {
-            return existing_object_outcome_from_file(
-                self,
-                key,
-                existing.length(),
-                path,
-                integrity,
-            );
-        }
-
-        let location = self.location_for_key(key)?;
-        let temporary = temporary_upload_location(&self.key_prefix);
-        if let Err(error) = self.stream_file_to_location(&temporary, path) {
-            self.delete_location_if_present(&temporary).ok();
-            return Err(error);
-        }
-
-        let copy_result = self.block_on(self.inner.copy_opts(
-            &temporary,
-            &location,
-            CopyOptions::new().with_mode(CopyMode::Create),
-        ));
-        // Best-effort cleanup — ignore failure, data is at the canonical key.
-        self.delete_location_if_present(&temporary).ok();
-        match copy_result {
-            Ok(()) => Ok(PutOutcome::Inserted),
-            Err(S3ObjectStoreError::External(ExternalObjectStoreError::AlreadyExists {
-                ..
-            }))
-            | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
-                ..
-            })) => {
-                let existing_length = ObjectStore::metadata(self, key)?
-                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
-                    .length();
-                existing_object_outcome_from_file(self, key, existing_length, path, integrity)
-            }
-            Err(error) => Err(error),
-        }
+        self.put_file_if_absent(key, path, integrity)
     }
 
     /// Copies an existing object to a new key if the destination key is absent.
@@ -625,21 +695,13 @@ impl S3ObjectStore {
     /// This uses the S3-compatible provider's server-side copy path instead of reading
     /// the full source object back into process memory.
     ///
-    /// # TOCTOU Race Window
+    /// # Concurrency
     ///
-    /// This method has a TOCTOU window between the `metadata()` destination
-    /// existence probe implicit in the `CopyMode::Create` copy operation and the
-    /// copy itself.  The `CopyMode::Create` is atomic at the S3 API
-    /// level — either the destination is absent and the copy succeeds, or the
-    /// destination exists and the copy fails with `AlreadyExists`.  However, the
-    /// earlier source-metadata check and the source-or-destination
-    /// equality check are not atomic with the copy.  A concurrent
-    /// writer that deletes the source between the metadata check and the copy
-    /// will cause the copy to fail with `NotFound`.  A concurrent writer that
-    /// inserts the destination key between the metadata check and the copy will
-    /// cause the copy to fail with `AlreadyExists`, triggering the
-    /// conflict-resolution comparison.  This is safe for content-addressed usage
-    /// where source and destination represent the same logical content.
+    /// Both the server-side copy and the large-object streaming fallback use
+    /// conditional multipart completion, so a competing destination writer is
+    /// protected atomically at publication. An existing destination is compared
+    /// with the source before returning `AlreadyExists`. Sources must remain
+    /// immutable during copying and comparison, as in content-addressed usage.
     ///
     /// # Errors
     ///
@@ -663,32 +725,13 @@ impl S3ObjectStore {
             };
         }
 
-        let Some(source_metadata) = ObjectStore::metadata(self, source)? else {
-            return Err(S3ObjectStoreError::External(
-                ExternalObjectStoreError::NotFound {
-                    path: source.as_str().to_owned(),
-                    source: Box::new(IoError::from(std::io::ErrorKind::NotFound)),
-                },
-            ));
-        };
-
         let source_location = self.location_for_key(source)?;
         let destination_location = self.location_for_key(destination)?;
-        let source_len = source_metadata.length();
-
-        // S3 single-part COPY is limited to 5 GiB.  For larger objects, fall
-        // back to a streaming multipart copy that reads the source in chunks
-        // and re-uploads them to the destination.
-        if source_len > MAX_SINGLE_COPY_BYTES {
-            return self.block_on_result(self.streaming_large_copy(
-                &source_location,
-                &destination_location,
-                source,
-                destination,
-                source_len,
-            ));
-        }
-
+        // Try the conditional server-side copy first. A source HEAD on every
+        // successful copy adds a request and can race with the copy itself.
+        // The copy operation reports a missing source and atomically protects
+        // the destination, so metadata is only needed on failure: to compare
+        // an existing destination, or to select the >5 GiB streaming fallback.
         match self.block_on(self.inner.copy_opts(
             &source_location,
             &destination_location,
@@ -700,9 +743,42 @@ impl S3ObjectStore {
             }))
             | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
-            })) => existing_copy_outcome(self, source, destination, source_len),
-            Err(error) => Err(error),
+            })) => {
+                let source_len = self.copy_source_length(source)?;
+                existing_copy_outcome(self, source, destination, source_len)
+            }
+            Err(error) => {
+                let source_len = match ObjectStore::metadata(self, source) {
+                    Ok(Some(metadata)) => metadata.length(),
+                    Ok(None) => return Err(missing_copy_source(source)),
+                    // Keep the original copy failure when the follow-up
+                    // metadata request cannot explain it.
+                    Err(_) => return Err(error),
+                };
+
+                // S3-compatible providers report CopyObject/UploadPartCopy
+                // size-limit failures differently. The source length is the
+                // provider-independent signal for selecting the established
+                // streaming multipart path.
+                if source_len > MAX_SINGLE_COPY_BYTES {
+                    self.block_on_result(self.streaming_large_copy(
+                        &source_location,
+                        &destination_location,
+                        source,
+                        destination,
+                        source_len,
+                    ))
+                } else {
+                    Err(error)
+                }
+            }
         }
+    }
+
+    fn copy_source_length(&self, source: &ObjectKey) -> Result<u64, S3ObjectStoreError> {
+        ObjectStore::metadata(self, source)?
+            .map(|metadata| metadata.length())
+            .ok_or_else(|| missing_copy_source(source))
     }
 
     /// Copies a large object from `source_location` to `destination_location`
@@ -757,20 +833,23 @@ impl S3ObjectStore {
 
         match result {
             Ok(()) => {
-                // Re-check destination existence before completing.  A
-                // concurrent writer may have promoted content to the
-                // target key while we were uploading parts.
-                if ObjectStore::metadata(self, destination)?.is_some() {
-                    store.abort_multipart(&dst, &upload_id).await.ok();
-                    // The destination may have been written by a different
-                    // operation while this multipart copy was in flight.
-                    // Compare bytes before treating the race as an
-                    // idempotent success; the destination key is not itself
-                    // proof that it contains the source content.
-                    return existing_copy_outcome(self, source, destination, source_len);
-                }
-                match store.complete_multipart(&dst, &upload_id, part_ids).await {
+                // The provider must enforce absence atomically at publication.
+                // Another HEAD here cannot fence a competing node's later PUT.
+                // This dedicated client adds If-None-Match only to completion,
+                // retaining the dependency's signing, XML parsing and retries.
+                match self
+                    .conditional_completion_inner
+                    .complete_multipart(&dst, &upload_id, part_ids)
+                    .await
+                {
                     Ok(_) => Ok(PutOutcome::Inserted),
+                    Err(
+                        ExternalObjectStoreError::AlreadyExists { .. }
+                        | ExternalObjectStoreError::Precondition { .. },
+                    ) => {
+                        store.abort_multipart(&dst, &upload_id).await.ok();
+                        existing_copy_outcome(self, source, destination, source_len)
+                    }
                     Err(error) => {
                         store.abort_multipart(&dst, &upload_id).await.ok();
                         Err(S3ObjectStoreError::External(error))
@@ -784,49 +863,7 @@ impl S3ObjectStore {
         }
     }
 
-    fn stream_file_to_location(
-        &self,
-        location: &ObjectStorePath,
-        path: &Path,
-    ) -> Result<(), S3ObjectStoreError> {
-        let store = self.inner.clone();
-        let location = location.clone();
-        let path = path.to_path_buf();
-        self.block_on_result(async move {
-            let upload = store.put_multipart(&location).await?;
-            let mut writer = WriteMultipart::new_with_chunk_size(upload, STREAM_UPLOAD_CHUNK_BYTES);
-            let mut file = TokioFile::open(&path)
-                .await
-                .map_err(S3ObjectStoreError::Io)?;
-            let mut buffer = vec![0_u8; STREAM_UPLOAD_CHUNK_BYTES];
-            loop {
-                let read = match file.read(&mut buffer).await {
-                    Ok(read) => read,
-                    Err(error) => {
-                        let _ignored = writer.abort().await;
-                        return Err(S3ObjectStoreError::Io(error));
-                    }
-                };
-                if read == 0 {
-                    break;
-                }
-                let chunk = buffer
-                    .get(..read)
-                    .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
-                writer.write(chunk);
-                if let Err(error) = writer.wait_for_capacity(4).await {
-                    let _ignored = writer.abort().await;
-                    return Err(S3ObjectStoreError::External(error));
-                }
-            }
-            writer
-                .finish()
-                .await
-                .map_err(S3ObjectStoreError::External)?;
-            Ok(())
-        })
-    }
-
+    #[cfg(test)]
     pub(crate) fn delete_location_if_present(
         &self,
         location: &ObjectStorePath,
@@ -845,7 +882,7 @@ impl S3ObjectStore {
     /// and `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>`) are
     /// normally deleted immediately after promotion, but a crash between the
     /// temp write and the copy/delete strands them forever (F-48). The normal
-    /// listing paths skip temp keys, so this sweep does its own raw enumeration
+    /// listing paths skip temp keys, so this sweep enumerates the reserved `__tmp/` subtree
     /// and deletes only keys matching the exact generated-temp grammars
     /// (`is_temp_upload_key`) whose `LastModified` — S3 backend truth, immune
     /// to writer/GC wall-clock divergence — is older than the age bound. User
@@ -865,7 +902,7 @@ impl S3ObjectStore {
             u128::from(now_unix_seconds.saturating_sub(S3_TEMP_ARTIFACT_AGE_SECONDS))
                 * 1_000_000_000;
         let prefix =
-            ObjectPrefix::parse("").map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
+            ObjectPrefix::parse("__tmp/").map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
         let location = self.location_for_prefix(&prefix)?;
         self.block_on_result(async {
             let mut listed = self.inner.list(Some(&location));
@@ -1181,46 +1218,71 @@ pub(crate) fn verify_integrity(
 pub(crate) fn existing_object_outcome_from_file(
     store: &S3ObjectStore,
     key: &ObjectKey,
-    existing_length: u64,
     path: &Path,
     integrity: &ObjectIntegrity,
-) -> Result<PutOutcome, S3ObjectStoreError> {
+) -> Result<Option<PutOutcome>, S3ObjectStoreError> {
     verify_file_length(path, integrity)?;
-    if existing_length != integrity.length() {
+    let location = store.location_for_key(key)?;
+    let result = match store.block_on(store.inner.get(&location)) {
+        Ok(result) => result,
+        Err(S3ObjectStoreError::External(ExternalObjectStoreError::NotFound { .. })) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if result.meta.size != integrity.length() {
         return Err(S3ObjectStoreError::ExistingObjectConflict);
     }
-    let mut file = File::open(path).map_err(S3ObjectStoreError::Io)?;
-    let mut offset = 0_u64;
-    let mut buffer = vec![0_u8; super::STREAM_COMPARE_CHUNK_BYTES];
-    while offset < existing_length {
-        let remaining = existing_length
-            .checked_sub(offset)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let to_read = usize::try_from(remaining.min(super::STREAM_COMPARE_CHUNK_BYTES as u64))
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let chunk = buffer
-            .get_mut(..to_read)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        file.read_exact(chunk).map_err(S3ObjectStoreError::Io)?;
-        let end = offset
-            .checked_add(
-                u64::try_from(to_read)
-                    .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?,
-            )
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let range = ByteRange::new(offset, end)
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let existing = ObjectStore::read_range(store, key, range)?;
-        let expected = buffer
-            .get(..to_read)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        if existing.as_slice() != expected {
+
+    let expected_length = integrity.length();
+    let path = path.to_path_buf();
+    let mut stream = result.into_stream();
+    store.block_on_result(async move {
+        let mut file = TokioFile::open(path)
+            .await
+            .map_err(S3ObjectStoreError::Io)?;
+        let mut buffer = vec![0_u8; super::STREAM_COMPARE_CHUNK_BYTES];
+        let mut compared_length = 0_u64;
+        while let Some(remote_chunk) = stream.next().await {
+            let remote_chunk = remote_chunk.map_err(S3ObjectStoreError::External)?;
+            for remote_part in remote_chunk.chunks(buffer.len()) {
+                let expected = buffer
+                    .get_mut(..remote_part.len())
+                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
+                file.read_exact(expected)
+                    .await
+                    .map_err(S3ObjectStoreError::Io)?;
+                if expected != remote_part {
+                    return Err(S3ObjectStoreError::ExistingObjectConflict);
+                }
+                compared_length = compared_length
+                    .checked_add(
+                        u64::try_from(remote_part.len())
+                            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?,
+                    )
+                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
+            }
+        }
+        let mut trailing = [0_u8; 1];
+        if file
+            .read(&mut trailing)
+            .await
+            .map_err(S3ObjectStoreError::Io)?
+            != 0
+            || compared_length != expected_length
+        {
             return Err(S3ObjectStoreError::ExistingObjectConflict);
         }
-        offset = end.saturating_add(1);
-    }
-    Ok(PutOutcome::AlreadyExists)
+        Ok(())
+    })?;
+    Ok(Some(PutOutcome::AlreadyExists))
+}
+
+fn missing_copy_source(source: &ObjectKey) -> S3ObjectStoreError {
+    S3ObjectStoreError::External(ExternalObjectStoreError::NotFound {
+        path: source.as_str().to_owned(),
+        source: Box::new(IoError::from(std::io::ErrorKind::NotFound)),
+    })
 }
 
 pub(crate) fn existing_copy_outcome(
@@ -1277,7 +1339,13 @@ pub(crate) fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
     ShardlineHash::from_bytes(*digest.as_bytes())
 }
 
+#[cfg(test)]
 pub(crate) fn temporary_upload_location(key_prefix: &Option<String>) -> ObjectStorePath {
+    use super::types::TEMP_UPLOAD_COUNTER;
+    use std::{
+        sync::atomic::Ordering,
+        time::{SystemTime, UNIX_EPOCH},
+    };
     let counter = TEMP_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let unix_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

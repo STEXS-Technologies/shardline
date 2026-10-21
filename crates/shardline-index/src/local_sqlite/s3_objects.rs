@@ -1,13 +1,12 @@
 #[cfg(test)]
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params_from_iter};
-use std::{collections::HashMap, fmt::Write as _};
+use std::fmt::Write as _;
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
 use crate::{S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, s3_prefix_successor};
 use shardline_reliability::{
-    OperationKind, S3ObjectLifecycleEvent, SnapshotEvidence, persisted_event_sequence,
-    verify_and_append_snapshot_transition, verify_persisted_merkle_commit_with_previous,
+    OperationKind, S3ObjectLifecycleEvent, SnapshotEvidence, verify_and_append_snapshot_transition,
     verify_snapshot_event,
 };
 
@@ -60,7 +59,13 @@ fn upsert_s3_object_sql(
             content_hash = excluded.content_hash,
             etag = excluded.etag,
             user_metadata = excluded.user_metadata,
-            updated_at_unix_seconds = excluded.updated_at_unix_seconds",
+            updated_at_unix_seconds = excluded.updated_at_unix_seconds
+         WHERE shardline_s3_objects.file_id IS NOT excluded.file_id
+            OR shardline_s3_objects.size_bytes IS NOT excluded.size_bytes
+            OR shardline_s3_objects.content_hash IS NOT excluded.content_hash
+            OR shardline_s3_objects.etag IS NOT excluded.etag
+            OR shardline_s3_objects.user_metadata IS NOT excluded.user_metadata
+            OR shardline_s3_objects.updated_at_unix_seconds IS NOT excluded.updated_at_unix_seconds",
         rusqlite::params![
             entry.scope_namespace,
             entry.object_key,
@@ -81,6 +86,20 @@ fn compare_and_swap_s3_object_sql(
     expected: Option<&S3ObjectEntry>,
     replacement: &S3ObjectEntry,
 ) -> Result<bool, LocalIndexStoreError> {
+    if expected == Some(replacement) {
+        // The caller holds an IMMEDIATE transaction, so the comparison and
+        // evidence append retain the same writer exclusion as a real UPDATE.
+        let current = current_s3_object_sql(
+            transaction,
+            &replacement.scope_namespace,
+            &replacement.object_key,
+        )?;
+        if current.as_ref() != expected {
+            return Ok(false);
+        }
+        record_s3_object_transition(transaction, expected, Some(replacement))?;
+        return Ok(true);
+    }
     let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
     let changed = if let Some(expected) = expected {
         transaction.execute(
@@ -240,7 +259,7 @@ fn scan_s3_objects_sql(
 
 /// Verifies only the latest committed boundary for a paginated listing.
 /// Historical-chain verification remains the fsck/recovery responsibility;
-/// this keeps normal listings bounded to one query and one event per object.
+/// this keeps normal listings bounded to batched seeks and one event per object.
 fn verify_s3_object_listing_evidence(
     transaction: &Transaction<'_>,
     values: &[S3ObjectEntry],
@@ -262,93 +281,17 @@ fn verify_s3_object_listing_evidence(
                 .map(|operation| operation.operation_id)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let placeholders = (0..operations.len())
-        .map(|index| format!("?{}", index.saturating_add(2)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT operation_id, sequence, event_json, merkle_commit_json,
-                CASE WHEN EXISTS (
-                    SELECT 1 FROM shardline_reliability_events AS missing
-                    WHERE missing.operation_kind = ?1
-                      AND missing.operation_id = current.operation_id
-                      AND missing.sequence < current.sequence
-                      AND missing.merkle_commit_json IS NULL
-                ) THEN '{{\"missing_previous_merkle_commit\":true}}' ELSE (
-                    SELECT previous.merkle_commit_json
-                    FROM shardline_reliability_events AS previous
-                    WHERE previous.operation_kind = ?1
-                      AND previous.operation_id = current.operation_id
-                      AND previous.sequence < current.sequence
-                    ORDER BY previous.sequence DESC LIMIT 1
-                ) END AS previous_merkle_json
-         FROM shardline_reliability_events AS current
-         WHERE current.operation_kind = ?1
-           AND current.operation_id IN ({placeholders})
-           AND current.sequence = (
-               SELECT MAX(latest.sequence)
-               FROM shardline_reliability_events AS latest
-               WHERE latest.operation_kind = ?1
-                 AND latest.operation_id = current.operation_id
-           )"
-    );
-    let mut parameters = Vec::with_capacity(operations.len().saturating_add(1));
-    parameters.push(OperationKind::S3Object.as_str().to_owned());
-    parameters.extend(operations.iter().cloned());
-    let mut statement = transaction.prepare(&sql)?;
-    let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
-        let operation_id: String = row.get(0)?;
-        let sequence: i64 = row.get(1)?;
-        let event_json: String = row.get(2)?;
-        let merkle_json: Option<String> = row.get(3)?;
-        let previous_json: Option<String> = row.get(4)?;
-        Ok((
-            operation_id,
-            sequence,
-            event_json,
-            merkle_json,
-            previous_json,
-        ))
-    })?;
-    let mut latest = HashMap::with_capacity(values.len());
-    for row in rows {
-        let (operation_id, sequence, event_json, merkle_json, previous_json) = row?;
-        latest.insert(
-            operation_id,
-            (
-                sequence,
-                serde_json::from_str::<serde_json::Value>(&event_json)?,
-                merkle_json
-                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
-                    .transpose()?,
-                previous_json
-                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
-                    .transpose()?,
-            ),
-        );
-    }
+    let mut latest = helpers::load_latest_verified_event_json_batch(
+        transaction,
+        OperationKind::S3Object,
+        &operations,
+    )?;
     for (operation_id, expected) in operations.iter().zip(&snapshots) {
-        let Some((row_sequence, event_json, merkle_json, previous_json)) =
-            latest.remove(operation_id)
-        else {
+        let Some(event_json) = latest.remove(operation_id) else {
             return Err(LocalIndexStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         };
-        let event_sequence = persisted_event_sequence(OperationKind::S3Object, event_json.clone())?;
-        if u64::try_from(row_sequence).ok() != Some(event_sequence) {
-            return Err(LocalIndexStoreError::Reliability(
-                shardline_reliability::ReliabilityError::Merkle(
-                    "S3 listing evidence sequence mismatch".into(),
-                ),
-            ));
-        }
-        verify_persisted_merkle_commit_with_previous(
-            OperationKind::S3Object,
-            event_json.clone(),
-            merkle_json,
-            previous_json,
-        )?;
         let event: S3ObjectLifecycleEvent = serde_json::from_value(event_json)?;
         verify_snapshot_event(&event, expected)?;
     }
@@ -678,6 +621,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identical_s3_object_upsert_and_cas_skip_row_update_and_keep_evidence_valid() {
+        let store = make_store();
+        let value = entry("global", "data/replay.pt", &file_id(8), 100, 1000);
+        let connection = store.open_connection().expect("open test connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE s3_object_update_audit (updates INTEGER NOT NULL);
+                 INSERT INTO s3_object_update_audit VALUES (0);
+                 CREATE TRIGGER count_s3_object_updates
+                 AFTER UPDATE ON shardline_s3_objects
+                 BEGIN
+                     UPDATE s3_object_update_audit SET updates = updates + 1;
+                 END;",
+            )
+            .expect("install update counter");
+
+        store.upsert_s3_object(&value).await.unwrap();
+        store.upsert_s3_object(&value).await.unwrap();
+        assert!(
+            store
+                .compare_and_swap_s3_object(Some(&value), &value)
+                .await
+                .unwrap()
+        );
+
+        let updates: i64 = connection
+            .query_row("SELECT updates FROM s3_object_update_audit", [], |row| {
+                row.get(0)
+            })
+            .expect("read update counter");
+        assert_eq!(updates, 0);
+        assert_eq!(
+            store
+                .scan_s3_object_exact("global", "data/replay.pt")
+                .await
+                .unwrap(),
+            Some(value.clone())
+        );
+        let events: i64 = connection.query_row(
+            "SELECT count(*) FROM shardline_reliability_events WHERE operation_kind = 'S3Object'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(
+            events, 4,
+            "the no-op CAS still appends its evidence transition"
+        );
+        let mut newer = value.clone();
+        newer.updated_at_unix_seconds = 1001;
+        assert!(
+            store
+                .compare_and_swap_s3_object(Some(&value), &newer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .compare_and_swap_s3_object(Some(&value), &value)
+                .await
+                .unwrap()
+        );
+        let updates: i64 = connection
+            .query_row("SELECT updates FROM s3_object_update_audit", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            updates, 1,
+            "timestamp-changing CAS must still update the row"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_s3_object_returns_true_then_false() {
         let store = make_store();
         let e = entry("global", "data/delete.pt", &file_id(3), 100, 1000);
@@ -773,6 +788,65 @@ mod tests {
         assert_eq!(
             scan(&store, "global", "", Some(&cursor), 100).await,
             vec!["f4.txt", "f5.txt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_verifies_evidence_after_first_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let mut last_operation = String::new();
+        for index in 0..901 {
+            let value = entry(
+                "batched-listing",
+                &format!("key-{index:04}"),
+                &file_id(1),
+                1,
+                1,
+            );
+            upsert_s3_object_sql(&transaction, &value).unwrap();
+            last_operation = helpers::s3_object_snapshot(
+                &value.scope_namespace,
+                &value.object_key,
+                Some(&value),
+            )
+            .unwrap()
+            .evidence_operation()
+            .unwrap()
+            .operation_id;
+        }
+        transaction.commit().unwrap();
+        let values = store
+            .scan_s3_objects("batched-listing", "", None, 901)
+            .await
+            .unwrap();
+        assert_eq!(values.len(), 901);
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events SET merkle_commit_json=NULL
+             WHERE operation_kind='S3Object' AND operation_id=?1",
+                [&last_operation],
+            )
+            .unwrap();
+        assert!(
+            store
+                .scan_s3_objects("batched-listing", "", None, 901)
+                .await
+                .is_err()
+        );
+        let missing: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_reliability_events
+             WHERE operation_kind='S3Object' AND operation_id=?1 AND merkle_commit_json IS NULL",
+                [&last_operation],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            missing > 0,
+            "listing must reject corruption without repairing it"
         );
     }
 
@@ -897,6 +971,12 @@ mod tests {
         assert!(
             store
                 .scan_s3_object_exact("global", "model.bin")
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .compare_and_swap_s3_object(Some(&value), &value)
                 .await
                 .is_err()
         );

@@ -30,13 +30,49 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Improved
 
+- Avoided rewriting identical Xet identity rows in SQLite and PostgreSQL while
+  retaining transactional conflict checks and native identity updates.
+- Avoided scratch payload copies during filesystem-backed durable multipart
+  and OCI upload completion, retaining part-size checks and streaming checksum verification.
+- Removed intermediate local part copies during durable LFS range assembly,
+  preserving overlap ordering and final object digest verification.
+- Reduced repeated SQLite WAL checkpoint and recovery work in local backends by
+  retaining one idle connection, preserving commit durability and concurrent transactions.
+- Reused bounded SQLite evidence lookups for OCI tag and S3 object listings,
+  avoiding repeated history scans while preserving snapshot and integrity validation.
+- Limited S3 temporary-upload cleanup listings to the reserved temporary namespace,
+  avoiding scans of unrelated stored objects while retaining deletion safeguards.
+- Removed redundant local temporary-file writes when staging in-memory OCI/LFS
+  upload parts, preserving verified retries and synced atomic publication.
 - Accelerated upload chunk-boundary scanning while preserving existing chunk identities.
+- Avoided writing unreferenced per-chunk objects for local filesystem protocol
+  uploads when bounded Xorb packing succeeds, retaining verified chunk fallback
+  and independently readable chunks advertised by the public upload API.
 - Reused bounded validation output for full-file downloads while preserving
   complete container checks and bounded streaming responses.
+- Removed local Xorb scratch copies and redundant S3 HEAD requests from
+  referenced-term reads and lifecycle repair, retaining full-container validation.
+- Removed local container scratch copies from fsck and index rebuild while
+  preserving corruption checks, shard limits, and rebuild length validation.
+- Removed remaining local container scratch copies in Xet adapter validation,
+  retaining streamed remote reads and full-container checks.
 - Reduced duplicate S3 requests and overlapped bounded upload read-back while
   retaining full content verification.
+- Removed temporary-object promotion from file-backed S3 create-if-absent uploads
+  with bounded streaming and conditional multipart completion, preserving conflict
+  checks and atomic publication.
 - Batched PostgreSQL version and latest metadata in the owning publication transaction
   and reduced reference sorting, locking, and snapshot setup overhead during publication.
+- Avoided rewriting identical S3 metadata compare-and-swap rows while retaining
+  database locks, timestamp-changing updates, and reliability evidence.
+- Reduced repeated local directory validation while retaining fresh symlink
+  checks and durability syncs.
+- Removed redundant local object opens and verification-handle duplication,
+  preserving full byte comparisons, anchored publication, and durability syncs.
+- Removed redundant S3 HEAD requests when loading GC clock records while retaining
+  bounded reads, response validation, and conservative clock recovery.
+- Removed redundant S3 HEAD requests during saved-delete receipt recovery while
+  preserving bounded reads and exact-attempt verification.
 - Strengthened upload and resumable lifecycle validation with native StateChronicle
   profiles while preserving existing transition rules.
 - Stored PostgreSQL task history in shared metadata without additional payload-bucket
@@ -44,6 +80,22 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Fixed
 
+- Kept Hub REST commits on the requested branch instead of updating main,
+  rejecting stale or deleted feature-branch updates atomically.
+- Returned Git-compatible Hub SDK commit IDs while retaining historical revision
+  IDs and legacy response fields, allowing SDK optimistic writes without changing data.
+- Restored Hugging Face SDK reference listing and current repository commit/file
+  metadata, retaining repository authorization and live branch/tag semantics.
+- Supported Hugging Face SDK branch and lightweight-tag creation and deletion
+  with atomic publication, protected main, and preserved commit history.
+- Added bounded Hub SDK commit-history reads and typed missing-repository,
+  revision, and file errors without changing existing status codes or bodies.
+- Prevented incomplete persisted Xorb member caches from hiding live references;
+  member scans now validate the source container before exposing its chunks.
+
+- Enabled native Hugging Face `hf_xet` uploads through the Hub frontend, including
+  large-file negotiation, scoped CAS tokens, and verified download of committed
+  Xet content, while preserving basic LFS clients.
 - Blocked crate publication while workspace-only dependency overrides would
   silently drop required fixes for downstream consumers.
 - Prevented maintenance commands from continuing as the old owner after losing

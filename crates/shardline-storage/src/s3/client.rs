@@ -1,3 +1,4 @@
+use object_store::ClientOptions;
 use object_store::aws::{AmazonS3, AmazonS3Builder, S3ConditionalPut, S3CopyIfNotExists};
 
 use super::{S3ObjectStoreConfig, S3ObjectStoreError};
@@ -9,7 +10,29 @@ use super::{S3ObjectStoreConfig, S3ObjectStoreError};
 pub(crate) fn build_amazon_s3_client(
     config: &S3ObjectStoreConfig,
 ) -> Result<AmazonS3, S3ObjectStoreError> {
-    build_client(config, object_store::RetryConfig::default(), false)
+    build_client(
+        config,
+        object_store::RetryConfig::default(),
+        false,
+        ClientOptions::default(),
+    )
+}
+
+/// This client is used only for multipart completion. Applying the condition to
+/// CreateMultipartUpload or UploadPart would be invalid on some S3 providers.
+pub(crate) fn build_conditional_completion_client(
+    config: &S3ObjectStoreConfig,
+) -> Result<AmazonS3, S3ObjectStoreError> {
+    let headers = http::HeaderMap::from_iter([(
+        http::header::IF_NONE_MATCH,
+        http::HeaderValue::from_static("*"),
+    )]);
+    build_client(
+        config,
+        object_store::RetryConfig::default(),
+        false,
+        ClientOptions::default().with_default_headers(headers),
+    )
 }
 
 pub(crate) fn build_single_attempt_client(
@@ -22,6 +45,7 @@ pub(crate) fn build_single_attempt_client(
             ..object_store::RetryConfig::default()
         },
         true,
+        ClientOptions::default(),
     )
 }
 
@@ -29,8 +53,10 @@ fn build_client(
     config: &S3ObjectStoreConfig,
     retry: object_store::RetryConfig,
     single_delete: bool,
+    client_options: ClientOptions,
 ) -> Result<AmazonS3, S3ObjectStoreError> {
     let mut builder = AmazonS3Builder::new()
+        .with_client_options(client_options)
         .with_retry(retry)
         .with_disable_bulk_delete(single_delete)
         .with_bucket_name(config.bucket.clone())

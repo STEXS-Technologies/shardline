@@ -146,42 +146,17 @@ where
     IndexAdapter::Error: Into<ProviderEventsError>,
 {
     let provider = repository.provider().repository_provider();
-    let existing = index_store
-        .provider_repository_state(provider, repository.owner(), repository.name())
-        .await
-        .map_err(Into::into)?;
     let state = ProviderRepositoryState::new(
         provider,
         repository.owner().to_owned(),
         repository.name().to_owned(),
-        access_changed_at_unix_seconds.or_else(|| {
-            existing
-                .as_ref()
-                .and_then(ProviderRepositoryState::last_access_changed_at_unix_seconds)
-        }),
-        revision_pushed_at_unix_seconds.or_else(|| {
-            existing
-                .as_ref()
-                .and_then(ProviderRepositoryState::last_revision_pushed_at_unix_seconds)
-        }),
-        revision.map(ToOwned::to_owned).or_else(|| {
-            existing
-                .as_ref()
-                .and_then(ProviderRepositoryState::last_pushed_revision)
-                .map(ToOwned::to_owned)
-        }),
-    )
-    .with_reconciliation(
-        existing
-            .as_ref()
-            .and_then(ProviderRepositoryState::last_cache_invalidated_at_unix_seconds),
-        existing
-            .as_ref()
-            .and_then(ProviderRepositoryState::last_authorization_rechecked_at_unix_seconds),
-        existing
-            .as_ref()
-            .and_then(ProviderRepositoryState::last_drift_checked_at_unix_seconds),
+        access_changed_at_unix_seconds,
+        revision_pushed_at_unix_seconds,
+        revision.map(ToOwned::to_owned),
     );
+    // The index adapters merge partial observations atomically while they hold
+    // the repository row lock. Passing only this event's fields avoids a
+    // separate read of the same row and cannot erase independent observations.
     index_store
         .upsert_provider_repository_state(&state)
         .await
@@ -191,7 +166,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use shardline_index::{LifecycleStore, MemoryIndexStore, ProviderRepositoryState};
+    use shardline_index::{
+        AsyncIndexStore, LifecycleStore, LocalIndexStore, MemoryIndexStore, ProviderRepositoryState,
+    };
     use shardline_protocol::RepositoryProvider;
     use shardline_vcs::{
         ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind,
@@ -263,6 +240,123 @@ mod tests {
         assert_eq!(state.last_access_changed_at_unix_seconds(), Some(2000));
         assert_eq!(state.last_revision_pushed_at_unix_seconds(), None);
         assert_eq!(state.last_pushed_revision(), None);
+    }
+
+    #[tokio::test]
+    async fn provider_event_partial_upsert_preserves_other_observations() {
+        let index = MemoryIndexStore::new();
+        let initial = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "repo".into(),
+            None,
+            Some(100),
+            Some("refs/heads/main".into()),
+        )
+        .with_reconciliation(Some(110), Some(120), Some(130));
+        LifecycleStore::upsert_provider_repository_state(&index, &initial).unwrap();
+
+        let event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::AccessChanged,
+            "delivery-access-preserves-revision",
+        );
+        apply_access_changed(&index, &event, 200).await.unwrap();
+
+        let state = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "repo",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(state.last_access_changed_at_unix_seconds(), Some(200));
+        assert_eq!(state.last_revision_pushed_at_unix_seconds(), Some(100));
+        assert_eq!(state.last_pushed_revision(), Some("refs/heads/main"));
+        assert_eq!(state.last_cache_invalidated_at_unix_seconds(), Some(110));
+        assert_eq!(
+            state.last_authorization_rechecked_at_unix_seconds(),
+            Some(120)
+        );
+        assert_eq!(state.last_drift_checked_at_unix_seconds(), Some(130));
+
+        let pushed = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::RevisionPushed {
+                revision: RevisionRef::new("refs/heads/release").expect("valid revision"),
+            },
+            "delivery-push-preserves-access",
+        );
+        apply_revision_pushed(&index, &pushed, "refs/heads/release", 300)
+            .await
+            .unwrap();
+        let state = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "repo",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(state.last_access_changed_at_unix_seconds(), Some(200));
+        assert_eq!(state.last_revision_pushed_at_unix_seconds(), Some(300));
+        assert_eq!(state.last_pushed_revision(), Some("refs/heads/release"));
+        assert_eq!(state.last_cache_invalidated_at_unix_seconds(), Some(110));
+        assert_eq!(
+            state.last_authorization_rechecked_at_unix_seconds(),
+            Some(120)
+        );
+        assert_eq!(state.last_drift_checked_at_unix_seconds(), Some(130));
+    }
+
+    #[tokio::test]
+    async fn sqlite_provider_event_partial_upsert_preserves_other_observations() {
+        let directory = tempfile::tempdir().expect("temporary metadata directory");
+        let index = LocalIndexStore::new(directory.path().to_path_buf()).expect("open SQLite");
+        let initial = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "repo".into(),
+            None,
+            Some(100),
+            Some("refs/heads/main".into()),
+        )
+        .with_reconciliation(Some(110), Some(120), Some(130));
+        AsyncIndexStore::upsert_provider_repository_state(&index, &initial)
+            .await
+            .expect("persist initial provider state");
+
+        let event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::AccessChanged,
+            "delivery-sqlite-access-preserves-revision",
+        );
+        apply_access_changed(&index, &event, 200)
+            .await
+            .expect("apply access change");
+
+        let state = AsyncIndexStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "repo",
+        )
+        .await
+        .expect("load merged provider state")
+        .expect("provider state exists");
+        assert_eq!(state.last_access_changed_at_unix_seconds(), Some(200));
+        assert_eq!(state.last_revision_pushed_at_unix_seconds(), Some(100));
+        assert_eq!(state.last_pushed_revision(), Some("refs/heads/main"));
+        assert_eq!(state.last_cache_invalidated_at_unix_seconds(), Some(110));
+        assert_eq!(
+            state.last_authorization_rechecked_at_unix_seconds(),
+            Some(120)
+        );
+        assert_eq!(state.last_drift_checked_at_unix_seconds(), Some(130));
     }
 
     #[tokio::test]

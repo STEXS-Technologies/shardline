@@ -1,6 +1,6 @@
-use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use std::{collections::HashSet, str::FromStr};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -8,8 +8,8 @@ use futures_util::TryStreamExt;
 use serde_json::to_vec;
 use shardline_reliability::resumable_session_event;
 use sqlx::{
-    Connection as _, PgConnection, Postgres, Row, Transaction, postgres::PgRow, query,
-    query_scalar, types::Json,
+    Connection as _, PgConnection, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow,
+    query, query_scalar, types::Json,
 };
 
 use super::{
@@ -27,6 +27,9 @@ use crate::{
     },
     xet_hash_hex_string,
 };
+
+/// Keep bulk dedupe publication well below PostgreSQL's bind-parameter ceiling.
+const POSTGRES_DEDUPE_MAPPING_BATCH_SIZE: usize = 4_096;
 
 // Admission precedes polling an owned read row or cloning a write payload,
 // bounding conversion work across read and write paths and store instances.
@@ -86,7 +89,13 @@ async fn prepare_record_upsert(
                 scope_key = EXCLUDED.scope_key,
                 file_id = EXCLUDED.file_id,
                 content_hash = EXCLUDED.content_hash,
-                record = EXCLUDED.record,
+                -- Keep the existing TOASTed payload on an exact replay while
+                -- still advancing updated_at and firing the normal row triggers.
+                record = CASE
+                    WHEN shardline_file_records.record IS DISTINCT FROM EXCLUDED.record
+                        THEN EXCLUDED.record
+                    ELSE shardline_file_records.record
+                END,
                 updated_at = now()",
         )
         .bind(locator.record_key)
@@ -122,7 +131,13 @@ async fn upsert_file_aliases_in_transaction(
                 scope_key = EXCLUDED.scope_key,
                 file_id = EXCLUDED.file_id,
                 content_hash = EXCLUDED.content_hash,
-                record = EXCLUDED.record,
+                -- Keep the existing TOASTed payload on an exact replay while
+                -- still advancing updated_at and firing the normal row triggers.
+                record = CASE
+                    WHEN shardline_file_records.record IS DISTINCT FROM EXCLUDED.record
+                        THEN EXCLUDED.record
+                    ELSE shardline_file_records.record
+                END,
                 updated_at = now()",
         )
         .bind(version.record_key)
@@ -627,12 +642,35 @@ impl super::PostgresRecordStore {
         dedupe_mappings: &[DedupeShardMapping],
         references: &[shardline_storage::ObjectKey],
     ) -> Result<(), PostgresMetadataStoreError> {
+        self.commit_native_shard_metadata_with_xet_identities(
+            records,
+            dedupe_mappings,
+            references,
+            &[],
+        )
+        .await
+    }
+
+    /// Atomically commits native shard metadata and Hub SHA-256 identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns a metadata/database error or a conflict when a repository-scoped
+    /// SHA-256 identity already has a different byte length.
+    pub async fn commit_native_shard_metadata_with_xet_identities(
+        &self,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+        identities: &[crate::XetFileIdentity],
+    ) -> Result<(), PostgresMetadataStoreError> {
         let mut connection = self.pool.acquire().await?;
-        self.commit_native_shard_metadata_on_connection(
+        self.commit_native_shard_metadata_on_connection_with_xet_identities(
             &mut connection,
             records,
             dedupe_mappings,
             references,
+            identities,
         )
         .await
     }
@@ -654,6 +692,31 @@ impl super::PostgresRecordStore {
         dedupe_mappings: &[DedupeShardMapping],
         references: &[shardline_storage::ObjectKey],
     ) -> Result<(), PostgresMetadataStoreError> {
+        self.commit_native_shard_metadata_on_connection_with_xet_identities(
+            connection,
+            records,
+            dedupe_mappings,
+            references,
+            &[],
+        )
+        .await
+    }
+
+    /// Publishes native shard records, mappings, references, and Hub identities
+    /// in one transaction on the existing owner session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a pending-delete, metadata/database error, or a conflict when a
+    /// repository-scoped SHA-256 identity has a different byte length.
+    pub async fn commit_native_shard_metadata_on_connection_with_xet_identities(
+        &self,
+        connection: &mut PgConnection,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+        identities: &[crate::XetFileIdentity],
+    ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
         if !references.is_empty()
             && query_scalar::<_, bool>(
@@ -668,8 +731,46 @@ impl super::PostgresRecordStore {
             let locator = self.version_record_locator(record);
             upsert_record_in_transaction(&mut transaction, &locator, record).await?;
         }
-        for mapping in dedupe_mappings {
-            upsert_dedupe_shard_mapping_in_transaction(&mut transaction, mapping).await?;
+        upsert_dedupe_shard_mappings_in_transaction(&mut transaction, dedupe_mappings).await?;
+        for identity in identities {
+            let scope_key = identity.repository_key();
+            let total_bytes = i64::try_from(identity.total_bytes).map_err(|_error| {
+                PostgresMetadataStoreError::IntegerOutOfRange("file size exceeds i64".to_owned())
+            })?;
+            let result = query(
+                "INSERT INTO shardline_xet_file_identities
+                    (scope_key, sha256, file_id, total_bytes)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (scope_key, sha256) DO UPDATE SET
+                    file_id = EXCLUDED.file_id,
+                    total_bytes = EXCLUDED.total_bytes
+                 WHERE shardline_xet_file_identities.total_bytes = EXCLUDED.total_bytes
+                   AND shardline_xet_file_identities.file_id <> EXCLUDED.file_id",
+            )
+            .bind(&scope_key)
+            .bind(&identity.sha256)
+            .bind(&identity.file_id)
+            .bind(total_bytes)
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() == 0 {
+                // ON CONFLICT retains the conflicting row lock even when its
+                // WHERE clause skips the update. Check the locked identity in
+                // this transaction, including concurrent identical insertions.
+                let replay: bool = query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM shardline_xet_file_identities
+                     WHERE scope_key=$1 AND sha256=$2 AND file_id=$3 AND total_bytes=$4)",
+                )
+                .bind(&scope_key)
+                .bind(&identity.sha256)
+                .bind(&identity.file_id)
+                .bind(total_bytes)
+                .fetch_one(&mut *transaction)
+                .await?;
+                if !replay {
+                    return Err(PostgresMetadataStoreError::XetFileIdentityConflict);
+                }
+            }
         }
         for record in records {
             let locator = self.latest_record_locator(record);
@@ -677,6 +778,42 @@ impl super::PostgresRecordStore {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Looks up a Hub SHA-256 identity for a repository, independent of revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a metadata/database error or a range error if the stored size is invalid.
+    pub async fn xet_file_identity(
+        &self,
+        repository_scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, PostgresMetadataStoreError> {
+        let row = query(
+            "SELECT file_id, total_bytes FROM shardline_xet_file_identities
+             WHERE scope_key = $1 AND sha256 = $2",
+        )
+        .bind(crate::XetFileIdentity::repository_key_for_scope(
+            repository_scope,
+        ))
+        .bind(sha256)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let total_bytes: i64 = row.try_get("total_bytes")?;
+            Ok(crate::XetFileIdentity {
+                repository_scope: repository_scope.clone(),
+                sha256: sha256.to_owned(),
+                file_id: row.try_get("file_id")?,
+                total_bytes: u64::try_from(total_bytes).map_err(|_error| {
+                    PostgresMetadataStoreError::IntegerOutOfRange(
+                        "stored file size is negative".to_owned(),
+                    )
+                })?,
+            })
+        })
+        .transpose()
     }
 
     async fn upsert_record(
@@ -1148,12 +1285,53 @@ async fn upsert_dedupe_shard_mapping_in_transaction(
          ON CONFLICT (chunk_hash)
          DO UPDATE SET
             shard_object_key = EXCLUDED.shard_object_key,
-            updated_at = now()",
+            updated_at = now()
+         WHERE shardline_dedupe_shards.shard_object_key
+               IS DISTINCT FROM EXCLUDED.shard_object_key",
     )
     .bind(xet_hash_hex_string(mapping.chunk_hash()))
     .bind(mapping.shard_object_key().as_str())
     .execute(&mut **transaction)
     .await?;
+    Ok(())
+}
+
+async fn upsert_dedupe_shard_mappings_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    mappings: &[DedupeShardMapping],
+) -> Result<(), PostgresMetadataStoreError> {
+    let mut seen = HashSet::with_capacity(mappings.len());
+    let has_duplicate_hashes = mappings
+        .iter()
+        .any(|mapping| !seen.insert(mapping.chunk_hash()));
+    if has_duplicate_hashes {
+        // Preserve the established last-write-wins behavior for callers that
+        // supply the same chunk more than once. The native shard parser emits
+        // unique hashes, so normal uploads use the batched path below.
+        for mapping in mappings {
+            upsert_dedupe_shard_mapping_in_transaction(transaction, mapping).await?;
+        }
+        return Ok(());
+    }
+
+    for batch in mappings.chunks(POSTGRES_DEDUPE_MAPPING_BATCH_SIZE) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO shardline_dedupe_shards (chunk_hash, shard_object_key) ",
+        );
+        builder.push_values(batch, |mut row, mapping| {
+            row.push_bind(xet_hash_hex_string(mapping.chunk_hash()))
+                .push_bind(mapping.shard_object_key().as_str());
+        });
+        builder.push(
+            " ON CONFLICT (chunk_hash)
+              DO UPDATE SET
+                 shard_object_key = EXCLUDED.shard_object_key,
+                 updated_at = now()
+              WHERE shardline_dedupe_shards.shard_object_key
+                    IS DISTINCT FROM EXCLUDED.shard_object_key",
+        );
+        builder.build().execute(&mut **transaction).await?;
+    }
     Ok(())
 }
 
@@ -1224,15 +1402,16 @@ mod tests {
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use
     )]
-    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
+    use shardline_storage::ObjectKey;
 
     use super::RecordKind;
     use super::record_locator;
-    use crate::RecordTraversal;
     use crate::{
-        FileChunkRecord, FileRecord, ResumableSession, ResumableSessionProtocol, S3ObjectEntry,
-        S3PublishCondition,
+        DedupeShardMapping, FileChunkRecord, FileRecord, ResumableSession,
+        ResumableSessionProtocol, S3ObjectEntry, S3PublishCondition,
     };
+    use crate::{RecordMutation, RecordTraversal};
 
     fn sample_record(repo_scope: Option<RepositoryScope>) -> FileRecord {
         FileRecord {
@@ -1252,6 +1431,197 @@ mod tests {
                 packed_end: 50,
             }],
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pg_xet_identity_replay_preserves_row_and_conflict_rollback() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        // This fixture clones the released database's tables. Install the new
+        // identity table in its isolated schema before exercising the bridge.
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261021000000_xet_file_identities.up.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut identity = crate::XetFileIdentity {
+            repository_scope: RepositoryScope::new(
+                RepositoryProvider::GitHub,
+                "team",
+                "assets",
+                Some("main"),
+            )
+            .unwrap(),
+            sha256: "a".repeat(64),
+            file_id: "b".repeat(64),
+            total_bytes: 42,
+        };
+        let identities = std::slice::from_ref(&identity);
+        let (first, second) = tokio::join!(
+            store.commit_native_shard_metadata_with_xet_identities(&[], &[], &[], identities),
+            store.commit_native_shard_metadata_with_xet_identities(&[], &[], &[], identities),
+        );
+        first.unwrap();
+        second.unwrap();
+        let before: String =
+            sqlx::query_scalar("SELECT xmin::text FROM shardline_xet_file_identities")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        store
+            .commit_native_shard_metadata_with_xet_identities(&[], &[], &[], identities)
+            .await
+            .unwrap();
+        let after: String =
+            sqlx::query_scalar("SELECT xmin::text FROM shardline_xet_file_identities")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            before, after,
+            "exact replay must not replace the row version"
+        );
+        identity.file_id = "c".repeat(64);
+        store
+            .commit_native_shard_metadata_with_xet_identities(
+                &[],
+                &[],
+                &[],
+                std::slice::from_ref(&identity),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .xet_file_identity(&identity.repository_scope, &identity.sha256)
+                .await
+                .unwrap(),
+            Some(identity.clone())
+        );
+        let mut new_identity = identity.clone();
+        new_identity.sha256 = "d".repeat(64);
+        let mut conflict = identity.clone();
+        conflict.total_bytes = 43;
+        assert!(matches!(
+            store
+                .commit_native_shard_metadata_with_xet_identities(
+                    &[],
+                    &[],
+                    &[],
+                    &[new_identity.clone(), conflict]
+                )
+                .await,
+            Err(super::super::PostgresMetadataStoreError::XetFileIdentityConflict)
+        ));
+        assert_eq!(
+            store
+                .xet_file_identity(&new_identity.repository_scope, &new_identity.sha256)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .xet_file_identity(&identity.repository_scope, &identity.sha256)
+                .await
+                .unwrap(),
+            Some(identity)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pg_native_shard_dedupe_mapping_batches_preserve_replay_and_duplicate_semantics() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mappings: Vec<_> = (0..5_000_u64)
+            .map(|index| {
+                let mut hash_bytes = [0_u8; 32];
+                hash_bytes[..8].copy_from_slice(&index.to_be_bytes());
+                DedupeShardMapping::new(
+                    ShardlineHash::from_bytes(hash_bytes),
+                    ObjectKey::parse(&format!("shards/{index:08x}/fixture.shard")).unwrap(),
+                )
+            })
+            .collect();
+
+        store
+            .commit_native_shard_metadata_with_xet_identities(&[], &mappings, &[], &[])
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shardline_dedupe_shards")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, mappings.len() as i64);
+
+        let checked_mapping = &mappings[4_096];
+        let hash = crate::xet_hash_hex_string(checked_mapping.chunk_hash());
+        let xmin_before: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_dedupe_shards WHERE chunk_hash = $1",
+        )
+        .bind(&hash)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        store
+            .commit_native_shard_metadata_with_xet_identities(&[], &mappings, &[], &[])
+            .await
+            .unwrap();
+        let xmin_after: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_dedupe_shards WHERE chunk_hash = $1",
+        )
+        .bind(&hash)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(xmin_before, xmin_after, "an exact replay rewrote the row");
+
+        let remapped = [DedupeShardMapping::new(
+            checked_mapping.chunk_hash(),
+            ObjectKey::parse("shards/remapped/fixture.shard").unwrap(),
+        )];
+        store
+            .commit_native_shard_metadata_with_xet_identities(&[], &remapped, &[], &[])
+            .await
+            .unwrap();
+        let remapped_key: String = sqlx::query_scalar(
+            "SELECT shard_object_key FROM shardline_dedupe_shards WHERE chunk_hash = $1",
+        )
+        .bind(&hash)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remapped_key, "shards/remapped/fixture.shard");
+
+        let duplicate_hash = mappings[0].chunk_hash();
+        let duplicate_mappings = [
+            DedupeShardMapping::new(
+                duplicate_hash,
+                ObjectKey::parse("shards/duplicate/first.shard").unwrap(),
+            ),
+            DedupeShardMapping::new(
+                duplicate_hash,
+                ObjectKey::parse("shards/duplicate/last.shard").unwrap(),
+            ),
+        ];
+        store
+            .commit_native_shard_metadata_with_xet_identities(&[], &duplicate_mappings, &[], &[])
+            .await
+            .unwrap();
+        let final_key: String = sqlx::query_scalar(
+            "SELECT shard_object_key FROM shardline_dedupe_shards WHERE chunk_hash = $1",
+        )
+        .bind(crate::xet_hash_hex_string(duplicate_hash))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(final_key, "shards/duplicate/last.shard");
+        pool.close().await;
     }
 
     #[test]
@@ -1429,6 +1799,76 @@ mod tests {
             Err(super::super::PostgresMetadataStoreError::RecordNotFound)
         ));
         assert_eq!(store.read_latest_record_bytes(&record).await.unwrap(), None);
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pg_version_replay_refreshes_row_and_latest_replay_updates() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let record = sample_record(None);
+
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+        let version = store.version_record_locator(&record);
+        let version_xmin_before: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_file_records WHERE record_key = $1",
+        )
+        .bind(&version.record_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+        let version_xmin_after: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_file_records WHERE record_key = $1",
+        )
+        .bind(&version.record_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(version_xmin_before, version_xmin_after);
+
+        let mut changed_record = record.clone();
+        changed_record.total_bytes += 1;
+        RecordMutation::write_version_record(&store, &changed_record)
+            .await
+            .unwrap();
+        let changed_version_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_file_records WHERE record_key = $1",
+        )
+        .bind(&version.record_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(version_xmin_after, changed_version_xmin);
+
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+        let latest = store.latest_record_locator(&record);
+        let latest_xmin_before: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_file_records WHERE record_key = $1",
+        )
+        .bind(&latest.record_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+        let latest_xmin_after: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_file_records WHERE record_key = $1",
+        )
+        .bind(&latest.record_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(latest_xmin_before, latest_xmin_after);
         pool.close().await;
     }
 

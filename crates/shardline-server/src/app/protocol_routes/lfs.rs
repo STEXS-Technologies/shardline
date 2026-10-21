@@ -45,7 +45,8 @@ use crate::{
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
     object_store::{
-        materialize_object_to_file, s3_lfs_parts_reader, stage_bytes_content_addressed,
+        materialize_object_to_file, open_local_object_for_read, s3_lfs_parts_reader,
+        stage_bytes_content_addressed,
     },
     overflow::checked_add,
     protocol_support::scope_namespace,
@@ -1798,17 +1799,28 @@ async fn durable_lfs_patch_object(
                 .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
             let key =
                 ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
-            let path = temporary.path().join(format!("part-{}", part.generation()));
-            materialize_object_to_file(
-                &state.backend.object_store(),
-                &key,
-                part.size_bytes(),
-                &path,
-            )
-            .await?;
+            let mut input = if let Some(file) =
+                open_local_object_for_read(&state.backend.object_store(), &key, part.size_bytes())
+                    .await?
+            {
+                file
+            } else {
+                let path = temporary.path().join(format!("part-{}", part.generation()));
+                materialize_object_to_file(
+                    &state.backend.object_store(),
+                    &key,
+                    part.size_bytes(),
+                    &path,
+                )
+                .await?;
+                tokio::fs::File::open(path).await?
+            };
             assembled.seek(SeekFrom::Start(part_range.start())).await?;
-            let mut input = tokio::fs::File::open(path).await?;
-            tokio::io::copy(&mut input, &mut assembled).await?;
+            if tokio::io::copy(&mut input, &mut assembled).await? != part.size_bytes() {
+                return Err(ServerError::ObjectStore(
+                    crate::error::ObjectStoreError::StoredLengthMismatch,
+                ));
+            }
         }
         assembled.flush().await?;
         drop(assembled);

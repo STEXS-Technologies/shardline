@@ -191,7 +191,8 @@ impl LocalIndexStore {
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (scope_namespace, repository, tag)
-                 DO UPDATE SET digest_hex = excluded.digest_hex",
+                 DO UPDATE SET digest_hex = excluded.digest_hex
+                 WHERE digest_hex != excluded.digest_hex",
                 params![tag.scope_namespace, tag.repository, tag.tag, tag.digest_hex],
             )?;
             super::oci_tags::record_tag_transition(

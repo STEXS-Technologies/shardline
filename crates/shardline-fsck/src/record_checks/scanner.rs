@@ -471,8 +471,8 @@ pub(crate) fn inspect_native_xet_term(
         .insert(object_key.as_str().to_owned());
 
     let xorb_location = object_location_display(object_root, object_store, &object_key);
-    let metadata = match object_store.metadata(&object_key)? {
-        Some(metadata) => metadata,
+    let mut reader = match object_store.materialize_bounded_object_if_present(&object_key, 0)? {
+        Some((reader, _length)) => reader,
         None => {
             push_issue(
                 report,
@@ -486,14 +486,11 @@ pub(crate) fn inspect_native_xet_term(
         }
     };
 
-    let mut xorb_file =
-        object_store.materialize_object_to_tempfile(&object_key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(&chunk.hash)?;
-    let mut reader = xorb_file.as_file_mut();
     // A stored container whose bytes fail to parse or validate is corrupt:
     // report it as a chunk hash mismatch instead of failing the whole fsck
-    // run. The reader is backed by a bounded temporary file, so validation
-    // does not scale process memory with the xorb size.
+    // run. Local readers retain the existing file; remote readers stream to a
+    // temporary file, so validation does not buffer the xorb in process memory.
     let validated = match validate_serialized_xorb(&mut reader, expected_hash) {
         Ok(validated) => validated,
         Err(_error) => {

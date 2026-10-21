@@ -234,12 +234,18 @@ pub(crate) async fn dataset_query(
             "not a dataset repository".to_owned(),
         ));
     }
-    let revision = state
-        .store
-        .resolve_revision(&name, &request.revision)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
-    if revision != request.revision {
+    let revision = crate::git::smart_http::resolve_commit_id(
+        &state,
+        &name,
+        &request.revision,
+        repo.capability(),
+    )?
+    .ok_or(HubApiError::RevisionNotFound)?;
+    if revision != request.revision
+        && crate::git::smart_http::public_commit_id(&state, &name, &revision, repo.capability())
+            .await?
+            != request.revision
+    {
         return Err(HubApiError::RevisionNotFound);
     }
     let files = state

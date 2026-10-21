@@ -78,8 +78,8 @@ use metadata_routes::{
     create_revision, delete_path, delete_revision, list_revisions, register_path, tree_lookup,
 };
 use operational::{
-    head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready, stats, upload_shard,
-    upload_xorb, write_xorb_transfer,
+    download_hub_xet_file, head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready,
+    stats, upload_shard, upload_xorb, write_xorb_transfer,
 };
 use protocol_routes::{
     bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
@@ -95,10 +95,14 @@ use provider_routes::{
     git_lfs_authenticate, handle_provider_webhook, issue_provider_token, issue_xet_read_token,
     issue_xet_write_token,
 };
-use reconstruction_routes::{batch_reconstruction, reconstruction, reconstruction_v2};
+use reconstruction_routes::{
+    batch_reconstruction, batch_reconstruction_post, reconstruction, reconstruction_v2,
+};
 
 pub const MAX_BATCH_RECONSTRUCTION_FILE_IDS: usize = 1024;
-pub const MAX_BATCH_RECONSTRUCTION_QUERY_BYTES: usize = 131_072;
+pub const MAX_BATCH_RECONSTRUCTION_REQUEST_BYTES: usize = 131_072;
+/// Backwards-compatible name for the existing GET query-string limit.
+pub const MAX_BATCH_RECONSTRUCTION_QUERY_BYTES: usize = MAX_BATCH_RECONSTRUCTION_REQUEST_BYTES;
 pub const MAX_LFS_BATCH_OBJECTS: usize = 1024;
 pub const MAX_OCI_MANIFEST_TAGS: usize = 128;
 pub const MAX_OCI_TAG_LIST_PAGE_SIZE: usize = 256;
@@ -210,6 +214,18 @@ async fn router_with_housekeeping_guard(
     housekeeping_guard: crate::task_tracking::housekeeping::HousekeepingGuard,
     housekeeping_stopped: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Router, ServerError> {
+    // The Hub frontend negotiates hf_xet for large-file transfers, so its
+    // runtime also needs the Xet CAS routes and reconstruction support. Add
+    // Xet to the effective frontend set once here so both route assembly and
+    // the backend's stored-object reconstruction dispatch agree. Hub-aware
+    // route registration below still leaves Hub-owned metadata paths intact.
+    let mut effective_frontends = config.server_frontends().to_vec();
+    if effective_frontends.contains(&ServerFrontend::Hub)
+        && !effective_frontends.contains(&ServerFrontend::Xet)
+    {
+        effective_frontends.push(ServerFrontend::Xet);
+    }
+    let config = config.with_server_frontends(effective_frontends)?;
     config.validate_runtime_requirements()?;
     let role = config.server_role();
     let max_request_body_bytes = config.max_request_body_bytes();
@@ -502,7 +518,6 @@ async fn router_with_housekeeping_guard(
     // and must be merged at the Router<()> level after both sides are
     // converted via `.with_state()`.
     let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
-    let mut xet_frontend_enabled = false;
     // S3 is mounted as the app-level FALLBACK rather than merged into the main
     // route trie: its `/{bucket}/{*key}` wildcard would otherwise conflict with
     // any other frontend's root-level parameter routes (Hub's Git Smart HTTP
@@ -517,7 +532,6 @@ async fn router_with_housekeeping_guard(
                 hub_state = Some(build_hub_state(&state, task_tracker.clone())?);
             }
             ServerFrontend::Xet => {
-                xet_frontend_enabled = true;
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
             ServerFrontend::S3 => {
@@ -539,7 +553,7 @@ async fn router_with_housekeeping_guard(
 
     // Merge hub routes (Router<()>) into the main app (Router<()>).
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs, !xet_frontend_enabled))
+        app.merge(shardline_hub_api::hub_routes(hs, true))
     } else {
         app
     };
@@ -745,8 +759,16 @@ fn register_xet_routes(
             .route(XET_READ_TOKEN_ROUTE, get(issue_xet_read_token))
             .route(XET_WRITE_TOKEN_ROUTE, get(issue_xet_write_token))
             .route("/reconstructions", get(batch_reconstruction))
-            .route("/v1/reconstructions", get(batch_reconstruction))
+            .route(
+                "/v1/reconstructions",
+                get(batch_reconstruction)
+                    .post(batch_reconstruction_post)
+                    .layer(DefaultBodyLimit::max(
+                        MAX_BATCH_RECONSTRUCTION_REQUEST_BYTES,
+                    )),
+            )
             .route("/v1/reconstructions/{file_id}", get(reconstruction))
+            .route("/v1/hub/xet-files/{sha256}", get(download_hub_xet_file))
             .route("/v2/reconstructions/{file_id}", get(reconstruction_v2))
             .route("/shards", post(upload_shard))
             .route("/v1/shards", post(upload_shard));

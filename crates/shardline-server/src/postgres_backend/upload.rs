@@ -64,11 +64,12 @@ impl super::PostgresBackend {
             &self.gc_barrier_pool,
             &self.request_session_identity,
             &self.request_session_slots,
-            self.upload_file_stream(
+            self.upload_file_stream_with_chunk_access(
                 file_id,
                 RequestBodyReader::from_bytes(body),
                 repository_scope,
                 None,
+                true,
             ),
         )
         .await
@@ -83,9 +84,27 @@ impl super::PostgresBackend {
     pub(crate) async fn upload_file_stream(
         &self,
         file_id: &str,
+        body: RequestBodyReader,
+        repository_scope: Option<&RepositoryScope>,
+        expected_sha256: Option<&str>,
+    ) -> Result<UploadFileResponse, ServerError> {
+        self.upload_file_stream_with_chunk_access(
+            file_id,
+            body,
+            repository_scope,
+            expected_sha256,
+            false,
+        )
+        .await
+    }
+
+    async fn upload_file_stream_with_chunk_access(
+        &self,
+        file_id: &str,
         mut body: RequestBodyReader,
         repository_scope: Option<&RepositoryScope>,
         expected_sha256: Option<&str>,
+        retain_standalone_chunks: bool,
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
@@ -129,7 +148,8 @@ impl super::PostgresBackend {
                 self.chunk_size,
                 expected_sha256.is_some(),
                 self.upload_max_in_flight_chunks,
-            );
+            )
+            .retain_standalone_chunks(retain_standalone_chunks);
             while let Some(bytes) = body.next_bytes().await? {
                 ingestor.ingest_body_chunk(&object_store, &bytes).await?;
             }
@@ -339,7 +359,7 @@ impl super::PostgresBackend {
                                 &bytes,
                                 repository_scope,
                                 shard_metadata_limits,
-                                move |records, mappings, references| async move {
+                                move |records, mappings, references, identities| async move {
                                     if let Some(mut connection) =
                                         crate::maintenance_barrier::RequestSession::connection_for(
                                             &request_session_identity,
@@ -347,21 +367,23 @@ impl super::PostgresBackend {
                                         .await
                                     {
                                         publication_backend
-                                            .commit_validated_native_shard_on_connection(
+                                            .commit_validated_native_shard_on_connection_with_xet_identities(
                                                 connection
                                                     .as_mut()
                                                     .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
                                                 &records,
                                                 &mappings,
                                                 &references,
+                                                &identities,
                                             )
                                             .await?;
                                     } else {
                                         publication_backend
-                                        .commit_validated_native_shard(
+                                        .commit_validated_native_shard_with_xet_identities(
                                             &records,
                                             &mappings,
                                             &references,
+                                            &identities,
                                         )
                                         .await?;
                                     }
@@ -376,7 +398,7 @@ impl super::PostgresBackend {
                                 file.path(),
                                 repository_scope,
                                 shard_metadata_limits,
-                                move |records, mappings, references| async move {
+                                move |records, mappings, references, identities| async move {
                                     if let Some(mut connection) =
                                         crate::maintenance_barrier::RequestSession::connection_for(
                                             &request_session_identity,
@@ -384,21 +406,23 @@ impl super::PostgresBackend {
                                         .await
                                     {
                                         publication_backend
-                                            .commit_validated_native_shard_on_connection(
+                                            .commit_validated_native_shard_on_connection_with_xet_identities(
                                                 connection
                                                     .as_mut()
                                                     .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
                                                 &records,
                                                 &mappings,
                                                 &references,
+                                                &identities,
                                             )
                                             .await?;
                                     } else {
                                         publication_backend
-                                        .commit_validated_native_shard(
+                                        .commit_validated_native_shard_with_xet_identities(
                                             &records,
                                             &mappings,
                                             &references,
+                                            &identities,
                                         )
                                         .await?;
                                     }
