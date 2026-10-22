@@ -2325,6 +2325,19 @@ async fn git_receive_pack_rejects_dotdot_refname() {
     create_model_repo(base_url, token).await;
 
     let client = Client::new();
+    let refs_url =
+        format!("{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack");
+    let refs_before = client
+        .get(&refs_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     let null_sha = "0000000000000000000000000000000000000000";
     let (push_body, _) = build_receive_pack_request_with_ref(
         null_sha,
@@ -2344,12 +2357,9 @@ async fn git_receive_pack_rejects_dotdot_refname() {
         .send()
         .await
         .unwrap();
-    assert!(
-        push_resp.status().is_success(),
-        "receive-pack should return 200 (ref silently rejected): {}",
-        push_resp.status()
-    );
+    assert_eq!(push_resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let push_response = push_resp.text().await.unwrap();
+    assert!(push_response.contains("malformed receive-pack commands"));
     assert!(
         !push_response.contains("refs/heads/../../etc/passwd"),
         "response should not confirm the dotdot refname: {push_response:?}"
@@ -2364,7 +2374,12 @@ async fn git_receive_pack_rejects_dotdot_refname() {
         .send()
         .await
         .unwrap();
-    let body = resp.text().await.unwrap();
+    let body = resp.error_for_status().unwrap().bytes().await.unwrap();
+    assert_eq!(
+        body, refs_before,
+        "rejected push must leave all refs unchanged"
+    );
+    let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(
         !body.contains("../../etc/passwd"),
         "info/refs must not advertise path-traversal ref: {body:?}"
@@ -2379,6 +2394,19 @@ async fn git_receive_pack_rejects_space_in_refname() {
     create_model_repo(base_url, token).await;
 
     let client = Client::new();
+    let refs_url =
+        format!("{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack");
+    let refs_before = client
+        .get(&refs_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     let null_sha = "0000000000000000000000000000000000000000";
     let (push_body, _) = build_receive_pack_request_with_ref(
         null_sha,
@@ -2398,12 +2426,9 @@ async fn git_receive_pack_rejects_space_in_refname() {
         .send()
         .await
         .unwrap();
-    assert!(
-        push_resp.status().is_success(),
-        "receive-pack should return 200 (ref silently rejected): {}",
-        push_resp.status()
-    );
+    assert_eq!(push_resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let push_response = push_resp.text().await.unwrap();
+    assert!(push_response.contains("malformed receive-pack commands"));
     assert!(
         !push_response.contains("refs/heads/feature branch"),
         "response should not confirm the space refname: {push_response:?}"
@@ -2418,7 +2443,12 @@ async fn git_receive_pack_rejects_space_in_refname() {
         .send()
         .await
         .unwrap();
-    let body = resp.text().await.unwrap();
+    let body = resp.error_for_status().unwrap().bytes().await.unwrap();
+    assert_eq!(
+        body, refs_before,
+        "rejected push must leave all refs unchanged"
+    );
+    let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(
         !body.contains("feature branch"),
         "info/refs must not advertise ref with space: {body:?}"
