@@ -17,6 +17,75 @@ async fn postgres_corrupt_copy_source_preserves_acknowledged_part() {
     exercise(state).await;
 }
 
+#[tokio::test]
+async fn copy_source_snapshot_stays_pinned_across_concurrent_overwrite() {
+    let (state, _root) = build_test_state().await;
+    exercise_snapshot_pinning(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_copy_source_snapshot_stays_pinned_across_overwrite() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise_snapshot_pinning(state).await;
+}
+
+async fn exercise_snapshot_pinning(state: Arc<AppState>) {
+    let app = s3_router(state.clone());
+    let source = "copy-source-snapshot-race";
+    let original = b"snapshot-pinned-original-bytes";
+    let uploaded = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            original.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    // UploadPartCopy resolves the source's listing row and content version
+    // before it opens the byte stream. Reproduce that exact race window by
+    // committing a replacement after snapshot resolution but before the read.
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let object_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let snapshot = state
+        .backend
+        .s3_object_read_snapshot(&namespace, source, &object_key)
+        .await
+        .unwrap();
+    assert!(snapshot.record_content_hash.is_some());
+
+    let replacement = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            b"replacement-version-with-different-length".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replacement.status(), StatusCode::OK);
+
+    let pinned = state
+        .backend
+        .read_object_stream_pinned(
+            &object_key,
+            snapshot.total_bytes,
+            None,
+            snapshot.record_content_hash.as_deref(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(Body::from_stream(pinned), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), original);
+}
+
 async fn exercise(state: Arc<AppState>) {
     let app = s3_router(state.clone());
     let source = "copy-integrity-source";
