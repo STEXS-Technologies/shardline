@@ -93,7 +93,7 @@ pub async fn upload_pack(
         if !done && !response_body.is_empty() {
             return Ok((response_body, pack_admission));
         }
-        let pack_data = generate_pack(&object_filter.apply(objects, &wants))?;
+        let pack_data = generate_pack(&object_filter.apply(objects, &wants)?)?;
         response_body.extend_from_slice(pktline::encode_line("NAK\n")?.as_bytes());
         if sideband {
             response_body.extend_from_slice(&pktline::sideband_data(&pack_data));

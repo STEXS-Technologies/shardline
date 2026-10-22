@@ -87,10 +87,12 @@ strict fsck after these operations, including an earlier date cutoff restoring
 full history. Date selection uses committed committer timestamps. Exclusions
 resolve repository branch/tag names, reject unknown or ambiguous names and omit
 their ancestry. Native Git checks exclusion by baseline tag and complete-history
-recovery. Partial clones support `blob:none` and `blob:limit=<bytes>[kmg]`.
+recovery. Partial clones support `blob:none`, `blob:limit=<bytes>[kmg]` and
+`tree:<depth>` using the minimum depth across selected history and explicit roots.
 Native Git checks omitted initial blobs, size limits, lazy checkout and historical
 content recovery. Explicit object requests must belong to the verified reachable
-graph of the authorized repository. Tree, sparse and combined filters and
+graph of the authorized repository. Native tree-depth clones verify directory
+omission and lazy checkout of nested files. Sparse and combined filters and
 protocol-v2 fetch remain unimplemented and are rejected explicitly. Broader
 shallow-history merge, backend and failure qualification remains open; these
 checks do not establish full Git protocol coverage.

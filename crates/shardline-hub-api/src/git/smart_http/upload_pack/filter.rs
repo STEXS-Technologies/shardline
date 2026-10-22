@@ -1,10 +1,11 @@
-//! Blob omission changes transfer contents, never committed object bytes.
+//! Object omission changes transfer contents, never committed object bytes.
 use super::*;
 use crate::git::pack::ObjectType;
 
 #[derive(Default)]
 pub(super) struct Filter {
     blob_limit: Option<u64>,
+    tree_depth: Option<u64>,
 }
 
 impl Filter {
@@ -21,8 +22,15 @@ impl Filter {
             let [_, spec] = fields.as_slice() else {
                 return Err(invalid());
             };
-            if filter.blob_limit.is_some() {
+            if filter.blob_limit.is_some() || filter.tree_depth.is_some() {
                 return Err(invalid());
+            }
+            if let Some(depth) = spec.strip_prefix("tree:") {
+                if depth.is_empty() || !depth.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(invalid());
+                }
+                filter.tree_depth = Some(depth.parse().map_err(|_error| invalid())?);
+                continue;
             }
             filter.blob_limit = Some(if *spec == "blob:none" {
                 0
@@ -55,20 +63,36 @@ impl Filter {
         Ok(filter)
     }
 
-    pub(super) fn apply(&self, objects: Vec<GitObject>, wants: &[String]) -> Vec<GitObject> {
+    pub(super) fn apply(
+        &self,
+        objects: Vec<GitObject>,
+        wants: &[String],
+    ) -> Result<Vec<GitObject>, HubApiError> {
         let explicit: std::collections::HashSet<_> = wants.iter().collect();
-        objects
+        let depths = if self.tree_depth.is_some() {
+            tree::depths(&objects, wants)?
+        } else {
+            std::collections::HashMap::new()
+        };
+        Ok(objects
             .into_iter()
             .filter(|object| {
-                object.object_type != ObjectType::Blob
+                let id = hex::encode(object.sha1());
+                let blob_allowed = object.object_type != ObjectType::Blob
                     || self
                         .blob_limit
-                        .is_none_or(|limit| (object.data.len() as u64) < limit)
-                    || explicit.contains(&hex::encode(object.sha1()))
+                        .is_none_or(|limit| (object.data.len() as u64) < limit);
+                let tree_allowed =
+                    !matches!(object.object_type, ObjectType::Blob | ObjectType::Tree)
+                        || self.tree_depth.is_none_or(|limit| {
+                            depths.get(&id).is_some_and(|depth| *depth < limit)
+                        });
+                (blob_allowed && tree_allowed) || explicit.contains(&id)
             })
-            .collect()
+            .collect())
     }
 }
 
 #[cfg(test)]
 mod tests;
+mod tree;

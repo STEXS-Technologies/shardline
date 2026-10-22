@@ -341,6 +341,48 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
             .status
             .success()
     );
+    for depth in [0, 1] {
+        let tree_path = work.path().join(format!("tree-filter-{depth}"));
+        let tree_dir = tree_path.to_str().unwrap();
+        let filter = format!("--filter=tree:{depth}");
+        let tree_cloned = git(&["clone", &filter, "--no-checkout", &url, tree_dir]);
+        assert!(
+            tree_cloned.status.success(),
+            "tree clone: {}",
+            String::from_utf8_lossy(&tree_cloned.stderr)
+        );
+        let listed = git(&[
+            "-C",
+            tree_dir,
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check",
+        ]);
+        assert!(listed.status.success());
+        let listing = String::from_utf8_lossy(&listed.stdout);
+        assert!(!listing.contains(" blob "));
+        // Git can synthesize its canonical empty tree locally; it is not a
+        // downloaded repository directory tree.
+        let nonempty_tree = listing
+            .lines()
+            .any(|line| line.contains(" tree ") && !line.ends_with(" tree 0"));
+        assert_eq!(nonempty_tree, depth > 0, "{listing}");
+        let checked_out = git(&["-C", tree_dir, "checkout", "main"]);
+        assert!(
+            checked_out.status.success(),
+            "tree lazy checkout: {}",
+            String::from_utf8_lossy(&checked_out.stderr)
+        );
+        assert_eq!(
+            std::fs::read(tree_path.join("nested/hello.txt")).unwrap(),
+            b"from Git push\n"
+        );
+        assert_eq!(
+            std::fs::read(tree_path.join("foo/child.txt")).unwrap(),
+            b"directory child\n"
+        );
+        assert!(git(&["-C", tree_dir, "fsck", "--strict"]).status.success());
+    }
     let limited_path = work.path().join("limited-clone");
     let limited_dir = limited_path.to_str().unwrap();
     let limited = git(&[
