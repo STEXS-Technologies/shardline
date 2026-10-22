@@ -79,10 +79,11 @@ broader concurrent deployment qualification remain separate.
 Custom stores advertise atomic support
 only when they implement the batch contract. Push-options and unimplemented
 response modes are rejected before publication.
-Depth-limited clone, relative deepening and unshallowing preserve verified commit
+Depth-limited clone, relative deepening, date-based shallow fetch and unshallowing preserve verified commit
 bytes. Missing or mistyped parent commits fail before depth boundaries are applied.
 A native Git workflow checks history counts, complete-history identity and
-strict fsck after these operations. Date/exclusion deepening, partial-clone filters
+strict fsck after these operations, including an earlier date cutoff restoring
+full history. Date selection uses committed committer timestamps. Exclusion deepening, partial-clone filters
 and protocol-v2 fetch remain unimplemented and are rejected explicitly. Broader
 shallow-history merge, backend and failure qualification remains open; these
 checks do not establish full Git protocol coverage.

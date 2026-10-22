@@ -53,6 +53,8 @@ fn git(args: &[&str]) -> std::process::Output {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TRACE_PACKET", "1")
+        .env("GIT_AUTHOR_DATE", "2030-01-01T00:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2030-01-01T00:00:00+00:00")
         .output()
         .expect("installed Git client")
 }
@@ -298,6 +300,67 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
         String::from_utf8_lossy(&pushed.stderr)
     );
     let second_path = work.path().join("clone-git");
+    let dated_path = work.path().join("dated-shallow");
+    let dated_dir = dated_path.to_str().unwrap();
+    let dated = git(&[
+        "clone",
+        "--shallow-since=2029-01-01T00:00:00Z",
+        "--single-branch",
+        "--no-tags",
+        &url,
+        dated_dir,
+    ]);
+    assert!(
+        dated.status.success(),
+        "date shallow clone: {}",
+        String::from_utf8_lossy(&dated.stderr)
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-list", "--count", "HEAD"]).stdout,
+        b"1\n"
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-list", "HEAD"]).stdout,
+        git(&[
+            "-C",
+            clone_dir,
+            "rev-list",
+            "--since=2029-01-01T00:00:00Z",
+            "HEAD"
+        ])
+        .stdout
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-parse", "HEAD"]).stdout,
+        pushed_head.stdout
+    );
+    assert_eq!(
+        std::fs::read(dated_path.join("nested/hello.txt")).unwrap(),
+        b"from Git push\n"
+    );
+    assert!(git(&["-C", dated_dir, "fsck", "--strict"]).status.success());
+    let older = git(&[
+        "-C",
+        dated_dir,
+        "fetch",
+        "--shallow-since=2000-01-01T00:00:00Z",
+        "origin",
+        "main",
+    ]);
+    assert!(
+        older.status.success(),
+        "date deepen: {}",
+        String::from_utf8_lossy(&older.stderr)
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-list", "HEAD"]).stdout,
+        git(&["-C", clone_dir, "rev-list", "HEAD"]).stdout
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-parse", "--is-shallow-repository"]).stdout,
+        b"false\n"
+    );
+    assert!(git(&["-C", dated_dir, "fsck", "--strict"]).status.success());
     let second_dir = second_path.to_str().unwrap();
     let recloned = git(&["clone", &url, second_dir]);
     assert!(

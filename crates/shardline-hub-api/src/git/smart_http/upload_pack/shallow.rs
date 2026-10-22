@@ -10,6 +10,7 @@ mod tests;
 pub(super) struct Request {
     boundaries: HashSet<String>,
     depth: Option<u32>,
+    since: Option<u64>,
     relative: bool,
 }
 
@@ -48,6 +49,21 @@ impl Request {
                     }
                     request.depth = (depth > 0).then_some(depth);
                 }
+                Some("deepen-since") => {
+                    let [_, timestamp] = fields.as_slice() else {
+                        return Err(invalid());
+                    };
+                    if request.since.is_some()
+                        || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        return Err(invalid());
+                    }
+                    let timestamp = timestamp.parse().map_err(|_error| invalid())?;
+                    if matches!(timestamp, 0 | u64::MAX) {
+                        return Err(invalid());
+                    }
+                    request.since = Some(timestamp);
+                }
                 Some("want") => {
                     request.relative |= fields
                         .iter()
@@ -57,7 +73,8 @@ impl Request {
                 _ => {}
             }
         }
-        if request.relative && request.depth.is_none() {
+        if (request.relative && request.depth.is_none()) || (depth_seen && request.since.is_some())
+        {
             return Err(invalid());
         }
         Ok(request)
@@ -72,6 +89,26 @@ fn parents(object: &GitObject) -> Result<Vec<String>, HubApiError> {
         .lines()
         .filter_map(|line| line.strip_prefix("parent ").map(str::to_owned))
         .collect())
+}
+
+fn commit_time(object: &GitObject) -> Result<u64, HubApiError> {
+    let invalid = || HubApiError::CasError("invalid Git committer timestamp".to_owned());
+    let text = std::str::from_utf8(&object.data).map_err(|_error| invalid())?;
+    let headers = text.split_once("\n\n").map_or(text, |(headers, _)| headers);
+    let mut committers = headers
+        .lines()
+        .filter_map(|line| line.strip_prefix("committer "));
+    let committer = committers.next().ok_or_else(invalid)?;
+    if committers.next().is_some() {
+        return Err(invalid());
+    }
+    committer
+        .split_whitespace()
+        .rev()
+        .nth(1)
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_error| invalid())
 }
 
 pub(super) fn negotiate(
@@ -133,10 +170,15 @@ pub(super) fn negotiate(
         if object.object_type != ObjectType::Commit {
             continue;
         }
+        if let Some(since) = request.since
+            && commit_time(object)? < since
+        {
+            continue;
+        }
         if request.boundaries.contains(&id) {
             if request.relative {
                 budget = request.depth.map(|depth| depth.saturating_add(1));
-            } else if request.depth.is_none() {
+            } else if request.depth.is_none() && request.since.is_none() {
                 budget = Some(1);
             }
         }
@@ -154,7 +196,12 @@ pub(super) fn negotiate(
         }
     }
     let mut updates = Vec::new();
-    if request.depth.is_some() {
+    if request.depth.is_some() || request.since.is_some() {
+        if selected.is_empty() {
+            return Err(HubApiError::BadRequest(
+                "no commits selected for shallow request".to_owned(),
+            ));
+        }
         let mut ordered: Vec<_> = selected.iter().collect();
         ordered.sort_unstable();
         for id in ordered {

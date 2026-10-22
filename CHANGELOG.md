@@ -19,7 +19,7 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Added
 
-- Added depth-limited Git clones, relative history deepening and unshallowing
+- Added depth-limited Git clones, relative and date-based history deepening and unshallowing
   without rewriting verified commit bytes.
 - Added negotiated atomic Git pushes on SQLite and PostgreSQL, committing all
   requested refs and their reliability evidence together.

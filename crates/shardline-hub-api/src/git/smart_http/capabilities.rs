@@ -39,9 +39,7 @@ pub(super) fn upload(lines: &[Vec<u8>]) -> Result<(), HubApiError> {
             continue;
         };
         let command = line.split_whitespace().next().unwrap_or("");
-        if matches!(command, "deepen-since" | "deepen-not" | "filter")
-            || command.starts_with("command=")
-        {
+        if matches!(command, "deepen-not" | "filter") || command.starts_with("command=") {
             return Err(HubApiError::BadRequest(format!(
                 "unsupported upload-pack command: {command}"
             )));
@@ -83,12 +81,7 @@ mod tests {
 
     #[test]
     fn unsupported_fetch_semantics_are_not_silently_ignored() {
-        for command in [
-            "deepen-since 123",
-            "deepen-not main",
-            "filter blob:none",
-            "command=fetch",
-        ] {
+        for command in ["deepen-not main", "filter blob:none", "command=fetch"] {
             assert!(upload(&[command.as_bytes().to_vec()]).is_err());
         }
         assert!(upload(&[b"want deadbeef side-band-64k".to_vec(), b"done".to_vec()]).is_ok());
