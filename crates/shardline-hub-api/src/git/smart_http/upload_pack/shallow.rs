@@ -75,6 +75,12 @@ impl Request {
                     }
                     request.exclude_refs.push((*reference).to_owned());
                 }
+                Some("deepen-relative") if !request.relative => {
+                    if fields.len() != 1 {
+                        return Err(invalid());
+                    }
+                    request.relative = true;
+                }
                 Some("want") => {
                     request.relative |= fields
                         .iter()

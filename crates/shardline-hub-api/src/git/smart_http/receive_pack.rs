@@ -30,6 +30,7 @@ use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 #[cfg(test)]
 mod atomic_tests;
 mod commands;
+mod push_options;
 pub(super) use commands::parse as parse_receive_pack_request;
 
 // ---- Receive-pack: POST /{type}/{ns}/{repo}/git-receive-pack ----
@@ -64,8 +65,16 @@ pub async fn receive_pack(
     let (body, admission) =
         super::admission::read_request(body, MAX_RECEIVE_PACK_REQUEST_BYTES, "receive-pack")
             .await?;
-    let (updates, packed_tail) = parse_receive_pack_request(&body)?;
+    let (updates, request_tail) = parse_receive_pack_request(&body)?;
     let negotiated = super::capabilities::receive(&body)?;
+    let packed_tail = if negotiated.push_options {
+        // Shardline does not execute Git receive hooks. Still consume the
+        // negotiated protocol phase exactly so PACK starts at the right byte
+        // and options cannot be mistaken for or smuggled into pack data.
+        push_options::skip_section(request_tail)?
+    } else {
+        request_tail
+    };
     let sideband = negotiated.sideband;
     if negotiated.atomic && !state.store.supports_atomic_ref_updates() {
         return Err(HubApiError::BadRequest(

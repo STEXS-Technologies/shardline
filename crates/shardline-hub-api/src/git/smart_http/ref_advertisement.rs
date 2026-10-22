@@ -227,13 +227,35 @@ pub async fn info_refs(
         }
     }
 
+    // Protocol v2 advertises capabilities without listing refs, but it must
+    // still apply the same repository visibility and history checks as the
+    // legacy advertisement before returning a successful response.
+    if super::upload_pack::v2::is_requested(&headers)? {
+        if service != GitSmartHttpService::UploadPack {
+            return Err(HubApiError::BadRequest(
+                "Git protocol v2 receive-pack is not supported".to_owned(),
+            ));
+        }
+        let response = Response::builder()
+            .header(
+                "content-type",
+                "application/x-git-upload-pack-advertisement",
+            )
+            .header("cache-control", "no-cache")
+            .body(axum::body::Body::from(
+                super::upload_pack::v2::advertisement()?,
+            ))
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        return Ok(response);
+    }
+
     let (capabilities, content_type) = match service {
         GitSmartHttpService::ReceivePack if state.store.supports_atomic_ref_updates() => (
-            "report-status report-status-v2 delete-refs quiet side-band-64k atomic",
+            "report-status report-status-v2 delete-refs quiet side-band-64k atomic push-options",
             "application/x-git-receive-pack-advertisement",
         ),
         GitSmartHttpService::ReceivePack => (
-            "report-status report-status-v2 delete-refs quiet side-band-64k",
+            "report-status report-status-v2 delete-refs quiet side-band-64k push-options",
             "application/x-git-receive-pack-advertisement",
         ),
         GitSmartHttpService::UploadPack => (

@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   checksums, multipart listing and range-based UploadPartCopy.
 - Support atomic Git pushes, report-status-v2, side-band responses, shallow
   history by depth, date or excluded refs, and blob/tree partial clones.
+- Support Git protocol v2 upload-pack discovery, reference listing and fetch,
+  including shallow and filtered requests with bounded combined blob/tree
+  filters and object-type selection, while retaining v0/v1 behavior.
+- Support negotiated Git receive-pack push-options with strict packet framing;
+  options are consumed but have no effect because Shardline exposes no receive hooks.
 
 ### Improved
 
@@ -27,6 +32,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Apply repository-scoped read authorization before returning Git protocol-v2
+  capability discovery.
+- Propagate LFS object-store lookup failures instead of reporting them as
+  missing objects during batch negotiation.
+- Return Hub LFS route errors with the LFS media type and `message` field,
+  including request-decoding and authorization failures.
 - Preserve Hub branch, revision and historical Git identities across SDK writes,
   reference updates and native Git operations.
 - Publish Git reference batches and their recovery evidence atomically, rejecting

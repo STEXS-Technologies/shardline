@@ -251,6 +251,49 @@ async fn same_content_commits_in_two_repositories_keep_independent_trees() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_protocol_v2_discovery_enforces_repository_read_binding() {
+    let (_tmp, state) = build_state();
+    for repo_id in ["alice/private", "bob/private"] {
+        state
+            .store
+            .create_repo(HubRepoType::Model, repo_id, true)
+            .unwrap();
+    }
+    let app = shardline_hub_api::hub_routes(state, true);
+    let uri = "/models/alice/private/info/refs?service=git-upload-pack";
+
+    let mut alice_headers = auth_header("alice:private:read");
+    alice_headers.insert("git-protocol", HeaderValue::from_static("version=2"));
+    let allowed = app
+        .clone()
+        .oneshot(request("GET", uri, alice_headers, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let allowed_body = axum::body::to_bytes(allowed.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&allowed_body).contains("version 2"));
+
+    let mut bob_headers = auth_header("bob:private:read");
+    bob_headers.insert("git-protocol", HeaderValue::from_static("version=2"));
+    let cross_tenant = app
+        .clone()
+        .oneshot(request("GET", uri, bob_headers, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(cross_tenant.status(), StatusCode::FORBIDDEN);
+
+    let mut anonymous_headers = HeaderMap::new();
+    anonymous_headers.insert("git-protocol", HeaderValue::from_static("version=2"));
+    let anonymous = app
+        .oneshot(request("GET", uri, anonymous_headers, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_different_delete_cannot_change_a_published_commit_tree() {
     let (_tmp, state) = build_state();
     state

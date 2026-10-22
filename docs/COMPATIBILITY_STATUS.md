@@ -21,7 +21,7 @@ version.
 | Git LFS | **Beta** | LFS batch negotiation plus direct object GET/HEAD/PUT routes; pinned Git LFS 3.7.1 and adjacent 3.6.1 push/pull plus separate pull and fetch --all flows; conformance-tested but limited production evidence |
 | Bazel HTTP remote cache | **Beta** | `ac` and `cas` object GET and PUT routes; pinned Bazel 8.7.0 and 9.2.0 remote-cache flows with `remote_download_outputs=all` and `toplevel`; conformance-tested but limited production evidence |
 | OCI Distribution | **Stable** | Full blob upload/download, manifest PUT/GET/HEAD/DELETE, tag listing with pagination, token-service flow at /v2/token, upload cancellation, scoped upload-session handling; checked-in `skopeo`, Docker, Helm, and Podman client coverage |
-| Hugging Face Hub API | **Beta** | Repository create/info/delete, revision and tree lookup, size-aware preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search, webhooks, Git Smart HTTP clone/fetch/push, and LFS transfers. The native `hf` CLI E2E covers small model and dataset files plus 9 MiB `hf_xet` uploads, Hub commits, and byte-for-byte downloads for both repository types. It verifies Xet shard and Xorb transfer, no ordinary LFS body-upload fallback, and repository-scoped SHA-256 to native Xet file mappings. The flows pass with Hub enabled alone and with Hub, Xet, and S3 enabled together. The Xet-token response includes current JSON connection fields and matching headers. The separate git-xet E2E uses a mock forge LFS control plane while exercising Shardline CAS. |
+| Hugging Face Hub API | **Beta** | Repository create/info/delete, revision and tree lookup, size-aware preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search, webhooks, Git Smart HTTP clone/fetch/push, and LFS transfers. The native `hf` CLI E2E covers small model and dataset files plus 9 MiB `hf_xet` uploads, Hub commits, and byte-for-byte downloads for both repository types. It verifies Xet shard and Xorb transfer, no ordinary LFS body-upload fallback, and repository-scoped SHA-256 to native Xet file mappings. The flows pass with Hub enabled alone and with Hub, Xet, and S3 enabled together. The Xet-token response includes current JSON connection fields and matching headers. The separate git-xet E2E uses a mock forge LFS control plane while exercising Shardline CAS. Git Smart HTTP supports protocol v2 upload-pack (`ls-refs` and `fetch`) plus the traditional v0/v1 upload-pack and receive-pack flow; receive-pack supports negotiated `push-options` but has no Git receive hooks, and protocol v2 push remains unsupported. |
 | S3 frontend (protocol) | **Stable** | Scoped object, listing and multipart workflows documented in [S3_FRONTEND.md](S3_FRONTEND.md), not the entire AWS S3 service. Existing access-key-as-token and Bearer credentials remain supported. Optional configured signing identities verify SigV4, session credentials, presigned GET/PUT and classic signed payload streams. Signed trailers and extended service APIs remain qualification or implementation work. Native client coverage includes `mc`, AWS CLI, boto3, `s3cmd`, `rclone`, and pyarrow 25. |
 | Ed25519 auth provider | **Beta** | Signing and verification, bounded overlapping key rotation, verification-only mode, environment/TOML configuration, authenticated HTTP flows, and operator CLI mint-to-verify interoperability have targeted tests; broader deployment evidence remains graduation work |
 | Local filesystem storage | **Stable** | Checked-in adapter, concurrency, and operator workflow coverage |
@@ -77,8 +77,10 @@ drop the client status after observing a successful server commit, verify both
 new heads and retry through the normal endpoint. Application process-kill and
 broader concurrent deployment qualification remain separate.
 Custom stores advertise atomic support
-only when they implement the batch contract. Push-options and unimplemented
-response modes are rejected before publication.
+only when they implement the batch contract. Receive-pack negotiates and
+validates push-options framing before publication. Shardline has no Git receive
+hooks, so those option values currently have no hook consumer. Unimplemented
+response modes remain rejected before publication.
 Depth-limited clone, relative deepening, date-based and exclusion-based shallow
 fetch, and unshallowing preserve verified commit
 bytes. Missing or mistyped parent commits fail before depth boundaries are applied.
@@ -92,10 +94,17 @@ recovery. Partial clones support `blob:none`, `blob:limit=<bytes>[kmg]` and
 Native Git checks omitted initial blobs, size limits, lazy checkout and historical
 content recovery. Explicit object requests must belong to the verified reachable
 graph of the authorized repository. Native tree-depth clones verify directory
-omission and lazy checkout of nested files. Sparse and combined filters and
-protocol-v2 fetch remain unimplemented and are rejected explicitly. Broader
-shallow-history merge, backend and failure qualification remains open; these
-checks do not establish full Git protocol coverage.
+omission and lazy checkout of nested files. Protocol-v2 upload-pack now supports
+`ls-refs` and `fetch`, including shallow depth/date/exclusion and the advertised
+`blob:none`, blob-size and tree-depth filters, including bounded combined
+blob-size/tree-depth intersections. `object:type` filters select blobs, trees,
+commits or tags; explicitly wanted objects remain available, and native Git 2.52
+verifies lazy fetching of an omitted tree during checkout over protocol v0, v1
+and v2. Native Git checks v2 clone, incremental fetch, deepen/unshallow, shallow
+date/exclusion, omitted objects, lazy checkout and strict fsck. Sparse-checkout
+and other unimplemented filters are rejected explicitly. Broader shallow-history merge, backend and
+failure qualification remains open; these checks do not establish full Git
+protocol coverage.
 Receive-pack validates the entire command section before publication: malformed
 framing, invalid object IDs/ref names, duplicate ref commands and misplaced
 capabilities reject the request rather than applying only its valid commands.
@@ -110,12 +119,13 @@ behavior. Other E2E targets still need an individual skip audit. Review actual
 execution logs before treating a specific revision as qualified; workflow changes
 alone are not a passing CI result.
 
-The default contributor library run leaves twelve explicitly ignored tests:
+The default contributor library run leaves eighteen explicitly ignored tests:
 
 | Checks | Where they run explicitly |
 | --- | --- |
 | Four PostgreSQL OCI subject-index and reclamation contracts | Protocol-conformance gate with a migrated disposable database |
 | PostgreSQL corrupt-copy preservation and startup-worker shutdown | Protocol-conformance gate with that database |
+| Six PostgreSQL frontend-schema compatibility and permission contracts | Protocol-conformance gate with that database |
 | Six full-size or legacy maintenance-history capacity drills | Explicit release-mode capacity campaigns; ordinary CI does not establish their result |
 
 The E2E job separately selects the ignored native Xet PostgreSQL/MinIO test and

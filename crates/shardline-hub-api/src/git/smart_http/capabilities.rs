@@ -5,6 +5,7 @@ use crate::error::HubApiError;
 pub(super) struct Receive {
     pub sideband: bool,
     pub atomic: bool,
+    pub push_options: bool,
 }
 
 pub(super) fn receive(body: &[u8]) -> Result<Receive, HubApiError> {
@@ -23,7 +24,10 @@ pub(super) fn receive(body: &[u8]) -> Result<Receive, HubApiError> {
             if capability == "atomic" {
                 negotiated.atomic = true;
             }
-            if matches!(capability, "push-options" | "side-band") {
+            if capability == "push-options" {
+                negotiated.push_options = true;
+            }
+            if capability == "side-band" {
                 return Err(HubApiError::BadRequest(format!(
                     "unsupported receive-pack capability: {capability}"
                 )));
@@ -54,15 +58,20 @@ mod tests {
 
     #[test]
     fn unsupported_push_modes_are_rejected_before_updates_are_processed() {
-        for capability in ["push-options", "side-band"] {
-            let line = format!(
-                "{} {} refs/heads/main\0report-status {capability}\n",
-                "0".repeat(40),
-                "1".repeat(40)
-            );
-            let body = super::super::super::pktline::encode_line(&line).unwrap();
-            assert!(receive(body.as_bytes()).is_err());
-        }
+        let line = format!(
+            "{} {} refs/heads/main\0report-status side-band\n",
+            "0".repeat(40),
+            "1".repeat(40)
+        );
+        let body = super::super::super::pktline::encode_line(&line).unwrap();
+        assert!(receive(body.as_bytes()).is_err());
+        let command = format!(
+            "{} {} refs/heads/main\0report-status push-options\n",
+            "0".repeat(40),
+            "1".repeat(40)
+        );
+        let framed = super::super::super::pktline::encode_line(&command).unwrap();
+        assert!(receive(framed.as_bytes()).unwrap().push_options);
         assert!(receive(b"0000").is_ok());
         let line = format!(
             "{} {} refs/heads/main\0report-status-v2\n",

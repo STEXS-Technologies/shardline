@@ -116,6 +116,23 @@ reachable within the authorized repository and sends objects matching those IDs.
 Existing `.gitattributes` files are preserved; include LFS tracking rules in your
 repository when Git LFS checkout is required.
 
+The tested Smart HTTP path supports Git protocol v0/v1 upload-pack and
+receive-pack, plus protocol v2 upload-pack (`ls-refs` and `fetch`). Native Git
+2.52 tests cover v2 clone and incremental fetch, depth-, date-, and
+ref-exclusion-based shallow history, blob omission/size limits, tree-depth
+filtering, lazy checkout, and strict repository checks. Filters also support
+`object:type` selection for blobs, trees, commits and tags, with explicitly
+wanted objects retained; native Git 2.52 checks omitted-tree lazy fetch under
+protocol v0, v1 and v2. Combined filters support bounded intersections of
+blob-size, tree-depth and object-type selection.
+Sparse-checkout filters and other unimplemented filters are rejected.
+Protocol v2 is currently used for upload-pack; Git pushes use the v0/v1
+receive-pack flow, including when the client is configured for protocol v2.
+Receive-pack negotiates and validates the `push-options` packet section. The
+server does not expose Git receive hooks, so accepted options currently have
+no hook consumer. The frontend supports `side-band-64k`, not the older
+`side-band` mode.
+
 Git export is bounded to 10,000 history revisions, 10,000 references, 100,000
 unique objects, 128 tree levels, 1,024 bytes per projected path, 1,000,000
 cumulative file entries across projected revisions, and 64 MiB of unique
@@ -142,6 +159,8 @@ bytes. LFS pointers require one lowercase 64-hex SHA-256 OID and one size field.
 Their payload must match both the SHA-256 and size, either in the push or already
 uploaded to the authorized repository. Missing or mismatched payloads fail before
 the new tree or reference is published.
+Hub LFS route errors use `application/vnd.git-lfs+json` and the LFS `message`
+field, including errors raised during request decoding or object-store lookup.
 
 Historical short Hub revision IDs that require recovery are not exported. A
 recovered revision starts Git history at that recovery boundary. Historical Git
