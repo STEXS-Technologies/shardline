@@ -80,7 +80,8 @@ Custom stores advertise atomic support
 only when they implement the batch contract. Push-options and unimplemented
 response modes are rejected before publication.
 Depth-limited clone, relative deepening and unshallowing preserve verified commit
-bytes. A native Git workflow checks history counts, complete-history identity and
+bytes. Missing or mistyped parent commits fail before depth boundaries are applied.
+A native Git workflow checks history counts, complete-history identity and
 strict fsck after these operations. Date/exclusion deepening, partial-clone filters
 and protocol-v2 fetch remain unimplemented and are rejected explicitly. Broader
 shallow-history merge, backend and failure qualification remains open; these

@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn shallow_cut_cannot_conceal_missing_or_mistyped_parent() {
+    let blob = GitObject::blob(b"not a commit".to_vec());
+    for (parent_id, extra) in [
+        ("f".repeat(40), None),
+        (hex::encode(blob.sha1()), Some(blob)),
+    ] {
+        let tip = GitObject::commit(format!("parent {parent_id}\n\ntip").into_bytes());
+        let tip_id = hex::encode(tip.sha1());
+        let mut objects = vec![tip];
+        objects.extend(extra);
+        let request = Request::parse(&[b"deepen 1".to_vec()]).unwrap();
+        assert!(negotiate(objects, &[tip_id], &[], &request).is_err());
+    }
+}
+
+#[test]
+fn independent_wants_keep_shared_ancestor_when_reachable_with_larger_budget() {
+    let root = GitObject::commit(b"author root\n\nroot".to_vec());
+    let root_id = hex::encode(root.sha1());
+    let parent = GitObject::commit(format!("parent {root_id}\n\nparent").into_bytes());
+    let parent_id = hex::encode(parent.sha1());
+    let tip = GitObject::commit(format!("parent {parent_id}\n\ntip").into_bytes());
+    let tip_id = hex::encode(tip.sha1());
+    let request = Request::parse(&[b"deepen 2".to_vec()]).unwrap();
+    let (selected, updates) =
+        negotiate(vec![root, parent, tip], &[tip_id, parent_id], &[], &request).unwrap();
+    assert_eq!(selected.len(), 3);
+    assert_eq!(updates, b"0000");
+}
+
+#[test]
 fn merge_depth_keeps_both_parents_and_deduplicates_shared_ancestry() {
     let root = GitObject::commit(b"author root\n\nroot".to_vec());
     let root_id = hex::encode(root.sha1());

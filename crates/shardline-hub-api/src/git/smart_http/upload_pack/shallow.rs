@@ -84,6 +84,22 @@ pub(super) fn negotiate(
         .iter()
         .map(|object| (hex::encode(object.sha1()), object))
         .collect();
+    // A depth cut is intentional; a missing or mistyped parent is corruption.
+    // Validate before cutting so a shallow request cannot conceal broken history.
+    for object in &objects {
+        if object.object_type == ObjectType::Commit {
+            for parent in parents(object)? {
+                if !by_id
+                    .get(&parent)
+                    .is_some_and(|ancestor| ancestor.object_type == ObjectType::Commit)
+                {
+                    return Err(HubApiError::CasError(
+                        "missing or invalid Git parent commit".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
     for boundary in &request.boundaries {
         if !by_id
             .get(boundary)
