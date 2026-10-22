@@ -2851,6 +2851,7 @@ pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::InvalidLegacyImportState
         | other @ LocalIndexStoreError::SchemaMigrationsTableMissing
         | other @ LocalIndexStoreError::UnknownSchemaMigration(_)
+        | other @ LocalIndexStoreError::FrontendSchemaIncompatible(_)
         | other @ LocalIndexStoreError::PendingSchemaMigrations { .. }
         | other @ LocalIndexStoreError::InvalidRepoType(_)
         | other @ LocalIndexStoreError::BlockingTask(_)

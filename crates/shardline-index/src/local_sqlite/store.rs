@@ -224,7 +224,7 @@ impl LocalIndexStore {
                 pending_count: pending.len(),
             });
         }
-        Ok(())
+        super::frontend_schema::check(&connection)
     }
 
     /// Adds missing StateChronicle Merkle commitments to one bounded batch of
@@ -324,6 +324,7 @@ impl LocalIndexStore {
         if !*initialized {
             helpers::ensure_local_schema_migrations_table(&connection)?;
             helpers::apply_pending_local_migrations(&mut connection)?;
+            super::frontend_schema::install(&mut connection)?;
             helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
             super::upload_recovery_guard::install(&connection)?;
             *initialized = true;

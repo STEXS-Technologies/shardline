@@ -55,6 +55,8 @@ cargo test --locked -p shardline-server --test protocol_completion -- \
   --include-ignored --skip postgres --skip minio_ --nocapture
 
 if [[ -n "${DATABASE_URL:-}" ]]; then
+  cargo test --locked -p shardline-server --lib \
+    database_migration::frontend_schema::tests:: -- --ignored --nocapture
   cargo test --locked -p shardline-index --lib hub_postgres::tests::atomic_ref_batch -- --nocapture
   # Includes an owned temporary role to prove runtime indexing needs no DDL.
   cargo test --locked -p shardline-index --lib subject_index -- \

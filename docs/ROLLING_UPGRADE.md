@@ -20,23 +20,34 @@ runtime a longer grace period so the server's deadline runs before SIGKILL.
 ## Protocol frontend upgrade from 1.12.1
 
 The unreleased frontend changes add durable Xet file identities and LFS locks.
-They require schema migrations; the schema-free dependency upgrade described
-below does not apply to this transition.
+An owner-run command installs these additive tables in a separate frontend
+schema registry. The released core migration ledger remains compatible with
+1.12.1; unknown core migrations still cause startup to fail.
 
-Drain all server roles and pause maintenance before changing the shared schema.
-Back up metadata and object storage together. With the upgraded binary, run
-`shardline db migrate up` as the PostgreSQL schema owner, or
-`shardline db migrate local-up --root <root>` for local SQLite. Give runtime
-accounts access to the new tables using the deployment's existing grant policy;
-they do not need permission to create tables. Restart upgraded roles and verify
-existing files through their normal clients before resuming traffic.
+Back up metadata and object storage together. Pause destructive maintenance
+during rollout. With the upgraded binary, run `shardline db migrate up` as the
+PostgreSQL schema owner, or `shardline db migrate local-up --root <root>` for
+local SQLite. PostgreSQL installation carries forward the existing table grant
+policy for the new tables; runtime accounts do not need DDL permission.
+Shardline does not yet migrate deployments that use row-level security on either
+permission source table. Migration stops because those policies cannot safely
+be copied to the new table shapes. Do not disable the policies to force the
+upgrade; this deployment needs a policy-aware migration before rollout. Startup
+also fails closed if source-table row security is enabled after installation.
+Then replace processes one at a time, draining each process and checking readiness.
 
-A binary-only rollback to 1.12.1 is rejected because that binary does not know
-the new migration entries. The new tables contain persistent identities and
-locks: dropping them is not a data-preserving rollback of those capabilities.
-Do not run downgrade SQL blindly or restore an old backup over newer writes.
-Retain the matching metadata and object-store backup and qualify the rollback
-procedure for the deployment before upgrading.
+Real 1.12.1/new-binary drills cover live S3-frontend writes during installation,
+cross-version reads, new-version writes, and restarting 1.12.1 against the
+upgraded metadata. These checks pass with SQLite and PostgreSQL. They establish
+this storage path's rolling compatibility, not every protocol's mixed-version
+behavior. Keep new frontend features on upgraded replicas while their remaining
+native-client qualification is completed. An old replica cannot provide the new
+durable-lock or Xet-identity behavior.
+
+Restarting an old binary does not require dropping the additive tables or
+restoring an old backup. Keep those tables: they contain persistent identities
+and locks for upgraded replicas. Do not run downgrade SQL blindly or restore an
+old backup over newer writes. Qualify protocol-specific rollback before rollout.
 
 Restoring that backup recovers its contents, including its matching object
 storage, but not writes acknowledged after the backup. Keep the upgraded

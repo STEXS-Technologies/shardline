@@ -6,7 +6,7 @@ pub(crate) struct LocalSqliteMigration {
     pub(crate) down_sql: &'static str,
 }
 
-pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 36] = [
+pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 34] = [
     LocalSqliteMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -233,6 +233,11 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 36] = [
         up_sql: include_str!("../../migrations/20261003010000_webhook_retention_index.up.sql"),
         down_sql: include_str!("../../migrations/20261003010000_webhook_retention_index.down.sql"),
     },
+];
+
+// Additive frontend state has separate installation history so released servers
+// can continue validating the unchanged core ledger during a rolling upgrade.
+pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 2] = [
     LocalSqliteMigration {
         version: "20261021000000",
         name: "xet_file_identities",

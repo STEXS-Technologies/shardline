@@ -1158,6 +1158,10 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
 /// migration).
 #[test]
 fn bundled_sqlite_migrations_match_on_disk_files() {
+    let registered: Vec<_> = LOCAL_SQLITE_MIGRATIONS
+        .iter()
+        .chain(super::migration::FRONTEND_MIGRATIONS.iter())
+        .collect();
     let migrations_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let entries = fs::read_dir(&migrations_dir).expect("migrations directory must exist");
     let mut on_disk = Vec::new();
@@ -1172,14 +1176,14 @@ fn bundled_sqlite_migrations_match_on_disk_files() {
     on_disk.sort();
 
     assert_eq!(
-        LOCAL_SQLITE_MIGRATIONS.len(),
+        registered.len(),
         on_disk.len(),
         "registration count must match the on-disk .up.sql count \
          (registered={}, on_disk={})",
-        LOCAL_SQLITE_MIGRATIONS.len(),
+        registered.len(),
         on_disk.len(),
     );
-    for migration in LOCAL_SQLITE_MIGRATIONS {
+    for migration in &registered {
         assert!(
             on_disk
                 .iter()
@@ -1189,7 +1193,7 @@ fn bundled_sqlite_migrations_match_on_disk_files() {
             migration.version,
         );
     }
-    let mut registered_versions: Vec<&str> = LOCAL_SQLITE_MIGRATIONS
+    let mut registered_versions: Vec<&str> = registered
         .iter()
         .map(|migration| migration.version)
         .collect();
@@ -1215,14 +1219,15 @@ fn bundled_sqlite_migrations_have_unique_versions() {
     assert!(!LOCAL_SQLITE_MIGRATIONS.is_empty());
     let mut versions: Vec<&str> = LOCAL_SQLITE_MIGRATIONS
         .iter()
+        .chain(super::migration::FRONTEND_MIGRATIONS.iter())
         .map(|migration| migration.version)
         .collect();
     versions.sort_unstable();
     versions.dedup();
     assert_eq!(
         versions.len(),
-        LOCAL_SQLITE_MIGRATIONS.len(),
-        "LOCAL_SQLITE_MIGRATIONS contains a duplicate version"
+        LOCAL_SQLITE_MIGRATIONS.len() + super::migration::FRONTEND_MIGRATIONS.len(),
+        "core and frontend installation histories must not reuse versions"
     );
 }
 

@@ -99,6 +99,9 @@ pub enum LocalIndexStoreError {
     /// An existing local metadata database contains an unknown migration.
     #[error("local metadata database contains an unknown migration version: {0}")]
     UnknownSchemaMigration(String),
+    /// Additive frontend state is missing or differs from its installed contract.
+    #[error("local frontend schema is incompatible for {0}; run shardline db migrate local-up")]
+    FrontendSchemaIncompatible(String),
     /// An existing local metadata database is behind the running binary.
     #[error(
         "local metadata schema is stale: {pending_count} migration(s) pending, first pending version {first_pending_version}"

@@ -1,6 +1,7 @@
 mod async_index_store;
 mod constants;
 mod error;
+mod frontend_schema;
 mod helpers;
 mod index_store;
 mod lfs_locks;

@@ -3,6 +3,8 @@
 use super::*;
 use shardline_index::{LocalRecordStore, XetFileIdentity};
 
+mod postgres;
+
 struct LocalServer {
     child: std::process::Child,
     base: String,
@@ -12,12 +14,20 @@ struct LocalServer {
 
 impl LocalServer {
     fn spawn(binary: &Path, root: &Path) -> Self {
+        Self::spawn_with_postgres(binary, root, None)
+    }
+
+    fn spawn_with_postgres(binary: &Path, root: &Path, postgres: Option<&str>) -> Self {
         let port = free_tcp_port().expect("local upgrade port");
         let log = NamedTempFile::new().unwrap();
         let config = NamedTempFile::new().unwrap();
         let base = format!("http://127.0.0.1:{port}");
-        let child = Command::new(binary)
-            .env_clear()
+        let mut command = Command::new(binary);
+        command.env_clear();
+        if let Some(url) = postgres {
+            command.env("SHARDLINE_INDEX_POSTGRES_URL", url);
+        }
+        let child = command
             .arg("--config")
             .arg(config.path())
             .arg("serve")
@@ -128,6 +138,105 @@ fn copy_offline_root(source: &Path, destination: &Path) {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn released_local_rolling_upgrade_preserves_live_writes_and_old_restart() {
+    rolling_upgrade(None).await;
+}
+
+async fn rolling_upgrade(postgres: Option<&str>) {
+    let Some(old) = resolve_n_minus_one_binary("local rolling protocol upgrade") else {
+        return;
+    };
+    let current = resolve_shardline_binary().expect("current binary required");
+    let root = TempDir::new().unwrap();
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    migrate_metadata(&old, root.path(), postgres).await;
+    let mut previous = LocalServer::spawn_with_postgres(&old, root.path(), postgres);
+    previous.ready().await;
+    let old_base = previous.base.clone();
+    let writer_token = token.clone();
+    let (started, first_acknowledged) = tokio::sync::oneshot::channel();
+    let writer = tokio::spawn(async move {
+        let mut started = Some(started);
+        for index in 0..32_u8 {
+            let bytes = vec![index; 65_537];
+            let response =
+                s3_put(&old_base, &writer_token, &format!("rolling-{index}"), bytes).await;
+            assert!(
+                response.status().is_success(),
+                "live write {index}: {}",
+                response.status()
+            );
+            if let Some(started) = started.take() {
+                started.send(()).unwrap();
+            }
+        }
+    });
+    first_acknowledged.await.unwrap();
+    migrate_metadata(&current, root.path(), postgres).await;
+    let mut upgraded = LocalServer::spawn_with_postgres(&current, root.path(), postgres);
+    upgraded.ready().await;
+    writer.await.unwrap();
+    for index in 0..32_u8 {
+        let key = format!("rolling-{index}");
+        let bytes = vec![index; 65_537];
+        assert_s3_bytes(&previous.base, &token, &key, &bytes, "old live reader").await;
+        assert_s3_bytes(&upgraded.base, &token, &key, &bytes, "new live reader").await;
+    }
+    let bytes = vec![91; 131_079];
+    assert!(
+        s3_put(&upgraded.base, &token, "new-writer", bytes.clone())
+            .await
+            .status()
+            .is_success()
+    );
+    assert_s3_bytes(
+        &previous.base,
+        &token,
+        "new-writer",
+        &bytes,
+        "old reader of new write",
+    )
+    .await;
+    drop(previous);
+    // A rollout must tolerate an old replica restarting, without deleting
+    // migration records, downgrading SQL, or discarding newly acknowledged data.
+    let mut restarted = LocalServer::spawn_with_postgres(&old, root.path(), postgres);
+    restarted.ready().await;
+    assert_s3_bytes(
+        &restarted.base,
+        &token,
+        "new-writer",
+        &bytes,
+        "old replica restart",
+    )
+    .await;
+}
+
+async fn migrate_metadata(binary: &Path, root: &Path, postgres: Option<&str>) {
+    let binary = binary.to_path_buf();
+    let root = root.to_path_buf();
+    let postgres = postgres.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        if let Some(url) = postgres {
+            let output = Command::new(binary)
+                .env_clear()
+                .args(["db", "migrate", "up", "--database-url", &url])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "migration: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        } else {
+            migrate(&binary, &root);
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn released_local_upgrade_preserves_objects_and_protocol_state() {
     let Some(old) = resolve_n_minus_one_binary("local protocol upgrade") else {
@@ -153,7 +262,7 @@ async fn released_local_upgrade_preserves_objects_and_protocol_state() {
     // Copy metadata AND objects only after the old process has closed them.
     copy_offline_root(root.path(), backup.path());
     let mut unmigrated = LocalServer::spawn(&current, root.path());
-    unmigrated.rejected("schema is stale").await;
+    unmigrated.rejected("frontend schema is incompatible").await;
     drop(unmigrated);
     migrate(&current, root.path());
     let mut server = LocalServer::spawn(&current, root.path());
@@ -229,9 +338,25 @@ async fn released_local_upgrade_preserves_objects_and_protocol_state() {
     );
     drop(store);
     drop(server);
-    let mut incompatible = LocalServer::spawn(&old, root.path());
-    incompatible.rejected("unknown migration").await;
-    drop(incompatible);
+    let mut previous = LocalServer::spawn(&old, root.path());
+    previous.ready().await;
+    assert_s3_bytes(
+        &previous.base,
+        &token,
+        "before",
+        &old_bytes,
+        "old replica restart",
+    )
+    .await;
+    assert_s3_bytes(
+        &previous.base,
+        &token,
+        "after",
+        &new_bytes,
+        "old replica restart",
+    )
+    .await;
+    drop(previous);
     let mut restored = LocalServer::spawn(&old, backup.path());
     restored.ready().await;
     assert_s3_bytes(
@@ -258,4 +383,16 @@ async fn released_local_upgrade_preserves_objects_and_protocol_state() {
         "retained upgraded deployment",
     )
     .await;
+    let retained_locks: serde_json::Value = client
+        .get(format!("{}/v1/lfs/locks", retained.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retained_locks["locks"][0]["id"], lock["lock"]["id"]);
 }

@@ -28,6 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Bound Git request buffering, projection, packing and slow-consumer responses
   through shared admission.
+- Keep additive LFS-lock and Xet-identity migrations outside the released core
+  schema ledger, allowing 1.12.1 replicas to restart and read stored objects
+  during a rolling upgrade; deployments with incompatible row-level security
+  policies fail the migration safely.
 - Exercise protocol frontends with real clients and explicit prerequisite checks.
 
 ### Fixed
