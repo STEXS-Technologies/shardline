@@ -19,6 +19,8 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Added
 
+- Added Git blob-free and size-limited partial clones with repository-scoped lazy
+  fetching of verified reachable objects.
 - Added depth-limited Git clones, relative, date-based and exclusion-based history
   deepening and unshallowing
   without rewriting verified commit bytes.

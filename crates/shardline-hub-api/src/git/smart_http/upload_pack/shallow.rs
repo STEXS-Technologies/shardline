@@ -309,7 +309,11 @@ pub(super) fn negotiate(
         let mut visited = HashSet::new();
         let mut pending_objects: Vec<_> = roots
             .iter()
-            .filter(|id| by_id.contains_key(*id) && (known || selected.contains(*id)))
+            .filter(|id| {
+                by_id.get(*id).is_some_and(|object| {
+                    known || selected.contains(*id) || object.object_type != ObjectType::Commit
+                })
+            })
             .cloned()
             .collect();
         let mut discovered: HashSet<_> = pending_objects.iter().cloned().collect();
@@ -343,7 +347,9 @@ pub(super) fn negotiate(
             .into_iter()
             .filter(|object| {
                 let id = hex::encode(object.sha1());
-                wanted.contains(&id) && !known.contains(&id)
+                wanted.contains(&id)
+                    && (!known.contains(&id)
+                        || (object.object_type != ObjectType::Commit && wants.contains(&id)))
             })
             .collect(),
         updates,

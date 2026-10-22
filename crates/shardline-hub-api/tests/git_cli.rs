@@ -300,6 +300,106 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
         String::from_utf8_lossy(&pushed.stderr)
     );
     let second_path = work.path().join("clone-git");
+    let partial_path = work.path().join("partial-clone");
+    let partial_dir = partial_path.to_str().unwrap();
+    let partial = git(&[
+        "clone",
+        "--filter=blob:none",
+        "--no-checkout",
+        &url,
+        partial_dir,
+    ]);
+    assert!(
+        partial.status.success(),
+        "partial clone: {}",
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    let local_objects = git(&[
+        "-C",
+        partial_dir,
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check",
+    ]);
+    assert!(local_objects.status.success());
+    assert!(
+        !String::from_utf8_lossy(&local_objects.stdout).contains(" blob "),
+        "initial clone must omit blobs"
+    );
+    let checkout = git(&["-C", partial_dir, "checkout", "main"]);
+    assert!(
+        checkout.status.success(),
+        "lazy checkout: {}",
+        String::from_utf8_lossy(&checkout.stderr)
+    );
+    assert_eq!(
+        std::fs::read(partial_path.join("nested/hello.txt")).unwrap(),
+        b"from Git push\n"
+    );
+    assert!(
+        git(&["-C", partial_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
+    let limited_path = work.path().join("limited-clone");
+    let limited_dir = limited_path.to_str().unwrap();
+    let limited = git(&[
+        "clone",
+        "--filter=blob:limit=16",
+        "--no-checkout",
+        &url,
+        limited_dir,
+    ]);
+    assert!(
+        limited.status.success(),
+        "limited clone: {}",
+        String::from_utf8_lossy(&limited.stderr)
+    );
+    let listed = git(&[
+        "-C",
+        limited_dir,
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check",
+    ]);
+    assert!(listed.status.success());
+    let listing = String::from_utf8(listed.stdout).unwrap();
+    let sizes: Vec<_> = listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next()?;
+            (fields.next()? == "blob").then(|| fields.next().unwrap().parse::<usize>().unwrap())
+        })
+        .collect();
+    assert!(!sizes.is_empty());
+    assert!(sizes.iter().all(|size| *size < 16));
+    let historical_partial = git(&[
+        "-C",
+        limited_dir,
+        "show",
+        &format!("{}:nested/hello.txt", ancestor.trim()),
+    ]);
+    assert!(
+        historical_partial.status.success(),
+        "lazy history: {}",
+        String::from_utf8_lossy(&historical_partial.stderr)
+    );
+    assert_eq!(historical_partial.stdout, b"first real contents\n");
+    assert!(
+        git(&["-C", limited_dir, "checkout", "main"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        std::fs::read(limited_path.join("nested/hello.txt")).unwrap(),
+        b"from Git push\n"
+    );
+    assert!(
+        git(&["-C", limited_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
     let baseline = git(&[
         "-C",
         clone_dir,

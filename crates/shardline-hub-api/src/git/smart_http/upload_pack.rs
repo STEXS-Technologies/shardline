@@ -15,6 +15,7 @@ use crate::{
     error::HubApiError,
     routes::{HubState, require_repository_binding},
 };
+mod filter;
 mod shallow;
 #[cfg(test)]
 use shardline_index::hub::HubFileEntry;
@@ -42,6 +43,7 @@ pub async fn upload_pack(
         super::admission::read_request(body, MAX_UPLOAD_PACK_REQUEST_BYTES, "upload-pack").await?;
     let request_lines = decode_negotiation(&body)?;
     super::capabilities::upload(&request_lines)?;
+    let object_filter = filter::Filter::parse(&request_lines)?;
     let mut shallow_request = shallow::Request::parse(&request_lines)?;
     let wants = parse_wants(&request_lines);
     let haves = parse_haves(&request_lines);
@@ -63,11 +65,15 @@ pub async fn upload_pack(
     shallow_request
         .resolve_exclusions(&state, &repo_id, &projection.identities)
         .await?;
-    let identities: std::collections::HashSet<_> = projection.identities.values().collect();
+    let identities: std::collections::HashSet<_> = projection
+        .objects
+        .iter()
+        .map(|object| hex::encode(object.sha1()))
+        .collect();
     for want in &wants {
         if !identities.contains(want) {
             return Err(HubApiError::BadRequest(
-                "wanted Git commit is not in this repository".to_owned(),
+                "wanted Git object is not reachable in this repository".to_owned(),
             ));
         }
     }
@@ -87,7 +93,7 @@ pub async fn upload_pack(
         if !done && !response_body.is_empty() {
             return Ok((response_body, pack_admission));
         }
-        let pack_data = generate_pack(&objects)?;
+        let pack_data = generate_pack(&object_filter.apply(objects, &wants))?;
         response_body.extend_from_slice(pktline::encode_line("NAK\n")?.as_bytes());
         if sideband {
             response_body.extend_from_slice(&pktline::sideband_data(&pack_data));

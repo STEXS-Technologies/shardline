@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn explicit_lazy_blob_is_not_hidden_by_known_commit_ancestry() {
+    let blob = GitObject::blob(b"lazy bytes".to_vec());
+    let blob_id = hex::encode(blob.sha1());
+    let mut tree_data = b"100644 file\0".to_vec();
+    tree_data.extend_from_slice(&blob.sha1());
+    let tree = GitObject::tree(tree_data);
+    let tree_id = hex::encode(tree.sha1());
+    let commit = GitObject::commit(format!("tree {tree_id}\n\ncommit").into_bytes());
+    let commit_id = hex::encode(commit.sha1());
+    let (selected, updates) = negotiate(
+        vec![blob.clone(), tree, commit],
+        &[blob_id],
+        &[commit_id],
+        &Request::default(),
+    )
+    .unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].data, blob.data);
+    assert!(updates.is_empty());
+}
+
+#[test]
 fn exclusion_resolution_rejects_unknown_ambiguous_and_changed_refs() {
     use super::super::super::ref_advertisement::GitRef;
     let refs = vec![

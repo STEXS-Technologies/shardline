@@ -39,7 +39,7 @@ pub(super) fn upload(lines: &[Vec<u8>]) -> Result<(), HubApiError> {
             continue;
         };
         let command = line.split_whitespace().next().unwrap_or("");
-        if command == "filter" || command.starts_with("command=") {
+        if command.starts_with("command=") {
             return Err(HubApiError::BadRequest(format!(
                 "unsupported upload-pack command: {command}"
             )));
@@ -81,9 +81,7 @@ mod tests {
 
     #[test]
     fn unsupported_fetch_semantics_are_not_silently_ignored() {
-        for command in ["filter blob:none", "command=fetch"] {
-            assert!(upload(&[command.as_bytes().to_vec()]).is_err());
-        }
+        assert!(upload(&[b"command=fetch".to_vec()]).is_err());
         assert!(upload(&[b"want deadbeef side-band-64k".to_vec(), b"done".to_vec()]).is_ok());
     }
 
