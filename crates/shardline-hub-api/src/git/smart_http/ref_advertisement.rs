@@ -237,7 +237,7 @@ pub async fn info_refs(
             "application/x-git-receive-pack-advertisement",
         ),
         GitSmartHttpService::UploadPack => (
-            "side-band-64k shallow deepen-relative deepen-since",
+            "side-band-64k shallow deepen-relative deepen-since deepen-not",
             "application/x-git-upload-pack-advertisement",
         ),
     };

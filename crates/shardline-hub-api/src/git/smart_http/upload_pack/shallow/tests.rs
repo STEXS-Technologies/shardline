@@ -1,6 +1,76 @@
 use super::*;
 
 #[test]
+fn exclusion_resolution_rejects_unknown_ambiguous_and_changed_refs() {
+    use super::super::super::ref_advertisement::GitRef;
+    let refs = vec![
+        GitRef {
+            name: "refs/heads/base".to_owned(),
+            sha1: "hub-one".to_owned(),
+        },
+        GitRef {
+            name: "refs/tags/base".to_owned(),
+            sha1: "hub-two".to_owned(),
+        },
+    ];
+    let identities = HashMap::from([
+        ("hub-one".to_owned(), "1".repeat(40)),
+        ("hub-two".to_owned(), "2".repeat(40)),
+    ]);
+    for name in ["missing", "base"] {
+        let mut request = Request::parse(&[format!("deepen-not {name}").into_bytes()]).unwrap();
+        assert!(request.resolve_refs(&refs, &identities).is_err());
+    }
+    let mut request = Request::parse(&[b"deepen-not refs/tags/base".to_vec()]).unwrap();
+    assert!(request.resolve_refs(&refs, &HashMap::new()).is_err());
+    request.resolve_refs(&refs, &identities).unwrap();
+    assert_eq!(request.excluded_roots, HashSet::from(["2".repeat(40)]));
+}
+
+#[test]
+fn exclusion_removes_all_baseline_ancestry_and_combines_with_date() {
+    use super::super::super::ref_advertisement::GitRef;
+    let root = GitObject::commit(b"committer Root <r@example.com> 100 +0000\n\nroot".to_vec());
+    let root_id = hex::encode(root.sha1());
+    let base = GitObject::commit(
+        format!("parent {root_id}\ncommitter Base <b@example.com> 200 +0000\n\nbase").into_bytes(),
+    );
+    let base_id = hex::encode(base.sha1());
+    let tip = GitObject::commit(
+        format!("parent {base_id}\ncommitter Tip <t@example.com> 300 +0000\n\ntip").into_bytes(),
+    );
+    let tip_id = hex::encode(tip.sha1());
+    let mut request = Request::parse(&[
+        b"deepen-not baseline".to_vec(),
+        b"deepen-since 250".to_vec(),
+    ])
+    .unwrap();
+    request
+        .resolve_refs(
+            &[GitRef {
+                name: "refs/tags/baseline".to_owned(),
+                sha1: "hub-base".to_owned(),
+            }],
+            &HashMap::from([("hub-base".to_owned(), base_id)]),
+        )
+        .unwrap();
+    let (selected, updates) = negotiate(
+        vec![root, base, tip],
+        std::slice::from_ref(&tip_id),
+        &[],
+        &request,
+    )
+    .unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(hex::encode(selected[0].sha1()), tip_id);
+    assert!(
+        String::from_utf8(updates)
+            .unwrap()
+            .contains(&format!("shallow {tip_id}\n"))
+    );
+}
+
+#[test]
 fn date_selection_rejects_missing_duplicate_or_invalid_committer_time() {
     for bytes in [
         b"author A <a@example.com> 100 +0000\n\nmissing".as_slice(),
@@ -183,6 +253,9 @@ fn rejects_ambiguous_or_invalid_depth_requests() {
         vec!["deepen-since 1 trailing"],
         vec!["deepen-since 1", "deepen-since 2"],
         vec!["deepen-since 1", "deepen 0"],
+        vec!["deepen-not"],
+        vec!["deepen-not one two"],
+        vec!["deepen-not main", "deepen 1"],
         vec!["deepen 1", "deepen-since 1"],
         vec!["shallow invalid"],
         vec!["want 0000000000000000000000000000000000000000 deepen-relative"],

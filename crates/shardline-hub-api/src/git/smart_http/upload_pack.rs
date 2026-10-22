@@ -42,7 +42,7 @@ pub async fn upload_pack(
         super::admission::read_request(body, MAX_UPLOAD_PACK_REQUEST_BYTES, "upload-pack").await?;
     let request_lines = decode_negotiation(&body)?;
     super::capabilities::upload(&request_lines)?;
-    let shallow_request = shallow::Request::parse(&request_lines)?;
+    let mut shallow_request = shallow::Request::parse(&request_lines)?;
     let wants = parse_wants(&request_lines);
     let haves = parse_haves(&request_lines);
 
@@ -60,6 +60,9 @@ pub async fn upload_pack(
         request_admission,
     )
     .await?;
+    shallow_request
+        .resolve_exclusions(&state, &repo_id, &projection.identities)
+        .await?;
     let identities: std::collections::HashSet<_> = projection.identities.values().collect();
     for want in &wants {
         if !identities.contains(want) {

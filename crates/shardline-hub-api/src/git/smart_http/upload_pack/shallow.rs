@@ -11,6 +11,8 @@ pub(super) struct Request {
     boundaries: HashSet<String>,
     depth: Option<u32>,
     since: Option<u64>,
+    exclude_refs: Vec<String>,
+    excluded_roots: HashSet<String>,
     relative: bool,
 }
 
@@ -64,6 +66,15 @@ impl Request {
                     }
                     request.since = Some(timestamp);
                 }
+                Some("deepen-not") => {
+                    let [_, reference] = fields.as_slice() else {
+                        return Err(invalid());
+                    };
+                    if request.exclude_refs.len() >= 10_000 || reference.len() > 1024 {
+                        return Err(invalid());
+                    }
+                    request.exclude_refs.push((*reference).to_owned());
+                }
                 Some("want") => {
                     request.relative |= fields
                         .iter()
@@ -73,11 +84,62 @@ impl Request {
                 _ => {}
             }
         }
-        if (request.relative && request.depth.is_none()) || (depth_seen && request.since.is_some())
+        if (request.relative && request.depth.is_none())
+            || (depth_seen && (request.since.is_some() || !request.exclude_refs.is_empty()))
         {
             return Err(invalid());
         }
         Ok(request)
+    }
+
+    pub(super) async fn resolve_exclusions(
+        &mut self,
+        state: &HubState,
+        repo_id: &str,
+        identities: &HashMap<String, String>,
+    ) -> Result<(), HubApiError> {
+        if self.exclude_refs.is_empty() {
+            return Ok(());
+        }
+        let refs = super::super::ref_advertisement::collect_refs(state, repo_id).await?;
+        self.resolve_refs(&refs, identities)
+    }
+
+    fn resolve_refs(
+        &mut self,
+        refs: &[super::super::ref_advertisement::GitRef],
+        identities: &HashMap<String, String>,
+    ) -> Result<(), HubApiError> {
+        let refs_by_name: HashMap<_, _> = refs
+            .iter()
+            .map(|reference| (reference.name.as_str(), reference))
+            .collect();
+        for requested in &self.exclude_refs {
+            let aliases = [
+                requested.clone(),
+                format!("refs/{requested}"),
+                format!("refs/tags/{requested}"),
+                format!("refs/heads/{requested}"),
+                format!("refs/remotes/{requested}"),
+                format!("refs/remotes/{requested}/HEAD"),
+            ];
+            let mut matches = aliases
+                .iter()
+                .filter_map(|alias| refs_by_name.get(alias.as_str()));
+            let reference = matches.next().ok_or_else(|| {
+                HubApiError::BadRequest("unknown Git shallow exclusion ref".to_owned())
+            })?;
+            if matches.next().is_some() {
+                return Err(HubApiError::BadRequest(
+                    "ambiguous Git shallow exclusion ref".to_owned(),
+                ));
+            }
+            let id = identities.get(&reference.sha1).ok_or_else(|| {
+                HubApiError::CasError("Git exclusion ref changed during projection".to_owned())
+            })?;
+            self.excluded_roots.insert(id.clone());
+        }
+        Ok(())
     }
 }
 
@@ -147,6 +209,21 @@ pub(super) fn negotiate(
             ));
         }
     }
+    if !request.exclude_refs.is_empty() && request.excluded_roots.is_empty() {
+        return Err(HubApiError::CasError(
+            "unresolved Git shallow exclusions".to_owned(),
+        ));
+    }
+    let mut excluded = HashSet::new();
+    let mut exclude_pending: Vec<_> = request.excluded_roots.iter().cloned().collect();
+    while let Some(id) = exclude_pending.pop() {
+        if excluded.insert(id.clone()) {
+            let object = by_id
+                .get(&id)
+                .ok_or_else(|| HubApiError::CasError("missing Git exclusion commit".to_owned()))?;
+            exclude_pending.extend(parents(object)?);
+        }
+    }
     let mut selected = HashSet::new();
     let mut budgets = HashMap::<String, Option<u32>>::new();
     let mut pending: VecDeque<_> = wants
@@ -164,6 +241,9 @@ pub(super) fn negotiate(
         })
         .collect();
     while let Some((id, mut budget)) = pending.pop_front() {
+        if excluded.contains(&id) {
+            continue;
+        }
         let Some(object) = by_id.get(&id) else {
             continue;
         };
@@ -178,7 +258,10 @@ pub(super) fn negotiate(
         if request.boundaries.contains(&id) {
             if request.relative {
                 budget = request.depth.map(|depth| depth.saturating_add(1));
-            } else if request.depth.is_none() && request.since.is_none() {
+            } else if request.depth.is_none()
+                && request.since.is_none()
+                && request.exclude_refs.is_empty()
+            {
                 budget = Some(1);
             }
         }
@@ -196,7 +279,7 @@ pub(super) fn negotiate(
         }
     }
     let mut updates = Vec::new();
-    if request.depth.is_some() || request.since.is_some() {
+    if request.depth.is_some() || request.since.is_some() || !request.exclude_refs.is_empty() {
         if selected.is_empty() {
             return Err(HubApiError::BadRequest(
                 "no commits selected for shallow request".to_owned(),
@@ -226,7 +309,7 @@ pub(super) fn negotiate(
         let mut visited = HashSet::new();
         let mut pending_objects: Vec<_> = roots
             .iter()
-            .filter(|id| by_id.contains_key(*id))
+            .filter(|id| by_id.contains_key(*id) && (known || selected.contains(*id)))
             .cloned()
             .collect();
         let mut discovered: HashSet<_> = pending_objects.iter().cloned().collect();

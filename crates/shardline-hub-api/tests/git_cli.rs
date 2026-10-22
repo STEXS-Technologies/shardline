@@ -300,6 +300,126 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
         String::from_utf8_lossy(&pushed.stderr)
     );
     let second_path = work.path().join("clone-git");
+    let baseline = git(&[
+        "-C",
+        clone_dir,
+        "push",
+        "origin",
+        "HEAD^:refs/tags/shallow-base",
+    ]);
+    assert!(
+        baseline.status.success(),
+        "baseline tag: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let excluded_path = work.path().join("excluded-shallow");
+    let excluded_dir = excluded_path.to_str().unwrap();
+    let excluded = git(&[
+        "clone",
+        "--shallow-exclude=shallow-base",
+        "--single-branch",
+        "--no-tags",
+        &url,
+        excluded_dir,
+    ]);
+    assert!(
+        excluded.status.success(),
+        "excluded clone: {}",
+        String::from_utf8_lossy(&excluded.stderr)
+    );
+    assert_eq!(
+        git(&["-C", excluded_dir, "rev-list", "--count", "HEAD"]).stdout,
+        b"1\n"
+    );
+    assert_eq!(
+        git(&["-C", excluded_dir, "rev-parse", "HEAD"]).stdout,
+        pushed_head.stdout
+    );
+    assert_eq!(
+        std::fs::read(excluded_path.join("nested/hello.txt")).unwrap(),
+        b"from Git push\n"
+    );
+    assert!(
+        git(&["-C", excluded_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
+    let restored = git(&["-C", excluded_dir, "fetch", "--unshallow", "origin", "main"]);
+    assert!(
+        restored.status.success(),
+        "excluded unshallow: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(
+        git(&["-C", excluded_dir, "rev-list", "HEAD"]).stdout,
+        git(&["-C", clone_dir, "rev-list", "HEAD"]).stdout
+    );
+    assert!(
+        git(&["-C", excluded_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&[
+            "-C",
+            clone_dir,
+            "push",
+            "origin",
+            "HEAD^:refs/heads/shallow-base"
+        ])
+        .status
+        .success()
+    );
+    let ambiguous_path = work.path().join("ambiguous-exclusion");
+    let ambiguous = git(&[
+        "clone",
+        "--shallow-exclude=shallow-base",
+        "--single-branch",
+        "--no-tags",
+        &url,
+        ambiguous_path.to_str().unwrap(),
+    ]);
+    assert!(
+        !ambiguous.status.success(),
+        "ambiguous branch/tag exclusion must fail"
+    );
+    let explicit_path = work.path().join("explicit-exclusion");
+    let explicit = git(&[
+        "clone",
+        "--shallow-exclude=refs/tags/shallow-base",
+        "--single-branch",
+        "--no-tags",
+        &url,
+        explicit_path.to_str().unwrap(),
+    ]);
+    assert!(
+        explicit.status.success(),
+        "explicit exclusion: {}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert_eq!(
+        git(&[
+            "-C",
+            explicit_path.to_str().unwrap(),
+            "rev-list",
+            "--count",
+            "HEAD"
+        ])
+        .stdout,
+        b"1\n"
+    );
+    assert!(
+        git(&[
+            "-C",
+            clone_dir,
+            "push",
+            "origin",
+            ":refs/tags/shallow-base",
+            ":refs/heads/shallow-base"
+        ])
+        .status
+        .success()
+    );
     let dated_path = work.path().join("dated-shallow");
     let dated_dir = dated_path.to_str().unwrap();
     let dated = git(&[
