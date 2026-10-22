@@ -63,6 +63,9 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
     --include-ignored --nocapture
   cargo test --locked -p shardline-server --lib \
     corrupt_copy_source_preserves -- --include-ignored --nocapture
+  cargo test --locked -p shardline-server --lib \
+    hub_server_shutdown_joins_startup_workers_before_runtime_teardown -- \
+    --ignored --nocapture
   cargo test --locked -p shardline-server --test protocol_completion postgres -- \
     --ignored --skip on_postgres_s3_replica --skip on_postgres_and_minio --nocapture
 else

@@ -114,6 +114,9 @@ jobs:
           USE_BAZEL_VERSION: "8.7.0"
         run: cargo make test-e2e
 
+      - name: Qualify native Xet with PostgreSQL and MinIO
+        run: bash scripts/shardline/verify_maintenance_native_xet.sh
+
       - name: Run native Bazel client flows
         env:
           USE_BAZEL_VERSION: "8.7.0"

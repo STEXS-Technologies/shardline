@@ -1,3 +1,4 @@
+mod live_provider_bridge_requirements;
 mod support;
 
 use std::{
@@ -46,14 +47,15 @@ const LIVE_PROVIDER_TOKEN_TTL_SECONDS: u64 = 300;
 const LIVE_GITHUB_API_BASE_URL: &str = "https://api.github.com";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live GitHub and Gitea test repositories and credentials"]
 async fn live_provider_bridge_supports_private_github_and_gitea_repositories() {
-    if !(command_available("git") && command_available("git-lfs") && command_available("git-xet")) {
-        return;
-    }
-
-    let Some(config) = LiveBridgeConfig::from_env().await else {
-        return;
-    };
+    assert!(
+        command_available("git") && command_available("git-lfs") && command_available("git-xet"),
+        "explicit live-provider qualification requires git, git-lfs and git-xet"
+    );
+    let config = LiveBridgeConfig::from_env()
+        .await
+        .expect("live-provider qualification configuration");
 
     let result = exercise_live_provider_bridge_flow(config).await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -1044,11 +1046,36 @@ struct LiveBridgeConfig {
 }
 
 impl LiveBridgeConfig {
-    async fn from_env() -> Option<Self> {
+    async fn from_env() -> Result<Self, TestError> {
+        // Validate the complete opt-in fixture before contacting either forge.
+        for name in [
+            "SHARDLINE_LIVE_GITHUB_OWNER",
+            "SHARDLINE_LIVE_GITHUB_REPO",
+            "SHARDLINE_LIVE_GITHUB_TOKEN",
+            "SHARDLINE_LIVE_GITEA_BASE_URL",
+            "SHARDLINE_LIVE_GITEA_OWNER",
+            "SHARDLINE_LIVE_GITEA_REPO",
+            "SHARDLINE_LIVE_GITEA_TOKEN",
+        ] {
+            if !var(name).is_ok_and(|value| !value.trim().is_empty()) {
+                return Err(ServerE2eInvariantError::new(format!(
+                    "missing live-provider fixture variable {name}"
+                ))
+                .into());
+            }
+        }
         let client = Client::new();
-        let github = LiveProviderConfig::github_from_env(&client).await.ok()?;
-        let gitea = LiveProviderConfig::gitea_from_env(&client).await.ok()?;
-        Some(Self { github, gitea })
+        let github = LiveProviderConfig::github_from_env(&client)
+            .await
+            .map_err(|_| {
+                ServerE2eInvariantError::new("live GitHub fixture identity lookup failed")
+            })?;
+        let gitea = LiveProviderConfig::gitea_from_env(&client)
+            .await
+            .map_err(|_| {
+                ServerE2eInvariantError::new("live Gitea fixture identity lookup failed")
+            })?;
+        Ok(Self { github, gitea })
     }
 }
 

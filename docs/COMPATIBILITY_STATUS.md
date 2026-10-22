@@ -110,6 +110,24 @@ behavior. Other E2E targets still need an individual skip audit. Review actual
 execution logs before treating a specific revision as qualified; workflow changes
 alone are not a passing CI result.
 
+The default contributor library run leaves twelve explicitly ignored tests:
+
+| Checks | Where they run explicitly |
+| --- | --- |
+| Four PostgreSQL OCI subject-index and reclamation contracts | Protocol-conformance gate with a migrated disposable database |
+| PostgreSQL corrupt-copy preservation and startup-worker shutdown | Protocol-conformance gate with that database |
+| Six full-size or legacy maintenance-history capacity drills | Explicit release-mode capacity campaigns; ordinary CI does not establish their result |
+
+The E2E job separately selects the ignored native Xet PostgreSQL/MinIO test and
+the two Bazel flows. Kubernetes and kind tests still require their dedicated
+deployment fixtures. The live GitHub/Gitea bridge test is explicitly ignored by
+default because it requires external credentials and test repositories. Selecting
+it explicitly requires its clients and complete configuration; missing prerequisites
+or failed identity lookups fail the test. A default E2E pass does not qualify that live integration.
+Likewise, optional developer runs without the required-client flag can omit
+tool-dependent flows. Keep these limits separate from executed native-client
+and disposable-backend results.
+
 The required protocol-conformance step separately runs native Git LFS locking and
 transfers and the official OCI Distribution v1.1.1 suite. It fails if its client
 tools are missing. PostgreSQL contracts also exercise lock races across two
