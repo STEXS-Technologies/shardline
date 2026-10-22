@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- Support native Hugging Face Xet uploads through Hub negotiation, scoped CAS
+  credentials, repository-scoped file identities and verified reconstruction.
+- Support durable Git LFS locks shared across replicas, including owner checks,
+  pagination and the Hub's LFS routes.
+- Support OCI 1.1 referrer discovery with artifact filtering and pagination,
+  retaining recovery checks and legacy inventory reconciliation.
+- Add optional S3 SigV4 identities, presigned requests, authenticated streaming
+  checksums, multipart listing and range-based UploadPartCopy.
+- Support atomic Git pushes, report-status-v2, side-band responses, shallow
+  history by depth, date or excluded refs, and blob/tree partial clones.
+
+### Improved
+
+- Bound Git request buffering, projection, packing and slow-consumer responses
+  through shared admission.
+- Exercise protocol frontends with real clients and explicit prerequisite checks.
+
+### Fixed
+
+- Preserve Hub branch, revision and historical Git identities across SDK writes,
+  reference updates and native Git operations.
+- Publish Git reference batches and their recovery evidence atomically, rejecting
+  malformed commands, stale refs and incomplete ancestry before publication.
+- Read OCI visibility and resumable-upload evidence consistently during concurrent
+  transitions; prevent reclaimed OCI indexes from being recreated by stale backfill.
+- Keep PostgreSQL multipart listing rows, parts and evidence in one read-only
+  snapshot, preventing false integrity errors without blocking upload writers.
+- Preserve the released direct upload packer, verified chunk cache, batched S3
+  cleanup and bounded streaming comparisons when integrating protocol changes.
+
+### Security
+
+- Update TLS certificate verification and bundled trust roots to patched releases
+  for RUSTSEC-2026-0381, RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
+
 ## [1.12.1] - 2026-10-17
 
 This patch reduces storage, database, and local I/O overhead while preserving

@@ -9,4 +9,6 @@ cargo nextest run --locked -p shardline-index --lib --all-features --no-fail-fas
 cargo nextest run --locked -p shardline-provider-events --all-features \
     --test provider_events_integration -E 'test(postgres_)' --no-fail-fast
 cargo nextest run --locked -p shardline-server --lib --all-features --no-fail-fast
+# Native frontend contracts require SDKs and remote-storage fixtures; the E2E
+# workflow runs them explicitly through verify-protocol-conformance.sh.
 cargo nextest run --locked -p shardline --all-features --test db_migrate_e2e --no-fail-fast

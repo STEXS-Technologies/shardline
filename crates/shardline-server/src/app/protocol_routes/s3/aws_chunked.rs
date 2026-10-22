@@ -9,8 +9,9 @@
 //! ```
 //!
 //! The decoder strips the framing so the CDC ingestor stores the **decoded**
-//! payload (and its size), matching what the client sent. Chunk signatures are
-//! NOT verified (documented deviation — the access key *is* the credential).
+//! payload (and its size), matching what the client sent. Registered signing
+//! identities have chunk signatures and signed checksum trailers verified by middleware.
+//! Legacy access-key-as-token clients retain their framing-only decoding path.
 
 use std::io::{Error as IoError, ErrorKind};
 

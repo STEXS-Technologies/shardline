@@ -70,6 +70,9 @@ pub enum LocalIndexStoreError {
         #[source]
         UploadIntentConflictError,
     ),
+    /// A Hub SHA-256 identity conflicts with an existing file size.
+    #[error("Hub Xet file identity conflicts with an existing SHA-256 mapping")]
+    XetFileIdentityConflict,
     /// A stored integer exceeded the supported range.
     #[error("stored integer exceeded the supported range: {0}")]
     IntegerOutOfRange(String),

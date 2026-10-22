@@ -442,7 +442,7 @@ fn existing_file_uploads_compare_complete_objects_with_one_get() {
             .unwrap(),
         PutOutcome::AlreadyExists
     );
-    assert_eq!(provider.requests(), ["HEAD", "GET"]);
+    assert_eq!(provider.requests(), ["GET"]);
     provider.state.lock().unwrap().requests.clear();
     assert_eq!(
         store
@@ -450,12 +450,14 @@ fn existing_file_uploads_compare_complete_objects_with_one_get() {
             .unwrap(),
         PutOutcome::AlreadyExists
     );
-    assert_eq!(provider.requests(), ["HEAD", "GET"]);
+    assert_eq!(provider.requests(), ["GET"]);
 }
 
 #[test]
 fn existing_file_comparison_rejects_corruption_and_invalid_responses() {
-    let bytes = vec![0x42; 1024 * 1024 + 17];
+    let bytes = (0..1024 * 1024 + 17)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
     let mut file = tempfile::NamedTempFile::new().unwrap();
     file.write_all(&bytes).unwrap();
     let key = ObjectKey::parse("files/invalid").unwrap();
@@ -482,6 +484,9 @@ fn existing_file_comparison_rejects_corruption_and_invalid_responses() {
                 "long" => stored.push(0),
                 "denied" => state.deny_reads = true,
                 "range" => {
+                    // A provider returning a shifted body to a full GET must
+                    // fail the complete byte comparison, regardless of headers.
+                    stored.rotate_left(1);
                     state.response_range =
                         Some(format!("bytes 1-{}/{}", bytes.len(), bytes.len() + 1))
                 }
@@ -500,17 +505,24 @@ fn existing_file_comparison_rejects_corruption_and_invalid_responses() {
             }
         }
         assert!(
-            super::existing_object_outcome_from_file(
+            !super::existing_object_outcome_from_file(
                 &store,
                 &key,
-                bytes.len() as u64,
                 file.path(),
                 &integrity(&bytes)
             )
-            .is_err(),
+            .is_ok_and(|outcome| outcome.is_some()),
             "case {case}"
         );
-        assert_eq!(provider.requests(), ["GET"]);
+        let requests = provider.requests();
+        if case == "truncated" {
+            // The storage client can resume a broken read. It must still
+            // reject the incomplete response and never issue a write or HEAD.
+            assert!(!requests.is_empty());
+            assert!(requests.iter().all(|method| method == "GET"));
+        } else {
+            assert_eq!(requests, ["GET"], "case {case}");
+        }
     }
 }
 

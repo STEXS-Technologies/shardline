@@ -18,6 +18,336 @@ use support::{bearer_token, wait_for_health};
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_git_and_legacy_commit_ids_identify_the_same_revision() {
+    let srv = start_hub_server().await;
+    create_model_repo(srv.base_url(), srv.token()).await;
+    let client = Client::new();
+    let repo = format!("{}/api/models/test-owner/test-model", srv.base_url());
+    let response = client.post(format!("{repo}/commit/main"))
+        .bearer_auth(srv.token()).header("Content-Type", "application/x-ndjson")
+        .body("{\"header\":{\"summary\":\"identity compatibility\"}}\n{\"file\":{\"path\":\"same.txt\",\"content\":\"c2FtZQ==\"}}")
+        .send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let commit: serde_json::Value = response.json().await.unwrap();
+    let legacy = commit["commit_id"].as_str().unwrap();
+    let public = commit["commitOid"].as_str().unwrap();
+    assert_eq!(legacy.len(), 64);
+    assert_eq!(public.len(), 40);
+    for identity in [legacy, public] {
+        let response = client
+            .get(format!("{repo}/revision/{identity}"))
+            .bearer_auth(srv.token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let info: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(info["sha"], public);
+        let response = client
+            .get(format!(
+                "{}/models/test-owner/test-model/resolve/{identity}/same.txt",
+                srv.base_url()
+            ))
+            .bearer_auth(srv.token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers().get("x-repo-commit").unwrap(), public);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"same");
+    }
+    let updated = client.post(format!("{repo}/commit/{legacy}"))
+        .bearer_auth(srv.token()).header("Content-Type", "application/x-ndjson")
+        .body(format!("{{\"header\":{{\"summary\":\"legacy conditional write\",\"parentCommit\":\"{legacy}\"}}}}"))
+        .send().await.unwrap();
+    assert_eq!(
+        updated.status(),
+        200,
+        "historical IDs remain writable parents"
+    );
+    for stale in [legacy, public] {
+        let response = client
+            .post(format!("{repo}/commit/main"))
+            .bearer_auth(srv.token())
+            .header("Content-Type", "application/x-ndjson")
+            .body(format!(
+                "{{\"header\":{{\"summary\":\"stale\",\"parentCommit\":\"{stale}\"}}}}"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            409,
+            "both stale ID forms must be rejected"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_branch_writes_preserve_main_and_reject_stale_or_deleted_targets() {
+    let srv = start_hub_server().await;
+    create_model_repo(srv.base_url(), srv.token()).await;
+    let initial = commit_inline_file(
+        srv.base_url(),
+        srv.token(),
+        "models",
+        "test-owner",
+        "test-model",
+        "main",
+        "main.txt",
+        b"main",
+    )
+    .await;
+    let client = Client::new();
+    let repo_url = format!("{}/api/models/test-owner/test-model", srv.base_url());
+    let branch = client
+        .post(format!("{repo_url}/branch/feature%2Fhttp"))
+        .bearer_auth(srv.token())
+        .json(&serde_json::json!({"startingPoint": initial}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(branch.status(), 201);
+    let branch_head = commit_inline_file(
+        srv.base_url(),
+        srv.token(),
+        "models",
+        "test-owner",
+        "test-model",
+        "feature%2Fhttp",
+        "feature.txt",
+        b"feature",
+    )
+    .await;
+    assert_ne!(branch_head, initial);
+    let info: serde_json::Value = client
+        .get(&repo_url)
+        .bearer_auth(srv.token())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["sha"], initial, "branch writes must not advance main");
+    let stale_body =
+        format!("{{\"header\":{{\"summary\":\"stale\",\"parentCommit\":\"{initial}\"}}}}\n");
+    let commit_url = format!("{repo_url}/commit/feature%2Fhttp");
+    let stale = client
+        .post(&commit_url)
+        .bearer_auth(srv.token())
+        .header("Content-Type", "application/x-ndjson")
+        .body(stale_body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 409);
+    let current: serde_json::Value = client
+        .get(format!("{repo_url}/revision/feature%2Fhttp"))
+        .bearer_auth(srv.token())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(current["sha"], branch_head);
+    let deleted = client
+        .delete(format!("{repo_url}/branch/feature%2Fhttp"))
+        .bearer_auth(srv.token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), 204);
+    let retry = client
+        .post(&commit_url)
+        .bearer_auth(srv.token())
+        .header("Content-Type", "application/x-ndjson")
+        .body(stale_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        retry.status(),
+        404,
+        "a stale write must not revive a deleted branch"
+    );
+    let legacy = commit_inline_file(
+        srv.base_url(),
+        srv.token(),
+        "models",
+        "test-owner",
+        "test-model",
+        &initial,
+        "legacy.txt",
+        b"legacy conditional main write",
+    )
+    .await;
+    let info: serde_json::Value = client
+        .get(&repo_url)
+        .bearer_auth(srv.token())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        info["sha"], legacy,
+        "legacy explicit-parent URLs must still work"
+    );
+    let retained = client
+        .get(format!("{repo_url}/revision/{branch_head}"))
+        .bearer_auth(srv.token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retained.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_history_preserves_order_and_repository_read_authorization() {
+    let srv = start_hub_server().await;
+    create_model_repo(srv.base_url(), srv.token()).await;
+    let first = commit_inline_file(
+        srv.base_url(),
+        srv.token(),
+        "models",
+        "test-owner",
+        "test-model",
+        "main",
+        "first.txt",
+        b"one",
+    )
+    .await;
+    let second = commit_inline_file(
+        srv.base_url(),
+        srv.token(),
+        "models",
+        "test-owner",
+        "test-model",
+        "main",
+        "second.txt",
+        b"two",
+    )
+    .await;
+    let client = Client::new();
+    let url = format!(
+        "{}/api/models/test-owner/test-model/commits/main",
+        srv.base_url()
+    );
+    let read = mint_token_for(
+        "test-owner",
+        "test-model",
+        shardline_protocol::TokenScope::Read,
+    )
+    .unwrap();
+    let response = client.get(&url).bearer_auth(&read).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let history: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(history[0]["id"], second);
+    assert_eq!(history[1]["id"], first);
+    let missing_auth = client.get(&url).send().await.unwrap();
+    assert_eq!(missing_auth.status(), 401);
+    let foreign = client
+        .get(&url)
+        .bearer_auth(srv.token_for("other-owner", "other-model"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), 403);
+    let missing = client
+        .get(format!(
+            "{}/api/models/test-owner/test-model/commits/missing",
+            srv.base_url()
+        ))
+        .bearer_auth(&read)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    assert_eq!(
+        missing.headers().get("x-error-code").unwrap(),
+        "RevisionNotFound"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_reference_mutations_require_repository_write_authorization() {
+    let srv = start_hub_server().await;
+    create_model_repo(srv.base_url(), srv.token()).await;
+    let client = Client::new();
+    let refs_url = format!("{}/api/models/test-owner/test-model/refs", srv.base_url());
+    let before: serde_json::Value = client
+        .get(&refs_url)
+        .bearer_auth(srv.token())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let read = mint_token_for(
+        "test-owner",
+        "test-model",
+        shardline_protocol::TokenScope::Read,
+    )
+    .unwrap();
+    let foreign = srv.token_for("other-owner", "other-model");
+    for (method, path, body) in [
+        (
+            reqwest::Method::POST,
+            "branch/feature",
+            serde_json::json!({}),
+        ),
+        (
+            reqwest::Method::DELETE,
+            "branch/main",
+            serde_json::json!({}),
+        ),
+        (
+            reqwest::Method::POST,
+            "tag/main",
+            serde_json::json!({"tag": "v1"}),
+        ),
+        (reqwest::Method::DELETE, "tag/v1", serde_json::json!({})),
+    ] {
+        let url = format!("{}/api/models/test-owner/test-model/{path}", srv.base_url());
+        let unauthenticated = client
+            .request(method.clone(), &url)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), 401, "{method} {path}");
+        for token in [&read, &foreign] {
+            let denied = client
+                .request(method.clone(), &url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), 403, "{method} {path}");
+        }
+    }
+    let after: serde_json::Value = client
+        .get(&refs_url)
+        .bearer_auth(srv.token())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "rejected mutations must leave live refs intact"
+    );
+}
+
 /// Guard that aborts the server task on drop, even if the test panics.
 struct ServerGuard {
     base_url: String,
@@ -305,9 +635,9 @@ async fn commit_inline_file(
         status.is_success(),
         "commit failed: {status} body: {body:?}"
     );
-    body["commit_id"]
+    body["commitOid"]
         .as_str()
-        .expect("commit_id missing")
+        .expect("commitOid missing")
         .to_owned()
 }
 
@@ -1707,6 +2037,22 @@ async fn git_smart_http_ref_deletion_removes_branch_and_keeps_commit_available()
         !refs_after.contains("refs/heads/feature/remove-me"),
         "deleted branch must not be advertised: {refs_after}"
     );
+    let sdk_refs = client
+        .get(format!("{base_url}/api/models/test-owner/test-model/refs"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sdk_refs.status(), 200);
+    let sdk_refs: serde_json::Value = sdk_refs.json().await.unwrap();
+    assert!(
+        !sdk_refs["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reference| { reference["name"] == "feature/remove-me" }),
+        "SDK reference listing must not revive deleted branches: {sdk_refs}"
+    );
 
     let preserved_commit = client
         .get(format!(
@@ -2596,6 +2942,45 @@ async fn hub_tag_push_appears_in_revisions() {
             .iter()
             .any(|r| r["ref_name"].as_str() == Some("refs/tags/v1.0")),
         "revisions should contain refs/tags/v1.0: {body:?}"
+    );
+
+    let refs_url = format!("{base_url}/api/models/test-owner/test-model/refs");
+    let refs_response = client
+        .get(&refs_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refs_response.status(), 200);
+    let refs: serde_json::Value = refs_response.json().await.unwrap();
+    assert_eq!(
+        refs["tags"],
+        serde_json::json!([{
+            "name": "v1.0", "ref": "refs/tags/v1.0", "targetCommit": _tag_commit_hex,
+        }])
+    );
+    assert_eq!(
+        refs["branches"],
+        serde_json::json!([{
+            "name": "main", "ref": "refs/heads/main", "targetCommit": _commit_sha,
+        }])
+    );
+    let denied = client.get(&refs_url).send().await.unwrap();
+    assert_eq!(
+        denied.status(),
+        401,
+        "refs must retain repository authentication"
+    );
+    let foreign = client
+        .get(&refs_url)
+        .bearer_auth(srv.token_for("other-owner", "other-model"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        foreign.status(),
+        403,
+        "refs must enforce repository binding"
     );
 }
 

@@ -2002,7 +2002,7 @@ async fn s3_create_multipart_upload_returns_initiate_xml() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_list_parts_and_list_multipart_uploads_return_501() {
+async fn s3_list_parts_missing_upload_and_unsupported_upload_listing() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
     let auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
@@ -2012,16 +2012,19 @@ async fn s3_list_parts_and_list_multipart_uploads_return_501() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}?uploadId=abc"))
+                .uri(format!(
+                    "/{BUCKET}/{KEY}?uploadId={}",
+                    shardline_s3_adapter::new_upload_id()
+                ))
                 .header(header::AUTHORIZATION, &auth)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(list_parts.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(list_parts.status(), StatusCode::NOT_FOUND);
     let body = String::from_utf8(body_bytes(list_parts).await).unwrap();
-    assert!(body.contains("<Code>NotImplemented</Code>"), "{body}");
+    assert!(body.contains("<Code>NoSuchUpload</Code>"), "{body}");
 
     let list_uploads = app
         .clone()
@@ -2035,7 +2038,9 @@ async fn s3_list_parts_and_list_multipart_uploads_return_501() {
         )
         .await
         .unwrap();
-    assert_eq!(list_uploads.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(list_uploads.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(list_uploads).await).unwrap();
+    assert!(body.contains("<ListMultipartUploadsResult"), "{body}");
 }
 
 // =========================================================================
@@ -4725,6 +4730,7 @@ async fn s3_local_part_content_corruption_cannot_publish_a_different_object() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+mod copy_integrity;
 mod pool_progress;
 
 #[tokio::test]

@@ -77,17 +77,26 @@ use shardline_protocol::TokenScope;
 /// Rejects empty refnames, refnames with ASCII control characters,
 /// refnames that do not start with `refs/`, and refnames containing
 /// `..` path components (path traversal).
-pub(super) fn is_valid_refname(refname: &str) -> bool {
-    if refname.is_empty() || refname.contains(' ') {
+pub(crate) fn is_valid_refname(refname: &str) -> bool {
+    if refname.is_empty()
+        || refname.ends_with('.')
+        || refname.contains("..")
+        || refname.contains("@{")
+    {
         return false;
     }
-    if refname.bytes().any(|b| b < 0x20 || b == 0x7f) {
+    if refname
+        .bytes()
+        .any(|b| b <= 0x20 || b == 0x7f || b"~^:?*[\\".contains(&b))
+    {
         return false;
     }
     if !refname.starts_with("refs/") {
         return false;
     }
-    !refname.split('/').any(|c| c == "..")
+    !refname
+        .split('/')
+        .any(|c| c.is_empty() || c.starts_with('.') || c.ends_with(".lock"))
 }
 
 /// Collects all refs from the HubStore for a given repo.
@@ -219,12 +228,16 @@ pub async fn info_refs(
     }
 
     let (capabilities, content_type) = match service {
+        GitSmartHttpService::ReceivePack if state.store.supports_atomic_ref_updates() => (
+            "report-status report-status-v2 delete-refs quiet side-band-64k atomic",
+            "application/x-git-receive-pack-advertisement",
+        ),
         GitSmartHttpService::ReceivePack => (
-            "report-status delete-refs quiet",
+            "report-status report-status-v2 delete-refs quiet side-band-64k",
             "application/x-git-receive-pack-advertisement",
         ),
         GitSmartHttpService::UploadPack => (
-            "side-band-64k",
+            "side-band-64k shallow deepen-relative deepen-since deepen-not filter allow-reachable-sha1-in-want",
             "application/x-git-upload-pack-advertisement",
         ),
     };

@@ -119,11 +119,68 @@ impl LocalObjectStore {
         open_existing_object_file(&path)
     }
 
+    /// Opens an existing object without treating absence as an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the object path exists but cannot be safely opened.
+    pub fn open_object_file_if_present(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<Option<File>, LocalObjectStoreError> {
+        match self.open_object_file(key) {
+            Ok(file) => Ok(Some(file)),
+            Err(LocalObjectStoreError::Io(error)) if error.kind() == ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Confirms that `pinned` is still the object published at `key` and makes
+    /// its bytes and directory entry durable before acknowledging a duplicate.
+    ///
+    /// This is useful after comparing an incoming stream directly against an
+    /// already-open immutable object. If the name was removed or replaced
+    /// during that comparison, the caller must retry instead of acknowledging.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the object name changed, the filesystem cannot sync
+    /// it, or the local path no longer resolves to the anchored store.
+    #[cfg(unix)]
+    pub fn verify_open_object_is_still_durable(
+        &self,
+        key: &ObjectKey,
+        pinned: &File,
+    ) -> Result<(), LocalObjectStoreError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let path = self.key_path(key);
+        metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
+        let pinned_metadata = pinned.metadata()?;
+        verify_existing_object_durable(&self.root, &path, |anchored_path| {
+            let current = open_existing_object_file(anchored_path)?;
+            let current_metadata = current.metadata()?;
+            if (pinned_metadata.dev(), pinned_metadata.ino())
+                != (current_metadata.dev(), current_metadata.ino())
+            {
+                return Err(LocalObjectStoreError::Io(IoError::new(
+                    ErrorKind::NotFound,
+                    "local object changed while verifying duplicate upload",
+                )));
+            }
+            Ok::<File, LocalObjectStoreError>(current)
+        })?;
+        Ok(())
+    }
+
     /// Stores a temporary file if no identical object exists yet.
     ///
-    /// The temporary file is consumed and removed on every successful outcome. Callers
-    /// should create it on the same filesystem as the store root so installation can
-    /// use an atomic hard-link operation.
+    /// The temporary file is consumed and removed on every successful outcome. When
+    /// it is on the same filesystem as the store root, installation uses an atomic
+    /// hard link; cross-filesystem sources are copied to a target-side temporary file
+    /// before the same atomic publication step.
     ///
     /// # Errors
     ///
@@ -137,7 +194,8 @@ impl LocalObjectStore {
     ) -> Result<PutOutcome, LocalObjectStoreError> {
         let verified_source = verify_file_integrity(temporary, integrity)?;
         let path = self.key_path(key);
-        metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
+        // The installation helper validates the same parent immediately before
+        // publication; do not repeat that complete walk at this boundary.
         io::link_temporary_file_if_absent(
             &self.root,
             &path,
@@ -279,17 +337,17 @@ impl ObjectStore for LocalObjectStore {
         verify_integrity(body.as_slice(), integrity)?;
         let path = self.key_path(key);
         metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
-        match open_existing_object_file(&path) {
-            Ok(_) => {
-                verify_existing_object_durable(&self.root, &path, |anchored_path| {
-                    let file = open_existing_object_file(anchored_path)?;
-                    ensure_file_matches_bytes(file.try_clone()?, body.as_slice())?;
-                    Ok::<File, LocalObjectStoreError>(file)
-                })?;
-                return Ok(PutOutcome::AlreadyExists);
-            }
-            Err(LocalObjectStoreError::Io(error)) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        // This observation only selects the path. Reuse still opens the file
+        // through its pinned parent and compares every byte before syncing.
+        // Do not open and immediately discard another handle just to test
+        // whether the target exists.
+        if object_file_metadata(&path)?.is_some() {
+            verify_existing_object_durable(&self.root, &path, |anchored_path| {
+                let file = open_existing_object_file(anchored_path)?;
+                ensure_file_matches_bytes(file.try_clone()?, body.as_slice())?;
+                Ok::<File, LocalObjectStoreError>(file)
+            })?;
+            return Ok(PutOutcome::AlreadyExists);
         }
 
         match put_bytes_if_absent(&self.root, &path, body.as_slice())

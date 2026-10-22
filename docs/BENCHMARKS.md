@@ -2,6 +2,50 @@
 
 Shardline has two complementary benchmark classes.
 
+## Protocol integration versus released 1.12.1
+
+On October 22, 2026, the published 1.12.1 Linux binary and the integrated
+protocol build were compared using the operational-cost runner below. Each
+used 1 and 2 API replicas, 32 objects of 1 MiB, 8 clients, unique and repeated
+data, and two repetitions. The entire comparison was repeated in reverse
+binary order: four observations per dataset and replica count.
+
+| Workload | Replicas | 1.12.1 S3 attempts | Integrated S3 attempts |
+| --- | ---: | ---: | ---: |
+| Unique initial ingestion | 1 or 2 | 128 | 128 |
+| Repeated initial ingestion | 1 | 104 | 104 |
+| Repeated initial ingestion | 2 | 112 | 112 |
+| Unique mixed PUT/GET with GC | 1 or 2 | 294 | 258 |
+| Repeated mixed PUT/GET with GC | 1 or 2 | 198 | 186 |
+
+Counts include backend probes and maintenance attempts, not only successful
+client requests. PostgreSQL query counts also matched for each corresponding
+phase. Durable Xorb payloads were identical: 32 containers totaling 33,588,848
+bytes for unique data and 8 totaling 8,397,128 bytes for repeated data. Each
+binary passed 2,304 post-GC response byte comparisons across both run orders.
+The TLS-patched integrated build repeated the same matrix, passing another
+1,152 byte comparisons with identical request counts and Xorb payloads.
+
+Fewer requests do not mean less backend transfer during GC. The integrated
+collector validates source containers instead of trusting unauthenticated
+`_xorb_chunks` sidecars. MinIO response bytes during the unique mixed+GC
+workload increased from 67,260,673 to 100,797,088 (about 50%); repeated data
+increased from 67,206,604 to 75,591,132 (about 12%). The extra transfer is one
+complete read per unique container in that scan. Normal ingestion and the mixed
+workload without GC retained their backend transfer counts. These trace bytes
+include protocol overhead and are not a cloud-egress billing measurement.
+
+The integrity check remains required. Recovering this maintenance-read cost
+would require verifiable membership evidence; restoring trust in the old plain
+sidecars would reopen the integrity gap. Do not describe this comparison as
+preserving all operational costs.
+
+Timing varied between run orders, so these shared-host bursts do not establish a
+throughput or p99 improvement, production scale-out efficiency, cloud bills,
+NVMe wear, or the memory ceiling of large concurrent uploads. Keep raw runner
+output outside the checkout; use the same fixture options to reproduce this
+comparison with the target release binaries.
+
 ## Performance and latency
 
 Run the reproducible local matrix:

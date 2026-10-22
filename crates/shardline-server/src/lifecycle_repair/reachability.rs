@@ -158,15 +158,14 @@ fn collect_xorb_member_chunk_references(
     else {
         return Ok(());
     };
-    let Some(metadata) = object_store.metadata(&xorb_key)? else {
+    let Some((mut reader, _length)) =
+        object_store.materialize_bounded_object_if_present(&xorb_key, 0)?
+    else {
         return Ok(());
     };
     let xorb_hash_hex =
         xorb_hash_from_object_key_if_present(&xorb_key)?.ok_or(ServerError::InvalidContentHash)?;
-    let mut xorb_file =
-        object_store.materialize_object_to_tempfile(&xorb_key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let mut reader = xorb_file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     match try_for_each_serialized_xorb_chunk_trusted(&mut reader, &validated, |decoded| {
         let member_hash_hex = xet_hash_hex_string(chunk_hash(decoded.data()));

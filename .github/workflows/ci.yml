@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - improve/reliability-integration-upgrade
+      - improve/protocol-integration
   workflow_dispatch:
 
 permissions:

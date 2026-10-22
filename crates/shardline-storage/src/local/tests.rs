@@ -89,6 +89,68 @@ fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
     assert!(matches!(store.contains(&key), Ok(false)));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn local_put_temporary_file_handles_source_on_a_different_filesystem() {
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(root) = tempfile::tempdir_in("/var/tmp") else {
+        return;
+    };
+    let Ok(source) = tempfile::NamedTempFile::new_in("/dev/shm") else {
+        return;
+    };
+    let root_device = fs::metadata(root.path()).unwrap().dev();
+    let source_device = fs::metadata(source.path()).unwrap().dev();
+    if root_device == source_device {
+        return;
+    }
+
+    let store = LocalObjectStore::new(root.path().to_path_buf()).unwrap();
+    let key = ObjectKey::parse("xorbs/default/cross-filesystem.xorb").unwrap();
+    let bytes = b"cross-filesystem local upload";
+    let mut source_handle = source.reopen().unwrap();
+    source_handle.write_all(bytes).unwrap();
+    source_handle.sync_all().unwrap();
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(bytes), bytes.len() as u64);
+
+    assert!(matches!(
+        store.put_temporary_file_if_absent(&key, source.path(), &integrity),
+        Ok(PutOutcome::Inserted)
+    ));
+    assert_eq!(fs::read(store.path_for_key(&key)).unwrap(), bytes);
+
+    let duplicate = tempfile::NamedTempFile::new_in("/dev/shm").unwrap();
+    let mut duplicate_handle = duplicate.reopen().unwrap();
+    duplicate_handle.write_all(bytes).unwrap();
+    duplicate_handle.sync_all().unwrap();
+    assert!(matches!(
+        store.put_temporary_file_if_absent(&key, duplicate.path(), &integrity),
+        Ok(PutOutcome::AlreadyExists)
+    ));
+
+    let conflicting = tempfile::NamedTempFile::new_in("/dev/shm").unwrap();
+    let mut conflicting_handle = conflicting.reopen().unwrap();
+    conflicting_handle
+        .write_all(b"cross-filesystem local upLoad")
+        .unwrap();
+    conflicting_handle.sync_all().unwrap();
+    let conflicting_integrity = ObjectIntegrity::new(
+        super::util::chunk_hash(b"cross-filesystem local upLoad"),
+        b"cross-filesystem local upLoad".len() as u64,
+    );
+    let conflicting_result =
+        store.put_temporary_file_if_absent(&key, conflicting.path(), &conflicting_integrity);
+    assert!(
+        matches!(
+            conflicting_result,
+            Err(super::LocalObjectStoreError::IntegrityHashMismatch)
+        ),
+        "unexpected conflicting upload result: {conflicting_result:?}"
+    );
+}
+
 #[test]
 fn local_object_store_rejects_integrity_mismatch_and_out_of_bounds_range() {
     let storage = shardline_test_support::TempStorage::new();
@@ -361,6 +423,32 @@ fn local_object_store_put_if_absent_with_symlink_target_returns_error() {
     let result = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
     // Should fail because existing path is a symlink
     assert!(result.is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn local_object_store_does_not_confirm_replaced_pinned_object_as_durable() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let key = ObjectKey::parse("lfs/objects/replaced-object").unwrap();
+    let original = b"the object pinned by the duplicate upload";
+    let replacement = b"a new object installed at the same key";
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(original), original.len() as u64);
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(original), &integrity)
+        .unwrap();
+
+    let pinned = store.open_object_file(&key).unwrap();
+    let path = store.path_for_key(&key);
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, replacement).unwrap();
+
+    assert!(
+        store
+            .verify_open_object_is_still_durable(&key, &pinned)
+            .is_err()
+    );
+    assert_eq!(fs::read(path).unwrap(), replacement);
 }
 
 #[cfg(unix)]
@@ -1625,7 +1713,7 @@ fn local_verify_open_file_integrity_accepts_correct() {
     std::fs::write(&path, b"verify me").unwrap();
     let file = std::fs::File::open(&path).unwrap();
     let integrity = crate::ObjectIntegrity::new(super::util::chunk_hash(b"verify me"), 9);
-    assert!(super::io::verify_open_file_integrity(file, &integrity).is_ok());
+    assert!(super::io::verify_open_file_integrity(&file, &integrity).is_ok());
 }
 
 #[test]
@@ -1636,7 +1724,7 @@ fn local_verify_open_file_integrity_rejects_wrong_hash() {
     let file = std::fs::File::open(&path).unwrap();
     let wrong_hash = super::util::chunk_hash(b"different");
     let integrity = crate::ObjectIntegrity::new(wrong_hash, 10);
-    assert!(super::io::verify_open_file_integrity(file, &integrity).is_err());
+    assert!(super::io::verify_open_file_integrity(&file, &integrity).is_err());
 }
 
 // ── remove_empty_ancestors ─────────────────────────────────────────────

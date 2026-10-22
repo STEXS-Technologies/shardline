@@ -681,6 +681,62 @@ pub async fn read_session_locked(
     Ok(session)
 }
 
+/// Lists live sessions for a bucket and namespace without opening part payloads.
+///
+/// # Errors
+/// Returns I/O or evidence errors; an expired session is omitted.
+pub async fn list_bucket_sessions(
+    root: &Path,
+    scope: &str,
+    bucket: &str,
+    ttl: NonZeroU64,
+) -> Result<Vec<MultipartUploadSession>, S3SessionError> {
+    let mut sessions = Vec::new();
+    visit_bucket_sessions(root, scope, bucket, ttl, |session| sessions.push(session)).await?;
+    Ok(sessions)
+}
+
+/// Visits verified live session metadata one session at a time, without part I/O.
+/// The synchronous visitor runs under the upload-session lock and must not do
+/// blocking work or acquire that lock again.
+///
+/// # Errors
+/// Returns directory I/O or session evidence failures.
+pub async fn visit_bucket_sessions(
+    root: &Path,
+    scope: &str,
+    bucket: &str,
+    ttl: NonZeroU64,
+    mut visit: impl FnMut(MultipartUploadSession),
+) -> Result<(), S3SessionError> {
+    let _guard = lock_upload_sessions(root).await?;
+    let mut entries = match tokio::fs::read_dir(upload_dir(root)).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        if !entry.file_type().await?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(id) = name.to_str() else {
+            continue;
+        };
+        if validate_upload_id(id).is_err() {
+            continue;
+        }
+        match read_session_locked(root, id, ttl).await {
+            Ok(session) if session.scope_namespace == scope && session.bucket == bucket => {
+                visit(session);
+            }
+            Ok(_) | Err(S3SessionError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// Records a stored part's size in the session metadata.
 ///
 /// The part file itself is written by the caller (which streams the request

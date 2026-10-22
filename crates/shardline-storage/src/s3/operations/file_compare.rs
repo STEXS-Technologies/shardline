@@ -2,19 +2,18 @@
 use std::path::Path;
 
 use futures_util::StreamExt;
-use object_store::{GetOptions, ObjectStore};
+use object_store::GetResult;
 use tokio::io::AsyncReadExt;
 
 use super::{S3ObjectStore, S3ObjectStoreError, stream_payload_for_range};
-use crate::{ObjectKey, PutOutcome};
+use crate::PutOutcome;
 
 pub(super) fn compare_existing_file(
     store: &S3ObjectStore,
-    key: &ObjectKey,
+    result: GetResult,
     path: &Path,
     expected_length: u64,
 ) -> Result<PutOutcome, S3ObjectStoreError> {
-    let location = store.location_for_key(key)?;
     store.block_on_result(async {
         let file = tokio::fs::File::open(path)
             .await
@@ -26,14 +25,6 @@ pub(super) fn compare_existing_file(
         // so tiny network frames do not turn into tiny disk reads or jobs.
         let mut file =
             tokio::io::BufReader::with_capacity(crate::s3::STREAM_COMPARE_CHUNK_BYTES, file);
-        let result = store
-            .inner
-            .get_opts(
-                &location,
-                GetOptions::new().with_range(Some(0..expected_length)),
-            )
-            .await
-            .map_err(S3ObjectStoreError::External)?;
         if result.meta.size != expected_length {
             return Err(S3ObjectStoreError::ExistingObjectConflict);
         }

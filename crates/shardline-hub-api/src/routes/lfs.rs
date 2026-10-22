@@ -1,16 +1,24 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path as FsPath, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     Json,
     body::Body,
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION},
     response::IntoResponse,
     response::Response,
 };
 use futures_util::StreamExt;
-use shardline_protocol::ShardlineHash;
-use shardline_storage::{ObjectIntegrity, ObjectStore};
+use sha2::{Digest, Sha256};
+use shardline_protocol::{ByteRange, ShardlineHash, TokenClaims, TokenScope};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+use tempfile::NamedTempFile;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::{commit, error::HubApiError, models::*};
 
@@ -20,6 +28,172 @@ use super::{HubRepository, HubState, lfs_object_key, stream_object};
 const MAX_LFS_BATCH_OBJECTS: usize = 1024;
 /// Maximum body size for a single LFS upload (64 MiB, matches server-side default).
 const MAX_LFS_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// Avoid a scratch-file write for small LFS uploads while keeping aggregate
+/// request-body memory bounded per server process.
+const LFS_UPLOAD_MEMORY_THRESHOLD: usize = 256 * 1024;
+const LFS_UPLOAD_MEMORY_SLOTS: usize = 64;
+static LFS_UPLOAD_MEMORY_ADMISSION: Semaphore = Semaphore::const_new(LFS_UPLOAD_MEMORY_SLOTS);
+
+#[cfg(test)]
+std::thread_local! {
+    static LFS_TEMPFILE_ATTEMPTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_lfs_tempfile_attempts() -> u64 {
+    LFS_TEMPFILE_ATTEMPTS.with(std::cell::Cell::get)
+}
+
+enum LfsUploadStagedContent {
+    Memory {
+        bytes: Vec<u8>,
+        _permit: SemaphorePermit<'static>,
+    },
+    File(NamedTempFile),
+}
+
+struct LfsUploadStaging {
+    memory: Option<Vec<u8>>,
+    permit: Option<SemaphorePermit<'static>>,
+    temporary: Option<NamedTempFile>,
+    output: Option<tokio::fs::File>,
+    local_root: Option<PathBuf>,
+}
+
+impl LfsUploadStaging {
+    async fn new(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
+        let permit = LFS_UPLOAD_MEMORY_ADMISSION.try_acquire().ok();
+        Self::with_permit(permit, local_root).await
+    }
+
+    async fn with_permit(
+        permit: Option<SemaphorePermit<'static>>,
+        local_root: Option<&FsPath>,
+    ) -> Result<Self, HubApiError> {
+        if permit.is_some() {
+            return Ok(Self {
+                memory: Some(Vec::new()),
+                permit,
+                temporary: None,
+                output: None,
+                local_root: local_root.map(FsPath::to_path_buf),
+            });
+        }
+
+        Self::file_backed(local_root).await
+    }
+
+    async fn file_backed(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
+        let temporary = new_lfs_temporary_file(local_root)
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        let output = tokio::fs::File::create(temporary.path())
+            .await
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        Ok(Self {
+            memory: None,
+            permit: None,
+            temporary: Some(temporary),
+            output: Some(output),
+            local_root: local_root.map(FsPath::to_path_buf),
+        })
+    }
+
+    async fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), HubApiError> {
+        if let Some(memory) = &mut self.memory {
+            let next_length = memory
+                .len()
+                .checked_add(bytes.len())
+                .ok_or_else(|| HubApiError::BadRequest("upload too large".to_owned()))?;
+            if next_length <= LFS_UPLOAD_MEMORY_THRESHOLD {
+                memory.try_reserve_exact(bytes.len()).map_err(|error| {
+                    HubApiError::CasError(format!("unable to stage small LFS upload: {error}"))
+                })?;
+                memory.extend_from_slice(bytes);
+                return Ok(());
+            }
+
+            let temporary = new_lfs_temporary_file(self.local_root.as_deref())
+                .map_err(|error| HubApiError::CasError(error.to_string()))?;
+            let mut output = tokio::fs::File::create(temporary.path())
+                .await
+                .map_err(|error| HubApiError::CasError(error.to_string()))?;
+            output
+                .write_all(memory)
+                .await
+                .map_err(|error| HubApiError::CasError(error.to_string()))?;
+            output
+                .write_all(bytes)
+                .await
+                .map_err(|error| HubApiError::CasError(error.to_string()))?;
+            self.memory = None;
+            self.permit = None;
+            self.temporary = Some(temporary);
+            self.output = Some(output);
+            return Ok(());
+        }
+
+        self.output
+            .as_mut()
+            .ok_or_else(|| HubApiError::CasError("LFS staging sink is unavailable".to_owned()))?
+            .write_all(bytes)
+            .await
+            .map_err(|error| HubApiError::CasError(error.to_string()))
+    }
+
+    async fn finish(mut self) -> Result<LfsUploadStagedContent, HubApiError> {
+        if let Some(output) = &mut self.output {
+            output
+                .flush()
+                .await
+                .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        }
+        drop(self.output.take());
+        if let (Some(bytes), Some(permit)) = (self.memory.take(), self.permit.take()) {
+            return Ok(LfsUploadStagedContent::Memory {
+                bytes,
+                _permit: permit,
+            });
+        }
+        self.temporary
+            .take()
+            .map(LfsUploadStagedContent::File)
+            .ok_or_else(|| HubApiError::CasError("LFS staging sink is unavailable".to_owned()))
+    }
+}
+
+/// Place local-store staging files on the store's filesystem when possible.
+/// They live beside (not inside) the object root, so walkers and GC cannot
+/// mistake an in-progress upload for a published object. This lets local
+/// publication use its verified atomic hard-link path instead of copying a
+/// large upload across filesystems from the system temp directory.
+fn new_lfs_temporary_file(local_root: Option<&FsPath>) -> std::io::Result<NamedTempFile> {
+    #[cfg(test)]
+    LFS_TEMPFILE_ATTEMPTS.with(|attempts| attempts.set(attempts.get().saturating_add(1)));
+
+    if let Some(local_root) = local_root
+        && let Some(parent) = local_root.parent()
+        && same_filesystem(parent, local_root)
+        && let Ok(temporary) = NamedTempFile::new_in(parent)
+    {
+        return Ok(temporary);
+    }
+    NamedTempFile::new()
+}
+
+#[cfg(unix)]
+fn same_filesystem(left: &FsPath, right: &FsPath) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    left.metadata()
+        .ok()
+        .zip(right.metadata().ok())
+        .is_some_and(|(left, right)| left.dev() == right.dev())
+}
+
+#[cfg(not(unix))]
+fn same_filesystem(_left: &FsPath, _right: &FsPath) -> bool {
+    false
+}
 
 // ---- LFS batch (requires Read) ----
 
@@ -28,12 +202,53 @@ pub(crate) async fn lfs_batch(
     repo: HubRepository,
     Json(request): Json<LfsBatchRequest>,
 ) -> Result<Json<LfsBatchResponse>, HubApiError> {
-    shardline_metrics::record_hub_api_request("lfs_batch", "POST", 200);
-    // These LFS routes carry no `ns/repo` in the URL path; the token itself
-    // identifies the repository, so the capability's claims both authorize the
-    // request and namespace the LFS object keys.
-    let capability = repo.capability();
+    lfs_batch_inner(&state, repo.capability(), request).await
+}
 
+/// Git LFS discovery endpoint used by Hugging Face's standard `hf upload`
+/// client: `/{owner}/{repo}.git/info/lfs/objects/batch`.
+pub(crate) async fn lfs_batch_git(
+    State(state): State<HubState>,
+    repo: HubRepository<false, false>,
+    Path((ns, repo_name)): Path<(String, String)>,
+    Json(request): Json<LfsBatchRequest>,
+) -> Result<Json<LfsBatchResponse>, HubApiError> {
+    let repo_name = repo_name.strip_suffix(".git").unwrap_or(&repo_name);
+    repo.require_binding(&ns, repo_name)?;
+    lfs_batch_inner(&state, repo.capability(), request).await
+}
+
+/// Dataset and Space clients include the repo type as a URL prefix, unlike
+/// model clients. Hugging Face builds their LFS batch URLs as
+/// `/datasets/{owner}/{repo}.git/...` and `/spaces/{owner}/{repo}.git/...`.
+pub(crate) async fn lfs_batch_git_typed(
+    State(state): State<HubState>,
+    repo: HubRepository<false, false>,
+    Path((repo_type, ns, repo_name)): Path<(String, String, String)>,
+    Json(request): Json<LfsBatchRequest>,
+) -> Result<Json<LfsBatchResponse>, HubApiError> {
+    if !matches!(repo_type.as_str(), "datasets" | "spaces") {
+        return Err(HubApiError::NotFound);
+    }
+    let repo_name = repo_name.strip_suffix(".git").unwrap_or(&repo_name);
+    repo.require_binding(&ns, repo_name)?;
+    lfs_batch_inner(&state, repo.capability(), request).await
+}
+
+async fn lfs_batch_inner(
+    state: &HubState,
+    capability: &shardline_server_core::AuthorizedRepository,
+    request: LfsBatchRequest,
+) -> Result<Json<LfsBatchResponse>, HubApiError> {
+    shardline_metrics::record_hub_api_request("lfs_batch", "POST", 200);
+    if request.operation != LfsBatchOperation::Download
+        && capability
+            .claims()
+            .is_some_and(|claims| !claims.scope().allows_write())
+    {
+        return Err(HubApiError::Forbidden);
+    }
+    // LFS object keys are namespaced by the authenticated repository claim.
     // Validate batch size.
     if request.objects.len() > MAX_LFS_BATCH_OBJECTS {
         return Err(HubApiError::BadRequest(
@@ -50,52 +265,55 @@ pub(crate) async fn lfs_batch(
         ));
     }
 
-    // Determine the transfer adapter. Prefer "xet" when the client supports it
-    // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
-    let supports_xet = request.transfers.iter().any(|t| t == "xet");
-    let use_xet = supports_xet && state.auth.is_some() && capability.claims().is_some();
-    let transfer = if use_xet {
-        "xet"
-    } else {
-        // Fall back to basic: either the client supports basic, or we
-        // degrade gracefully when xet-only was requested but unsupported.
-        "basic"
-    };
+    // Xet uploads register both the native reconstruction and the file's LFS
+    // SHA-256 in the uploaded shard. Hub commits still contain the ordinary
+    // LFS pointer, and the resolve/download routes use that SHA-256 to find
+    // the registered reconstruction. Only negotiate Xet when a write token
+    // can be exchanged for a repository-scoped CAS token.
+    let use_xet = request.operation == LfsBatchOperation::Upload
+        && request.transfers.iter().any(|transfer| transfer == "xet")
+        && capability.claims().is_some()
+        && state.auth.is_some();
+    let use_basic = request.transfers.is_empty()
+        || request.transfers.iter().any(|transfer| transfer == "basic");
+    if !use_xet && !use_basic {
+        return Err(HubApiError::BadRequest(
+            "none of the requested LFS transfer adapters are supported".to_owned(),
+        ));
+    }
+    let transfer = if use_xet { "xet" } else { "basic" };
+    if use_xet {
+        for object in &request.objects {
+            commit::validate_lfs_oid(&object.oid)
+                .map_err(|error| HubApiError::BadRequest(error.to_string()))?;
+        }
+        let objects = request
+            .objects
+            .into_iter()
+            .map(|object| LfsObjectResponse {
+                oid: object.oid,
+                size: object.size,
+                actions: None,
+                error: None,
+            })
+            .collect();
+        return Ok(Json(LfsBatchResponse {
+            transfer: transfer.to_owned(),
+            objects,
+            hash_algo: Some("sha256".to_owned()),
+        }));
+    }
 
-    // Mint a CAS token when using xet transfer. The existing claims are
-    // re-signed so git-xet receives a scoped token for the CAS layer.
-    let cas_token = if use_xet {
-        capability.claims().and_then(|claims| {
-            state
-                .auth
-                .as_ref()
-                .and_then(|server_auth| server_auth.provider().mint_token(claims).ok())
-        })
-    } else {
-        None
-    };
-    let cas_header: Option<BTreeMap<String, String>> = cas_token.map(|token| {
-        let mut h = BTreeMap::new();
-        h.insert(
-            "X-Xet-Content-CAS-URL".to_owned(),
-            state.public_base_url.trim_end_matches('/').to_owned(),
-        );
-        h.insert("X-Xet-Content-CAS-Access".to_owned(), token);
-        h.insert(
-            "X-Xet-Content-CAS-Token-Expiration".to_owned(),
-            "0".to_owned(),
-        );
-        h
-    });
+    let action_header = lfs_action_auth_header(state, capability)?;
 
-    let objects: Vec<LfsObjectResponse> = request
+    let objects: Result<Vec<LfsObjectResponse>, HubApiError> = request
         .objects
         .iter()
-        .map(|obj| {
+        .map(|obj| -> Result<LfsObjectResponse, HubApiError> {
             let key = match lfs_object_key(&obj.oid, capability) {
                 Ok(k) => k,
                 Err(e) => {
-                    return LfsObjectResponse {
+                    return Ok(LfsObjectResponse {
                         oid: obj.oid.clone(),
                         size: obj.size,
                         actions: None,
@@ -103,7 +321,7 @@ pub(crate) async fn lfs_batch(
                             code: 400,
                             message: format!("invalid oid: {e}"),
                         }),
-                    };
+                    });
                 }
             };
             let exists = state.object_store.contains(&key).unwrap_or(false);
@@ -112,8 +330,12 @@ pub(crate) async fn lfs_batch(
                     if exists {
                         Some(LfsObjectActions {
                             download: Some(LfsObjectAction {
-                                href: format!("/lfs/objects/{}", obj.oid),
-                                header: cas_header.clone(),
+                                href: format!(
+                                    "{}/lfs/objects/{}",
+                                    state.public_base_url.trim_end_matches('/'),
+                                    obj.oid
+                                ),
+                                header: action_header.clone(),
                                 ssh: None,
                             }),
                             upload: None,
@@ -125,24 +347,32 @@ pub(crate) async fn lfs_batch(
                 }
                 LfsBatchOperation::Upload => {
                     if exists {
-                        Some(LfsObjectActions {
-                            download: None,
-                            upload: None,
-                            verify: Some(LfsObjectAction {
-                                href: format!("/lfs/objects/{}", obj.oid),
-                                header: None,
-                                ssh: None,
-                            }),
-                        })
+                        // Standard clients treat an object without actions as
+                        // already uploaded and skip it. A verify-only action
+                        // is invalid for their upload flow because it still
+                        // requires an upload action.
+                        None
                     } else {
                         Some(LfsObjectActions {
                             download: None,
                             upload: Some(LfsObjectAction {
-                                href: format!("/lfs/objects/{}", obj.oid),
-                                header: cas_header.clone(),
+                                href: lfs_upload_action_url(state, capability, &obj.oid)?,
+                                // huggingface_hub's single-part LFS uploader
+                                // does not forward action headers. The short-
+                                // lived, object-scoped upload URL carries its
+                                // own capability instead.
+                                header: None,
                                 ssh: None,
                             }),
-                            verify: None,
+                            verify: Some(LfsObjectAction {
+                                href: format!(
+                                    "{}/lfs/objects/{}/verify",
+                                    state.public_base_url.trim_end_matches('/'),
+                                    obj.oid
+                                ),
+                                header: action_header.clone(),
+                                ssh: None,
+                            }),
                         })
                     }
                 }
@@ -152,8 +382,12 @@ pub(crate) async fn lfs_batch(
                             download: None,
                             upload: None,
                             verify: Some(LfsObjectAction {
-                                href: format!("/lfs/objects/{}", obj.oid),
-                                header: None,
+                                href: format!(
+                                    "{}/lfs/objects/{}/verify",
+                                    state.public_base_url.trim_end_matches('/'),
+                                    obj.oid
+                                ),
+                                header: action_header.clone(),
                                 ssh: None,
                             }),
                         })
@@ -175,14 +409,15 @@ pub(crate) async fn lfs_batch(
                 None
             };
 
-            LfsObjectResponse {
+            Ok(LfsObjectResponse {
                 oid: obj.oid.clone(),
                 size: obj.size,
                 actions,
                 error,
-            }
+            })
         })
         .collect();
+    let objects = objects?;
 
     Ok(Json(LfsBatchResponse {
         transfer: transfer.to_owned(),
@@ -191,25 +426,112 @@ pub(crate) async fn lfs_batch(
     }))
 }
 
+fn lfs_upload_action_url(
+    state: &HubState,
+    capability: &shardline_server_core::AuthorizedRepository,
+    oid: &str,
+) -> Result<String, HubApiError> {
+    let base_url = state.public_base_url.trim_end_matches('/');
+    let Some(claims) = capability.claims() else {
+        return Ok(format!("{base_url}/lfs/objects/{oid}"));
+    };
+    let auth = state.auth.as_ref().ok_or(HubApiError::Unauthorized)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_error| HubApiError::InvalidToken)?
+        .as_secs();
+    let expires_at = now
+        .checked_add(300)
+        .ok_or(HubApiError::InvalidToken)?
+        .min(claims.expires_at_unix_seconds());
+    let subject = format!("shardline-lfs-upload:{oid}");
+    let upload_claims = TokenClaims::new(
+        claims.issuer(),
+        &subject,
+        TokenScope::Write,
+        claims.repository().clone(),
+        expires_at,
+    )
+    .map_err(|_error| HubApiError::InvalidToken)?;
+    let token = auth
+        .provider()
+        .mint_token(&upload_claims)
+        .map_err(|_error| HubApiError::InvalidToken)?;
+    Ok(format!("{base_url}/lfs/objects/{oid}?upload_token={token}"))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct LfsUploadQuery {
+    pub(crate) upload_token: Option<String>,
+}
+
+fn lfs_action_auth_header(
+    state: &HubState,
+    capability: &shardline_server_core::AuthorizedRepository,
+) -> Result<Option<BTreeMap<String, String>>, HubApiError> {
+    let Some(claims) = capability.claims() else {
+        return Ok(None);
+    };
+    let auth = state.auth.as_ref().ok_or(HubApiError::Unauthorized)?;
+    let token = auth.provider().mint_token(claims).map_err(|error| {
+        tracing::debug!("failed to mint LFS action token: {error}");
+        HubApiError::InvalidToken
+    })?;
+    Ok(Some(BTreeMap::from([(
+        "Authorization".to_owned(),
+        format!("Bearer {token}"),
+    )])))
+}
+
+/// Git LFS combines action headers with `http.extraHeader`. Only byte-identical
+/// Authorization repetitions have a single unambiguous credential. Other Hub
+/// routes retain their strict rejection of repeated Authorization fields.
+pub(crate) async fn normalize_lfs_authorization(
+    mut request: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, HubApiError> {
+    let values: Vec<_> = request.headers().get_all(AUTHORIZATION).iter().collect();
+    if values.len() > 1 {
+        let first = values.first().ok_or(HubApiError::InvalidToken)?;
+        if values.iter().any(|value| value != first) {
+            return Err(HubApiError::InvalidToken);
+        }
+        let credential = (*first).clone();
+        request.headers_mut().remove(AUTHORIZATION);
+        request.headers_mut().insert(AUTHORIZATION, credential);
+    }
+    Ok(next.run(request).await)
+}
+
 // ---- LFS upload (requires Write) ----
 
 pub(crate) async fn lfs_upload(
     State(state): State<HubState>,
-    repo: HubRepository<true>,
+    headers: HeaderMap,
+    Query(query): Query<LfsUploadQuery>,
     Path(oid): Path<String>,
     body: Body,
 ) -> Result<StatusCode, HubApiError> {
+    let repo = authorize_lfs_upload(&state, &headers, query.upload_token.as_deref(), &oid)?;
     shardline_metrics::record_hub_api_request("lfs_upload", "PUT", 200);
     shardline_metrics::record_hub_api_file_upload();
     commit::validate_lfs_oid(&oid)?;
 
-    let temporary =
-        tempfile::NamedTempFile::new().map_err(|e| HubApiError::CasError(e.to_string()))?;
-    let mut output = tokio::fs::File::create(temporary.path())
-        .await
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let key = lfs_object_key(&oid, &repo)?;
+    #[cfg(unix)]
+    if let Some(existing) = state
+        .object_store
+        .open_local_object_file_if_present(&key)
+        .map_err(|error| HubApiError::CasError(error.to_string()))?
+    {
+        verify_duplicate_local_lfs_upload(&state, &key, &oid, body, existing).await?;
+        return Ok(StatusCode::OK);
+    }
+
+    let mut staging = LfsUploadStaging::new(state.object_store.local_root()).await?;
     let mut length = 0_usize;
     let mut hasher = blake3::Hasher::new();
+    let mut sha256 = Sha256::new();
     let mut stream = body.into_data_stream();
     while let Some(frame) = stream.next().await {
         let bytes = frame.map_err(|e| HubApiError::CasError(e.to_string()))?;
@@ -223,25 +545,232 @@ pub(crate) async fn lfs_upload(
             )));
         }
         hasher.update(&bytes);
-        tokio::io::AsyncWriteExt::write_all(&mut output, &bytes)
-            .await
-            .map_err(|e| HubApiError::CasError(e.to_string()))?;
+        sha256.update(&bytes);
+        staging.write_chunk(&bytes).await?;
     }
-    tokio::io::AsyncWriteExt::flush(&mut output)
-        .await
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    let key = lfs_object_key(&oid, repo.capability())?;
+    if hex::encode(sha256.finalize()) != oid {
+        return Err(HubApiError::BadRequest(
+            "uploaded LFS content does not match its SHA-256 object id".to_owned(),
+        ));
+    }
+    let staged_content = staging.finish().await?;
     let integrity = ObjectIntegrity::new(
         ShardlineHash::from_bytes(*hasher.finalize().as_bytes()),
         length as u64,
     );
+    match staged_content {
+        LfsUploadStagedContent::Memory { bytes, _permit } => state
+            .object_store
+            .put_if_absent(&key, ObjectBody::from_vec(bytes), &integrity)
+            .map_err(|error| HubApiError::CasError(error.to_string()))?,
+        LfsUploadStagedContent::File(temporary) => state
+            .object_store
+            .put_content_addressed_file(&key, temporary.path(), &integrity)
+            .map_err(|error: shardline_server_core::ServerObjectStoreError| {
+                HubApiError::CasError(error.to_string())
+            })?,
+    };
+    Ok(StatusCode::OK)
+}
+
+/// Checks a retry against a pinned local object without writing the request
+/// body to scratch storage. The final inode and parent directory are synced
+/// again before acknowledging, so a concurrent GC unlink cannot turn this
+/// duplicate fast path into a false durable success.
+#[cfg(unix)]
+async fn verify_duplicate_local_lfs_upload(
+    state: &HubState,
+    key: &ObjectKey,
+    oid: &str,
+    body: Body,
+    existing: std::fs::File,
+) -> Result<(), HubApiError> {
+    const COMPARE_BUFFER_BYTES: usize = 64 * 1024;
+
+    let stored_length = existing
+        .metadata()
+        .map_err(|error| HubApiError::CasError(error.to_string()))?
+        .len();
+    let mut stored = tokio::fs::File::from_std(
+        existing
+            .try_clone()
+            .map_err(|error| HubApiError::CasError(error.to_string()))?,
+    );
+    let mut compare_buffer = vec![0_u8; COMPARE_BUFFER_BYTES];
+    let mut stream = body.into_data_stream();
+    let mut length = 0_usize;
+    let mut sha256 = Sha256::new();
+    let mut matches_existing = true;
+    let mut stored_eof = false;
+
+    while let Some(frame) = stream.next().await {
+        let bytes = frame.map_err(|error| HubApiError::CasError(error.to_string()))?;
+        length = length
+            .checked_add(bytes.len())
+            .ok_or_else(|| HubApiError::BadRequest("upload too large".to_owned()))?;
+        if length > MAX_LFS_UPLOAD_BYTES {
+            return Err(HubApiError::BadRequest(format!(
+                "upload body exceeds maximum size of {} bytes",
+                MAX_LFS_UPLOAD_BYTES
+            )));
+        }
+        sha256.update(&bytes);
+
+        let mut compared = 0;
+        while compared < bytes.len() && !stored_eof {
+            let read_limit = bytes
+                .len()
+                .saturating_sub(compared)
+                .min(compare_buffer.len());
+            let buffer = compare_buffer.get_mut(..read_limit).ok_or_else(|| {
+                HubApiError::CasError("invalid LFS comparison buffer length".to_owned())
+            })?;
+            let read = stored
+                .read(buffer)
+                .await
+                .map_err(|error| HubApiError::CasError(error.to_string()))?;
+            if read == 0 {
+                stored_eof = true;
+                matches_existing = false;
+                break;
+            }
+            let compared_end = compared.checked_add(read).ok_or_else(|| {
+                HubApiError::CasError("LFS comparison offset overflow".to_owned())
+            })?;
+            if bytes.get(compared..compared_end) != compare_buffer.get(..read) {
+                matches_existing = false;
+            }
+            compared = compared_end;
+        }
+    }
+
+    if hex::encode(sha256.finalize()) != oid {
+        return Err(HubApiError::BadRequest(
+            "uploaded LFS content does not match its SHA-256 object id".to_owned(),
+        ));
+    }
+    if !matches_existing || u64::try_from(length).ok() != Some(stored_length) {
+        return Err(HubApiError::CasError(
+            "existing local LFS object differs from uploaded content".to_owned(),
+        ));
+    }
+    let mut trailing = [0_u8; 1];
+    if stored
+        .read(&mut trailing)
+        .await
+        .map_err(|error| HubApiError::CasError(error.to_string()))?
+        != 0
+    {
+        return Err(HubApiError::CasError(
+            "existing local LFS object changed while checking duplicate upload".to_owned(),
+        ));
+    }
+
     state
         .object_store
-        .put_content_addressed_file(&key, temporary.path(), &integrity)
-        .map_err(|e: shardline_server_core::ServerObjectStoreError| {
-            HubApiError::CasError(e.to_string())
-        })?;
+        .verify_local_object_file_is_durable(key, &existing)
+        .map_err(|error| HubApiError::CasError(error.to_string()))
+}
+
+/// Verifies a completed LFS upload against its SHA-256 object id and declared
+/// size. Hugging Face clients may call this action after the PUT succeeds.
+pub(crate) async fn lfs_verify(
+    State(state): State<HubState>,
+    repo: HubRepository<true>,
+    Path(path_oid): Path<String>,
+    Json(request): Json<LfsObjectRequest>,
+) -> Result<StatusCode, HubApiError> {
+    commit::validate_lfs_oid(&path_oid)?;
+    if request.oid != path_oid {
+        return Err(HubApiError::BadRequest(
+            "LFS verify body oid does not match request path".to_owned(),
+        ));
+    }
+    if request.size > MAX_LFS_UPLOAD_BYTES as u64 {
+        return Err(HubApiError::BadRequest(
+            "LFS object exceeds verification size limit".to_owned(),
+        ));
+    }
+    let key = lfs_object_key(&path_oid, repo.capability())?;
+    let metadata = state
+        .object_store
+        .metadata(&key)
+        .map_err(|error| HubApiError::CasError(error.to_string()))?
+        .ok_or(HubApiError::NotFound)?;
+    if metadata.length() != request.size {
+        return Err(HubApiError::BadRequest(
+            "LFS object size does not match verify request".to_owned(),
+        ));
+    }
+    let content = if request.size == 0 {
+        Vec::new()
+    } else {
+        state
+            .object_store
+            .read_range(
+                &key,
+                ByteRange::new(
+                    0,
+                    request
+                        .size
+                        .checked_sub(1)
+                        .ok_or_else(|| HubApiError::BadRequest("invalid LFS size".to_owned()))?,
+                )
+                .map_err(|error| HubApiError::BadRequest(error.to_string()))?,
+            )
+            .map_err(|error| HubApiError::CasError(error.to_string()))?
+    };
+    if hex::encode(Sha256::digest(&content)) != path_oid {
+        return Err(HubApiError::BadRequest(
+            "stored LFS content does not match its SHA-256 object id".to_owned(),
+        ));
+    }
+    shardline_metrics::record_hub_api_request("lfs_verify", "POST", 200);
     Ok(StatusCode::OK)
+}
+
+fn authorize_lfs_upload(
+    state: &HubState,
+    request_headers: &HeaderMap,
+    upload_token: Option<&str>,
+    oid: &str,
+) -> Result<shardline_server_core::AuthorizedRepository, HubApiError> {
+    let Some(auth) = state.auth.as_ref() else {
+        if upload_token.is_some() {
+            return Err(HubApiError::InvalidToken);
+        }
+        return Ok(shardline_server_core::AuthorizedRepository::anonymous_full_access());
+    };
+
+    let mut headers = request_headers.clone();
+    if let Some(token) = upload_token {
+        // Native Git LFS also forwards its configured Authorization header.
+        // Verify both credentials and require the same authority/repository;
+        // the query capability still restricts this upload to its exact OID.
+        let caller = if headers.contains_key(AUTHORIZATION) {
+            Some(auth.authorize(&headers, TokenScope::Write)?)
+        } else {
+            None
+        };
+        let value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_error| HubApiError::InvalidToken)?;
+        headers.remove(AUTHORIZATION);
+        headers.insert(AUTHORIZATION, value);
+        let upload = auth.authorize(&headers, TokenScope::Write)?;
+        if caller.as_ref().is_some_and(|caller| {
+            caller.claims().issuer() != upload.claims().issuer()
+                || caller.claims().repository() != upload.claims().repository()
+        }) {
+            return Err(HubApiError::Forbidden);
+        }
+    }
+    let context = auth.authorize(&headers, TokenScope::Write)?;
+    if upload_token.is_some() && context.claims().subject() != format!("shardline-lfs-upload:{oid}")
+    {
+        return Err(HubApiError::Forbidden);
+    }
+    shardline_server_core::AuthorizedRepository::from_verified_context(context, TokenScope::Write)
+        .map_err(Into::into)
 }
 
 // ---- LFS download (requires Read) ----
@@ -257,8 +786,10 @@ pub(crate) async fn lfs_download(
     let meta = state
         .object_store
         .metadata(&key)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::NotFound)?;
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let Some(meta) = meta else {
+        return stream_hf_xet_object(&state, repo.capability(), &oid).await;
+    };
     let length = meta.length();
     let mut response = stream_object(&state.object_store, key, length).into_response();
     response.headers_mut().insert(
@@ -271,4 +802,124 @@ pub(crate) async fn lfs_download(
         .headers_mut()
         .insert(axum::http::header::CONTENT_LENGTH, length.into());
     Ok((StatusCode::OK, response).into_response())
+}
+
+async fn stream_hf_xet_object(
+    state: &HubState,
+    capability: &shardline_server_core::AuthorizedRepository,
+    oid: &str,
+) -> Result<Response, HubApiError> {
+    let auth = state.auth.as_ref().ok_or(HubApiError::NotFound)?;
+    let claims = capability.claims().ok_or(HubApiError::NotFound)?;
+    let read_claims = TokenClaims::new(
+        claims.issuer(),
+        claims.subject(),
+        TokenScope::Read,
+        claims.repository().clone(),
+        claims.expires_at_unix_seconds(),
+    )
+    .map_err(|_error| HubApiError::InvalidToken)?;
+    let read_token = auth
+        .provider()
+        .mint_token(&read_claims)
+        .map_err(|_error| HubApiError::InvalidToken)?;
+    let client = state.http_client.as_ref().ok_or_else(|| {
+        HubApiError::CasError("internal Xet file reader is unavailable".to_owned())
+    })?;
+    let url = format!(
+        "{}/v1/hub/xet-files/{oid}",
+        state.public_base_url.trim_end_matches('/')
+    );
+    let upstream = client
+        .get(url)
+        .bearer_auth(read_token)
+        .send()
+        .await
+        .map_err(|error| HubApiError::CasError(error.to_string()))?;
+    if upstream.status() == StatusCode::NOT_FOUND {
+        return Err(HubApiError::NotFound);
+    }
+    if !upstream.status().is_success() {
+        return Err(HubApiError::CasError(format!(
+            "internal Xet file read returned {}",
+            upstream.status()
+        )));
+    }
+    let content_length = upstream
+        .content_length()
+        .ok_or_else(|| HubApiError::CasError("Xet file response omitted length".to_owned()))?;
+    let stream = upstream
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(std::io::Error::other));
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/octet-stream"
+            .parse()
+            .map_err(|_error| HubApiError::NotFound)?,
+    );
+    response
+        .headers_mut()
+        .insert(axum::http::header::CONTENT_LENGTH, content_length.into());
+    Ok((StatusCode::OK, response).into_response())
+}
+
+#[cfg(test)]
+mod upload_staging_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::{LFS_UPLOAD_MEMORY_THRESHOLD, LfsUploadStaging};
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn small_upload_stays_in_memory() {
+        let mut staging = LfsUploadStaging::new(None).await.unwrap();
+        staging.write_chunk(b"small content").await.unwrap();
+        assert_eq!(staging.memory.as_deref(), Some(b"small content".as_slice()));
+        assert!(staging.temporary.is_none());
+    }
+
+    #[tokio::test]
+    async fn crossing_the_limit_spills_all_bytes_and_releases_memory_admission() {
+        let mut staging = LfsUploadStaging::new(None).await.unwrap();
+        let prefix = vec![b'a'; LFS_UPLOAD_MEMORY_THRESHOLD];
+        staging.write_chunk(&prefix).await.unwrap();
+        staging.write_chunk(b"b").await.unwrap();
+        assert!(staging.memory.is_none());
+        assert!(staging.permit.is_none());
+
+        let temporary = staging.temporary.as_ref().unwrap();
+        staging.output.as_mut().unwrap().flush().await.unwrap();
+        let stored = std::fs::read(temporary.path()).unwrap();
+        assert_eq!(stored.len(), LFS_UPLOAD_MEMORY_THRESHOLD + 1);
+        assert!(
+            stored[..LFS_UPLOAD_MEMORY_THRESHOLD]
+                .iter()
+                .all(|byte| *byte == b'a')
+        );
+        assert_eq!(stored[LFS_UPLOAD_MEMORY_THRESHOLD], b'b');
+    }
+
+    #[tokio::test]
+    async fn unavailable_memory_admission_uses_tempfile_staging() {
+        let staging = LfsUploadStaging::with_permit(None, None).await.unwrap();
+        assert!(staging.memory.is_none());
+        assert!(staging.temporary.as_ref().unwrap().path().exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_staging_uses_store_parent_without_entering_object_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let local_root = parent.path().join("objects");
+        std::fs::create_dir(&local_root).unwrap();
+        let mut staging = LfsUploadStaging::with_permit(None, Some(&local_root))
+            .await
+            .unwrap();
+        staging.write_chunk(b"local LFS payload").await.unwrap();
+
+        let temporary_path = staging.temporary.as_ref().unwrap().path();
+        assert_eq!(temporary_path.parent(), Some(parent.path()));
+        assert_ne!(temporary_path.parent(), Some(local_root.as_path()));
+    }
 }

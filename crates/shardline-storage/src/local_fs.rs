@@ -16,7 +16,7 @@ use std::os::unix::fs::OpenOptionsExt;
 
 #[cfg(unix)]
 use crate::anchored_fs::{
-    AnchoredPathOptions, AnchoredTarget,
+    AnchoredPathOptions, AnchoredTarget, copy_anchored_temporary_file,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared,
     open_anchored_target as open_anchored_target_shared, remove_if_present, sync_parent_directory,
     write_anchored_temporary_file as write_anchored_temporary_file_shared,
@@ -363,18 +363,82 @@ fn hard_link_file_if_absent_unix(
     // The caller pins the verified source inode. Sync it before publication,
     // then reject a source-path replacement rather than acknowledge its bytes.
     source_file.sync_all()?;
-    fs::hard_link(temporary, &final_path)?;
-    let installed = open_existing_regular_file(&final_path)?;
     use std::os::unix::fs::MetadataExt;
     let source_metadata = source_file.metadata()?;
-    let installed_metadata = installed.metadata()?;
-    if (source_metadata.dev(), source_metadata.ino())
-        != (installed_metadata.dev(), installed_metadata.ino())
-    {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "hard-link source changed during anchored publication",
-        ));
+    match fs::hard_link(temporary, &final_path) {
+        Ok(()) => {
+            let installed = open_existing_regular_file(&final_path)?;
+            let installed_metadata = installed.metadata()?;
+            if (source_metadata.dev(), source_metadata.ino())
+                != (installed_metadata.dev(), installed_metadata.ino())
+            {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "hard-link source changed during anchored publication",
+                ));
+            }
+        }
+        Err(link_error) if link_error.raw_os_error() == Some(libc::EXDEV) => {
+            // The request staging file may live under /tmp (often tmpfs) while
+            // SHARDLINE_ROOT_DIR is on a mounted data volume. Preserve the
+            // no-copy fast path when both paths share a filesystem; otherwise
+            // copy the already-verified inode to an anchored target-side temp.
+            match open_existing_regular_file(&final_path) {
+                Ok(_existing) => return Err(io::Error::from(ErrorKind::AlreadyExists)),
+                Err(open_error) if open_error.kind() == ErrorKind::NotFound => {}
+                Err(open_error) => return Err(open_error),
+            }
+            let copied_temporary = copy_anchored_temporary_file(
+                &anchored,
+                source_file,
+                anchored_path_options().file_mode,
+            )?;
+            let publish_result = (|| {
+                let copied_file = open_existing_regular_file(&copied_temporary)?;
+                crate::local::io::ensure_files_match(
+                    copied_file.try_clone()?,
+                    source_file.try_clone()?,
+                )
+                .map_err(io::Error::other)?;
+                match fs::hard_link(&copied_temporary, &final_path) {
+                    Ok(()) => {}
+                    Err(target_link_error) => return Err(target_link_error),
+                }
+                let installed = open_existing_regular_file(&final_path)?;
+                let installed_metadata = installed.metadata()?;
+                let copied_metadata = copied_file.metadata()?;
+                if (installed_metadata.dev(), installed_metadata.ino())
+                    != (copied_metadata.dev(), copied_metadata.ino())
+                {
+                    remove_if_present(&final_path)?;
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "target-side staging file changed during publication",
+                    ));
+                }
+                let original_source = match open_existing_regular_file(temporary) {
+                    Ok(file) => file,
+                    Err(open_error) => {
+                        remove_if_present(&final_path)?;
+                        return Err(open_error);
+                    }
+                };
+                let original_metadata = original_source.metadata()?;
+                if (source_metadata.dev(), source_metadata.ino())
+                    != (original_metadata.dev(), original_metadata.ino())
+                {
+                    remove_if_present(&final_path)?;
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "hard-link source changed during anchored publication",
+                    ));
+                }
+                Ok(())
+            })();
+            remove_if_present(&copied_temporary)?;
+            publish_result?;
+        }
+        Err(error) => return Err(error),
     }
     local_publish_failpoint(&anchored.logical_path(), LocalPublishBoundary::AfterInstall)?;
     if let Err(error) = ensure_parent_path_matches_anchor(&anchored) {

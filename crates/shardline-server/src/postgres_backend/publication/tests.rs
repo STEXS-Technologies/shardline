@@ -9,6 +9,40 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test]
+async fn public_upload_preserves_advertised_chunks_in_postgres() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: advertised chunk fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    let content = Bytes::from_static(b"postgres advertised chunk compatibility");
+    let uploaded = backend
+        .upload_file("advertised-chunks.bin", content.clone(), None)
+        .await
+        .unwrap();
+    assert!(!uploaded.chunks.is_empty());
+    for chunk in &uploaded.chunks {
+        let stored = backend.read_chunk(&chunk.hash).await.unwrap();
+        assert_eq!(
+            backend.chunk_length(&chunk.hash).await.unwrap(),
+            stored.len() as u64
+        );
+        let raw = lz4_flex::decompress_size_prepended(&stored).unwrap();
+        let start = usize::try_from(chunk.offset).unwrap();
+        let end = start + usize::try_from(chunk.length).unwrap();
+        assert_eq!(raw, content.get(start..end).unwrap());
+    }
+    assert_eq!(
+        backend
+            .download_file("advertised-chunks.bin", None, None)
+            .await
+            .unwrap(),
+        content
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn healthy_upload_owner_preserves_body_and_digest_errors() {
     use axum::response::IntoResponse;
     use shardline_index::{UploadIntentState, UploadIntentStore};
@@ -1833,14 +1867,14 @@ async fn native_shard_publication_rejects_a_deleted_validated_xorb() {
         &shard,
         None,
         crate::ShardMetadataLimits::default(),
-        |records, mappings, references| {
-            validated = Some((records, mappings, references));
+        |records, mappings, references, identities| {
+            validated = Some((records, mappings, references, identities));
             async { Ok(()) }
         },
     )
     .await
     .unwrap();
-    let (records, mappings, references) = validated.unwrap();
+    let (records, mappings, references, identities) = validated.unwrap();
     assert!(!records.is_empty());
     assert!(!mappings.is_empty());
     let physical = crate::xet_adapter::xorb_object_key(&hash).unwrap();
@@ -1857,7 +1891,12 @@ async fn native_shard_publication_rejects_a_deleted_validated_xorb() {
         .await
         .unwrap();
     let pending = backend
-        .commit_validated_native_shard(&records, &mappings, &references)
+        .commit_validated_native_shard_with_xet_identities(
+            &records,
+            &mappings,
+            &references,
+            &identities,
+        )
         .await;
     let deleted = backend.object_store().delete_if_present(&physical).unwrap();
     assert_eq!(deleted, shardline_storage::DeleteOutcome::Deleted);

@@ -480,6 +480,62 @@ pub(crate) async fn repo_revisions(
 
 // ---- Repo info (requires Read) ----
 
+/// Hugging Face's SDK uses `/refs`, not Shardline's historical `/revisions`.
+/// Read live references so deleted branches never reappear from commit history.
+pub(crate) async fn repo_refs(
+    State(state): State<HubState>,
+    _repo: HubRepository,
+    Path((_repo_type, ns, repo_name)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, HubApiError> {
+    let name = format!("{ns}/{repo_name}");
+    state
+        .store
+        .get_repo(&name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RepoNotFound)?;
+    let refs = state
+        .store
+        .list_refs_bounded(&name, 10_000)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let mut branches = Vec::new();
+    let mut tags = Vec::new();
+    let mut converts = Vec::new();
+    let mut pull_requests = Vec::new();
+    for reference in refs {
+        let (items, short_name, full_name) =
+            if let Some(short) = reference.ref_name.strip_prefix("refs/tags/") {
+                (&mut tags, short.to_owned(), reference.ref_name.clone())
+            } else if let Some(short) = reference.ref_name.strip_prefix("refs/heads/") {
+                (&mut branches, short.to_owned(), reference.ref_name.clone())
+            } else if let Some(short) = reference.ref_name.strip_prefix("refs/pr/") {
+                (
+                    &mut pull_requests,
+                    short.to_owned(),
+                    reference.ref_name.clone(),
+                )
+            } else if let Some(short) = reference.ref_name.strip_prefix("refs/convert/") {
+                (&mut converts, short.to_owned(), reference.ref_name.clone())
+            } else if !reference.ref_name.starts_with("refs/") {
+                (
+                    &mut branches,
+                    reference.ref_name.clone(),
+                    format!("refs/heads/{}", reference.ref_name),
+                )
+            } else {
+                continue;
+            };
+        items.push(serde_json::json!({
+            "name": short_name,
+            "ref": full_name,
+            "targetCommit": crate::git::smart_http::public_commit_id(&state, &name, &reference.sha, _repo.capability()).await?,
+        }));
+    }
+    Ok(Json(serde_json::json!({
+        "branches": branches, "tags": tags, "converts": converts,
+        "pullRequests": pull_requests,
+    })))
+}
+
 pub(crate) async fn repo_info(
     State(state): State<HubState>,
     repo: HubRepository,
@@ -496,15 +552,37 @@ pub(crate) async fn repo_info(
         .ok_or(HubApiError::RepoNotFound)?;
     let mut response = repo_response_from_hub(&entry);
 
-    // Populate card_data from README.md YAML front matter when available.
-    if let Ok(commit_sha) = state.store.resolve_revision(&name, &entry.default_branch)
-        && let Some(sha) = commit_sha
-        && let Ok(files) = state.store.get_files(&sha)
-        && let Some(readme) = files.iter().find(|f| f.path == "README.md")
-        && let Some(content) =
-            read_file_prefix_from_object_store(&state, &readme.sha, repo.capability())
+    // SDK repo_info() needs the same current commit and siblings as the
+    // explicit revision endpoint, rather than an apparently empty repository.
+    if let Some(sha) = state
+        .store
+        .resolve_revision(&name, &entry.default_branch)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
     {
-        response.card_data = parse_yaml_frontmatter(&content);
+        let files = state
+            .store
+            .get_files(&sha)
+            .map_err(|e| HubApiError::CasError(e.to_string()))?;
+        if let Some(readme) = files.iter().find(|f| f.path == "README.md")
+            && let Some(content) =
+                read_file_prefix_from_object_store(&state, &readme.sha, repo.capability())
+        {
+            response.card_data = parse_yaml_frontmatter(&content);
+        }
+        response.sha = Some(
+            crate::git::smart_http::public_commit_id(&state, &name, &sha, repo.capability())
+                .await?,
+        );
+        response.siblings = Some(
+            files
+                .into_iter()
+                .map(|file| {
+                    serde_json::json!({
+                        "rfilename": file.path, "size": file.size, "blobId": file.sha,
+                    })
+                })
+                .collect(),
+        );
     }
 
     Ok(Json(response))
@@ -522,17 +600,18 @@ pub(crate) async fn repo_revision_info(
         .get_repo(&name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RepoNotFound)?;
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &rev)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
+    let commit_sha =
+        crate::git::smart_http::resolve_commit_id(&state, &name, &rev, _repo.capability())?
+            .ok_or(HubApiError::RevisionNotFound)?;
     let files = state
         .store
         .get_files(&commit_sha)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     let mut response = repo_response_from_hub(&entry);
-    response.sha = Some(commit_sha);
+    response.sha = Some(
+        crate::git::smart_http::public_commit_id(&state, &name, &commit_sha, _repo.capability())
+            .await?,
+    );
     response.siblings = Some(
         files
             .into_iter()

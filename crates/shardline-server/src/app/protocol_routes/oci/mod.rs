@@ -3,6 +3,7 @@ mod handlers;
 mod helpers;
 mod manifest;
 pub(crate) mod path;
+mod referrers;
 mod tags;
 mod token;
 

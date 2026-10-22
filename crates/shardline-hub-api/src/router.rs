@@ -7,9 +7,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Builds the Hub API router with all registered routes.
 ///
-/// `register_xet_token_routes` controls whether the `xet-read-token` and
-/// `xet-write-token` routes are registered. Set to `false` when the Xet
-/// protocol frontend is already serving these routes.
+/// `register_xet_token_routes` controls whether the Hub-specific
+/// `xet-read-token` and `xet-write-token` routes are registered. These use
+/// explicit Hub repo-type paths and can coexist with native Xet provider paths.
 ///
 /// The returned [`Router`] is stateless (type [`Router<()>`]) and can be merged
 /// into any Axum router. Call this with the [`HubState`](super::routes::HubState) that

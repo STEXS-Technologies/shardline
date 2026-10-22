@@ -155,8 +155,8 @@ restore the most recent backup before anything else.
 
 1. Stop every process that can open the affected database: API and transfer
    processes, Hub processes, CLI maintenance commands, and scheduled jobs. Keep
-   them stopped throughout the restore and verification. A crashed process may
-   leave committed SQLite state in `-wal`; replacing only the main file can replay
+   them stopped throughout the restore and verification. Committed SQLite state
+   may remain in `-wal` after normal connection closes or crashes; replacing only the main file can replay
    that old state over the backup, even when `PRAGMA integrity_check` returns `ok`.
 2. For SQLite, restore a standalone native SQLite backup, created with the backup
    procedure in [Scenario E](#scenario-e-cross-node-recovery). Use the

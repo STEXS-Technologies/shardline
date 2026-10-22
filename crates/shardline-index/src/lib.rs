@@ -64,11 +64,15 @@ pub mod hub;
 mod hub_local_sqlite;
 mod hub_postgres;
 mod ids;
+mod lfs_locks;
 mod lifecycle;
+pub use lfs_locks::{CreateLfsLockOutcome, LfsLockRecord, LfsLockStore, UnlockLfsOutcome};
 mod local_sqlite;
 mod memory;
 mod oci_objects;
+mod oci_referrers;
 mod oci_tags;
+pub use oci_referrers::OciManifestSubject;
 mod postgres;
 mod provider;
 mod provider_evidence;
@@ -114,7 +118,7 @@ pub use reconstruction::{FileReconstruction, ReconstructionTerm};
 pub use record::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout, RecordMutation,
     RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope, StorageRepresentation,
-    StoredRecord,
+    StoredRecord, XetFileIdentity,
 };
 pub use resource_fence::{ResourceLockDomain, ResourceLockKey};
 pub use resumable_session::{

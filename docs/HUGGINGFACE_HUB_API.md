@@ -1,14 +1,15 @@
 # HuggingFace Hub API Compatibility
 
-Shardline includes a HuggingFace Hub API compatibility layer that makes it a drop-in
-alternative to the HuggingFace Hub for model and dataset storage.
+Shardline includes a HuggingFace Hub API compatibility layer for the repository
+workflows listed below. It is a compatible subset, not a drop-in replacement for every
+Hugging Face Hub API or client transfer mode.
 
 ## What It Is
 
 The Hub API frontend translates HuggingFace Hub REST endpoints into Shardline CAS
 operations. Users and CI pipelines that already work with `huggingface-cli` or the Hub
-REST API can point at a Shardline instance and upload, download, and manage model
-repositories without code changes.
+REST API can point at a Shardline instance and use the supported repository operations.
+Client behavior outside the tested workflows may differ from Hugging Face's hosted Hub.
 
 The Hub frontend is registered as a server frontend alongside the other protocol
 adapters.
@@ -51,6 +52,34 @@ export HF_HUB_DISABLE_TELEMETRY=1
 export TRANSFORMERS_VERBOSITY=info
 ```
 
+The checked-in end-to-end test uses the installed `hf` CLI with `hf_xet` enabled. It
+covers repository creation, small model and dataset uploads, filtered downloads,
+deletion, and 9 MiB model and dataset uploads and downloads with byte-for-byte
+verification. For both large files, the test checks that Shardline persisted the
+repository-scoped LFS SHA-256 to native Xet file identity mapping and that the CLI
+uploaded Xet shards and Xorbs without sending the file body through ordinary Hub LFS.
+This proves the Hub commit and readback resolve to the CAS content. The flows pass
+with Hub enabled by itself and with Hub, Xet, and S3 enabled together.
+
+The Hub token exchange keeps the legacy `token` field and adds the `casUrl`,
+`accessToken`, and `exp` JSON fields expected by current `hf_xet` clients. It also
+returns the corresponding Xet response headers. Token exchange verifies that the
+repository and revision exist, rejects a revision outside the Hub token's scope,
+and scopes the resulting CAS token to the requested revision. `/preupload` selects LFS for files
+above 8 MiB (and files explicitly marked LFS by the client), while smaller files
+remain inline. For large uploads, the LFS batch endpoint now selects the Xet
+transfer when the client offers it and the request has write authorization. The
+CLI then uploads Xorbs and a shard to Shardline's CAS routes; the end-to-end test
+checks those CAS upload counters increase and that the file body did not go through
+the ordinary Hub LFS upload route. Shardline records the file's LFS SHA-256 in its
+repository-scoped Xet identity, so the committed pointer remains readable by Hub
+downloads. Clients without Xet support continue to use the basic LFS upload path.
+
+Hub owns overlapping `/api/.../tree` and `/api/.../revisions` routes when Hub and Xet
+frontends run together. The tested CLI upload, commit, and download flow works with
+that combined configuration; the native Xet frontend's separate metadata operations
+on those paths are not exposed in that mode.
+
 ## Using with Git
 
 The Hub API supports Git Smart HTTP protocol for clone, fetch, and push:
@@ -65,9 +94,21 @@ git remote add hub http://localhost:8080/models/my-org/my-model
 git push hub main
 ```
 
-NDJSON revisions retain their opaque Hub IDs in REST APIs. Git discovery maps them
-to stable SHA-1 commits whose trees contain the actual inline bytes and LFS pointer
-metadata. Git commit identities depend on repository, Hub revision, and ancestry,
+Hub SDK fields (`sha`, `commitOid`, history IDs and reference targets) use the
+same Git commit IDs as Git discovery. Previously issued opaque Hub revision IDs
+remain valid for reads and conditional writes. The legacy `commit_id` response
+field and `/revisions` endpoint retain internal IDs for existing integrations.
+Clients comparing saved opaque IDs with new SDK responses should resolve the
+saved revision first; the returned SDK ID identifies the same immutable commit.
+Content and internal revision identities are unchanged. The ID mapping is retained
+as an actual commit object in the existing repository/provider-scoped Git archive,
+so it survives restarts and branch deletion without another service or migration.
+Older server binaries still read the unchanged stored revisions, but do not
+understand newly returned Git aliases for NDJSON commits. During a rolling upgrade,
+route Hub SDK traffic to upgraded nodes; rollback integrations can retain the
+legacy `commit_id` or `/revisions` IDs. This does not require rewriting uploaded data.
+Git commit trees contain the actual inline bytes and LFS pointer metadata.
+Git commit identities depend on repository, Hub revision, and ancestry,
 so adding a branch or tag does not change an existing commit. Commits received
 through Git preserve their original object bytes, modes, and author metadata in
 a repository and provider scoped object archive. Upload-pack accepts only commits
@@ -119,6 +160,10 @@ original objects rather than substituting a different commit under the same ID.
 | `/api/{type}/{ns}/{repo}/preupload/{rev}` | POST | Pre-upload check |
 | `/api/{type}/{ns}/{repo}/commit/{rev}` | POST | Commit file changes |
 | `/api/{type}/{ns}/{repo}/revision/{rev}` | GET | Revision metadata and siblings |
+| `/api/{type}/{ns}/{repo}/commits/{rev}` | GET | SDK first-parent history from Hub metadata, bounded to 10,000 repository revisions; unknown authors remain empty |
+| `/api/{type}/{ns}/{repo}/refs` | GET | Live branches and tags in Hugging Face SDK format (at most 10,000 references) |
+| `/api/{type}/{ns}/{repo}/branch/{name}` | POST, DELETE | SDK branch creation from an existing revision and safe branch deletion |
+| `/api/{type}/{ns}/{repo}/tag/{name}` | POST, DELETE | SDK lightweight tag creation (POST uses the source revision in the path) and deletion |
 | `/api/{type}/{ns}/{repo}/tree/{rev}` | GET | Browse the repository root |
 | `/api/{type}/{ns}/{repo}/tree/{rev}/{path}` | GET | Browse file tree |
 | `/api/{type}/{ns}/{repo}/xet-read-token/{rev}` | GET | Xet read token exchange |
@@ -130,8 +175,10 @@ original objects rather than substituting a different commit under the same ID.
 | `/{type}/{ns}/{repo}/git-upload-pack` | POST | Git clone/fetch (upload-pack) |
 | `/{type}/{ns}/{repo}/git-receive-pack` | POST | Git push (receive-pack) |
 | `/objects/batch` | POST | LFS batch request |
+| `/{ns}/{repo}.git/info/lfs/objects/batch` | POST | Git LFS discovery endpoint used by `hf upload` |
 | `/lfs/objects/{oid}` | PUT | Upload an LFS object |
 | `/lfs/objects/{oid}` | GET | Download an LFS object |
+| `/lfs/objects/{oid}/verify` | POST | Verify an uploaded LFS object by size and SHA-256 |
 
 Git Smart HTTP supports safe branch and tag deletion through the normal Git zero-SHA
 receive-pack update.
@@ -143,10 +190,11 @@ Removing a ref does not remove the immutable commit history.
 
 Hub metadata is persisted to the configured index store:
 
-- **SQLite** (local): `{root_dir}/hub/` directory — 4 tables for repos, revisions, file
-  entries, and LFS objects
-- **Postgres** (production): same connection as the main index — 7th migration in the
-  bundled set
+- **SQLite** (local): the existing `{root_dir}/metadata.sqlite3` database, shared
+  with the storage index and recovery evidence.
+- **Postgres** (production): the configured index database. Run the upgraded
+  binary's owner-managed migrations before starting upgraded servers; Hub Xet
+  identities and LFS locks add durable tables.
 
 Hub metadata storage goes through the same index store contract used by the rest of
 the server.

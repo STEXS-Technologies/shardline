@@ -154,6 +154,17 @@ impl PostgresBackend {
         &self.record_store
     }
 
+    pub(crate) async fn xet_file_identity(
+        &self,
+        repository_scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<shardline_index::XetFileIdentity>, crate::ServerError> {
+        self.record_store
+            .xet_file_identity(repository_scope, sha256)
+            .await
+            .map_err(crate::ServerError::from)
+    }
+
     pub(crate) const fn object_backend_name(&self) -> &'static str {
         self.object_store.backend_name()
     }

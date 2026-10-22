@@ -298,7 +298,11 @@ async fn assert_ready(
         .bearer_auth(ADMIN_TOKEN)
         .send()
         .await?;
-    assert_eq!(admin.status(), StatusCode::OK, "{expected_role} admin status");
+    assert_eq!(
+        admin.status(),
+        StatusCode::OK,
+        "{expected_role} admin status"
+    );
     let admin: serde_json::Value = admin.json().await?;
     assert_eq!(admin["server_role"], expected_role);
     assert_eq!(admin["metadata_backend"], expected_metadata);

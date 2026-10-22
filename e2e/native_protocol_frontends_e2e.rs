@@ -5,8 +5,11 @@
     clippy::too_many_arguments
 )]
 
+mod native_client_policy;
+mod native_client_requirements;
 mod support;
 
+use native_client_policy::required as native_clients_required;
 use std::{
     error::Error,
     fs::{create_dir_all, read, write as write_file},
@@ -304,7 +307,7 @@ async fn exercise_native_git_lfs_flow_on_runtime(
     run_git_with_home(
         worktree.path(),
         git_home.path(),
-        &["config", "lfs.locksverify", "false"],
+        &["config", "lfs.locksverify", "true"],
     )?;
     run_git_with_home(
         worktree.path(),
@@ -363,7 +366,7 @@ async fn exercise_native_git_lfs_flow_on_runtime(
     run_git_with_home(
         clone.path(),
         git_home.path(),
-        &["config", "lfs.locksverify", "false"],
+        &["config", "lfs.locksverify", "true"],
     )?;
     run_git_with_home(
         clone.path(),
@@ -495,7 +498,7 @@ async fn exercise_native_git_lfs_pull_and_fetch_all_flow() -> Result<(), TestErr
         .arg("-c")
         .arg(format!("lfs.url={}/v1/lfs", runtime.base_url()))
         .arg("-c")
-        .arg("lfs.locksverify=false")
+        .arg("lfs.locksverify=true")
         .arg("-c")
         .arg(format!(
             "http.extraHeader=Authorization: Bearer {read_token}"
@@ -1617,6 +1620,10 @@ async fn start_runtime_with_s3(
     frontends: &[ServerFrontend],
 ) -> Result<Option<FrontendRuntime>, TestError> {
     let Some(deployment) = DockerLocalStack::builder().with_minio().start()? else {
+        assert!(
+            !native_clients_required(),
+            "required native-client qualification needs a working Docker/MinIO runtime"
+        );
         return Ok(None);
     };
     let storage = tempfile::tempdir()?;
@@ -1680,20 +1687,32 @@ async fn wait_for_health(base_url: &str) -> Result<(), TestError> {
 }
 
 fn command_available(program: &str) -> bool {
+    native_client_policy::require_available(program, probe_command(program))
+}
+
+fn probe_command(program: &str) -> bool {
     Command::new(program)
-        .arg("--version")
+        .arg(if program == "helm" {
+            "version"
+        } else {
+            "--version"
+        })
         .output()
         .is_ok_and(|output| output.status.success())
 }
 
 fn bazel_program() -> Option<&'static str> {
-    if command_available("bazel") {
+    if probe_command("bazel") {
         return Some("bazel");
     }
-    if command_available("bazelisk") {
+    if probe_command("bazelisk") {
         return Some("bazelisk");
     }
 
+    assert!(
+        !native_clients_required(),
+        "required native Bazel qualification needs bazel or bazelisk"
+    );
     None
 }
 
@@ -1790,7 +1809,7 @@ fn configure_lfs_client_repo(
         home,
         &["config", "lfs.url", &format!("{base_url}/v1/lfs")],
     )?;
-    run_git_with_home(repo, home, &["config", "lfs.locksverify", "false"])?;
+    run_git_with_home(repo, home, &["config", "lfs.locksverify", "true"])?;
     run_git_with_home(
         repo,
         home,

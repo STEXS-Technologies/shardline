@@ -11,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use shardline_metrics;
 
 use crate::{
@@ -239,6 +240,37 @@ pub(super) async fn upload_shard(
         .await?;
     metrics::record_shard_stored();
     Ok(Json(response))
+}
+
+/// Reconstructs a Hub LFS object whose bytes were uploaded through hf_xet.
+#[tracing::instrument(skip(state), fields(sha256 = %sha256))]
+pub(super) async fn download_hub_xet_file(
+    State(state): State<Arc<AppState>>,
+    Path(sha256): Path<String>,
+    repo: XetRepository,
+) -> Result<Response, ServerError> {
+    validate_hash_path(&sha256)?;
+    let repository_scope = repo.capability().namespace().ok_or(ServerError::NotFound)?;
+    let identity = state
+        .backend
+        .xet_file_identity(repository_scope, &sha256)
+        .await?
+        .ok_or(ServerError::NotFound)?;
+    let bytes = state
+        .backend
+        .download_file(&identity.file_id, None, Some(repository_scope))
+        .await?;
+    if bytes.len() as u64 != identity.total_bytes
+        || hex::encode(Sha256::digest(&bytes)) != identity.sha256
+    {
+        return Err(ServerError::NotFound);
+    }
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/octet-stream"),
+    );
+    Ok(response)
 }
 
 #[tracing::instrument(skip(state))]

@@ -197,6 +197,47 @@ pub(crate) enum HubRefPublicationMode {
     UpdateOnly,
 }
 
+/// One conditional change within an atomic repository ref transaction.
+#[derive(Debug, Clone)]
+pub struct HubRefChange {
+    /// Branch or tag name, using the same normalization as individual writes.
+    pub ref_name: String,
+    /// Expected current revision; `None` requires the ref to be absent.
+    pub expected_sha: Option<String>,
+    /// New revision; `None` deletes an existing, unprotected ref.
+    pub new_sha: Option<String>,
+    /// Revision description when publishing a new head.
+    pub message: String,
+}
+
+/// Result of an all-or-nothing conditional ref transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubRefBatchOutcome {
+    /// Every ref and its reliability evidence committed together.
+    Applied,
+    /// A stale, missing, duplicate or protected ref prevented all changes.
+    Conflict,
+    /// The custom backend does not implement atomic ref transactions.
+    Unsupported,
+}
+
+#[cfg(test)]
+pub(crate) mod ref_batch_tests;
+
+pub(crate) fn valid_ref_batch(changes: &[HubRefChange]) -> bool {
+    let mut names = std::collections::HashSet::new();
+    changes.len() <= 10_000
+        && changes.iter().all(|change| {
+            let name = canonical_ref_name(&change.ref_name);
+            !name.is_empty()
+                && names.insert(name)
+                && !change.expected_sha.as_deref().is_some_and(str::is_empty)
+                && !change.new_sha.as_deref().is_some_and(str::is_empty)
+                && (change.new_sha.is_some()
+                    || (change.expected_sha.is_some() && name != "main" && name != "HEAD"))
+        })
+}
+
 /// A Hub file entry within a commit tree.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -341,6 +382,23 @@ pub struct HubWebhook {
 /// [`PostgresIndexStore`](crate::PostgresIndexStore) implement this trait to
 /// provide durable storage for Hub API metadata.
 pub trait HubStore: Send + Sync {
+    /// Whether this backend implements all-or-nothing ref transactions.
+    fn supports_atomic_ref_updates(&self) -> bool {
+        false
+    }
+    /// Commits all changes and their evidence together, or makes no changes.
+    /// Payloads and immutable trees must be durable before calling this method.
+    ///
+    /// # Errors
+    /// Returns an error on storage or integrity failure, rolling back all refs.
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Self::Error> {
+        let _ = (repo_id, changes);
+        Ok(HubRefBatchOutcome::Unsupported)
+    }
     /// Adapter-specific error type.
     type Error: std::fmt::Display + Send + Sync + 'static;
 
@@ -503,6 +561,18 @@ pub trait HubStore: Send + Sync {
     ///
     /// Returns an error when the storage backend operation fails.
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error>;
+
+    /// Looks up immutable revision metadata within one repository.
+    /// Built-in stores use an indexed lookup; custom stores retain a compatible default.
+    ///
+    /// # Errors
+    /// Returns an error when metadata storage fails.
+    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, Self::Error> {
+        Ok(self
+            .list_revisions(repo_id)?
+            .into_iter()
+            .find(|revision| revision.sha == sha))
+    }
 
     /// Lists revisions only when the complete result fits `limit`; `None` means overflow.
     ///
@@ -697,6 +767,12 @@ impl Clone for BoxedHubStore {
 }
 
 trait ErasedHubStore: Send + Sync {
+    fn supports_atomic_ref_updates(&self) -> bool;
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Box<dyn std::error::Error + Send + Sync>>;
     fn create_repo(
         &self,
         repo_type: HubRepoType,
@@ -772,6 +848,11 @@ trait ErasedHubStore: Send + Sync {
         &self,
         repo_id: &str,
     ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
     fn list_revisions_bounded(
         &self,
         repo_id: &str,
@@ -858,6 +939,25 @@ trait ErasedHubStore: Send + Sync {
 }
 
 impl<T: HubStore> ErasedHubStore for T {
+    fn supports_atomic_ref_updates(&self) -> bool {
+        T::supports_atomic_ref_updates(self)
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::change_refs_atomically(self, repo_id, changes)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_revision(self, repo_id, sha)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
     fn create_repo(
         &self,
         repo_type: HubRepoType,
@@ -1129,6 +1229,33 @@ impl<T: HubStore> ErasedHubStore for T {
 }
 
 impl BoxedHubStore {
+    /// Whether the underlying backend supports atomic ref transactions.
+    #[must_use]
+    pub fn supports_atomic_ref_updates(&self) -> bool {
+        self.inner.supports_atomic_ref_updates()
+    }
+    /// Atomically applies conditional ref changes, preserving backend evidence.
+    ///
+    /// # Errors
+    /// Returns an error on storage or integrity failure; no refs are committed.
+    pub fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.change_refs_atomically(repo_id, changes)
+    }
+    /// Reads one immutable, repository-scoped revision without listing history.
+    ///
+    /// # Errors
+    /// Returns an error on metadata storage failure.
+    pub fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.get_revision(repo_id, sha)
+    }
     /// Creates a new `BoxedHubStore` from any `HubStore` implementation.
     pub fn new(
         store: impl HubStore<Error = Box<dyn std::error::Error + Send + Sync>> + 'static,
@@ -1512,6 +1639,23 @@ impl<T: HubStore> ErasedHubStore for ErasedAdapter<T>
 where
     T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    fn supports_atomic_ref_updates(&self) -> bool {
+        T::supports_atomic_ref_updates(&self.0)
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::change_refs_atomically(&self.0, repo_id, changes).map_err(Into::into)
+    }
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_revision(&self.0, repo_id, sha).map_err(Into::into)
+    }
     fn create_repo(
         &self,
         repo_type: HubRepoType,

@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::Path;
 
-use shardline_index::{DedupeShardMapping, FileRecord};
+use shardline_index::{DedupeShardMapping, FileRecord, XetFileIdentity};
 use shardline_protocol::RepositoryScope;
 use shardline_server_core::{ServerObjectStore, ShardMetadataLimits};
 use shardline_storage::ObjectKey;
@@ -123,7 +123,12 @@ pub async fn register_uploaded_shard_bytes_with_member_references<Commit, Commit
     commit_metadata: Commit,
 ) -> Result<ShardUploadResponse, XetAdapterError>
 where
-    Commit: FnOnce(Vec<FileRecord>, Vec<DedupeShardMapping>, Vec<ObjectKey>) -> CommitFuture,
+    Commit: FnOnce(
+        Vec<FileRecord>,
+        Vec<DedupeShardMapping>,
+        Vec<ObjectKey>,
+        Vec<XetFileIdentity>,
+    ) -> CommitFuture,
     CommitFuture: Future<Output = Result<(), XetAdapterError>>,
 {
     let mut references = std::collections::HashSet::new();
@@ -141,7 +146,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
     let mut references: Vec<_> = references.into_iter().collect();
     references.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
-    commit_metadata(parsed.records, mappings, references).await?;
+    commit_metadata(parsed.records, mappings, references, parsed.file_identities).await?;
     Ok(ShardUploadResponse {
         result: parsed.result,
     })
@@ -162,7 +167,12 @@ pub async fn register_uploaded_shard_file_with_member_references<Commit, CommitF
     commit_metadata: Commit,
 ) -> Result<ShardUploadResponse, XetAdapterError>
 where
-    Commit: FnOnce(Vec<FileRecord>, Vec<DedupeShardMapping>, Vec<ObjectKey>) -> CommitFuture,
+    Commit: FnOnce(
+        Vec<FileRecord>,
+        Vec<DedupeShardMapping>,
+        Vec<ObjectKey>,
+        Vec<XetFileIdentity>,
+    ) -> CommitFuture,
     CommitFuture: Future<Output = Result<(), XetAdapterError>>,
 {
     let mut file = std::fs::File::open(path).map_err(XetAdapterError::Io)?;
@@ -181,7 +191,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
     let mut references: Vec<_> = references.into_iter().collect();
     references.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
-    commit_metadata(parsed.records, mappings, references).await?;
+    commit_metadata(parsed.records, mappings, references, parsed.file_identities).await?;
     Ok(ShardUploadResponse {
         result: parsed.result,
     })
@@ -295,8 +305,8 @@ mod tests {
                 &shard,
                 None,
                 DEFAULT_SHARD_METADATA_LIMITS,
-                |records, mappings, references| {
-                    from_bytes = Some((records, mappings, references));
+                |records, mappings, references, identities| {
+                    from_bytes = Some((records, mappings, references, identities));
                     async { Ok(()) }
                 },
             ))
@@ -310,16 +320,20 @@ mod tests {
                 file.path(),
                 None,
                 DEFAULT_SHARD_METADATA_LIMITS,
-                |records, mappings, references| {
-                    from_file = Some((records, mappings, references));
+                |records, mappings, references, identities| {
+                    from_file = Some((records, mappings, references, identities));
                     async { Ok(()) }
                 },
             ))
             .unwrap();
-        let (records, mappings, references) = from_bytes.unwrap();
+        let (records, mappings, references, identities) = from_bytes.unwrap();
+        let (file_records, file_mappings, file_references, file_identities) = from_file.unwrap();
         assert_eq!((records.clone(), mappings.clone()), legacy.unwrap());
+        assert_eq!(records, file_records);
+        assert_eq!(mappings, file_mappings);
+        assert_eq!(references, file_references);
+        assert_eq!(identities, file_identities);
         assert_eq!(references, vec![expected_key]);
-        assert_eq!((records, mappings, references), from_file.unwrap());
         assert_eq!(byte_response.result, 0);
         assert_eq!(file_response.result, 0);
     }

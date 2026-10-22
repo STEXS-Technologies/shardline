@@ -16,6 +16,7 @@ type BodyChunkResult = Result<Bytes, ServerError>;
 type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
 
 mod md5_checked_tee;
+const MAX_IN_MEMORY_STAGED_BODY_BYTES: usize = 256 * 1024;
 
 /// Stream wrapper that feeds every chunk into a caller-shared MD5 hasher, so
 /// the S3 ETag (hex MD5 of the object bytes) can be computed while a body
@@ -335,8 +336,8 @@ pub(crate) async fn stage_body_to_tempfile(
 }
 
 /// Stages a bounded protocol object in memory for remote object storage and
-/// on the filesystem for local storage. Remote parsing avoids pod-local IO;
-/// the request reader's configured ceiling remains the memory bound.
+/// small local bodies, spilling larger local bodies to a temporary file. The
+/// request reader's configured ceiling remains the total accepted-body bound.
 pub(crate) async fn stage_body_for_object_store(
     reader: &mut RequestBodyReader,
     object_store: &ServerObjectStore,
@@ -350,8 +351,71 @@ pub(crate) async fn stage_body_for_object_store(
             hash,
         });
     }
-    let (file, length, hash) = stage_body_to_tempfile(reader).await?;
-    Ok(StagedRequestBody::File { file, length, hash })
+
+    // Small local protocol objects can be validated in memory and then written
+    // once to their final content-addressed path. Avoid a disposable scratch
+    // write for those bodies. Unknown or larger bodies spill after a strict
+    // per-request memory bound.
+    if reader
+        .expected_total_bytes
+        .is_some_and(|length| length > MAX_IN_MEMORY_STAGED_BODY_BYTES)
+    {
+        let (file, length, hash) = stage_body_to_tempfile(reader).await?;
+        return Ok(StagedRequestBody::File { file, length, hash });
+    }
+
+    let initial_capacity = reader
+        .expected_total_bytes
+        .unwrap_or(0)
+        .min(MAX_IN_MEMORY_STAGED_BODY_BYTES);
+    let mut memory = Vec::new();
+    memory
+        .try_reserve(initial_capacity)
+        .map_err(|_error| ServerError::RequestBodyTooLarge)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut length = 0_u64;
+    let mut temporary: Option<(tempfile::NamedTempFile, tokio::fs::File)> = None;
+
+    while let Some(bytes) = reader.next_bytes().await? {
+        hasher.update(&bytes);
+        length = checked_add(length, u64::try_from(bytes.len())?)?;
+        let next_memory_length = memory
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(ServerError::Overflow)?;
+        if temporary.is_none() && next_memory_length <= MAX_IN_MEMORY_STAGED_BODY_BYTES {
+            memory
+                .try_reserve(bytes.len())
+                .map_err(|_error| ServerError::RequestBodyTooLarge)?;
+            memory.extend_from_slice(&bytes);
+            continue;
+        }
+
+        if temporary.is_none() {
+            let file = tempfile::NamedTempFile::new()?;
+            let mut output = tokio::fs::File::create(file.path()).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut output, &memory).await?;
+            memory = Vec::new();
+            temporary = Some((file, output));
+        }
+        let Some((_file, output)) = temporary.as_mut() else {
+            return Err(ServerError::Overflow);
+        };
+        tokio::io::AsyncWriteExt::write_all(output, &bytes).await?;
+    }
+
+    let hash = shardline_protocol::ShardlineHash::from_bytes(*hasher.finalize().as_bytes());
+    if let Some((file, mut output)) = temporary {
+        tokio::io::AsyncWriteExt::flush(&mut output).await?;
+        drop(output);
+        Ok(StagedRequestBody::File { file, length, hash })
+    } else {
+        Ok(StagedRequestBody::Memory {
+            bytes: Bytes::from(memory),
+            length,
+            hash,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -362,8 +426,8 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     use super::{
-        ChunkBuffer, RequestBodyReader, StagedRequestBody, read_body_to_bytes,
-        stage_body_for_object_store, stage_body_to_tempfile,
+        ChunkBuffer, MAX_IN_MEMORY_STAGED_BODY_BYTES, RequestBodyReader, StagedRequestBody,
+        read_body_to_bytes, stage_body_for_object_store, stage_body_to_tempfile,
     };
     use crate::{ObjectStorageAdapter, ServerConfig, object_store::object_store_from_config};
 
@@ -493,7 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_object_storage_retains_filesystem_staging_fallback() {
+    async fn local_object_storage_stages_small_body_in_memory() {
         let root = tempfile::tempdir().unwrap();
         let config = ServerConfig::new(
             std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
@@ -507,7 +571,63 @@ mod tests {
         let staged = stage_body_for_object_store(&mut reader, &object_store)
             .await
             .unwrap();
-        assert!(matches!(staged, StagedRequestBody::File { .. }));
+        assert!(matches!(&staged, StagedRequestBody::Memory { .. }));
+        let StagedRequestBody::Memory {
+            bytes,
+            length,
+            hash,
+        } = staged
+        else {
+            return;
+        };
+        assert_eq!(bytes.as_ref(), b"local");
+        assert_eq!(length, 5);
+        assert_eq!(
+            hash,
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"local").as_bytes())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_object_storage_spills_large_body_to_file() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::new(
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(1024 * 1024).unwrap(),
+        );
+        let object_store = object_store_from_config(&config).unwrap();
+        let mut contents = vec![b'x'; MAX_IN_MEMORY_STAGED_BODY_BYTES];
+        contents.push(b'y');
+        let body = axum::body::Body::from_stream(futures_util::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; MAX_IN_MEMORY_STAGED_BODY_BYTES])),
+            Ok(Bytes::from_static(b"y")),
+        ]));
+        let mut reader =
+            RequestBodyReader::from_body(body, std::num::NonZeroUsize::new(1024 * 1024).unwrap())
+                .unwrap();
+
+        let staged = stage_body_for_object_store(&mut reader, &object_store)
+            .await
+            .unwrap();
+        assert!(matches!(&staged, StagedRequestBody::File { .. }));
+        let StagedRequestBody::File { file, length, hash } = staged else {
+            return;
+        };
+        let mut actual = Vec::new();
+        tokio::fs::File::open(file.path())
+            .await
+            .unwrap()
+            .read_to_end(&mut actual)
+            .await
+            .unwrap();
+        assert_eq!(actual, contents);
+        assert_eq!(length, u64::try_from(actual.len()).unwrap());
+        assert_eq!(
+            hash,
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&actual).as_bytes())
+        );
     }
 
     #[tokio::test]

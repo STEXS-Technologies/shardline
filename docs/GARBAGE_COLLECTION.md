@@ -51,6 +51,13 @@ In particular, dedupe-shard mappings are rebuildable index state, so they must n
 retained-shard objects alive on their own after the live file graph no longer references
 the chunk content they describe.
 
+Xorb member lists are read from validated containers. Old `_xorb_chunks/`
+sidecars are not trusted to describe all members: a damaged list could leave out
+a live chunk. This can increase read traffic for scans that previously used those
+sidecars. Local scans use the original file without a scratch copy; S3 scans
+stream the container to disk. See [the I/O measurements](PERFORMANCE.md) for the
+scope of the savings and this safety trade-off.
+
 ## Mark and Sweep Model
 
 Shardline should use a two-phase model:

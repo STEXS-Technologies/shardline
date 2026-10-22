@@ -29,11 +29,7 @@ use shardline_server::{
     ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
 };
 use support::ServerE2eInvariantError;
-use tokio::{
-    net::TcpListener,
-    task::JoinHandle,
-    time::sleep,
-};
+use tokio::{net::TcpListener, task::JoinHandle, time::sleep};
 
 const SIGNING_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
 /// Admin read token wired into spawned servers so tests verify runtime
@@ -62,9 +58,8 @@ impl RoleRuntime {
         };
         server.abort();
         match server.await {
-            Ok(result) => result.map_err(|error| {
-                format!("server task failed during upgrade stop: {error}").into()
-            }),
+            Ok(result) => result
+                .map_err(|error| format!("server task failed during upgrade stop: {error}").into()),
             Err(join_error) if join_error.is_cancelled() => Ok(()),
             Err(join_error) => Err(format!("server task join failed: {join_error}").into()),
         }
@@ -83,10 +78,7 @@ impl Drop for RoleRuntime {
 async fn api_role_rolling_upgrade_keeps_transfer_serving() {
     let result = exercise_rolling_upgrade(ServerRole::Api, ServerRole::Transfer).await;
     let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "api rolling-upgrade e2e failed: {error:?}"
-    );
+    assert!(result.is_ok(), "api rolling-upgrade e2e failed: {error:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -110,8 +102,10 @@ async fn exercise_rolling_upgrade(
     let upgrade_storage = tempfile::tempdir()?;
     let steady_storage = tempfile::tempdir()?;
 
-    let mut upgrade = start_role_runtime(upgrade_role, &FRONTENDS, None, upgrade_storage.path()).await?;
-    let mut steady = start_role_runtime(steady_role, &FRONTENDS, None, steady_storage.path()).await?;
+    let mut upgrade =
+        start_role_runtime(upgrade_role, &FRONTENDS, None, upgrade_storage.path()).await?;
+    let mut steady =
+        start_role_runtime(steady_role, &FRONTENDS, None, steady_storage.path()).await?;
 
     let client = Client::new();
     wait_for_ready(&client, upgrade.base_url()).await?;
@@ -121,7 +115,10 @@ async fn exercise_rolling_upgrade(
     let steady_ready = ready_response(&client, steady.base_url()).await?;
     assert_eq!(upgrade_ready["server_role"], upgrade_role.as_str());
     assert_eq!(steady_ready["server_role"], steady_role.as_str());
-    assert_eq!(upgrade_ready["server_frontends"], serde_json::json!(["xet"]));
+    assert_eq!(
+        upgrade_ready["server_frontends"],
+        serde_json::json!(["xet"])
+    );
     assert_eq!(steady_ready["server_frontends"], serde_json::json!(["xet"]));
     assert_eq!(
         role_surface_statuses(&client, upgrade.base_url()).await?,
@@ -160,7 +157,10 @@ async fn exercise_rolling_upgrade(
     wait_for_ready(&client, upgraded_restarted.base_url()).await?;
     let restarted_ready = ready_response(&client, upgraded_restarted.base_url()).await?;
     assert_eq!(restarted_ready["server_role"], upgrade_role.as_str());
-    assert_eq!(restarted_ready["server_frontends"], serde_json::json!(["xet"]));
+    assert_eq!(
+        restarted_ready["server_frontends"],
+        serde_json::json!(["xet"])
+    );
     assert_eq!(
         role_surface_statuses(&client, upgraded_restarted.base_url()).await?,
         expected_surface(upgrade_role)
@@ -219,7 +219,9 @@ async fn bind_with_retry(addr: SocketAddr, attempts: u32) -> Result<TcpListener,
                 sleep(Duration::from_millis(50 * u64::from(attempt + 1))).await;
             }
             Err(error) => {
-                return Err(format!("failed to bind {addr} after {attempts} attempts: {error}").into());
+                return Err(
+                    format!("failed to bind {addr} after {attempts} attempts: {error}").into(),
+                );
             }
         }
     }
@@ -256,7 +258,12 @@ async fn wait_for_ready(client: &Client, base_url: &str) -> Result<(), Box<dyn E
 /// window is real (the old listener is gone before the new one rebinds).
 async fn wait_for_server_down(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
     for _attempt in 0..50 {
-        if client.get(format!("{base_url}/healthz")).send().await.is_err() {
+        if client
+            .get(format!("{base_url}/healthz"))
+            .send()
+            .await
+            .is_err()
+        {
             return Ok(());
         }
         // Raw connect probe (bypasses any reqwest connection pooling): if the
@@ -288,7 +295,11 @@ async fn ready_response(
         .send()
         .await?
         .error_for_status()?;
-    assert_eq!(readyz.status(), reqwest::StatusCode::OK, "readyz should be healthy");
+    assert_eq!(
+        readyz.status(),
+        reqwest::StatusCode::OK,
+        "readyz should be healthy"
+    );
     let response = client
         .get(format!("{base_url}/api/v1/status"))
         .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
@@ -305,7 +316,10 @@ async fn role_surface_statuses(
     base_url: &str,
 ) -> Result<(StatusCode, StatusCode), Box<dyn Error>> {
     let reconstruction_status = client
-        .request(Method::PUT, format!("{base_url}/v1/reconstructions/asset.bin"))
+        .request(
+            Method::PUT,
+            format!("{base_url}/v1/reconstructions/asset.bin"),
+        )
         .send()
         .await?
         .status();

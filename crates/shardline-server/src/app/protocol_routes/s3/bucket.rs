@@ -107,6 +107,9 @@ pub(crate) async fn s3_get_bucket(
 ) -> Result<Response, S3Error> {
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
+    if matches!(resources.as_slice(), [S3SubResource::Uploads]) {
+        return super::multipart::s3_list_uploads(&state, auth.capability(), &bucket, &query).await;
+    }
     if resources
         .iter()
         .any(|resource| matches!(resource, S3SubResource::Location))

@@ -264,11 +264,38 @@ fn is_valid_refname_valid() {
     assert!(is_valid_refname("refs/heads/feature/foo"));
     assert!(is_valid_refname("refs/heads/feature/foo/bar"));
     assert!(is_valid_refname("refs/pull/42/head"));
+    assert!(is_valid_refname("refs/heads/foo./bar"));
+    assert!(is_valid_refname("refs/heads/@"));
 }
 
 #[test]
 fn is_valid_refname_empty() {
     assert!(!is_valid_refname(""));
+}
+
+#[test]
+fn is_valid_refname_rejects_git_reserved_spellings() {
+    for reference in [
+        "refs/heads/a..b",
+        "refs/heads/.hidden",
+        "refs/heads/a.lock",
+        "refs/heads/a.",
+        "refs/heads/a//b",
+        "refs/heads/a/",
+        "refs/heads/a@{b",
+        "refs/heads/a~b",
+        "refs/heads/a^b",
+        "refs/heads/a:b",
+        "refs/heads/a?b",
+        "refs/heads/a*b",
+        "refs/heads/a[b",
+        "refs/heads/a\\b",
+    ] {
+        assert!(
+            !is_valid_refname(reference),
+            "invalid Git ref accepted: {reference}"
+        );
+    }
 }
 
 #[test]
@@ -844,7 +871,7 @@ fn build_report_response_unpack_ok_and_ok_refs() {
         ("refs/heads/main".to_owned(), true, None),
         ("refs/heads/dev".to_owned(), true, None),
     ];
-    let response = build_report_response(&results, true).unwrap();
+    let response = build_report_response(&results, true, false).unwrap();
     let body = body_string(response);
     assert!(body.contains("unpack ok"));
     assert!(body.contains("ok refs/heads/main"));
@@ -858,7 +885,7 @@ fn build_report_response_unpack_failed_and_ng_refs() {
         false,
         Some("unpack failed".to_owned()),
     )];
-    let response = build_report_response(&results, false).unwrap();
+    let response = build_report_response(&results, false, false).unwrap();
     let body = body_string(response);
     assert!(body.contains("unpack failed"));
     assert!(body.contains("ng refs/heads/main"));
@@ -868,7 +895,7 @@ fn build_report_response_unpack_failed_and_ng_refs() {
 #[test]
 fn build_report_response_ng_with_default_message() {
     let results = vec![("refs/heads/bad".to_owned(), false, None)];
-    let response = build_report_response(&results, false).unwrap();
+    let response = build_report_response(&results, false, false).unwrap();
     let body = body_string(response);
     assert!(body.contains("ng refs/heads/bad failed"));
 }
@@ -876,7 +903,7 @@ fn build_report_response_ng_with_default_message() {
 #[test]
 fn build_report_response_ends_with_flush() {
     let results: Vec<(String, bool, Option<String>)> = vec![];
-    let response = build_report_response(&results, true).unwrap();
+    let response = build_report_response(&results, true, false).unwrap();
     let body = body_string(response);
     assert!(
         body.ends_with("0000"),
@@ -887,11 +914,36 @@ fn build_report_response_ends_with_flush() {
 // --- parse_receive_pack_request tests ---
 
 #[test]
+fn receive_sideband_preserves_status_across_frame_boundaries() {
+    let results: Vec<_> = (0..4000)
+        .map(|index| (format!("refs/heads/branch-{index}"), index % 2 == 0, None))
+        .collect();
+    for unpack_ok in [true, false] {
+        let plain = body_string(build_report_response(&results, unpack_ok, false).unwrap());
+        let framed = body_string(build_report_response(&results, unpack_ok, true).unwrap());
+        assert!(framed.ends_with("0000"));
+        let packets = pktline::decode_lines(framed.as_bytes());
+        assert!(
+            packets.len() > 1,
+            "fixture must cross an outer frame boundary"
+        );
+        let mut recovered = Vec::new();
+        for packet in packets {
+            assert_eq!(packet[0], 1);
+            assert!(packet.len() + 4 <= 65520);
+            recovered.extend_from_slice(&packet[1..]);
+        }
+        assert_eq!(recovered, plain.as_bytes());
+        assert!(recovered.ends_with(b"0000"));
+    }
+}
+
+#[test]
 fn parse_receive_pack_request_with_updates_and_pack() {
     // Build a pkt-line request: commands followed by flush, then pack data
     let mut body = Vec::new();
     // Command line: "old-sha new-sha refs/heads/main"
-    let cmd = "0000000000000000000000000000000000000000 newsha1234567890123456789012345678901234567890 refs/heads/main\n";
+    let cmd = "0000000000000000000000000000000000000000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/main\n";
     let encoded = format!("{:04x}{}", cmd.len() + 4, cmd);
     body.extend_from_slice(encoded.as_bytes());
     body.extend_from_slice(b"0000"); // flush
@@ -899,7 +951,7 @@ fn parse_receive_pack_request_with_updates_and_pack() {
     body.extend_from_slice(&[0, 0, 0, 2]); // version
     body.extend_from_slice(&[0, 0, 0, 0]); // 0 objects
 
-    let (updates, pack_data) = parse_receive_pack_request(&body);
+    let (updates, pack_data) = parse_receive_pack_request(&body).unwrap();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].2, "refs/heads/main");
     assert!(!pack_data.is_empty());
@@ -907,39 +959,25 @@ fn parse_receive_pack_request_with_updates_and_pack() {
 }
 
 #[test]
-fn parse_receive_pack_request_no_flush_returns_empty_pack() {
+fn parse_receive_pack_request_rejects_missing_flush() {
     // "000a" = 10 bytes total (4 prefix + 6 payload "check\n")
     let body = b"000acheck\n";
-    let (updates, pack_data) = parse_receive_pack_request(body);
-    // "check\n" has no whitespace, so split gives 1 part, but the
-    // function requires at least 3 parts (old, new, refname), so updates is empty
-    assert!(updates.is_empty());
-    // No flush packet found, so pack_start remains 0.
-    // pack_start (0) < body.len() (10) → true, so pack_data = body[0..] (the full body)
-    assert!(
-        !pack_data.is_empty(),
-        "pack_data should be the full body when no flush is present"
-    );
+    assert!(parse_receive_pack_request(body).is_err());
 }
 
 #[test]
 fn parse_receive_pack_request_empty_body() {
-    let (updates, pack_data) = parse_receive_pack_request(b"");
-    assert!(updates.is_empty());
-    assert!(pack_data.is_empty());
+    assert!(parse_receive_pack_request(b"").is_err());
 }
 
 #[test]
-fn parse_receive_pack_request_non_utf8_line_skipped() {
+fn parse_receive_pack_request_rejects_non_utf8_line() {
     let mut body = Vec::new();
     // Non-UTF8 line: length prefix points to content with 0xFF
     body.extend_from_slice(b"0005\xff\x00");
     body.extend_from_slice(b"0000");
     body.extend_from_slice(b"PACKdata");
-    let (updates, pack_data) = parse_receive_pack_request(&body);
-    // Non-UTF8 line is skipped, so updates is empty
-    assert!(updates.is_empty());
-    assert!(!pack_data.is_empty());
+    assert!(parse_receive_pack_request(&body).is_err());
 }
 
 // --- parse_lfs_pointer_field tests ---
@@ -1362,7 +1400,7 @@ fn parse_lfs_pointer_field_trailing_whitespace() {
 // --- parse_receive_pack_request with valid non-UTF8 pkt-lines ---
 
 #[test]
-fn parse_receive_pack_request_skips_non_utf8_and_finds_pack() {
+fn parse_receive_pack_request_rejects_non_utf8_before_pack() {
     let mut body = Vec::new();
     // Skip non-UTF8: 0005\xff\x00 (length 5, 2 bytes payload after 4 hex prefix)
     // Actually length 5 total means 5 - 4 = 1 byte payload. Let's fix:
@@ -1372,10 +1410,7 @@ fn parse_receive_pack_request_skips_non_utf8_and_finds_pack() {
     body.extend_from_slice(b"PACK");
     body.extend_from_slice(&[0, 0, 0, 2]);
     body.extend_from_slice(&[0, 0, 0, 0]);
-    let (updates, pack_data) = parse_receive_pack_request(&body);
-    assert!(updates.is_empty());
-    assert!(!pack_data.is_empty());
-    assert!(pack_data.starts_with(b"PACK"));
+    assert!(parse_receive_pack_request(&body).is_err());
 }
 
 // --- authorize with auth configured (error paths) ---
@@ -1613,7 +1648,7 @@ fn tree_from_nested_lfs_files_creates_sub_trees() {
 // --- parse_receive_pack_request with valid commands ---
 
 #[test]
-fn parse_receive_pack_request_skips_empty_lines() {
+fn parse_receive_pack_request_rejects_empty_command_before_valid_update() {
     let mut body = Vec::new();
     // Empty pkt-line (length prefix 0004 = empty)
     body.extend_from_slice(b"0004");
@@ -1626,11 +1661,7 @@ fn parse_receive_pack_request_skips_empty_lines() {
     body.extend_from_slice(&[0, 0, 0, 2]);
     body.extend_from_slice(&[0, 0, 0, 0]);
 
-    let (updates, pack_data) = parse_receive_pack_request(&body);
-    // The empty line (0004) is skipped, the valid command is parsed
-    assert_eq!(updates.len(), 1, "expected 1 update, got {updates:?}");
-    assert_eq!(updates[0].2, "refs/heads/main");
-    assert!(!pack_data.is_empty());
+    assert!(parse_receive_pack_request(&body).is_err());
 }
 
 // --- receive_pack error paths ---
@@ -1788,21 +1819,9 @@ async fn receive_pack_malformed_pack_data_returns_ng_refs() {
         .store
         .create_repo(HubRepoType::Model, "org/rp-bad", false)
         .unwrap();
-    let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
-    state
-        .store
-        .create_revision(
-            "org/rp-bad",
-            Some(initial_sha),
-            "oldsha1234567890123456789012345678901234567",
-            "refs/heads/main",
-            "initial",
-        )
-        .unwrap();
-
     // Build a receive-pack request with valid command but garbage pack data
-    let new_sha = "0000000000000000000000000000000000000000";
-    let old_sha = "oldsha1234567890123456789012345678901234567";
+    let new_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let old_sha = "0000000000000000000000000000000000000000";
     let cmd = format!("{old_sha} {new_sha} refs/heads/main\n");
     let encoded = format!("{:04x}{}", cmd.len() + 4, cmd);
     let mut body = encoded.into_bytes();
@@ -1817,7 +1836,13 @@ async fn receive_pack_malformed_pack_data_returns_ng_refs() {
     )
     .await;
     // Should return a response (even with errors) rather than fail
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "unexpected receive-pack error: {result:?}");
+    let report = axum::body::to_bytes(result.unwrap().into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let report = std::str::from_utf8(&report).unwrap();
+    assert!(report.contains("unpack failed"));
+    assert!(report.contains("ng refs/heads/main"));
 }
 
 // --- receive_pack non-fast-forward rejection has NO write side effects (F-61) ---

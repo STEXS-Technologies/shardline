@@ -525,8 +525,8 @@ mod tests {
                 &[HubFileEntry {
                     path: "README.md".into(),
                     size: 100,
-                    sha: "sha_readme".into(),
-                    is_lfs: false,
+                    sha: "a".repeat(64),
+                    is_lfs: true,
                 }],
             )
             .expect("store files");

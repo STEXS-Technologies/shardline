@@ -1,3 +1,5 @@
+mod native_client_policy;
+mod native_xet_requirements;
 mod support;
 
 use std::{
@@ -84,13 +86,16 @@ fn shardline_accepts_native_xet_upload_and_download_flows() {
 #[test]
 fn shardline_accepts_native_xet_upload_and_download_flows_with_s3_when_configured() {
     let services = DockerLocalStack::builder().with_minio().start();
+    native_client_policy::require_available(
+        "Docker/MinIO native Xet backend",
+        matches!(&services, Ok(Some(_))),
+    );
     let Ok(Some(services)) = services else {
         return;
     };
-    let Some(raw) = services.s3_raw_config(Some(&services.unique_s3_key_prefix("native-xet-e2e")))
-    else {
-        return;
-    };
+    let raw = services
+        .s3_raw_config(Some(&services.unique_s3_key_prefix("native-xet-e2e")))
+        .expect("started MinIO must provide an S3 configuration");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
         .with_credentials(

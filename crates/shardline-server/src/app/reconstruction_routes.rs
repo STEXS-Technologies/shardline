@@ -278,6 +278,62 @@ pub(super) async fn batch_reconstruction(
     Ok(Json(build_batch_reconstruction_response(responses)))
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct BatchReconstructionRequestItem {
+    prefix: String,
+    hash: String,
+}
+
+/// Implements the Xet CAS JSON batch-reconstruction endpoint while preserving
+/// Shardline's existing query-string form for older clients.
+pub(super) async fn batch_reconstruction_post(
+    State(state): State<Arc<AppState>>,
+    repo: XetRepository,
+    Json(request): Json<Vec<BatchReconstructionRequestItem>>,
+) -> Result<Json<BatchReconstructionResponse>, ServerError> {
+    let _admit = state
+        .admission
+        .try_acquire(weights::BATCH_OPERATION)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let _parsing = state
+        .pools
+        .parsing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
+
+    if request.len() > super::MAX_BATCH_RECONSTRUCTION_FILE_IDS {
+        return Err(ServerError::TooManyBatchReconstructionFileIds);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut file_ids = Vec::with_capacity(request.len());
+    for item in request {
+        if item.prefix != "default" {
+            return Err(ServerError::InvalidContentHash);
+        }
+        validate_hash_path(&item.hash)?;
+        if seen.insert(item.hash.clone()) {
+            file_ids.push(item.hash);
+        }
+    }
+
+    let start = Instant::now();
+    let mut responses = Vec::new();
+    for file_id in file_ids {
+        match load_reconstruction_response(&state, &file_id, None, None, repo.capability()).await {
+            Ok(response) => responses.push((file_id, response)),
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let elapsed = start.elapsed();
+    let total_chunks = responses
+        .iter()
+        .map(|(_, response)| u64::try_from(response.terms.len()).unwrap_or(0))
+        .sum();
+    shardline_metrics::record_reconstruction(true, elapsed, total_chunks);
+    Ok(Json(build_batch_reconstruction_response(responses)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

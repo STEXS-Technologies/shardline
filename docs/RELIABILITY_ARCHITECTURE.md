@@ -74,6 +74,13 @@ Normal Linux maintenance is tracked in its existing CLI process; server startup
 owns in-process observation of its existing background sweeps. Only the explicit
 protected runner starts managed children. Neither requires a tracker service or
 introduces a GC schedule.
+Normal server shutdown stops optional startup housekeeping and waits for its
+blocking workers while database I/O is still available. An interrupted Hub
+secret sweep keeps completed atomic updates; later startup or lazy reads can
+upgrade the remaining rows. Embedded hosts that own their Tokio runtime can use
+`app::router_with_background_tasks`, stop HTTP serving, and await the returned
+handle's `shutdown()` before dropping that runtime. Existing `app::router`
+callers must keep their runtime alive until background work has finished.
 The public signing method continues to accept `ed25519-dalek` version-2 keys;
 the version-3 key required by StateChronicle is constructed internally from a
 zeroized seed copy.
@@ -181,7 +188,7 @@ independent reconciliation after fencing.
 
 The Linux `shardline maintenance` command composes these ports with the existing
 fsck, index rebuild, GC, lifecycle repair and storage migration implementations.
-Normal server startup starts no workers. SQLite operations run on a blocking
+Normal server startup starts no child processes. SQLite operations run on a blocking
 thread; a protected child process performs application work. Deployment roots,
 metadata/S3 targets, migration endpoints, input and executable are pinned. State
 directories remain outside deployment and migration roots. The controller

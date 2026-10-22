@@ -1,5 +1,7 @@
 use axum::{
+    body::Body,
     extract::{Path, State},
+    http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
 
@@ -21,7 +23,21 @@ pub(crate) async fn resolve_file(
         String,
     )>,
 ) -> Result<Response, HubApiError> {
-    resolve_file_for_repository(state, repo, ns, repo_name, rev, file_path).await
+    resolve_file_for_repository(state, repo, ns, repo_name, rev, file_path, false).await
+}
+
+pub(crate) async fn resolve_file_head(
+    State(state): State<HubState>,
+    repo: HubRepository,
+    Path((_repo_type, ns, repo_name, rev, file_path)): Path<(
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
+) -> Result<Response, HubApiError> {
+    resolve_file_for_repository(state, repo, ns, repo_name, rev, file_path, true).await
 }
 
 pub(crate) async fn resolve_model_file(
@@ -29,7 +45,15 @@ pub(crate) async fn resolve_model_file(
     repo: HubRepository,
     Path((ns, repo_name, rev, file_path)): Path<(String, String, String, String)>,
 ) -> Result<Response, HubApiError> {
-    resolve_file_for_repository(state, repo, ns, repo_name, rev, file_path).await
+    resolve_file_for_repository(state, repo, ns, repo_name, rev, file_path, false).await
+}
+
+pub(crate) async fn resolve_model_file_head(
+    State(state): State<HubState>,
+    repo: HubRepository,
+    Path((ns, repo_name, rev, file_path)): Path<(String, String, String, String)>,
+) -> Result<Response, HubApiError> {
+    resolve_file_for_repository(state, repo, ns, repo_name, rev, file_path, true).await
 }
 
 async fn resolve_file_for_repository(
@@ -39,22 +63,24 @@ async fn resolve_file_for_repository(
     repo_name: String,
     rev: String,
     file_path: String,
+    head_only: bool,
 ) -> Result<Response, HubApiError> {
     shardline_metrics::record_hub_api_request("resolve_file", "GET", 200);
     // The extractor has already authorized the request and minted the
     // capability; its repository scope namespaces the object-store reads.
     let name = format!("{ns}/{repo_name}");
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &rev)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
+    let commit_sha =
+        crate::git::smart_http::resolve_commit_id(&state, &name, &rev, repo.capability())?
+            .ok_or(HubApiError::RevisionNotFound)?;
     let result = resolve::resolve_file_from_store_scoped(
         &state,
         &commit_sha,
         &file_path,
         repo.capability(),
     )?;
+    let commit_sha =
+        crate::git::smart_http::public_commit_id(&state, &name, &commit_sha, repo.capability())
+            .await?;
 
     match result {
         resolve::DownloadResult::Inline { size, sha, .. } => {
@@ -70,6 +96,12 @@ async fn resolve_file_for_repository(
                 return Err(HubApiError::CasError(
                     "stored file length did not match revision metadata".to_owned(),
                 ));
+            }
+            if head_only {
+                let mut response = Response::new(Body::empty());
+                *response.status_mut() = StatusCode::OK;
+                set_file_metadata_headers(&mut response, &sha, &commit_sha, size)?;
+                return Ok(response);
             }
             let content_length = size.to_string();
             let mut response = stream_object(&state.object_store, key, size).into_response();
@@ -87,9 +119,34 @@ async fn resolve_file_for_repository(
             }
             Ok(response)
         }
-        resolve::DownloadResult::LfsRedirect { oid, .. } => {
+        resolve::DownloadResult::LfsRedirect { oid, size } => {
+            if head_only {
+                let mut response = Response::new(Body::empty());
+                *response.status_mut() = StatusCode::OK;
+                set_file_metadata_headers(&mut response, &oid, &commit_sha, size)?;
+                return Ok(response);
+            }
             let redirect_url = format!("/lfs/objects/{oid}");
             Ok(Redirect::temporary(&redirect_url).into_response())
         }
     }
+}
+
+fn set_file_metadata_headers(
+    response: &mut Response,
+    etag: &str,
+    commit_sha: &str,
+    size: u64,
+) -> Result<(), HubApiError> {
+    for (name, value) in [
+        ("content-type", "application/octet-stream".to_owned()),
+        ("x-repo-commit", commit_sha.to_owned()),
+        ("etag", etag.to_owned()),
+        ("content-length", size.to_string()),
+    ] {
+        response
+            .headers_mut()
+            .insert(name, value.parse().map_err(|_error| HubApiError::NotFound)?);
+    }
+    Ok(())
 }

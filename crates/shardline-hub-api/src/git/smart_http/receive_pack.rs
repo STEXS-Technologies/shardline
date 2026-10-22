@@ -1,7 +1,7 @@
 //! Receive-pack implementation for push.
 
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     extract::{Path, State},
     http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
@@ -13,18 +13,24 @@ use super::super::pktline::{self, FLUSH};
 use super::MAX_RECEIVE_PACK_REQUEST_BYTES;
 use super::error::SmartHttpError;
 use super::pack_parse::parse_pack_data_with_budget;
-use super::ref_advertisement::{authorize_write_with_context, is_valid_refname, resolve_repo_id};
+use super::ref_advertisement::{authorize_write_with_context, resolve_repo_id};
 use super::tree_walk::{parse_commit_object, walk_git_tree};
 use crate::{
     error::HubApiError,
     routes::{HubState, lfs_object_key, require_repository_binding},
 };
 use shardline_index::hub::{
-    HubFileEntry, HubRefCreateOutcome, HubRefUpdateOutcome, canonical_ref_name,
+    HubFileEntry, HubRefBatchOutcome, HubRefChange, HubRefCreateOutcome, HubRefUpdateOutcome,
+    canonical_ref_name,
 };
 use shardline_protocol::{ShardlineHash, TokenScope};
 use shardline_server_core::AuthorizedRepository;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+
+#[cfg(test)]
+mod atomic_tests;
+mod commands;
+pub(super) use commands::parse as parse_receive_pack_request;
 
 // ---- Receive-pack: POST /{type}/{ns}/{repo}/git-receive-pack ----
 
@@ -53,34 +59,37 @@ pub async fn receive_pack(
         None => AuthorizedRepository::anonymous_full_access(),
     };
 
-    let body = to_bytes(body, MAX_RECEIVE_PACK_REQUEST_BYTES)
-        .await
-        .map_err(|error| {
-            HubApiError::BadRequest(format!("receive-pack request too large: {error}"))
-        })?;
-    let (updates, packed_tail) = parse_receive_pack_request(&body);
+    // Admit before buffering the compressed pack, then transfer the same slot
+    // into projection. Reacquiring here would deadlock concurrent pushes.
+    let (body, admission) =
+        super::admission::read_request(body, MAX_RECEIVE_PACK_REQUEST_BYTES, "receive-pack")
+            .await?;
+    let (updates, packed_tail) = parse_receive_pack_request(&body)?;
+    let negotiated = super::capabilities::receive(&body)?;
+    let sideband = negotiated.sideband;
+    if negotiated.atomic && !state.store.supports_atomic_ref_updates() {
+        return Err(HubApiError::BadRequest(
+            "atomic pushes are unsupported by this store".to_owned(),
+        ));
+    }
     let pack_start = body.len().saturating_sub(packed_tail.len());
 
-    let updates: Vec<_> = updates
-        .into_iter()
-        .filter(|(_old, _new, refname)| is_valid_refname(refname))
-        .collect();
-
     if updates.is_empty() {
-        return build_report_response(&[], true);
+        return build_report_response(&[], true, sideband);
     }
 
-    let projection = super::projection::project_history_async(
+    let projection = super::projection::project_history_admitted(
         state.clone(),
         repo_id.clone(),
         capability.clone(),
+        admission,
     )
     .await?;
     let new_ids: Vec<_> = updates.iter().map(|(_, sha, _)| sha.clone()).collect();
     // Only read-only projection and pack processing run outside this future.
     // Mutations below remain synchronous so cancellation cannot release the
     // server's maintenance barrier while a detached storage write continues.
-    let (identities, objects) = tokio::task::spawn_blocking(move || {
+    let (identities, objects, _admission) = tokio::task::spawn_blocking(move || {
         let bases: HashMap<_, _> = projection
             .objects
             .iter()
@@ -110,7 +119,7 @@ pub async fn receive_pack(
             }
             objects
         });
-        (projection.identities, parsed)
+        (projection.identities, parsed, projection.admission)
     })
     .await
     .map_err(|e| HubApiError::BadRequest(format!("pack worker failed: {e}")))?;
@@ -124,10 +133,12 @@ pub async fn receive_pack(
                     .map(|(_, _, refname)| (refname, false, Some("unpack failed".to_owned())))
                     .collect::<Vec<_>>(),
                 false,
+                sideband,
             );
         }
     };
     let mut results = Vec::new();
+    let mut changes = Vec::new();
 
     for (old_sha, new_sha, refname) in &updates {
         // Multiple Hub revisions may project to the same Git commit. Resolve
@@ -139,7 +150,31 @@ pub async fn receive_pack(
             .flatten()
             .filter(|current| identities.get(current) == Some(old_sha))
             .unwrap_or_else(|| old_sha.clone());
-        let result = if new_sha == "0000000000000000000000000000000000000000" {
+        let result = if negotiated.atomic {
+            let prepared = if new_sha == "0000000000000000000000000000000000000000" {
+                if resolved_old == "0000000000000000000000000000000000000000" {
+                    Err(SmartHttpError::CannotDeleteNonExistentRef)
+                } else {
+                    Ok(HubRefChange {
+                        ref_name: refname.clone(),
+                        expected_sha: Some(resolved_old.clone()),
+                        new_sha: None,
+                        message: String::new(),
+                    })
+                }
+            } else {
+                prepare_push_objects(
+                    &state,
+                    &repo_id,
+                    &resolved_old,
+                    new_sha,
+                    refname,
+                    &objects,
+                    &capability,
+                )
+            };
+            prepared.map(|change| changes.push(change))
+        } else if new_sha == "0000000000000000000000000000000000000000" {
             delete_push_ref(&state, &repo_id, &resolved_old, refname)
         } else {
             store_push_objects(
@@ -158,57 +193,48 @@ pub async fn receive_pack(
         }
     }
 
-    build_report_response(&results, true)
-}
-
-pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, &[u8]) {
-    let mut updates = Vec::new();
-    let mut pack_start = 0;
-
-    let lines = pktline::decode_lines(body);
-    for line in &lines {
-        let s = match std::str::from_utf8(line) {
-            Ok(s) => s
-                .split_once('\0')
-                .map_or(s, |(command, _)| command)
-                .trim()
-                .to_owned(),
-            Err(_) => continue,
-        };
-
-        if s.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = s.split_whitespace().collect();
-        if let [first, second, third, ..] = parts.as_slice() {
-            updates.push((first.to_string(), second.to_string(), third.to_string()));
-        }
-    }
-
-    let mut pos = 0usize;
-    while pos.wrapping_add(4) <= body.len() {
-        let hex_len = body.get(pos..pos.wrapping_add(4)).unwrap_or(&[]);
-        if let Ok(hex_str) = std::str::from_utf8(hex_len)
-            && let Ok(len) = u16::from_str_radix(hex_str, 16)
-        {
-            if len == 0 {
-                pack_start = pos.wrapping_add(4);
-                break;
+    if negotiated.atomic {
+        let failure = if results.iter().any(|(_, ok, _)| !ok) {
+            Some("atomic push preparation failed".to_owned())
+        } else {
+            let store = state.store.clone();
+            let repository = repo_id.clone();
+            // Retain the same admission slot if the HTTP waiter disappears
+            // while the database transaction is still completing.
+            let publication = tokio::task::spawn_blocking(move || {
+                let _admission = _admission;
+                store.change_refs_atomically(&repository, &changes)
+            })
+            .await;
+            match publication {
+                Ok(Ok(HubRefBatchOutcome::Applied)) => None,
+                Ok(Ok(HubRefBatchOutcome::Conflict)) => {
+                    Some("atomic push failed: ref conflict or protected ref".to_owned())
+                }
+                Ok(Ok(HubRefBatchOutcome::Unsupported)) => {
+                    Some("atomic pushes are unsupported by this store".to_owned())
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!("atomic Git publication failed: {error}");
+                    Some("atomic push storage failure".to_owned())
+                }
+                Err(error) => {
+                    tracing::warn!("atomic Git worker failed: {error}");
+                    Some("atomic push worker failure".to_owned())
+                }
             }
-            pos = pos.wrapping_add(len as usize);
-            continue;
+        };
+        if let Some(failure) = failure {
+            for (_, ok, error) in &mut results {
+                *ok = false;
+                if error.is_none() {
+                    *error = Some(failure.clone());
+                }
+            }
         }
-        break;
     }
 
-    let pack_data = if pack_start < body.len() {
-        body.get(pack_start..).unwrap_or(&[])
-    } else {
-        &[]
-    };
-
-    (updates, pack_data)
+    build_report_response(&results, true, sideband)
 }
 
 fn store_push_objects(
@@ -220,6 +246,19 @@ fn store_push_objects(
     objects: &[GitObject],
     auth: &AuthorizedRepository,
 ) -> Result<(), SmartHttpError> {
+    let change = prepare_push_objects(state, repo_id, old_sha, new_sha, ref_name, objects, auth)?;
+    publish_push_ref(state, repo_id, &change)
+}
+
+fn prepare_push_objects(
+    state: &HubState,
+    repo_id: &str,
+    old_sha: &str,
+    new_sha: &str,
+    ref_name: &str,
+    objects: &[GitObject],
+    auth: &AuthorizedRepository,
+) -> Result<HubRefChange, SmartHttpError> {
     // Build SHA → object index.
     let mut sha_to_obj: HashMap<[u8; 20], &GitObject> = HashMap::new();
     for obj in objects {
@@ -404,11 +443,29 @@ fn store_push_objects(
     super::projection::archive_objects(state, repo_id, new_sha, objects, auth)
         .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
-    // Create revision in the store.
-    if parent.is_none() {
+    Ok(HubRefChange {
+        ref_name: ref_name.to_owned(),
+        expected_sha: parent.map(str::to_owned),
+        new_sha: Some(new_sha.to_owned()),
+        message,
+    })
+}
+
+fn publish_push_ref(
+    state: &HubState,
+    repo_id: &str,
+    change: &HubRefChange,
+) -> Result<(), SmartHttpError> {
+    let ref_name = &change.ref_name;
+    let message = &change.message;
+    let new_sha = change
+        .new_sha
+        .as_deref()
+        .ok_or(SmartHttpError::CannotDeleteNonExistentRef)?;
+    if change.expected_sha.is_none() {
         match state
             .store
-            .create_revision_if_absent(repo_id, parent, new_sha, ref_name, &message)
+            .create_revision_if_absent(repo_id, None, new_sha, ref_name, message)
             .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
         {
             HubRefCreateOutcome::Created(_) => {}
@@ -423,10 +480,10 @@ fn store_push_objects(
                 ));
             }
         }
-    } else {
+    } else if let Some(old_sha) = change.expected_sha.as_deref() {
         match state
             .store
-            .update_revision_if_current(repo_id, old_sha, new_sha, ref_name, &message)
+            .update_revision_if_current(repo_id, old_sha, new_sha, ref_name, message)
             .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
         {
             HubRefUpdateOutcome::Updated(_) => {}
@@ -482,7 +539,11 @@ fn delete_push_ref(
 pub(super) fn build_report_response(
     results: &[(String, bool, Option<String>)],
     unpack_ok: bool,
+    sideband: bool,
 ) -> Result<Response, HubApiError> {
+    // This report is valid for both negotiated versions. V2's option lines
+    // describe proc-receive rewrites; Hub publishes the requested refs without
+    // such rewrites, so the optional list is empty. Preserve V1's wire format.
     let mut body = String::new();
 
     if unpack_ok {
@@ -500,6 +561,16 @@ pub(super) fn build_report_response(
         }
     }
     body.push_str(FLUSH);
+
+    // Receive-pack multiplexes the complete status pkt-line stream, including
+    // its inner flush. Only negotiated clients receive this outer framing.
+    let body = if sideband {
+        let mut framed = pktline::sideband_data(body.as_bytes());
+        framed.extend_from_slice(FLUSH.as_bytes());
+        framed
+    } else {
+        body.into_bytes()
+    };
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(

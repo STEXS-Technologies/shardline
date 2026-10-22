@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use shardline_index::{AsyncIndexStore, QuarantineCandidate, RecordStore};
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+#[cfg(test)]
+use shardline_storage::ObjectStore;
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
 use shardline_xet_adapter::xorb_hash_from_object_key_if_present;
 
 use crate::{
@@ -12,7 +14,29 @@ use crate::{
 use shardline_server_core::{ServerObjectStore, checked_add, checked_increment, chunk_hash};
 
 #[cfg(test)]
+mod clock_read_tests;
+#[cfg(test)]
 mod stale_listing_tests;
+
+fn read_clock_object(
+    object_store: &ServerObjectStore,
+    key: &ObjectKey,
+) -> Result<Option<Vec<u8>>, GcError> {
+    // Keep the existing whole-object read ceiling. The bounded API observes
+    // length and bytes in one S3 GET rather than a HEAD followed by a GET.
+    const MAX_CLOCK_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+    object_store
+        .read_object_if_present(key, MAX_CLOCK_OBJECT_BYTES)
+        .map(|object| object.map(|(bytes, _length)| bytes))
+        .map_err(|error| match error {
+            shardline_server_core::BoundedObjectReadError::ObjectTooLarge => {
+                GcError::ObjectStore(shardline_server_core::ServerObjectStoreError::Overflow)
+            }
+            shardline_server_core::BoundedObjectReadError::Store(error) => {
+                GcError::ObjectStore(error)
+            }
+        })
+}
 
 pub(super) async fn read_quarantine_entries<IndexAdapter>(
     index_store: &IndexAdapter,
@@ -167,10 +191,9 @@ pub(super) fn read_gc_clock_anchor(
     object_store: &ServerObjectStore,
 ) -> Result<Option<GcClockAnchor>, GcError> {
     let key = last_gc_clock_anchor_key()?;
-    let Some(metadata) = object_store.metadata(&key)? else {
+    let Some(body) = read_clock_object(object_store, &key)? else {
         return Ok(None);
     };
-    let body = object_store.read_full_object(&key, metadata.length())?;
     let Some(wall_seconds) = std::str::from_utf8(&body)
         .ok()
         .and_then(|text| text.trim().parse::<u64>().ok())
@@ -193,10 +216,9 @@ fn read_gc_clock_boot_sidecar(
 ) -> Result<Option<GcClockAnchor>, GcError> {
     let key = ObjectKey::parse(GC_CLOCK_BOOT_OBSERVATION_KEY)
         .map_err(|_error| GcError::InvalidContentHash)?;
-    let Some(metadata) = object_store.metadata(&key)? else {
+    let Some(body) = read_clock_object(object_store, &key)? else {
         return Ok(None);
     };
-    let body = object_store.read_full_object(&key, metadata.length())?;
     Ok(serde_json::from_slice(&body).ok())
 }
 

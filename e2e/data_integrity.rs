@@ -1,3 +1,6 @@
+mod data_integrity_requirements;
+mod native_client_policy;
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -93,11 +96,11 @@ async fn try_start_server(
         .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
         .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())?
         .with_provider_runtime(
-        config_path,
-        b"test-api-key-16bytes".to_vec(),
-        "test-issuer".to_owned(),
-        NonZeroU64::new(3600).unwrap(),
-    )?;
+            config_path,
+            b"test-api-key-16bytes".to_vec(),
+            "test-issuer".to_owned(),
+            NonZeroU64::new(3600).unwrap(),
+        )?;
     let config = modify_config(config)?;
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
@@ -259,10 +262,9 @@ async fn xet_write_token_issuance_succeeds() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_when_role_api_only() {
-    let (base_url, server) =
-        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], Ok)
-            .await
-            .unwrap();
+    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], Ok)
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -5282,7 +5284,7 @@ async fn bazel_put_ac_invalid_hash_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oci_referrers_api_not_supported() {
+async fn oci_referrers_for_unknown_subject_returns_empty_index() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
@@ -5295,7 +5297,10 @@ async fn oci_referrers_api_not_supported() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "referrers API not implemented");
+    assert_eq!(resp.status(), 200);
+    let index: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(index["schemaVersion"], 2);
+    assert!(index["manifests"].as_array().unwrap().is_empty());
 
     server.abort();
 }
@@ -7544,10 +7549,9 @@ async fn verify_wrong_signing_key_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_role_api_rejects_blob_upload() {
-    let (base_url, server) =
-        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], Ok)
-            .await
-            .unwrap();
+    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], Ok)
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let repo = "test-owner/test-repo";
@@ -8834,6 +8838,7 @@ async fn postgres_backend_lfs_round_trip() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -9376,6 +9381,7 @@ async fn s3_backend_lfs_round_trip() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -9410,6 +9416,7 @@ async fn s3_backend_lfs_round_trip() {
             ServerFrontend::Lfs,
             ServerFrontend::Oci,
             ServerFrontend::BazelHttp,
+            ServerFrontend::S3,
         ]
         .iter()
         .copied(),
@@ -9488,6 +9495,29 @@ async fn s3_backend_lfs_round_trip() {
         .unwrap();
     assert_eq!(bazel_get.status(), 200, "s3 Bazel GET");
 
+    // S3 PutObject streams through FileUploadIngestor. Use enough varied data
+    // to create multiple CDC chunks, then read it back through the published
+    // file record so the MinIO-backed Xorb path is checked end to end.
+    let s3_content: Vec<u8> = (0..512 * 1024)
+        .map(|index| ((index * 31 + index / 251) % 256) as u8)
+        .collect();
+    let s3_object = client
+        .put(format!("{base_url}/test-owner.test-repo/packed.bin"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(s3_content.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(s3_object.status(), 200, "s3 object PUT");
+    let s3_get = client
+        .get(format!("{base_url}/test-owner.test-repo/packed.bin"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(s3_get.status(), 200, "s3 object GET");
+    assert_eq!(s3_get.bytes().await.unwrap().as_ref(), s3_content);
+
     server.abort();
 }
 
@@ -9498,6 +9528,7 @@ async fn s3_backend_dedup_cross_frontend() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -9596,6 +9627,7 @@ async fn postgres_backend_oci_manifest_push_pull() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -10713,8 +10745,7 @@ async fn hub_dataset_operations() {
 
     // Repo-scoped token: `require_repository_binding` requires the token's
     // `RepositoryScope` to match `test-owner/test-dataset` exactly.
-    let dataset_token =
-        mint_token("test-subject", "test-owner", "test-dataset", "main").unwrap();
+    let dataset_token = mint_token("test-subject", "test-owner", "test-dataset", "main").unwrap();
 
     // Create a dataset repo.
     let create = client
@@ -12402,6 +12433,7 @@ async fn s3_backend_oci_session_upload() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -12550,6 +12582,7 @@ async fn s3_backend_oci_session_abort() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };

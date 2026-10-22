@@ -313,12 +313,10 @@ When unset, the transfer budget scales with host parallelism so larger deploymen
 not inherit the same fixed ceiling as a small single-node install.
 
 Shardline enforces `SHARDLINE_MAX_REQUEST_BODY_BYTES` as a maximum accepted request body
-size. Native xorb and shard uploads do not write request bodies to an `incoming`
-directory or shard parsing workspace.
-The server reads bounded request frames into memory for Xet normalization and
-validation, then writes immutable objects through the configured storage adapter.
-With the S3 adapter, upload-body persistence goes directly through S3; local filesystem
-writes happen only when the local object adapter is the selected storage backend.
+size. Native Xorb and shard uploads stage small bodies in bounded memory;
+bodies above 256 KiB spill to temporary files. The server validates content before
+publishing immutable objects through the configured storage adapter. S3-backed
+uploads can therefore still use local scratch I/O for staging and verification.
 Control-plane JSON and webhook bodies still use bounded extractor buffering because they
 are small metadata requests.
 Native xorb and shard ingest now also pre-size those bounded in-memory buffers from the

@@ -444,6 +444,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_max_tree_entries_per_repo(max_tree_entries_per_repo)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
+    if let Ok(path) = var("SHARDLINE_S3_SIGNING_IDENTITIES_FILE") {
+        config = config.with_s3_signing_identities_file(std::path::Path::new(&path))?;
+    }
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
     config.cache.redis_tls = reconstruction_cache_redis_tls;
     if config.cache.adapter == ReconstructionCacheAdapter::Redis

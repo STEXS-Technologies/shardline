@@ -15,8 +15,9 @@ pub(crate) use helpers::{
     parse_upload_content_range,
 };
 pub(crate) use lfs::{
-    lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_object,
-    lfs_put_object, lfs_verify_object, sweep_lfs_patch_sessions,
+    lfs_batch, lfs_create_lock, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_list_locks,
+    lfs_patch_object, lfs_put_object, lfs_unlock, lfs_verify_locks, lfs_verify_object,
+    register_hub_lock_routes, sweep_lfs_patch_sessions,
 };
 pub use lfs_patch_evidence::{LfsPatchEvidenceRepairInput, repair_lfs_patch_evidence};
 #[cfg(feature = "fuzzing")]
@@ -25,8 +26,9 @@ pub(crate) use oci::{
     oci_api_dispatch, oci_dispatch, oci_registry_token, oci_transfer_dispatch, oci_v2_root,
 };
 pub(crate) use s3::{
-    s3_create_bucket, s3_delete_bucket, s3_delete_object, s3_get_bucket, s3_get_object,
-    s3_head_bucket, s3_head_object, s3_list_buckets, s3_post_bucket, s3_post_object, s3_put_object,
+    protect_s3_signing, s3_create_bucket, s3_delete_bucket, s3_delete_object, s3_get_bucket,
+    s3_get_object, s3_head_bucket, s3_head_object, s3_list_buckets, s3_post_bucket, s3_post_object,
+    s3_put_object,
 };
 
 use super::MAX_PROTOCOL_QUERY_BYTES;

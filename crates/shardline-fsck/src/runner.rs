@@ -5,7 +5,7 @@ use shardline_index::{AsyncIndexStore, FileRecord, FileRecordInvariantError, xet
 use shardline_server_core::{
     OpsRecordStore, ServerObjectStore, ShardMetadataLimits, checked_increment,
 };
-use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_storage::ObjectKey;
 use shardline_xet_adapter::{XetAdapterError, retained_shard_chunk_hashes_from_reader};
 
 use crate::{
@@ -239,8 +239,10 @@ where
             let chunk_hash_hex = xet_hash_hex_string(mapping.chunk_hash());
             let shard_location =
                 object_location_display(object_root, object_store, mapping.shard_object_key());
-            let metadata = match object_store.metadata(mapping.shard_object_key())? {
-                Some(metadata) => metadata,
+            let mut shard_reader = match object_store
+                .materialize_bounded_object_if_present(mapping.shard_object_key(), 0)?
+            {
+                Some((reader, _length)) => reader,
                 None => {
                     push_issue(
                         report,
@@ -253,10 +255,8 @@ where
                     return Ok::<(), FsckError>(());
                 }
             };
-            let mut shard_file = object_store
-                .materialize_object_to_tempfile(mapping.shard_object_key(), metadata.length())?;
             let chunk_hashes = match retained_shard_chunk_hashes_from_reader(
-                shard_file.as_file_mut(),
+                &mut shard_reader,
                 shard_metadata_limits,
             ) {
                 Ok(chunk_hashes) => chunk_hashes,

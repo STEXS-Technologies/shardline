@@ -17,6 +17,27 @@ connections to finish; allow enough runtime termination grace for those transfer
 If an embedding application sets `ServerConfig::with_shutdown_timeout`, give the
 runtime a longer grace period so the server's deadline runs before SIGKILL.
 
+## Protocol frontend upgrade from 1.12.1
+
+The unreleased frontend changes add durable Xet file identities and LFS locks.
+They require schema migrations; the schema-free dependency upgrade described
+below does not apply to this transition.
+
+Drain all server roles and pause maintenance before changing the shared schema.
+Back up metadata and object storage together. With the upgraded binary, run
+`shardline db migrate up` as the PostgreSQL schema owner, or
+`shardline db migrate local-up --root <root>` for local SQLite. Give runtime
+accounts access to the new tables using the deployment's existing grant policy;
+they do not need permission to create tables. Restart upgraded roles and verify
+existing files through their normal clients before resuming traffic.
+
+A binary-only rollback to 1.12.1 is rejected because that binary does not know
+the new migration entries. The new tables contain persistent identities and
+locks: dropping them is not a data-preserving rollback of those capabilities.
+Do not run downgrade SQL blindly or restore an old backup over newer writes.
+Retain the matching metadata and object-store backup and qualify the rollback
+procedure for the deployment before upgrading.
+
 ## StateChronicle/Penelope 0.2.0 dependency upgrade
 
 For tracking commands and recovery, see the

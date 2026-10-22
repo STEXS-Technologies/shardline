@@ -5,8 +5,10 @@ pub mod dataset;
 pub mod handlers;
 pub mod health;
 pub mod helpers;
+mod history;
 pub mod lfs;
 mod object_io;
+mod refs;
 pub mod repos;
 pub mod resolve;
 pub mod router;
@@ -26,11 +28,13 @@ pub(crate) use self::helpers::test_repo;
 pub(crate) use self::helpers::{
     HubRepository, authorize, repo_type_path, require_repository_binding,
 };
+pub(crate) use self::history::*;
 // Re-export the canonical LFS object-key builder from the shared protocol
 // adapters so sibling modules and `crate::routes::lfs_object_key` references
 // resolve to a single implementation (no duplicated key derivation).
 pub(crate) use self::lfs::*;
 pub(crate) use self::object_io::{read_object_prefix, stream_object};
+pub(crate) use self::refs::*;
 pub(crate) use self::repos::*;
 pub(crate) use self::resolve::*;
 pub use self::router::{router, router_with_dataset_query};

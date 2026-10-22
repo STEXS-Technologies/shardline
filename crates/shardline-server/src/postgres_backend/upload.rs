@@ -65,11 +65,12 @@ impl super::PostgresBackend {
             &self.gc_barrier_pool,
             &self.request_session_identity,
             &self.request_session_slots,
-            self.upload_file_stream(
+            self.upload_file_stream_with_storage(
                 file_id,
                 RequestBodyReader::from_bytes(body),
                 repository_scope,
                 None,
+                UploadStorage::IndividualChunks,
             ),
         )
         .await
@@ -379,7 +380,7 @@ impl super::PostgresBackend {
                                 &bytes,
                                 repository_scope,
                                 shard_metadata_limits,
-                                move |records, mappings, references| async move {
+                                move |records, mappings, references, identities| async move {
                                     if let Some(mut connection) =
                                         crate::maintenance_barrier::RequestSession::connection_for(
                                             &request_session_identity,
@@ -387,21 +388,23 @@ impl super::PostgresBackend {
                                         .await
                                     {
                                         publication_backend
-                                            .commit_validated_native_shard_on_connection(
+                                            .commit_validated_native_shard_on_connection_with_xet_identities(
                                                 connection
                                                     .as_mut()
                                                     .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
                                                 &records,
                                                 &mappings,
                                                 &references,
+                                                &identities,
                                             )
                                             .await?;
                                     } else {
                                         publication_backend
-                                        .commit_validated_native_shard(
+                                        .commit_validated_native_shard_with_xet_identities(
                                             &records,
                                             &mappings,
                                             &references,
+                                            &identities,
                                         )
                                         .await?;
                                     }
@@ -416,7 +419,7 @@ impl super::PostgresBackend {
                                 file.path(),
                                 repository_scope,
                                 shard_metadata_limits,
-                                move |records, mappings, references| async move {
+                                move |records, mappings, references, identities| async move {
                                     if let Some(mut connection) =
                                         crate::maintenance_barrier::RequestSession::connection_for(
                                             &request_session_identity,
@@ -424,21 +427,23 @@ impl super::PostgresBackend {
                                         .await
                                     {
                                         publication_backend
-                                            .commit_validated_native_shard_on_connection(
+                                            .commit_validated_native_shard_on_connection_with_xet_identities(
                                                 connection
                                                     .as_mut()
                                                     .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
                                                 &records,
                                                 &mappings,
                                                 &references,
+                                                &identities,
                                             )
                                             .await?;
                                     } else {
                                         publication_backend
-                                        .commit_validated_native_shard(
+                                        .commit_validated_native_shard_with_xet_identities(
                                             &records,
                                             &mappings,
                                             &references,
+                                            &identities,
                                         )
                                         .await?;
                                     }

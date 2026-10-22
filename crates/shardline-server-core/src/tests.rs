@@ -557,6 +557,44 @@ fn materialize_object_to_tempfile_rejects_length_mismatch() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn materialize_local_reader_preserves_inode_bytes_and_open_handle_after_unlink() {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::MetadataExt;
+
+    let storage = shardline_test_support::TempStorage::new();
+    let root = storage.path().join("objects");
+    let store = ServerObjectStore::local(&root).unwrap();
+    let key =
+        ObjectKey::parse("aa/2222222222222222222222222222222222222222222222222222222222222222")
+            .unwrap();
+    let body: Vec<u8> = (0..(2 * 1024 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let integrity = ObjectIntegrity::new(chunk_hash(&body), body.len() as u64);
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(&body), &integrity)
+        .unwrap();
+    let source = root.join(key.as_str());
+    let original = std::fs::metadata(&source).unwrap();
+    let (mut reader, length) = store
+        .materialize_bounded_object_if_present(&key, 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(length, body.len() as u64);
+    let MaterializedObject::Local(file) = &reader else {
+        panic!("local validation must retain the original file");
+    };
+    assert_eq!(file.metadata().unwrap().ino(), original.ino());
+    assert_eq!(file.metadata().unwrap().dev(), original.dev());
+    std::fs::remove_file(&source).unwrap();
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    let mut recovered = Vec::new();
+    reader.read_to_end(&mut recovered).unwrap();
+    assert_eq!(recovered, body);
+}
+
 /// Serves exactly one GET. Asserting the complete requested range makes this
 /// fixture reject a regression to sequential per-MiB GETs.
 fn materialization_s3_fixture(
@@ -652,6 +690,182 @@ fn materialize_s3_rejects_wrong_response_range() {
     let result = store.materialize_object_to_tempfile(&key, 100);
     server.join().unwrap();
     assert!(result.is_err(), "a different range must not be accepted");
+}
+
+pub(crate) fn full_object_get_fixture(
+    body: Option<Vec<u8>>,
+) -> (ServerObjectStore, std::thread::JoinHandle<()>) {
+    full_object_get_fixture_with_length(body, None)
+}
+
+pub(crate) fn full_object_get_fixture_with_length(
+    body: Option<Vec<u8>>,
+    declared_length: Option<u64>,
+) -> (ServerObjectStore, std::thread::JoinHandle<()>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut connection, _) = listener.accept().unwrap();
+        connection
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(connection.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with("GET /assets/aa/materialize "));
+        loop {
+            line.clear();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+            assert!(
+                !line.to_ascii_lowercase().starts_with("range:"),
+                "full-object GET must not send a range header"
+            );
+        }
+        if let Some(body) = body {
+            write!(
+                connection,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Wed, 01 Oct 2025 00:00:00 GMT\r\nConnection: close\r\n\r\n",
+                declared_length.unwrap_or(body.len() as u64)
+            )
+            .unwrap();
+            // A bounded reader may reject the object from response metadata
+            // before consuming the body, which can close the client socket.
+            let _ = connection.write_all(&body);
+        } else {
+            connection
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        }
+    });
+    let config = S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
+        .with_endpoint(Some(format!("http://{address}")))
+        .with_allow_http(true)
+        .with_credentials(
+            Some(shardline_protocol::SecretString::from_secret("fixture")),
+            Some(shardline_protocol::SecretString::from_secret("fixture")),
+            None,
+        );
+    (ServerObjectStore::s3(config).unwrap(), server)
+}
+
+#[test]
+fn materialize_s3_if_present_uses_one_full_get_and_returns_observed_length() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let body = b"one request, same-response length".to_vec();
+    let (store, server) = full_object_get_fixture(Some(body.clone()));
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let materialized = store
+        .materialize_object_to_tempfile_if_present(&key)
+        .unwrap();
+    server.join().unwrap();
+    let (mut file, length) = materialized.unwrap();
+    assert_eq!(length, body.len() as u64);
+    file.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
+    let mut actual = Vec::new();
+    file.as_file_mut().read_to_end(&mut actual).unwrap();
+    assert_eq!(actual, body);
+}
+
+#[test]
+fn materialize_s3_if_present_returns_none_for_missing_object() {
+    let (store, server) = full_object_get_fixture(None);
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let materialized = store
+        .materialize_object_to_tempfile_if_present(&key)
+        .unwrap();
+    server.join().unwrap();
+    assert!(materialized.is_none());
+}
+
+#[test]
+fn materialize_bounded_s3_object_keeps_small_response_in_memory_with_one_get() {
+    use std::io::Read;
+
+    let body = b"verified bytes without scratch payload writes".to_vec();
+    let (store, server) = full_object_get_fixture(Some(body.clone()));
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let (mut object, length) = store
+        .materialize_bounded_object_if_present(&key, body.len() as u64)
+        .unwrap()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(length, body.len() as u64);
+    let mut actual = Vec::new();
+    object.read_to_end(&mut actual).unwrap();
+    assert_eq!(actual, body);
+    assert!(matches!(object, MaterializedObject::Memory(_)));
+}
+
+#[test]
+fn materialize_bounded_s3_object_spills_large_response_in_the_same_get() {
+    use std::io::Read;
+
+    let body = vec![b'x'; 128];
+    let (store, server) = full_object_get_fixture(Some(body.clone()));
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let (mut object, length) = store
+        .materialize_bounded_object_if_present(&key, 64)
+        .unwrap()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(length, body.len() as u64);
+    let mut actual = Vec::new();
+    object.read_to_end(&mut actual).unwrap();
+    assert_eq!(actual, body);
+    assert!(matches!(object, MaterializedObject::Temporary(_)));
+}
+
+#[test]
+fn read_s3_if_present_uses_one_full_get_and_returns_observed_length() {
+    let body = b"bounded one-request read".to_vec();
+    let (store, server) = full_object_get_fixture(Some(body.clone()));
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let object = store.read_object_if_present(&key, 1024).unwrap();
+    server.join().unwrap();
+    assert_eq!(object, Some((body.clone(), body.len() as u64)));
+}
+
+#[test]
+fn read_s3_if_present_returns_none_for_missing_object() {
+    let (store, server) = full_object_get_fixture(None);
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let object = store.read_object_if_present(&key, 1024).unwrap();
+    server.join().unwrap();
+    assert!(object.is_none());
+}
+
+#[test]
+fn read_s3_if_present_preserves_empty_object_existence() {
+    let (store, server) = full_object_get_fixture(Some(Vec::new()));
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let object = store.read_object_if_present(&key, 0).unwrap();
+    server.join().unwrap();
+    assert_eq!(object, Some((Vec::new(), 0)));
+}
+
+#[test]
+fn read_s3_if_present_rejects_objects_over_the_memory_bound() {
+    let (store, server) = full_object_get_fixture(Some(vec![b'x'; 8]));
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let result = store.read_object_if_present(&key, 7);
+    server.join().unwrap();
+    assert!(
+        matches!(
+            result,
+            Err(super::object_store::BoundedObjectReadError::ObjectTooLarge)
+        ),
+        "unexpected bounded-read result: {result:?}"
+    );
 }
 
 // ── copy_if_absent ────────────────────────────────────────────────

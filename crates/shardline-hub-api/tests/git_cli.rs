@@ -3,7 +3,16 @@
 mod support;
 use support::common;
 
-use axum::{body::Body, http::Request};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use axum::{
+    body::{Body, to_bytes},
+    http::Request,
+    middleware::{self, Next},
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use tower::ServiceExt;
 
@@ -43,6 +52,9 @@ fn git(args: &[&str]) -> std::process::Output {
         .env("GIT_HTTP_LOW_SPEED_TIME", "10")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TRACE_PACKET", "1")
+        .env("GIT_AUTHOR_DATE", "2030-01-01T00:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2030-01-01T00:00:00+00:00")
         .output()
         .expect("installed Git client")
 }
@@ -61,7 +73,27 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
     commit(&test, b"first real contents\n").await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = test.app();
+    // Count actual upload-pack HTTP response bytes seen by native Git. Compare
+    // incremental and cold fetches at the same head, rather than local pack
+    // sizes (Git can repack those independently of the server response).
+    let transferred = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&transferred);
+    let app = test.app().layer(middleware::from_fn(
+        move |request: Request<Body>, next: Next| {
+            let observed = Arc::clone(&observed);
+            async move {
+                let upload_pack = request.uri().path().ends_with("/git-upload-pack");
+                let response = next.run(request).await;
+                if !upload_pack {
+                    return response;
+                }
+                let (parts, body) = response.into_parts();
+                let bytes = to_bytes(body, 16 * 1024 * 1024).await.unwrap();
+                observed.fetch_add(bytes.len(), Ordering::Relaxed);
+                axum::response::Response::from_parts(parts, Body::from(bytes))
+            }
+        },
+    ));
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -100,13 +132,108 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
     );
     let first = git(&["-C", clone_dir, "rev-parse", "HEAD"]);
     commit(&test, b"second real contents\n").await;
+    transferred.store(0, Ordering::Relaxed);
     let fetched = git(&["-C", clone_dir, "fetch", "origin"]);
     assert!(
         fetched.status.success(),
         "fetch: {}",
         String::from_utf8_lossy(&fetched.stderr)
     );
+    let incremental_bytes = transferred.swap(0, Ordering::Relaxed);
+    let cold_path = work.path().join("cold-same-head");
+    let cold_dir = cold_path.to_str().unwrap();
+    let cold = git(&["clone", &url, cold_dir]);
+    assert!(
+        cold.status.success(),
+        "cold clone: {}",
+        String::from_utf8_lossy(&cold.stderr)
+    );
+    let cold_bytes = transferred.load(Ordering::Relaxed);
+    let shallow_path = work.path().join("shallow");
+    let shallow_dir = shallow_path.to_str().unwrap();
+    for args in [
+        vec![
+            "clone",
+            "--depth=1",
+            "--no-tags",
+            "--single-branch",
+            &url,
+            shallow_dir,
+        ],
+        vec!["-C", shallow_dir, "fsck", "--strict"],
+    ] {
+        let result = git(&args);
+        assert!(
+            result.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    assert_eq!(
+        git(&["-C", shallow_dir, "rev-list", "--count", "HEAD"]).stdout,
+        b"1\n"
+    );
+    assert_eq!(
+        git(&["-C", shallow_dir, "rev-parse", "--is-shallow-repository"]).stdout,
+        b"true\n"
+    );
+    let deepen = git(&["-C", shallow_dir, "fetch", "--deepen=1", "origin", "main"]);
+    assert!(
+        deepen.status.success(),
+        "deepen: {}",
+        String::from_utf8_lossy(&deepen.stderr)
+    );
+    assert_eq!(
+        git(&["-C", shallow_dir, "rev-list", "--count", "HEAD"]).stdout,
+        b"2\n"
+    );
+    let complete = git(&["-C", shallow_dir, "fetch", "--unshallow", "origin", "main"]);
+    assert!(
+        complete.status.success(),
+        "unshallow: {}",
+        String::from_utf8_lossy(&complete.stderr)
+    );
+    assert_eq!(
+        git(&["-C", shallow_dir, "rev-parse", "--is-shallow-repository"]).stdout,
+        b"false\n"
+    );
+    assert_eq!(
+        git(&["-C", shallow_dir, "rev-list", "HEAD"]).stdout,
+        git(&["-C", cold_dir, "rev-list", "HEAD"]).stdout
+    );
+    assert!(
+        git(&["-C", shallow_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
+    eprintln!("upload-pack response bytes: incremental={incremental_bytes}, cold={cold_bytes}");
+    assert!(incremental_bytes > 0);
+    assert!(
+        incremental_bytes < cold_bytes,
+        "native incremental fetch transferred {incremental_bytes} bytes versus {cold_bytes} for a cold clone at the same head"
+    );
+    assert_eq!(
+        git(&["-C", clone_dir, "rev-parse", "origin/main"]).stdout,
+        git(&["-C", cold_dir, "rev-parse", "HEAD"]).stdout
+    );
+    assert_eq!(
+        std::fs::read(cold_path.join("nested/hello.txt")).unwrap(),
+        b"second real contents\n"
+    );
+    assert!(
+        git(&["-C", cold_dir, "fsck", "--full", "--strict"])
+            .status
+            .success()
+    );
     let ancestor = String::from_utf8(first.stdout).unwrap();
+    let historical = git(&[
+        "-C",
+        clone_dir,
+        "show",
+        &format!("{}:nested/hello.txt", ancestor.trim()),
+    ]);
+    assert!(historical.status.success());
+    assert_eq!(historical.stdout, b"first real contents\n");
     assert!(
         git(&[
             "-C",
@@ -129,9 +256,13 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
         String::from_utf8_lossy(&checked.stderr)
     );
     assert!(
-        git(&["-C", clone_dir, "reset", "--hard", "origin/main"])
+        git(&["-C", clone_dir, "pull", "--ff-only", "origin", "main"])
             .status
             .success()
+    );
+    assert_eq!(
+        std::fs::read(clone_path.join("nested/hello.txt")).unwrap(),
+        b"second real contents\n"
     );
     std::fs::write(clone_path.join("nested/hello.txt"), b"from Git push\n").unwrap();
     assert!(git(&["-C", clone_dir, "add", "."]).status.success());
@@ -152,12 +283,346 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
     );
     let pushed_head = git(&["-C", clone_dir, "rev-parse", "HEAD"]);
     let pushed = git(&["-C", clone_dir, "push", "origin", "HEAD:main"]);
+    let trace = String::from_utf8_lossy(&pushed.stderr);
+    assert!(
+        trace.lines().any(|line| line.contains("> ")
+            && line.contains("report-status-v2")
+            && line.contains("side-band-64k")),
+        "native client must negotiate report-status-v2: {trace}"
+    );
+    assert!(
+        trace.contains("unpack ok"),
+        "native client must receive unpack status: {trace}"
+    );
     assert!(
         pushed.status.success(),
         "push: {}",
         String::from_utf8_lossy(&pushed.stderr)
     );
     let second_path = work.path().join("clone-git");
+    let partial_path = work.path().join("partial-clone");
+    let partial_dir = partial_path.to_str().unwrap();
+    let partial = git(&[
+        "clone",
+        "--filter=blob:none",
+        "--no-checkout",
+        &url,
+        partial_dir,
+    ]);
+    assert!(
+        partial.status.success(),
+        "partial clone: {}",
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    let local_objects = git(&[
+        "-C",
+        partial_dir,
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check",
+    ]);
+    assert!(local_objects.status.success());
+    assert!(
+        !String::from_utf8_lossy(&local_objects.stdout).contains(" blob "),
+        "initial clone must omit blobs"
+    );
+    let checkout = git(&["-C", partial_dir, "checkout", "main"]);
+    assert!(
+        checkout.status.success(),
+        "lazy checkout: {}",
+        String::from_utf8_lossy(&checkout.stderr)
+    );
+    assert_eq!(
+        std::fs::read(partial_path.join("nested/hello.txt")).unwrap(),
+        b"from Git push\n"
+    );
+    assert!(
+        git(&["-C", partial_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
+    for depth in [0, 1] {
+        let tree_path = work.path().join(format!("tree-filter-{depth}"));
+        let tree_dir = tree_path.to_str().unwrap();
+        let filter = format!("--filter=tree:{depth}");
+        let tree_cloned = git(&["clone", &filter, "--no-checkout", &url, tree_dir]);
+        assert!(
+            tree_cloned.status.success(),
+            "tree clone: {}",
+            String::from_utf8_lossy(&tree_cloned.stderr)
+        );
+        let listed = git(&[
+            "-C",
+            tree_dir,
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check",
+        ]);
+        assert!(listed.status.success());
+        let listing = String::from_utf8_lossy(&listed.stdout);
+        assert!(!listing.contains(" blob "));
+        // Git can synthesize its canonical empty tree locally; it is not a
+        // downloaded repository directory tree.
+        let nonempty_tree = listing
+            .lines()
+            .any(|line| line.contains(" tree ") && !line.ends_with(" tree 0"));
+        assert_eq!(nonempty_tree, depth > 0, "{listing}");
+        let checked_out = git(&["-C", tree_dir, "checkout", "main"]);
+        assert!(
+            checked_out.status.success(),
+            "tree lazy checkout: {}",
+            String::from_utf8_lossy(&checked_out.stderr)
+        );
+        assert_eq!(
+            std::fs::read(tree_path.join("nested/hello.txt")).unwrap(),
+            b"from Git push\n"
+        );
+        assert_eq!(
+            std::fs::read(tree_path.join("foo/child.txt")).unwrap(),
+            b"directory child\n"
+        );
+        assert!(git(&["-C", tree_dir, "fsck", "--strict"]).status.success());
+    }
+    let limited_path = work.path().join("limited-clone");
+    let limited_dir = limited_path.to_str().unwrap();
+    let limited = git(&[
+        "clone",
+        "--filter=blob:limit=16",
+        "--no-checkout",
+        &url,
+        limited_dir,
+    ]);
+    assert!(
+        limited.status.success(),
+        "limited clone: {}",
+        String::from_utf8_lossy(&limited.stderr)
+    );
+    let listed = git(&[
+        "-C",
+        limited_dir,
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check",
+    ]);
+    assert!(listed.status.success());
+    let listing = String::from_utf8(listed.stdout).unwrap();
+    let sizes: Vec<_> = listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next()?;
+            (fields.next()? == "blob").then(|| fields.next().unwrap().parse::<usize>().unwrap())
+        })
+        .collect();
+    assert!(!sizes.is_empty());
+    assert!(sizes.iter().all(|size| *size < 16));
+    let historical_partial = git(&[
+        "-C",
+        limited_dir,
+        "show",
+        &format!("{}:nested/hello.txt", ancestor.trim()),
+    ]);
+    assert!(
+        historical_partial.status.success(),
+        "lazy history: {}",
+        String::from_utf8_lossy(&historical_partial.stderr)
+    );
+    assert_eq!(historical_partial.stdout, b"first real contents\n");
+    assert!(
+        git(&["-C", limited_dir, "checkout", "main"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        std::fs::read(limited_path.join("nested/hello.txt")).unwrap(),
+        b"from Git push\n"
+    );
+    assert!(
+        git(&["-C", limited_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
+    let baseline = git(&[
+        "-C",
+        clone_dir,
+        "push",
+        "origin",
+        "HEAD^:refs/tags/shallow-base",
+    ]);
+    assert!(
+        baseline.status.success(),
+        "baseline tag: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let excluded_path = work.path().join("excluded-shallow");
+    let excluded_dir = excluded_path.to_str().unwrap();
+    let excluded = git(&[
+        "clone",
+        "--shallow-exclude=shallow-base",
+        "--single-branch",
+        "--no-tags",
+        &url,
+        excluded_dir,
+    ]);
+    assert!(
+        excluded.status.success(),
+        "excluded clone: {}",
+        String::from_utf8_lossy(&excluded.stderr)
+    );
+    assert_eq!(
+        git(&["-C", excluded_dir, "rev-list", "--count", "HEAD"]).stdout,
+        b"1\n"
+    );
+    assert_eq!(
+        git(&["-C", excluded_dir, "rev-parse", "HEAD"]).stdout,
+        pushed_head.stdout
+    );
+    assert_eq!(
+        std::fs::read(excluded_path.join("nested/hello.txt")).unwrap(),
+        b"from Git push\n"
+    );
+    assert!(
+        git(&["-C", excluded_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
+    let restored = git(&["-C", excluded_dir, "fetch", "--unshallow", "origin", "main"]);
+    assert!(
+        restored.status.success(),
+        "excluded unshallow: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(
+        git(&["-C", excluded_dir, "rev-list", "HEAD"]).stdout,
+        git(&["-C", clone_dir, "rev-list", "HEAD"]).stdout
+    );
+    assert!(
+        git(&["-C", excluded_dir, "fsck", "--strict"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&[
+            "-C",
+            clone_dir,
+            "push",
+            "origin",
+            "HEAD^:refs/heads/shallow-base"
+        ])
+        .status
+        .success()
+    );
+    let ambiguous_path = work.path().join("ambiguous-exclusion");
+    let ambiguous = git(&[
+        "clone",
+        "--shallow-exclude=shallow-base",
+        "--single-branch",
+        "--no-tags",
+        &url,
+        ambiguous_path.to_str().unwrap(),
+    ]);
+    assert!(
+        !ambiguous.status.success(),
+        "ambiguous branch/tag exclusion must fail"
+    );
+    let explicit_path = work.path().join("explicit-exclusion");
+    let explicit = git(&[
+        "clone",
+        "--shallow-exclude=refs/tags/shallow-base",
+        "--single-branch",
+        "--no-tags",
+        &url,
+        explicit_path.to_str().unwrap(),
+    ]);
+    assert!(
+        explicit.status.success(),
+        "explicit exclusion: {}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert_eq!(
+        git(&[
+            "-C",
+            explicit_path.to_str().unwrap(),
+            "rev-list",
+            "--count",
+            "HEAD"
+        ])
+        .stdout,
+        b"1\n"
+    );
+    assert!(
+        git(&[
+            "-C",
+            clone_dir,
+            "push",
+            "origin",
+            ":refs/tags/shallow-base",
+            ":refs/heads/shallow-base"
+        ])
+        .status
+        .success()
+    );
+    let dated_path = work.path().join("dated-shallow");
+    let dated_dir = dated_path.to_str().unwrap();
+    let dated = git(&[
+        "clone",
+        "--shallow-since=2029-01-01T00:00:00Z",
+        "--single-branch",
+        "--no-tags",
+        &url,
+        dated_dir,
+    ]);
+    assert!(
+        dated.status.success(),
+        "date shallow clone: {}",
+        String::from_utf8_lossy(&dated.stderr)
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-list", "--count", "HEAD"]).stdout,
+        b"1\n"
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-list", "HEAD"]).stdout,
+        git(&[
+            "-C",
+            clone_dir,
+            "rev-list",
+            "--since=2029-01-01T00:00:00Z",
+            "HEAD"
+        ])
+        .stdout
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-parse", "HEAD"]).stdout,
+        pushed_head.stdout
+    );
+    assert_eq!(
+        std::fs::read(dated_path.join("nested/hello.txt")).unwrap(),
+        b"from Git push\n"
+    );
+    assert!(git(&["-C", dated_dir, "fsck", "--strict"]).status.success());
+    let older = git(&[
+        "-C",
+        dated_dir,
+        "fetch",
+        "--shallow-since=2000-01-01T00:00:00Z",
+        "origin",
+        "main",
+    ]);
+    assert!(
+        older.status.success(),
+        "date deepen: {}",
+        String::from_utf8_lossy(&older.stderr)
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-list", "HEAD"]).stdout,
+        git(&["-C", clone_dir, "rev-list", "HEAD"]).stdout
+    );
+    assert_eq!(
+        git(&["-C", dated_dir, "rev-parse", "--is-shallow-repository"]).stdout,
+        b"false\n"
+    );
+    assert!(git(&["-C", dated_dir, "fsck", "--strict"]).status.success());
     let second_dir = second_path.to_str().unwrap();
     let recloned = git(&["clone", &url, second_dir]);
     assert!(
@@ -211,7 +676,100 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
             .lines()
             .any(|line| line == format!("{}\trefs/heads/same-head", head_sha.trim()))
     );
+    let atomic = git(&[
+        "-C",
+        clone_dir,
+        "push",
+        "--atomic",
+        "origin",
+        "HEAD:refs/heads/atomic-one",
+        "HEAD:refs/tags/atomic-two",
+    ]);
+    let atomic_trace = String::from_utf8_lossy(&atomic.stderr);
+    assert!(atomic.status.success(), "{atomic_trace}");
+    assert!(
+        atomic_trace
+            .lines()
+            .any(|line| line.contains("> ") && line.contains(" atomic")),
+        "{atomic_trace}"
+    );
+    for reference in ["refs/heads/atomic-one", "refs/tags/atomic-two"] {
+        assert!(!git(&["ls-remote", &url, reference]).stdout.is_empty());
+    }
+    let atomic_refusal = git(&[
+        "-C",
+        clone_dir,
+        "push",
+        "--atomic",
+        "origin",
+        "HEAD:refs/heads/atomic-must-not-exist",
+        ":refs/heads/main",
+    ]);
+    let atomic_refusal_trace = String::from_utf8_lossy(&atomic_refusal.stderr);
+    assert!(!atomic_refusal.status.success(), "{atomic_refusal_trace}");
+    assert!(
+        atomic_refusal_trace.contains("ng refs/heads/atomic-must-not-exist"),
+        "{atomic_refusal_trace}"
+    );
+    assert!(
+        atomic_refusal_trace.contains("ng refs/heads/main"),
+        "{atomic_refusal_trace}"
+    );
+    assert!(
+        git(&["ls-remote", &url, "refs/heads/atomic-must-not-exist"])
+            .stdout
+            .is_empty()
+    );
+    assert_eq!(
+        main_refs_before.stdout,
+        git(&["ls-remote", &url, "refs/heads/main"]).stdout
+    );
+    let atomic_deletion = git(&[
+        "-C",
+        clone_dir,
+        "push",
+        "--atomic",
+        "origin",
+        ":refs/heads/atomic-one",
+        ":refs/tags/atomic-two",
+    ]);
+    assert!(
+        atomic_deletion.status.success(),
+        "{}",
+        String::from_utf8_lossy(&atomic_deletion.stderr)
+    );
+    for reference in ["refs/heads/atomic-one", "refs/tags/atomic-two"] {
+        assert!(git(&["ls-remote", &url, reference]).stdout.is_empty());
+    }
     let mut large = vec![0u8; 256 * 1024];
+    let deleted_branch = git(&["-C", clone_dir, "push", "origin", ":refs/heads/same-head"]);
+    assert!(
+        deleted_branch.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deleted_branch.stderr)
+    );
+    assert!(
+        git(&["ls-remote", &url, "refs/heads/same-head"])
+            .stdout
+            .is_empty()
+    );
+    let refused = git(&["-C", clone_dir, "push", "origin", ":refs/heads/main"]);
+    assert!(!refused.status.success());
+    let refusal_trace = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        refusal_trace
+            .lines()
+            .any(|line| line.contains("> ") && line.contains("report-status-v2")),
+        "{refusal_trace}"
+    );
+    assert!(
+        refusal_trace.contains("ng refs/heads/main"),
+        "native client must receive rejected-ref status: {refusal_trace}"
+    );
+    assert_eq!(
+        main_refs_before.stdout,
+        git(&["ls-remote", &url, "refs/heads/main"]).stdout
+    );
     for (index, byte) in large.iter_mut().enumerate() {
         *byte = u8::try_from(index % 251).unwrap();
     }

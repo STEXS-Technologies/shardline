@@ -13,7 +13,7 @@ use crate::{
     error::HubApiError,
     models::*,
 };
-use shardline_index::hub::HubFileEntry;
+use shardline_index::hub::{HubFileEntry, HubRefUpdateOutcome, canonical_ref_name};
 use shardline_server_core::AuthorizedRepository;
 
 use super::{HubRepository, HubState, deliver_webhook_events, lfs_object_key};
@@ -22,12 +22,15 @@ use super::{HubRepository, HubState, deliver_webhook_events, lfs_object_key};
 /// the LFS flow. Keeping the request bounded prevents a giant JSON envelope
 /// from becoming a heap-sized upload.
 const MAX_COMMIT_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+/// Keep inline commits comfortably below the bounded NDJSON request limit.
+/// Larger Hub files use the existing LFS object flow.
+const MAX_INLINE_HUB_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 // ---- Preupload (requires Write) ----
 
 pub(crate) async fn preupload(
     State(state): State<HubState>,
-    _repo: HubRepository<true>,
+    repo: HubRepository<true>,
     Path((_repo_type, ns, repo_name, rev)): Path<(String, String, String, String)>,
     Json(request): Json<PreuploadRequest>,
 ) -> Result<Json<PreuploadResponse>, HubApiError> {
@@ -38,11 +41,9 @@ pub(crate) async fn preupload(
         )));
     }
     let name = format!("{ns}/{repo_name}");
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &rev)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
+    let commit_sha =
+        crate::git::smart_http::resolve_commit_id(&state, &name, &rev, repo.capability())?
+            .ok_or(HubApiError::RevisionNotFound)?;
 
     let existing_files = state
         .store
@@ -60,7 +61,11 @@ pub(crate) async fn preupload(
         .map(|f| PreuploadResult {
             exists: existing_paths.contains(f.path.as_str()),
             path: f.path,
-            upload_mode: "regular".to_owned(),
+            upload_mode: if f.lfs || f.size > MAX_INLINE_HUB_FILE_BYTES {
+                "lfs".to_owned()
+            } else {
+                "regular".to_owned()
+            },
             should_ignore: false,
         })
         .collect();
@@ -100,14 +105,9 @@ pub(crate) async fn commit(
         HubApiError::PathValidation(format!("commit body is not UTF-8: {error}"))
     })?;
     let name = format!("{ns}/{repo_name}");
-    let parent_sha = state
-        .store
-        .resolve_revision(&name, &rev)
-        .map_err(|e| {
-            tracing::error!(error = %e, repo = %name, rev = %rev, "resolve_revision failed");
-            HubApiError::CasError(e.to_string())
-        })?
-        .ok_or(HubApiError::RevisionNotFound)?;
+    let parent_sha =
+        crate::git::smart_http::resolve_commit_id(&state, &name, &rev, repo.capability())?
+            .ok_or(HubApiError::RevisionNotFound)?;
     let parsed = match commit::parse_ndjson_commit(body) {
         Ok(p) => p,
         Err(e) => {
@@ -117,7 +117,43 @@ pub(crate) async fn commit(
     };
     // The extractor minted a Write-scoped capability; its repository scope
     // namespaces the object-store writes so cross-tenant content stays isolated.
-    match apply_commit(&state, &name, &parent_sha, &parsed, repo.capability()).await {
+    // Retain the legacy explicit-parent commit URL as a conditional main
+    // update. Named revisions must publish to that branch, never to main.
+    let explicit_commit = rev == parent_sha
+        || (rev.len() == 40
+            && rev.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && rev
+                == crate::git::smart_http::public_commit_id(
+                    &state,
+                    &name,
+                    &parent_sha,
+                    repo.capability(),
+                )
+                .await?);
+    let target_ref = if explicit_commit || rev == "HEAD" {
+        "main"
+    } else {
+        canonical_ref_name(&rev)
+    };
+    if target_ref.starts_with("refs/")
+        || !crate::git::smart_http::ref_advertisement::is_valid_refname(&format!(
+            "refs/heads/{target_ref}"
+        ))
+    {
+        return Err(HubApiError::BadRequest(
+            "commits require a branch reference".to_owned(),
+        ));
+    }
+    match apply_commit_to_ref(
+        &state,
+        &name,
+        &parent_sha,
+        target_ref,
+        &parsed,
+        repo.capability(),
+    )
+    .await
+    {
         Ok(response) => {
             shardline_metrics::record_hub_api_request("commit", "POST", 200);
             shardline_metrics::record_hub_api_commit("ndjson");
@@ -131,6 +167,7 @@ pub(crate) async fn commit(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn apply_commit(
     state: &HubState,
     repo_id: &str,
@@ -138,14 +175,27 @@ pub(crate) async fn apply_commit(
     parsed: &ParsedCommit,
     auth: &AuthorizedRepository,
 ) -> Result<Json<CommitResponse>, HubApiError> {
+    apply_commit_to_ref(state, repo_id, parent_sha, "main", parsed, auth).await
+}
+
+async fn apply_commit_to_ref(
+    state: &HubState,
+    repo_id: &str,
+    parent_sha: &str,
+    target_ref: &str,
+    parsed: &ParsedCommit,
+    auth: &AuthorizedRepository,
+) -> Result<Json<CommitResponse>, HubApiError> {
     // HUB-004: Validate that the NDJSON body's parentCommit (if present) matches
     // the URL path's parent_sha. A mismatch indicates a stale or conflicting request.
-    if let Some(ref body_parent) = parsed.parent_commit
-        && body_parent != parent_sha
-    {
-        return Err(HubApiError::Conflict(format!(
-            "parentCommit mismatch: body specified {body_parent} but URL resolved to {parent_sha}"
-        )));
+    if let Some(ref body_parent) = parsed.parent_commit {
+        let resolved_parent =
+            crate::git::smart_http::resolve_commit_id(state, repo_id, body_parent, auth)?;
+        if resolved_parent.as_deref() != Some(parent_sha) {
+            return Err(HubApiError::Conflict(format!(
+                "parentCommit mismatch: body specified {body_parent} but URL resolved to {parent_sha}"
+            )));
+        }
     }
 
     let existing_files: Vec<HubFileEntry> = state.store.get_files(parent_sha).map_err(|e| {
@@ -281,27 +331,57 @@ pub(crate) async fn apply_commit(
         tracing::error!(error = %e, commit_sha, "store_files failed");
         HubApiError::CasError(e.to_string())
     })?;
-    state
-        .store
-        .create_revision(
-            repo_id,
-            Some(parent_sha),
-            &commit_sha,
-            "main",
-            &parsed.message,
-        )
-        .map_err(|e| {
-            tracing::error!(error = %e, commit_sha, repo_id, "create_revision failed");
-            HubApiError::CasError(e.to_string())
-        })?;
+    if target_ref == "main" {
+        state
+            .store
+            .create_revision(
+                repo_id,
+                Some(parent_sha),
+                &commit_sha,
+                target_ref,
+                &parsed.message,
+            )
+            .map_err(|e| {
+                tracing::error!(error = %e, commit_sha, repo_id, "create_revision failed");
+                HubApiError::CasError(e.to_string())
+            })?;
+    } else {
+        // A deleted or advanced branch is a conflict, never permission to
+        // recreate it. The backend owns the compare-and-update transaction.
+        match state
+            .store
+            .update_revision_if_current(
+                repo_id,
+                parent_sha,
+                &commit_sha,
+                target_ref,
+                &parsed.message,
+            )
+            .map_err(|e| HubApiError::CasError(e.to_string()))?
+        {
+            HubRefUpdateOutcome::Updated(_) => {}
+            HubRefUpdateOutcome::Conflict => {
+                return Err(HubApiError::Conflict(
+                    "branch moved or was deleted".to_owned(),
+                ));
+            }
+            HubRefUpdateOutcome::Unsupported => {
+                return Err(HubApiError::CasError(
+                    "store does not support atomic branch updates".to_owned(),
+                ));
+            }
+        }
+    }
 
     // Fire webhook deliveries in the background (non-blocking).
     deliver_webhook_events(state, repo_id, "push", &commit_sha).await;
 
+    let public_sha =
+        crate::git::smart_http::public_commit_id(state, repo_id, &commit_sha, auth).await?;
     Ok(Json(CommitResponse {
         commit_id: commit_sha.clone(),
-        commit_oid: commit_sha.clone(),
-        commit_url: format!("/{repo_id}/commit/{commit_sha}"),
-        ref_name: Some("main".to_owned()),
+        commit_oid: public_sha.clone(),
+        commit_url: format!("/{repo_id}/commit/{public_sha}"),
+        ref_name: Some(target_ref.to_owned()),
     }))
 }

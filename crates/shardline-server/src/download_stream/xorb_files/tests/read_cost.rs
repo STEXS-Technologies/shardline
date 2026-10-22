@@ -187,7 +187,9 @@ async fn packed_reads_use_one_get_and_validate_unselected_content() {
     );
     assert_eq!(
         provider.lock().unwrap().requests,
-        [(Method::GET, path.clone()), (Method::HEAD, path)]
+        // A failed GET now propagates directly, before response construction;
+        // it needs neither a HEAD probe nor a fallback to loose chunks.
+        [(Method::GET, path)]
     );
 }
 

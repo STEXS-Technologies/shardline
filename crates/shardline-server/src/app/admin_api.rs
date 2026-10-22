@@ -1255,9 +1255,12 @@ mod tests {
         // Disable optional cleanup before startup. Otherwise it may recreate
         // metadata between removal and the deliberate invalid-directory fault.
         stopped.store(true, std::sync::atomic::Ordering::Relaxed);
-        let app = crate::app::router_with_housekeeping_guard(config, guard, stopped)
-            .await
-            .expect("router");
+        let mut background = crate::app::RouterBackgroundTasks::new(stopped.clone());
+        let app =
+            crate::app::router_with_housekeeping_guard(config, guard, stopped, &mut background)
+                .await
+                .expect("router");
+        background.shutdown().await.expect("startup workers");
         tokio::fs::remove_file(temp.path().join("metadata.sqlite3"))
             .await
             .expect("remove metadata database");

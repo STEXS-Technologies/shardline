@@ -5,7 +5,10 @@
 //! files from HubStore metadata: tree objects, LFS pointer blobs, and commit
 //! objects are all constructed from the file entries stored per revision.
 
+mod admission;
+mod capabilities;
 pub mod error;
+mod identity;
 mod limits;
 pub mod pack_parse;
 mod projection;
@@ -18,6 +21,7 @@ pub mod upload_pack;
 mod tests;
 
 pub use error::SmartHttpError;
+pub(crate) use identity::{public_commit_id, resolve_commit_id};
 pub(crate) use limits::{MAX_RECEIVE_PACK_REQUEST_BYTES, MAX_UPLOAD_PACK_REQUEST_BYTES};
 pub use pack_parse::parse_pack_data;
 pub use receive_pack::receive_pack;

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+mod ref_batch;
+
 use futures_util::TryStreamExt;
 use serde_json::from_value;
 use sqlx::{Row, query_scalar};
@@ -246,6 +248,16 @@ where
 }
 
 impl HubStore for PostgresIndexStore {
+    fn supports_atomic_ref_updates(&self) -> bool {
+        true
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[crate::hub::HubRefChange],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply(self, repo_id, changes)
+    }
     type Error = PostgresMetadataStoreError;
 
     fn create_repo(
@@ -642,6 +654,35 @@ impl HubStore for PostgresIndexStore {
             .unwrap_or_default())
     }
 
+    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let sha = sha.to_owned();
+        block_on_async(async {
+            let row = sqlx::query(
+                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+                 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2",
+            )
+            .bind(&repo_id)
+            .bind(&sha)
+            .fetch_optional(&pool)
+            .await?;
+            row.map(|row| {
+                Ok(HubRevision {
+                    repo_id: row.try_get("repo_id")?,
+                    ref_name: row.try_get("ref_name")?,
+                    sha: row.try_get("sha")?,
+                    parent_sha: row.try_get("parent_sha")?,
+                    message: row.try_get("message")?,
+                    created_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
+                })
+            })
+            .transpose()
+        })
+    }
+
     fn list_revisions_bounded(
         &self,
         repo_id: &str,
@@ -742,7 +783,7 @@ impl HubStore for PostgresIndexStore {
                 commit_sha.to_owned(),
             ));
         }
-        if commit_sha == EMPTY_HUB_REVISION {
+        if commit_sha == EMPTY_HUB_REVISION || files.is_empty() {
             return Ok(());
         }
         let pool = self.pool().clone();
@@ -756,7 +797,10 @@ impl HubStore for PostgresIndexStore {
                     "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
                      VALUES ($1, $2, $3, $4, $5)
                      ON CONFLICT (commit_sha, path)
-                     DO UPDATE SET size = EXCLUDED.size, sha = EXCLUDED.sha, is_lfs = EXCLUDED.is_lfs",
+                     DO UPDATE SET size = EXCLUDED.size, sha = EXCLUDED.sha, is_lfs = EXCLUDED.is_lfs
+                     WHERE shardline_hub_file_entries.size IS DISTINCT FROM EXCLUDED.size
+                        OR shardline_hub_file_entries.sha IS DISTINCT FROM EXCLUDED.sha
+                        OR shardline_hub_file_entries.is_lfs IS DISTINCT FROM EXCLUDED.is_lfs",
                 )
                 .bind(&commit_sha)
                 .bind(&file.path)
@@ -1480,6 +1524,78 @@ mod tests {
     // block_on_async itself is tested indirectly by every hub_postgres integration
     // test that exercises the HubStore impl (create_repo, get_repo, etc.)
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atomic_ref_batch_contract() {
+        if std::env::var_os("DATABASE_URL").is_none() {
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool);
+        crate::hub::ref_batch_tests::contract(&store);
+        cleanup_repo(&store, "atomic/contract").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atomic_ref_batch_storage_failure_rolls_back_evidence_and_refs() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+        if std::env::var_os("DATABASE_URL").is_none() {
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool.clone());
+        let repo = "atomic/failure";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "old", "main", "Initial")
+            .unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE FUNCTION atomic_ref_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected ref failure'; END $$;
+            CREATE TRIGGER atomic_ref_failure BEFORE INSERT ON shardline_hub_refs FOR EACH ROW WHEN (NEW.ref_name = 'reject') EXECUTE FUNCTION atomic_ref_failure();")
+            .execute(&pool).await.unwrap();
+        let changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("old".into()),
+                new_sha: Some("next".into()),
+                message: "Next".into(),
+            },
+            HubRefChange {
+                ref_name: "reject".into(),
+                expected_sha: None,
+                new_sha: Some("new".into()),
+                message: "New".into(),
+            },
+        ];
+        let result = store.change_refs_atomically(repo, &changes);
+        sqlx::raw_sql("DROP TRIGGER atomic_ref_failure ON shardline_hub_refs; DROP FUNCTION atomic_ref_failure();").execute(&pool).await.unwrap();
+        assert!(result.is_err());
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            store.resolve_revision(repo, "main").unwrap().as_deref(),
+            Some("old")
+        );
+        assert_eq!(store.get_repo(repo).unwrap().unwrap().default_branch, "old");
+        assert!(store.get_revision(repo, "next").unwrap().is_none());
+        assert!(store.resolve_revision(repo, "reject").unwrap().is_none());
+        assert_eq!(
+            store.change_refs_atomically(repo, &changes).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        assert_eq!(store.list_refs(repo).unwrap().len(), 2);
+        cleanup_repo(&store, repo).await;
+    }
+
     async fn connect_postgres() -> Option<PgPool> {
         crate::postgres::connect_isolated_postgres().await
     }
@@ -1710,6 +1826,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rev.sha, "rev2");
+        let loaded = store
+            .get_revision("pg-rev-resolve", "rev2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                loaded.repo_id,
+                loaded.sha,
+                loaded.parent_sha,
+                loaded.message,
+                loaded.created_at_unix_seconds
+            ),
+            (
+                rev.repo_id,
+                rev.sha,
+                rev.parent_sha,
+                rev.message,
+                rev.created_at_unix_seconds
+            )
+        );
+        assert!(
+            store
+                .get_revision("pg-other-repo", "rev2")
+                .unwrap()
+                .is_none()
+        );
 
         let sha = store.resolve_revision("pg-rev-resolve", "rev2").unwrap();
         assert_eq!(sha.as_deref(), Some("rev2"));
@@ -1799,8 +1941,36 @@ mod tests {
         store
             .store_files("pg-commit-files", &files)
             .expect("store_files");
+        let xmin_before: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_hub_file_entries
+             WHERE commit_sha = $1 AND path = $2",
+        )
+        .bind("pg-commit-files")
+        .bind("a.txt")
+        .fetch_one(store.pool())
+        .await
+        .expect("read xmin before replay");
+        store
+            .store_files("pg-commit-files", &files)
+            .expect("replay identical files");
+        store
+            .store_files("pg-commit-files", &[])
+            .expect("empty batch preserves the committed file entries");
+        let xmin_after: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_hub_file_entries
+             WHERE commit_sha = $1 AND path = $2",
+        )
+        .bind("pg-commit-files")
+        .bind("a.txt")
+        .fetch_one(store.pool())
+        .await
+        .expect("read xmin after replay");
         let retrieved = store.get_files("pg-commit-files").expect("get_files");
 
+        assert_eq!(
+            xmin_before, xmin_after,
+            "identical replay must not update tuple"
+        );
         assert_eq!(retrieved.len(), 2);
         assert_eq!(retrieved[0].path, "a.txt");
         assert!(!retrieved[0].is_lfs);

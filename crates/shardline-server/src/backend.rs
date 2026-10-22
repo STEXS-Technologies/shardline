@@ -36,6 +36,8 @@ use crate::{
     xet_adapter::{FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse},
 };
 
+mod lfs_locks;
+
 #[cfg(test)]
 pub(crate) mod s3_delete_fault_injection {
     use std::sync::{LazyLock, Mutex};
@@ -646,6 +648,22 @@ impl ServerBackend {
             .await?)
     }
 
+    pub(crate) async fn list_scoped_inflight_resumable_sessions(
+        &self,
+        scope: &str,
+        protocol: shardline_index::ResumableSessionProtocol,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResumableSession>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .list_scoped_inflight_resumable_sessions(scope, protocol, after, limit)
+            .await?)
+    }
+
     pub(crate) async fn resumable_session_snapshot(
         &self,
         session_id: &str,
@@ -831,6 +849,39 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.protocol_file_record(file_id).await,
             Self::Postgres(backend) => backend.protocol_file_record(file_id).await,
+        }
+    }
+
+    /// Resolves a Hub SHA-256 to its repository-scoped native Xet identity.
+    pub(crate) async fn xet_file_identity(
+        &self,
+        repository_scope: &RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<shardline_index::XetFileIdentity>, ServerError> {
+        match self {
+            Self::Local(backend) => backend.xet_file_identity(repository_scope, sha256),
+            Self::Postgres(backend) => backend.xet_file_identity(repository_scope, sha256).await,
+        }
+    }
+
+    /// Downloads one logical file version using the active metadata backend.
+    pub(crate) async fn download_file(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<Vec<u8>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .download_file(file_id, content_hash, repository_scope)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .download_file(file_id, content_hash, repository_scope)
+                    .await
+            }
         }
     }
 
