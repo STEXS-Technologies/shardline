@@ -80,9 +80,19 @@ pub fn verify_sigv4(
             .ok_or_else(denied)?;
         let fields = authorization_fields
             .split(',')
-            .map(|field| field.trim().split_once('=').ok_or_else(denied))
-            .collect::<Result<Vec<_>, _>>()?;
-        if fields.len() != 3 {
+            .map(|field| {
+                let (name, value) = field.trim().split_once('=').ok_or_else(denied)?;
+                if name.is_empty() || value.is_empty() {
+                    return Err(denied());
+                }
+                Ok((name, value))
+            })
+            .collect::<Result<Vec<_>, S3Error>>()?;
+        if fields.len() != 3
+            || ["Credential", "SignedHeaders", "Signature"]
+                .iter()
+                .any(|expected| fields.iter().filter(|(name, _)| name == expected).count() != 1)
+        {
             return Err(denied());
         }
         let field = |name| {

@@ -364,6 +364,37 @@ fn rejects_expired_future_and_ambiguous_authentication() {
 }
 
 #[test]
+fn rejects_unknown_missing_and_duplicate_authorization_fields() {
+    let original = official_headers()["authorization"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    for changed in [
+        original.replace(",Signature=", ",Unknown=ignored,Signature="),
+        original.replace("Credential=", "Unknown=ignored,Credential="),
+        original.replace(",SignedHeaders=", ",Credential=duplicate,SignedHeaders="),
+        original.replace(",SignedHeaders=", ",Signature=duplicate,SignedHeaders="),
+        original.replace(",Signature=", ""),
+        original.replace(",Signature=", ",Signature=duplicate,Signature="),
+    ] {
+        let mut headers = official_headers();
+        headers.insert("authorization", HeaderValue::from_str(&changed).unwrap());
+        assert!(
+            verify_sigv4(
+                &Method::GET,
+                &"/test.txt".parse().unwrap(),
+                &headers,
+                &credential(),
+                "us-east-1",
+                1369353600,
+            )
+            .is_err(),
+            "accepted Authorization fields: {changed}"
+        );
+    }
+}
+
+#[test]
 fn rejects_unsigned_amz_headers_and_unbound_session_credentials() {
     let uri = "/test.txt".parse().unwrap();
     let mut headers = official_headers();
