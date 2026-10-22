@@ -40,9 +40,11 @@ Real 1.12.1/new-binary drills cover live S3-frontend writes during installation,
 cross-version reads, new-version writes, and restarting 1.12.1 against the
 upgraded metadata. These checks pass with SQLite and PostgreSQL. They establish
 this storage path's rolling compatibility, not every protocol's mixed-version
-behavior. Keep new frontend features on upgraded replicas while their remaining
-native-client qualification is completed. An old replica cannot provide the new
-durable-lock or Xet-identity behavior.
+behavior. During the mixed-version period, route requests that use the new LFS
+lock or native Xet identity behavior only to upgraded replicas. If the load
+balancer cannot route those requests, hold them until every replica is upgraded.
+A 1.12.1 replica can still read and write the tested object data, but it does not
+understand the new lock or identity records.
 
 Restarting an old binary does not require dropping the additive tables or
 restoring an old backup. Keep those tables: they contain persistent identities
