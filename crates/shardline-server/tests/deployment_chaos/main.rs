@@ -56,6 +56,8 @@ mod gc_acknowledgement;
 
 mod maintenance_history;
 
+mod local_protocol_upgrade;
+
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------

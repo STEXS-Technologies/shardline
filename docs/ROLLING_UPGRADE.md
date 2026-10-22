@@ -38,6 +38,12 @@ Do not run downgrade SQL blindly or restore an old backup over newer writes.
 Retain the matching metadata and object-store backup and qualify the rollback
 procedure for the deployment before upgrading.
 
+Restoring that backup recovers its contents, including its matching object
+storage, but not writes acknowledged after the backup. Keep the upgraded
+deployment intact until those newer writes have a recovery plan. The local
+released-binary drill checks an isolated backup restoration separately from
+the upgraded deployment; it does not establish a lossless downgrade.
+
 ## StateChronicle/Penelope 0.2.0 dependency upgrade
 
 For tracking commands and recovery, see the

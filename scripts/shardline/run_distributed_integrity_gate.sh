@@ -38,8 +38,8 @@ if rg -ni 'SKIP:|SKIPPED:|skipping:|panicked at' "$output/deployment.log"; then
     echo 'FAIL: a deployment drill skipped or a task panicked' >&2
     exit 1
 fi
-rg 'Starting 23 tests across 1 binary' "$output/deployment.log"
-rg 'Summary.*23 tests run: 23 passed' "$output/deployment.log"
+rg 'Starting 24 tests across 1 binary' "$output/deployment.log"
+rg 'Summary.*24 tests run: 24 passed' "$output/deployment.log"
 
 cargo nextest run --locked -p shardline-server --all-features --test multinode_chaos \
     --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \

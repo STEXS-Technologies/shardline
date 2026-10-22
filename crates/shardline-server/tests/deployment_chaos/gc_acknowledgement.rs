@@ -337,6 +337,15 @@ async fn run_remote_gc_fault_with_recovery(
     }
     let deployment = deployment_fingerprint(&config).unwrap();
     let store = MaintenanceHistory::from_postgres_pool(&config, &pool).await;
+    // Releases with inline tracking record the baseline mark/sweep too.
+    // Preserve those entries and require an exact delta for this execution.
+    let baseline_tasks = store.summaries(deployment, None, 10).unwrap();
+    assert!(
+        baseline_tasks
+            .iter()
+            .all(|task| task.state == TaskRunState::Completed)
+    );
+    let baseline_task_count = baseline_tasks.len();
     let mark = docker_run_owned(
         super::readonly_maintenance_deployment::readonly_cli_arguments(
             &binary,
@@ -425,7 +434,14 @@ async fn run_remote_gc_fault_with_recovery(
         "the remote request must have durable admission"
     );
     let tasks = store.summaries(deployment, None, 10).unwrap();
-    assert_eq!(tasks.len(), 2);
+    assert_eq!(tasks.len(), baseline_task_count + 2);
+    for baseline in &baseline_tasks {
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task.id == baseline.id && task.state == TaskRunState::Completed)
+        );
+    }
     let interrupted = tasks
         .iter()
         .find(|task| task.state == TaskRunState::RunningOrInterrupted)
@@ -789,7 +805,7 @@ async fn run_remote_gc_fault_with_recovery(
         String::from_utf8_lossy(&diagnostic.stderr)
     );
     let tasks = store.summaries(deployment, None, 10).unwrap();
-    assert_eq!(tasks.len(), 3);
+    assert_eq!(tasks.len(), baseline_task_count + 3);
     assert_eq!(
         tasks
             .iter()
@@ -803,7 +819,7 @@ async fn run_remote_gc_fault_with_recovery(
             .iter()
             .filter(|task| task.state == TaskRunState::Completed)
             .count(),
-        2
+        baseline_task_count + 2
     );
     for (sequence, bytes) in before.iter().enumerate() {
         assert_eq!(

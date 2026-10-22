@@ -96,6 +96,13 @@ async fn drill_readonly_postgres_cli_preserves_released_commands() {
         return;
     };
     migrate_chaos_postgres_with_binary(&previous, &stack.pg_url).await;
+    let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
+    let previous_has_history = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('shardline_task_artifacts_v1') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     for command in [&["fsck"][..], &["index", "rebuild"][..], &["gc"][..]] {
         let baseline = readonly_cli(&previous, &stack, command, false).await;
         assert!(
@@ -134,15 +141,24 @@ async fn drill_readonly_postgres_cli_preserves_released_commands() {
     let objects = shardline_server::object_store_from_config(&config).unwrap();
     let prefix = ObjectPrefix::parse("_shardline_tasks/v1/").unwrap();
     assert!(objects.list_prefix(&prefix).unwrap().is_empty());
-    let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
-    assert!(
-        sqlx::query_scalar::<_, bool>("SELECT to_regclass('shardline_task_artifacts_v1') IS NULL")
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-        "pre-upgrade commands must not install optional history"
+    assert_eq!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('shardline_task_artifacts_v1') IS NOT NULL"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        previous_has_history,
+        "ordinary commands must not change the released history schema"
     );
     migrate_chaos_postgres_with_binary(&current, &stack.pg_url).await;
+    let store =
+        super::maintenance_history::MaintenanceHistory::from_postgres_pool(&config, &pool).await;
+    let prior_tasks = store
+        .summaries(deployment_fingerprint(&config).unwrap(), None, 10)
+        .unwrap();
+    let previous_runs_per_pair = usize::from(previous_has_history);
+    assert_eq!(prior_tasks.len(), previous_runs_per_pair * 4);
     for command in [&["fsck"][..], &["index", "rebuild"][..], &["gc"][..]] {
         let baseline = readonly_cli(&previous, &stack, command, false).await;
         let upgraded = readonly_cli(&current, &stack, command, false).await;
@@ -156,14 +172,12 @@ async fn drill_readonly_postgres_cli_preserves_released_commands() {
         );
         assert_eq!(upgraded.stdout, baseline.stdout);
     }
-    let store =
-        super::maintenance_history::MaintenanceHistory::from_postgres_pool(&config, &pool).await;
     let tasks = store
         .summaries(deployment_fingerprint(&config).unwrap(), None, 10)
         .unwrap();
     assert_eq!(
         tasks.len(),
-        2,
+        prior_tasks.len() + 2 + previous_runs_per_pair * 2,
         "fsck and rebuild publish metadata history; read-only GC creates no run"
     );
     assert!(
@@ -199,12 +213,13 @@ async fn drill_readonly_postgres_cli_preserves_released_commands() {
         String::from_utf8_lossy(&upgraded.stderr)
     );
     assert_eq!(upgraded.stdout, baseline.stdout);
+    let tasks_before_readonly = tasks.len();
     let tasks = store
         .summaries(deployment_fingerprint(&config).unwrap(), None, 10)
         .unwrap();
     assert_eq!(
         tasks.len(),
-        3,
+        tasks_before_readonly + 1 + previous_runs_per_pair,
         "read-only payload access does not prevent verified metadata history"
     );
     assert!(

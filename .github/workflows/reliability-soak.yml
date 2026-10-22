@@ -199,7 +199,7 @@ jobs:
           set -o pipefail
           mkdir -p reliability-upgrade-results
           cargo nextest run -p shardline-server --test deployment_chaos \
-            -E 'test(drill_deploy_f_real_mixed_version_rollout_and_rollback)' \
+            -E 'test(drill_deploy_f_real_mixed_version_rollout_and_rollback) | test(local_protocol_upgrade::)' \
             --no-capture 2>&1 \
             | tee reliability-upgrade-results/mixed-version-upgrade.log
 
