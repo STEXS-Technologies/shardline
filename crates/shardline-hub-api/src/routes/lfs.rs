@@ -324,7 +324,10 @@ async fn lfs_batch_inner(
                     });
                 }
             };
-            let exists = state.object_store.contains(&key).unwrap_or(false);
+            let exists = state
+                .object_store
+                .contains(&key)
+                .map_err(|error| HubApiError::CasError(error.to_string()))?;
             let actions = match request.operation {
                 LfsBatchOperation::Download => {
                     if exists {
@@ -501,6 +504,46 @@ pub(crate) async fn normalize_lfs_authorization(
         request.headers_mut().insert(AUTHORIZATION, credential);
     }
     Ok(next.run(request).await)
+}
+
+/// Convert Hub-level route errors into the Git LFS API error shape. LFS
+/// clients expect a `message` field and the LFS media type even when
+/// authorization, JSON extraction, or object storage fails before an action
+/// response can be built.
+pub(crate) async fn lfs_error_response(
+    request: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+    const LFS_JSON: &str = "application/vnd.git-lfs+json";
+
+    let response = next.run(request).await;
+    if response.status().is_success() {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, MAX_ERROR_BODY_BYTES)
+        .await
+        .unwrap_or_default();
+    let message = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .or_else(|| value.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "LFS request failed".to_owned());
+
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(LFS_JSON),
+    );
+    let lfs_body = Body::from(serde_json::json!({ "message": message }).to_string());
+    Response::from_parts(parts, lfs_body)
 }
 
 // ---- LFS upload (requires Write) ----
@@ -905,6 +948,20 @@ mod upload_staging_tests {
         let staging = LfsUploadStaging::with_permit(None, None).await.unwrap();
         assert!(staging.memory.is_none());
         assert!(staging.temporary.as_ref().unwrap().path().exists());
+    }
+
+    #[tokio::test]
+    async fn dropping_cancelled_file_backed_upload_removes_partial_staging_file() {
+        let mut staging = LfsUploadStaging::with_permit(None, None).await.unwrap();
+        staging.write_chunk(b"partial upload").await.unwrap();
+        let temporary_path = staging.temporary.as_ref().unwrap().path().to_owned();
+        assert!(temporary_path.exists());
+
+        // The request future owns this staging guard. Dropping it after client
+        // cancellation must discard the incomplete body rather than leave a
+        // scratch file that could be mistaken for a published object.
+        drop(staging);
+        assert!(!temporary_path.exists());
     }
 
     #[cfg(unix)]

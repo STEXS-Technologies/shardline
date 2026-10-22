@@ -2472,6 +2472,35 @@ async fn handler_lfs_batch_upload_new_object() {
     assert!(obj.error.is_none());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn handler_lfs_batch_propagates_object_store_existence_failures() {
+    let (td, state) = make_lfs_state();
+    let root = td.path().join("lfs");
+    let moved_root = td.path().join("lfs-real");
+    std::fs::rename(&root, &moved_root).unwrap();
+    std::os::unix::fs::symlink(&moved_root, &root).unwrap();
+
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects: vec![LfsObjectRequest {
+                oid: "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0".into(),
+                size: 1000,
+            }],
+            transfers: Vec::new(),
+            hash_algo: None,
+        }),
+    )
+    .await;
+    assert!(matches!(result, Err(HubApiError::CasError(_))));
+}
+
 #[tokio::test]
 async fn handler_lfs_batch_does_not_mint_upload_capability_from_read_only_token() {
     let (_td, state) = make_alice_auth_state();
