@@ -18,14 +18,14 @@ async fn postgres_corrupt_copy_source_preserves_acknowledged_part() {
 }
 
 #[tokio::test]
-async fn copy_source_snapshot_stays_pinned_across_concurrent_overwrite() {
+async fn copy_source_snapshot_stays_pinned_if_source_is_replaced_before_read() {
     let (state, _root) = build_test_state().await;
     exercise_snapshot_pinning(state).await;
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL"]
-async fn postgres_copy_source_snapshot_stays_pinned_across_overwrite() {
+async fn postgres_copy_source_snapshot_stays_pinned_if_source_is_replaced_before_read() {
     std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
     let (state, _root) = build_postgres_test_state()
         .await
