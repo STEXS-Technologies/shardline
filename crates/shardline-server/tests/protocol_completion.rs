@@ -1280,6 +1280,137 @@ async fn hub_lfs_lock_urls_enforce_repository_binding_and_unlock() {
 }
 
 #[tokio::test]
+async fn hub_lfs_lock_force_unlock_and_pagination_follow_protocol_contract() {
+    let root = tempfile::tempdir().unwrap();
+    let server = start(root.path(), ServerFrontend::Hub, true, None).await;
+    let client = Client::new();
+    let alice = token("alice", "hub-lock-pages", TokenScope::Write);
+    let bob = token("bob", "hub-lock-pages", TokenScope::Write);
+    let base = format!("{}/hub-lock-pages/locks.git/info/lfs/locks", server.base);
+
+    let mut alice_lock_id = None;
+    for path in ["a.bin", "b.bin", "c.bin"] {
+        let created = client
+            .post(&base)
+            .bearer_auth(&alice)
+            .json(&json!({"path":path}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body: Value = created.json().await.unwrap();
+        let id = body["lock"]["id"].as_str().unwrap().to_owned();
+        alice_lock_id.get_or_insert(id);
+    }
+    let bob_created = client
+        .post(&base)
+        .bearer_auth(&bob)
+        .json(&json!({"path":"d.bin"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bob_created.status(), StatusCode::CREATED);
+
+    // The cursor is an opaque keyset position. Following it must return every
+    // lock exactly once even though lock identifiers are generated randomly.
+    let mut cursor = None;
+    let mut ids = Vec::new();
+    loop {
+        let mut request = client
+            .get(&base)
+            .bearer_auth(&alice)
+            .query(&[("limit", "2")]);
+        if let Some(cursor) = cursor.as_deref() {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        let locks = body["locks"].as_array().unwrap();
+        assert!(locks.len() <= 2);
+        ids.extend(
+            locks
+                .iter()
+                .map(|lock| lock["id"].as_str().unwrap().to_owned()),
+        );
+        cursor = body["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 4);
+
+    let mut cursor = None;
+    let mut verified_ids = Vec::new();
+    loop {
+        let body = cursor.as_ref().map_or_else(
+            || json!({"limit":2}),
+            |cursor| json!({"limit":2,"cursor":cursor}),
+        );
+        let response = client
+            .post(format!("{base}/verify"))
+            .bearer_auth(&alice)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        for category in ["ours", "theirs"] {
+            verified_ids.extend(
+                body[category]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|lock| lock["id"].as_str().unwrap().to_owned()),
+            );
+        }
+        cursor = body["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    verified_ids.sort();
+    verified_ids.dedup();
+    assert_eq!(verified_ids, ids);
+
+    let lock_id = alice_lock_id.unwrap();
+    let unlock_url = format!("{base}/{lock_id}/unlock");
+    let denied = client
+        .post(&unlock_url)
+        .bearer_auth(&bob)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let forced = client
+        .post(&unlock_url)
+        .bearer_auth(&bob)
+        .json(&json!({"force":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forced.status(), StatusCode::OK);
+    let forced: Value = forced.json().await.unwrap();
+    assert_eq!(forced["lock"]["id"], lock_id);
+
+    let gone = client
+        .get(&base)
+        .bearer_auth(&alice)
+        .query(&[("id", lock_id.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::OK);
+    let gone: Value = gone.json().await.unwrap();
+    assert_eq!(gone["locks"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn anonymous_hub_locks_are_isolated_by_repository() {
     let root = tempfile::tempdir().unwrap();
     let server = start(root.path(), ServerFrontend::Hub, false, None).await;
