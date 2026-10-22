@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use shardline_index::hub::HubRepoType;
 use shardline_server_core::ServerObjectStore;
 use std::{collections::HashSet, time::Duration};
+use tokio::{io::AsyncWriteExt, net::TcpListener};
 use tower::ServiceExt;
 
 use support::common;
@@ -163,4 +164,71 @@ async fn cancelled_http_upload_discards_partial_filesystem_staging() {
         !staged_path.exists(),
         "cancelling the HTTP request must remove its incomplete staging file"
     );
+}
+
+#[tokio::test]
+async fn tcp_disconnect_discards_partial_filesystem_staging() {
+    let test = common::setup();
+    let local_root = test
+        .state()
+        .object_store
+        .local_root()
+        .expect("test setup uses local object storage")
+        .to_path_buf();
+    let staging_directory = local_root.parent().unwrap().to_path_buf();
+    let existing: HashSet<_> = std::fs::read_dir(&staging_directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = test.app();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // Announce a larger body than we send, then close the TCP connection after
+    // the first chunk has forced file-backed staging.
+    let oid = hex::encode(Sha256::digest(
+        b"full body that the disconnected client never sends",
+    ));
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "PUT /lfs/objects/{oid} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2097152\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    client.write_all(&vec![b'x'; 256 * 1024 + 1]).await.unwrap();
+    client.flush().await.unwrap();
+
+    let staged_path = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let new_file = std::fs::read_dir(&staging_directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| !existing.contains(path) && path.is_file());
+            if let Some(path) = new_file {
+                break path;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server should stage the first body chunk before client disconnect");
+    assert!(staged_path.exists());
+    drop(client);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while staged_path.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("TCP disconnect must cancel upload and remove partial staging file");
+
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
 }
