@@ -45,6 +45,9 @@ jobs:
       - name: Build shardline binary
         run: cargo build --locked --release
 
+      - name: Apply disposable PostgreSQL schema as owner
+        run: target/release/shardline db migrate up --database-url "$DATABASE_URL"
+
       - name: Install real clients
         run: |
           set -euo pipefail
