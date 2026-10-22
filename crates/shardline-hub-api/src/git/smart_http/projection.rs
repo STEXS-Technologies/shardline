@@ -23,6 +23,9 @@ const MAX_PROJECTED_FILE_ENTRIES: usize = 1_000_000;
 pub(super) struct GitProjection {
     pub(super) identities: HashMap<String, String>,
     pub(super) objects: Vec<GitObject>,
+    // Async exports retain the existing identity admission slot through pack
+    // generation. A cancelled waiter cannot admit replacement blocking work.
+    pub(super) admission: Option<tokio::sync::SemaphorePermit<'static>>,
 }
 
 fn failure(error: impl std::fmt::Display) -> HubApiError {
@@ -130,9 +133,29 @@ pub(super) async fn project_history_async(
     repo_id: String,
     auth: AuthorizedRepository,
 ) -> Result<GitProjection, HubApiError> {
+    project_history_with_admission(state, repo_id, auth, &super::identity::IDENTITY_ADMISSION).await
+}
+
+async fn project_history_with_admission(
+    state: HubState,
+    repo_id: String,
+    auth: AuthorizedRepository,
+    admission: &'static tokio::sync::Semaphore,
+) -> Result<GitProjection, HubApiError> {
+    let permit = admission.acquire().await.map_err(failure)?;
+    project_history_admitted(state, repo_id, auth, permit).await
+}
+
+pub(super) async fn project_history_admitted(
+    state: HubState,
+    repo_id: String,
+    auth: AuthorizedRepository,
+    permit: tokio::sync::SemaphorePermit<'static>,
+) -> Result<GitProjection, HubApiError> {
     tokio::task::spawn_blocking(move || {
-        let projection = project_history(&state, &repo_id, &auth)?;
+        let mut projection = project_history(&state, &repo_id, &auth)?;
         super::identity::retain_projection_identities(&state, &repo_id, &projection, &auth)?;
+        projection.admission = Some(permit);
         Ok(projection)
     })
     .await
@@ -349,6 +372,7 @@ pub(super) fn project_history_with_roots(
         }
     }
     let mut projection = GitProjection {
+        admission: None,
         identities: known_identities,
         objects: Vec::new(),
     };
@@ -491,7 +515,7 @@ fn load_archived_graph(
     Ok(objects)
 }
 
-fn object_children(object: &GitObject) -> Result<Vec<String>, HubApiError> {
+pub(super) fn object_children(object: &GitObject) -> Result<Vec<String>, HubApiError> {
     let mut children = Vec::new();
     match object.object_type {
         ObjectType::Commit => {
@@ -958,7 +982,7 @@ mod tests {
             "alice/repo",
             &auth,
             MAX_PROJECTED_FILE_ENTRIES,
-            Some(&[sha.clone()]),
+            Some(std::slice::from_ref(&sha)),
         )
         .unwrap();
         assert_eq!(retained.identities.get(&sha), Some(&expected));
@@ -1350,6 +1374,79 @@ mod tests {
                 .unwrap(),
             bytes
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_projection_keeps_admission_until_blocking_work_finishes() {
+        static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let (temp, state) = super::super::tests::make_hub_state();
+        state
+            .store
+            .create_repo(
+                shardline_index::hub::HubRepoType::Model,
+                "alice/repo",
+                false,
+            )
+            .unwrap();
+        let database = temp.path().join("metadata.sqlite3");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(database).unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+            connection.execute_batch("COMMIT;").unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let worker_state = state.clone();
+        let operation = tokio::spawn(async move {
+            project_history_with_admission(
+                worker_state,
+                "alice/repo".to_owned(),
+                AuthorizedRepository::anonymous_full_access(),
+                &ADMISSION,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while ADMISSION.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        operation.abort();
+        assert!(matches!(operation.await, Err(error) if error.is_cancelled()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), ADMISSION.acquire(),)
+                .await
+                .is_err(),
+            "cancelled HTTP waiter must not admit overlapping blocking work"
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let projection = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            project_history_with_admission(
+                state,
+                "alice/repo".to_owned(),
+                AuthorizedRepository::anonymous_full_access(),
+                &ADMISSION,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ADMISSION.available_permits(),
+            0,
+            "retained objects still own their slot"
+        );
+        drop(projection);
+        assert_eq!(ADMISSION.available_permits(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

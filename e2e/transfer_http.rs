@@ -1,4 +1,6 @@
+mod native_client_policy;
 mod support;
+mod transfer_http_requirements;
 
 use std::{
     env,
@@ -1050,6 +1052,7 @@ async fn full_transfer_response_accepts_frame_larger_than_stream_buffer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_route_boots_with_postgres_metadata_config() {
     if env::var("DATABASE_URL").is_err() {
+        native_client_policy::require_available("PostgreSQL DATABASE_URL transfer backend", false);
         eprintln!("skipping postgres test: DATABASE_URL not set");
         return;
     }
@@ -1070,6 +1073,12 @@ async fn health_route_boots_with_postgres_metadata_config() {
     };
     let pg_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://shardline:change-me@localhost:5432/shardline".to_owned());
+    shardline_server::run_database_migration(&shardline_server::DatabaseMigrationOptions::new(
+        pg_url.clone(),
+        shardline_server::DatabaseMigrationCommand::Up { steps: None },
+    ))
+    .await
+    .expect("prepare PostgreSQL metadata before transfer startup");
     let config = ServerConfig::new(
         addr,
         format!("http://{addr}"),

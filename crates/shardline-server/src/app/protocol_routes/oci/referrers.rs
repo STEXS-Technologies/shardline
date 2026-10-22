@@ -15,7 +15,6 @@ use super::super::parse_query_map;
 use super::{
     helpers::{
         OciRepository, oci_manifest_index_key, oci_manifest_key, oci_manifest_media_type_key,
-        oci_manifest_prefix,
     },
     manifest::OCI_IMAGE_INDEX_MEDIA_TYPE,
 };
@@ -24,6 +23,27 @@ use crate::{ServerError, app::AppState, protocol_support::parse_sha256_digest};
 const DEFAULT_PAGE_SIZE: usize = 100;
 const MAX_PAGE_SIZE: usize = 1000;
 const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
+mod subject_index;
+
+pub(super) async fn index_manifest(
+    state: &Arc<AppState>,
+    repository: &str,
+    auth: &shardline_server_core::AuthorizedRepository,
+    digest: &str,
+    document: &Value,
+) -> Result<(), ServerError> {
+    if matches!(
+        subject_index::lookup(state).await?,
+        subject_index::Lookup::ManifestInventory
+    ) {
+        return Ok(());
+    }
+    subject_index::retain(
+        state,
+        subject_index::mapping(repository, auth, digest, document)?,
+    )
+    .await
+}
 
 /// Derive referrers from authoritative, immutable manifests, including documents
 /// uploaded before referrer discovery was available. Tombstones remain the
@@ -46,32 +66,34 @@ pub(super) async fn oci_referrers(
     let filter = query.get("artifactType");
     let mut after = query
         .get("last")
-        .map(|last| {
-            let parsed = parse_sha256_digest(&format!("sha256:{last}"))?;
-            oci_manifest_key(repo.repository(), &parsed, repo.capability())
-        })
+        .map(|last| parse_sha256_digest(&format!("sha256:{last}")))
         .transpose()?;
-    let prefix = oci_manifest_prefix(repo.repository(), repo.capability())?;
+    let lookup = subject_index::lookup(state).await?;
+    if matches!(lookup, subject_index::Lookup::Indexed) {
+        subject_index::reconcile(state, repo.repository(), repo.capability()).await?;
+    }
     let subject = format!("sha256:{digest_hex}");
     let mut descriptors = Vec::new();
     let mut descriptor_bytes = 0usize;
     let mut next_cursor = None;
     let mut last_returned = None;
     'scan: loop {
-        let page = state.backend.list_object_flat_namespace_page(
-            &prefix,
-            after.as_ref(),
-            MAX_PAGE_SIZE,
-        )?;
+        let page = subject_index::candidates(
+            state,
+            repo.repository(),
+            repo.capability(),
+            digest_hex,
+            after.as_deref(),
+            lookup,
+        )
+        .await?;
         if page.is_empty() {
             break;
         }
-        for metadata in page {
-            let key = metadata.key();
-            after = Some(key.clone());
-            let Some(candidate) = key.as_str().rsplit('/').next() else {
-                continue;
-            };
+        for entry in page {
+            let candidate = entry.digest_hex.as_str();
+            after = Some(entry.digest_hex.clone());
+            let key = oci_manifest_key(repo.repository(), candidate, repo.capability())?;
             if state
                 .backend
                 .oci_object_is_deleted(&oci_manifest_index_key(
@@ -83,11 +105,28 @@ pub(super) async fn oci_referrers(
             {
                 continue;
             }
-            let bytes = state.backend.read_object(key).await?;
+            let bytes = match state.backend.read_object(&key).await {
+                Ok(bytes) => bytes,
+                // A derived row may outlive physical reclamation. It cannot
+                // resurrect bytes absent from the immutable inventory. Other
+                // read failures, including corruption, still fail closed.
+                Err(ServerError::NotFound) => continue,
+                Err(error) => return Err(error),
+            };
             if hex::encode(Sha256::digest(&bytes)) != candidate {
                 return Err(ServerError::InvalidManifestReference);
             }
             let mut document: Value = serde_json::from_slice(&bytes)?;
+            if let Some(expected) = &entry.mapping
+                && subject_index::mapping(
+                    repo.repository(),
+                    repo.capability(),
+                    candidate,
+                    &document,
+                )? != *expected
+            {
+                return Err(ServerError::InvalidManifestReference);
+            }
             if document
                 .get("subject")
                 .and_then(|descriptor| descriptor.get("digest"))

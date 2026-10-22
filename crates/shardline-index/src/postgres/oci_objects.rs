@@ -27,7 +27,7 @@ fn oci_snapshot(
     )?)
 }
 
-async fn load_oci_evidence(
+pub(super) async fn load_oci_evidence(
     executor: &mut sqlx::PgConnection,
     key: &OciObjectKey,
 ) -> Result<OciObjectEvidenceLog, PostgresMetadataStoreError> {
@@ -562,8 +562,15 @@ impl OciObjectStore for PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn oci_object_is_deleted(&self, key: &OciObjectKey) -> Result<bool, Self::Error> {
-        let found = query_scalar::<_, i32>(
-            "SELECT 1 FROM shardline_oci_object_tombstones
+        let mut connection = self.pool.acquire().await?;
+        // Tombstone and evidence must describe one committed visibility state.
+        // READ COMMITTED across separate queries can mix delete/republish or
+        // reclamation transitions and report false evidence corruption.
+        let mut transaction = connection
+            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .await?;
+        let deleted_at = query_scalar::<_, i64>(
+            "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
                AND object_kind = $3 AND digest_hex = $4",
         )
@@ -571,22 +578,10 @@ impl OciObjectStore for PostgresIndexStore {
         .bind(&key.repository)
         .bind(key.kind.as_str())
         .bind(&key.digest_hex)
-        .fetch_optional(&self.pool)
+        .fetch_optional(transaction.as_mut())
         .await?;
-        let mut connection = self.pool.acquire().await?;
-        let mut transaction = connection.begin().await?;
         let evidence = load_oci_evidence(transaction.as_mut(), key).await?;
-        if found.is_some() {
-            let deleted_at: i64 = query_scalar(
-                "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
-                 WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
-            )
-            .bind(&key.scope_namespace)
-            .bind(&key.repository)
-            .bind(key.kind.as_str())
-            .bind(&key.digest_hex)
-            .fetch_one(transaction.as_mut())
-            .await?;
+        if let Some(deleted_at) = deleted_at {
             let expected = oci_snapshot(
                 key,
                 OciObjectLifecycleState::Deleted,
@@ -604,7 +599,7 @@ impl OciObjectStore for PostgresIndexStore {
             }
         }
         transaction.commit().await?;
-        Ok(found.is_some())
+        Ok(deleted_at.is_some())
     }
 
     async fn publish_oci_object(
@@ -717,6 +712,8 @@ impl OciObjectStore for PostgresIndexStore {
                 Some(tombstone.deleted_at_unix_seconds),
             )
             .await?;
+            super::oci_referrers::forget_reclaimed_manifest(transaction.as_mut(), &tombstone.key)
+                .await?;
         }
         transaction.commit().await?;
         Ok(result.rows_affected() != 0)
@@ -752,6 +749,37 @@ mod tests {
             tag: name.to_owned(),
             digest_hex: digest.to_string().repeat(64),
         }
+    }
+
+    #[tokio::test]
+    async fn visibility_reads_remain_consistent_during_delete_and_republish() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool);
+        let key = object("visibility-snapshot-race");
+        store.publish_oci_object(&key, &[]).await.unwrap();
+        let writes = async {
+            for _ in 0..64 {
+                store.delete_oci_object(&key).await.unwrap();
+                store.publish_oci_object(&key, &[]).await.unwrap();
+            }
+        };
+        let reads = async {
+            let mut errors = Vec::new();
+            for _ in 0..256 {
+                if let Err(error) = store.oci_object_is_deleted(&key).await {
+                    errors.push(error.to_string());
+                }
+            }
+            errors
+        };
+        let ((), errors) = tokio::join!(writes, reads);
+        assert!(
+            errors.is_empty(),
+            "visibility snapshots crossed a committed transition: {errors:?}"
+        );
+        assert!(!store.oci_object_is_deleted(&key).await.unwrap());
     }
 
     #[tokio::test]
@@ -1543,6 +1571,105 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+    async fn reclamation_barrier_preserves_waiting_republication_and_tag() {
+        let pool = connect_postgres().await.unwrap();
+        let gc_pool = pool
+            .options()
+            .clone()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let gc = PostgresIndexStore::new(gc_pool);
+        let store = PostgresIndexStore::new(pool);
+        let scope = format!(
+            "oci-reclaim-publication-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let manifest = object(&scope);
+        let current = tag(&scope, "latest", 'a');
+        for _ in 0..8 {
+            store
+                .publish_oci_object(&manifest, std::slice::from_ref(&current))
+                .await
+                .unwrap();
+            store.delete_oci_object(&manifest).await.unwrap();
+            let tombstone = store
+                .list_oci_object_tombstones()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.key == manifest)
+                .unwrap();
+            const BARRIER: i64 = 0x5348_4152_4447_4301;
+            query("SELECT pg_advisory_lock($1)")
+                .bind(BARRIER)
+                .execute(&gc.pool)
+                .await
+                .unwrap();
+            let mut writer = store.pool.acquire().await.unwrap();
+            writer.close_on_drop();
+            let pid: i32 = query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *writer)
+                .await
+                .unwrap();
+            let publisher = store.clone();
+            let identity = manifest.clone();
+            let tag = current.clone();
+            let publication = tokio::spawn(async move {
+                query("SELECT pg_advisory_lock_shared($1)")
+                    .bind(BARRIER)
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+                publisher
+                    .publish_oci_object_on_connection(&mut writer, &identity, &[tag])
+                    .await
+            });
+            let mut waiting = false;
+            for _ in 0..100 {
+                waiting = query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted)"
+                ).bind(pid).fetch_one(&store.pool).await.unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // The same single-connection pool owns the lock and performs GC.
+            let reclaimed = gc
+                .delete_oci_object_tombstone_if_unchanged(&tombstone)
+                .await;
+            query("SELECT pg_advisory_unlock($1)")
+                .bind(BARRIER)
+                .execute(&gc.pool)
+                .await
+                .unwrap();
+            publication.await.unwrap().unwrap();
+            assert!(waiting, "publication never waited on exclusive reclamation");
+            assert!(reclaimed.unwrap());
+            assert!(!store.oci_object_is_deleted(&manifest).await.unwrap());
+            assert_eq!(
+                store
+                    .oci_tag(&scope, &current.repository, &current.tag)
+                    .await
+                    .unwrap(),
+                Some(current.clone())
+            );
+            // Retrying the old reclamation after publication cannot hide the
+            // new generation or invalidate its verified visibility evidence.
+            assert!(
+                !store
+                    .delete_oci_object_tombstone_if_unchanged(&tombstone)
+                    .await
+                    .unwrap()
+            );
+            assert!(!store.oci_object_is_deleted(&manifest).await.unwrap());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

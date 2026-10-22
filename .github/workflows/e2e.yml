@@ -18,6 +18,22 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: shardline-e2e-only
+          POSTGRES_DB: shardline_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shardline_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      SHARDLINE_REQUIRE_NATIVE_CLIENTS: "1"
+      DATABASE_URL: postgres://postgres:shardline-e2e-only@127.0.0.1:5432/shardline_e2e
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -61,8 +77,30 @@ jobs:
           python3 -c "import boto3; print('boto3', boto3.__version__)"
           s3cmd --version
           sudo apt-get update
-          sudo apt-get install -y rclone
+          sudo apt-get install -y rclone skopeo podman unzip
           rclone --version
+          skopeo --version
+          podman info
+          docker info
+          helm_archive="${RUNNER_TEMP}/helm-v3.19.0-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "${helm_archive}" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  ${helm_archive}" \
+            | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/helm-client"
+          tar --extract --gzip --file "${helm_archive}" --directory "${RUNNER_TEMP}/helm-client"
+          sudo install --mode=0755 "${RUNNER_TEMP}/helm-client/linux-amd64/helm" /usr/local/bin/helm
+          helm version --short
+          git_xet_archive="${RUNNER_TEMP}/git-xet-linux-x86_64-v0.2.1.zip"
+          curl --fail --location --silent --show-error \
+            --output "${git_xet_archive}" \
+            https://github.com/huggingface/xet-core/releases/download/git-xet-v0.2.1/git-xet-linux-x86_64.zip
+          echo "e6354d55704cc838d1feed79ee27b9b89da7752ae98bd83df5797c180700fdb1  ${git_xet_archive}" \
+            | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/git-xet-client"
+          unzip -q "${git_xet_archive}" -d "${RUNNER_TEMP}/git-xet-client"
+          sudo install --mode=0755 "${RUNNER_TEMP}/git-xet-client/git-xet" /usr/local/bin/git-xet
+          git-xet --version
 
       - name: Qualify Git LFS locking and OCI Distribution v1.1.1
         run: bash scripts/verify-protocol-conformance.sh
@@ -102,6 +140,7 @@ jobs:
           tar --extract --gzip --file "${git_lfs_archive}" --directory "${RUNNER_TEMP}"
           sudo install --mode=0755 "${RUNNER_TEMP}/git-lfs-3.6.1/git-lfs" /usr/local/bin/git-lfs
           git-lfs version
+          bash scripts/verify-protocol-conformance.sh
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_protocol_frontends_e2e \
             -E 'test(native_git_lfs)' --no-tests=pass

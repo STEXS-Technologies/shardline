@@ -1,7 +1,7 @@
 //! Upload-pack implementation for clone/fetch.
 
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     extract::{Path, State},
     http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
@@ -15,6 +15,7 @@ use crate::{
     error::HubApiError,
     routes::{HubState, require_repository_binding},
 };
+mod shallow;
 #[cfg(test)]
 use shardline_index::hub::HubFileEntry;
 
@@ -37,14 +38,13 @@ pub async fn upload_pack(
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
 
-    let body = to_bytes(body, MAX_UPLOAD_PACK_REQUEST_BYTES)
-        .await
-        .map_err(|error| {
-            HubApiError::BadRequest(format!("upload-pack request too large: {error}"))
-        })?;
-    let request_lines = pktline::decode_lines(&body);
+    let (body, request_admission) =
+        super::admission::read_request(body, MAX_UPLOAD_PACK_REQUEST_BYTES, "upload-pack").await?;
+    let request_lines = decode_negotiation(&body)?;
+    super::capabilities::upload(&request_lines)?;
+    let shallow_request = shallow::Request::parse(&request_lines)?;
     let wants = parse_wants(&request_lines);
-    let _haves = parse_haves(&request_lines);
+    let haves = parse_haves(&request_lines);
 
     let capability = match auth_ctx {
         Some(ctx) => shardline_server_core::AuthorizedRepository::from_verified_context(
@@ -53,9 +53,13 @@ pub async fn upload_pack(
         )?,
         None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
     };
-    let projection =
-        super::projection::project_history_async(state.clone(), repo_id.clone(), capability)
-            .await?;
+    let projection = super::projection::project_history_admitted(
+        state.clone(),
+        repo_id.clone(),
+        capability,
+        request_admission,
+    )
+    .await?;
     let identities: std::collections::HashSet<_> = projection.identities.values().collect();
     for want in &wants {
         if !identities.contains(want) {
@@ -68,16 +72,27 @@ pub async fn upload_pack(
         std::str::from_utf8(line)
             .is_ok_and(|line| line.split_whitespace().any(|word| word == "side-band-64k"))
     });
-    let response_body = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, HubApiError> {
-        let pack_data = generate_pack(&projection.objects)?;
-        let mut response_body = pktline::encode_line("NAK\n")?.into_bytes();
+    let done = request_lines
+        .iter()
+        .any(|line| line.as_slice() == b"done\n" || line.as_slice() == b"done");
+    let (response_body, response_admission) = tokio::task::spawn_blocking(move || {
+        let pack_admission = projection
+            .admission
+            .ok_or_else(|| HubApiError::CasError("Git projection missing admission".to_owned()))?;
+        let (objects, mut response_body) =
+            shallow::negotiate(projection.objects, &wants, &haves, &shallow_request)?;
+        if !done && !response_body.is_empty() {
+            return Ok((response_body, pack_admission));
+        }
+        let pack_data = generate_pack(&objects)?;
+        response_body.extend_from_slice(pktline::encode_line("NAK\n")?.as_bytes());
         if sideband {
             response_body.extend_from_slice(&pktline::sideband_data(&pack_data));
             response_body.extend_from_slice(FLUSH.as_bytes());
         } else {
             response_body.extend_from_slice(&pack_data);
         }
-        Ok(response_body)
+        Ok::<_, HubApiError>((response_body, pack_admission))
     })
     .await
     .map_err(|error| HubApiError::CasError(error.to_string()))??;
@@ -88,11 +103,57 @@ pub async fn upload_pack(
         HeaderValue::from_static("application/x-git-upload-pack-result"),
     );
     resp_headers.insert("cache-control", HeaderValue::from_static("no-cache"));
+    resp_headers.insert(
+        axum::http::header::CONTENT_LENGTH,
+        HeaderValue::from_str(&response_body.len().to_string())
+            .map_err(|error| HubApiError::CasError(error.to_string()))?,
+    );
 
-    Ok((resp_headers, response_body).into_response())
+    Ok((
+        resp_headers,
+        super::admission::response_body(response_body, response_admission),
+    )
+        .into_response())
 }
 
 // ---- Helper functions ----
+
+/// Upload-pack places have lines after the want-list flush. The generic
+/// single-section pkt-line decoder intentionally stops at that flush.
+fn decode_negotiation(mut bytes: &[u8]) -> Result<Vec<Vec<u8>>, HubApiError> {
+    let invalid = || HubApiError::BadRequest("invalid upload-pack pkt-line".to_owned());
+    let mut lines = Vec::new();
+    while !bytes.is_empty() {
+        let header = bytes.get(..4).ok_or_else(invalid)?;
+        let length = std::str::from_utf8(header)
+            .ok()
+            .and_then(|value| usize::from_str_radix(value, 16).ok())
+            .ok_or_else(invalid)?;
+        if length <= 2 {
+            bytes = bytes.get(4..).ok_or_else(invalid)?;
+            continue;
+        }
+        let payload = bytes.get(4..length).ok_or_else(invalid)?;
+        lines.push(payload.to_vec());
+        bytes = bytes.get(length..).ok_or_else(invalid)?;
+    }
+    Ok(lines)
+}
+
+/// Send only wanted reachable objects absent from the client's known history.
+/// Unknown have IDs cannot exclude any object from this repository.
+#[cfg(test)]
+fn negotiated_objects(
+    objects: Vec<GitObject>,
+    wants: &[String],
+    haves: &[String],
+) -> Result<Vec<GitObject>, HubApiError> {
+    shallow::negotiate(objects, wants, haves, &shallow::Request::default())
+        .map(|(objects, _updates)| objects)
+}
+
+#[cfg(test)]
+mod negotiation_tests;
 
 pub(super) fn parse_wants(lines: &[Vec<u8>]) -> Vec<String> {
     lines

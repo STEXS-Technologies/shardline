@@ -1,3 +1,4 @@
+mod native_client_policy;
 mod support;
 
 use std::{
@@ -1964,8 +1965,9 @@ fn command_error(description: &str, output: &Output) -> IoError {
 }
 
 fn command_available(program: &str) -> bool {
-    Command::new(program)
+    let available = Command::new(program)
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| output.status.success());
+    native_client_policy::require_available(program, available)
 }

@@ -19,6 +19,22 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Added
 
+- Added depth-limited Git clones, relative history deepening and unshallowing
+  without rewriting verified commit bytes.
+- Added negotiated atomic Git pushes on SQLite and PostgreSQL, committing all
+  requested refs and their reliability evidence together.
+- Added Git `report-status-v2` negotiation for ordinary Hub pushes, preserving
+  legacy status reports and existing reference publication checks.
+- Added negotiated Git receive-side `side-band-64k` status framing, preserving
+  plain responses for clients that do not request it.
+- Added partial S3 object attributes for committed ETag, size and storage class,
+  with explicit field selection; multipart attributes remain pending.
+- Added opt-in S3 signing identities bound to existing scoped tokens, with
+  signature verification, payload and session-credential checks, signed streaming
+  uploads and checksum trailers, and presigned GET/PUT support.
+- Added paginated S3 multipart part discovery over existing local and PostgreSQL
+  upload state, bucket-wide upload discovery, and server-side part copying with
+  source conditions and byte ranges, including native AWS CLI recovery checks.
 - Added durable Git LFS locking with owner checks and PostgreSQL replica
   coordination, plus OCI referrers with filtering and pagination.
 - Added an upstream OCI Distribution v1.1.1 conformance gate and native Git LFS
@@ -34,6 +50,19 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Improved
 
+- Selected OCI referrers through durable, corruption-checked subject metadata,
+  reconciling older uploads while retaining content and deletion checks, with
+  verified scanning for read-only databases and deployments without the index.
+- Honored S3 read date conditions consistently across GET, HEAD and object
+  attributes, with entity-tag precedence and unchanged committed metadata.
+- Bounded multipart discovery selection to one response page plus look-ahead,
+  retaining verified pagination anchors after upload abort and filesystem restart.
+- Kept startup maintenance workers owned through server shutdown, allowing
+  in-flight database updates to settle and interrupted Hub secret sweeps to resume.
+- Reused durable LFS locking through Hub repository URLs, including native
+  lock-and-transfer checks and compatible object-scoped upload authentication.
+- Limited Hub Git fetch packs to requested history absent from the client's
+  known history, avoiding repeated transfer of already-held objects.
 - Avoided rewriting identical Xet identity rows in SQLite and PostgreSQL while
   retaining transactional conflict checks and native identity updates.
 - Avoided scratch payload copies during filesystem-backed durable multipart
@@ -84,6 +113,36 @@ existing deployment data, public reliability types, and normal startup behavior.
 
 ### Fixed
 
+- Rejected malformed or duplicate Git push commands before applying any ref
+  update, preserving exact pack boundaries and valid client requests.
+- Prevented OCI discovery backfill from recreating subject mappings after
+  physical reclamation, while preserving legitimate republication and existing
+  runtime database permissions.
+- Accepted native MinIO signed-checksum trailer framing while preserving chunk
+  signatures, trailer authentication, checksum validation and exact EOF checks.
+- Kept OCI referrer discovery available when concurrent GC removes a manifest
+  between its inventory listing and reconciliation read.
+- Removed obsolete OCI subject-index entries in completed reclamation
+  transactions when existing database permissions allow cleanup.
+- Allowed SQLite OCI manifests to be uploaded again after physical garbage
+  collection, preserving the verified reclamation history.
+- Rejected unimplemented Git atomic-push and shallow/filter request semantics
+  before processing instead of silently ignoring them.
+- Admitted Git smart-HTTP request buffering before reading upload bodies, using
+  the same bounded slots retained through projection and pack processing.
+- Retained Git download admission until the response body is consumed or
+  cancelled, preventing slow readers from accumulating unaccounted pack buffers.
+- Accepted valid pre-1970 HTTP dates in S3 read and copy conditions without
+  relaxing malformed-date validation.
+- Returned LFS JSON errors for malformed lock requests on standalone and Hub
+  routes while preserving HTTP rejection statuses and existing locks.
+- Rejected duplicate LFS lock-listing filters instead of silently selecting the
+  last pagination or revision parameter.
+- Read PostgreSQL OCI visibility markers and evidence from one committed
+  snapshot, preventing false integrity errors during delete and republish.
+- Verified PostgreSQL resumable-session metadata and lifecycle evidence under
+  the same row lock, preventing false integrity failures during concurrent
+  multipart completion and abort.
 - Kept Hub REST commits on the requested branch instead of updating main,
   rejecting stale or deleted feature-branch updates atomically.
 - Returned Git-compatible Hub SDK commit IDs while retaining historical revision

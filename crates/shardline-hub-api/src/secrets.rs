@@ -61,7 +61,7 @@ pub fn upgrade_webhook_secrets_with_report(
     store: &shardline_index::hub::BoxedHubStore,
     cipher: &WebhookSecretCipher,
 ) -> WebhookSecretUpgradeReport {
-    upgrade_with_report(store, cipher, false)
+    upgrade_with_report(store, cipher, false, &|| false)
 }
 
 /// Stops the sweep on its first storage failure without replacing its store.
@@ -72,15 +72,33 @@ pub fn upgrade_webhook_secrets_with_report_fail_fast(
     store: &shardline_index::hub::BoxedHubStore,
     cipher: &WebhookSecretCipher,
 ) -> WebhookSecretUpgradeReport {
-    upgrade_with_report(store, cipher, true)
+    upgrade_with_report(store, cipher, true, &|| false)
+}
+
+/// Runs a fail-fast sweep with cooperative cancellation between storage calls.
+/// An interrupted scan reports a failure rather than claiming full completion.
+/// An already-issued compare-and-swap is allowed to settle; encrypted rows and
+/// concurrent secret rotations retain the existing atomic update semantics.
+#[must_use]
+pub fn upgrade_webhook_secrets_until_stopped(
+    store: &shardline_index::hub::BoxedHubStore,
+    cipher: &WebhookSecretCipher,
+    should_stop: &dyn Fn() -> bool,
+) -> WebhookSecretUpgradeReport {
+    upgrade_with_report(store, cipher, true, should_stop)
 }
 
 fn upgrade_with_report(
     store: &shardline_index::hub::BoxedHubStore,
     cipher: &WebhookSecretCipher,
     stop_on_storage_error: bool,
+    should_stop: &dyn Fn() -> bool,
 ) -> WebhookSecretUpgradeReport {
     let mut report = WebhookSecretUpgradeReport::default();
+    if should_stop() {
+        report.failures = 1;
+        return report;
+    }
     let repos = match store.list_repos() {
         Ok(repos) => repos,
         Err(error) => {
@@ -90,6 +108,10 @@ fn upgrade_with_report(
         }
     };
     for repo in repos {
+        if should_stop() {
+            report.failures = report.failures.saturating_add(1);
+            return report;
+        }
         let webhooks = match store.list_webhooks(&repo.repo_id) {
             Ok(webhooks) => webhooks,
             Err(error) => {
@@ -102,6 +124,10 @@ fn upgrade_with_report(
             }
         };
         for webhook in webhooks {
+            if should_stop() {
+                report.failures = report.failures.saturating_add(1);
+                return report;
+            }
             report.inspected = report.inspected.saturating_add(1);
             let Some(stored) = webhook.secret.as_ref() else {
                 continue;
@@ -270,5 +296,58 @@ mod tests {
         // No webhooks at all: the sweep must complete without error or panic.
         upgrade_webhook_secrets(&store, &cipher);
         assert_eq!(store.list_repos().expect("list repos").len(), 1);
+    }
+
+    #[test]
+    fn interrupted_sweep_keeps_completed_updates_and_resumes_remaining_rows() {
+        let (_root, store, cipher) = encrypted_store();
+        for suffix in ["first", "second"] {
+            store
+                .create_webhook(
+                    "org/sweep",
+                    &format!("https://example.com/{suffix}"),
+                    &["push".to_owned()],
+                    Some("original-secret"),
+                )
+                .expect("seed webhook");
+        }
+        let checks = std::cell::Cell::new(0_u32);
+        let report = upgrade_webhook_secrets_until_stopped(&store, &cipher, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() >= 4
+        });
+        assert_eq!(
+            (report.inspected, report.upgraded, report.failures),
+            (1, 1, 1)
+        );
+        let partial = store.list_webhooks("org/sweep").expect("partial rows");
+        let encrypted = partial
+            .iter()
+            .find(|row| {
+                row.secret
+                    .as_ref()
+                    .is_some_and(|secret| is_ciphertext(secret.expose_secret()))
+            })
+            .expect("one completed encrypted row");
+        let preserved = encrypted.secret.clone();
+        let resumed = upgrade_webhook_secrets_with_report(&store, &cipher);
+        assert_eq!(
+            (resumed.inspected, resumed.upgraded, resumed.failures),
+            (2, 1, 0)
+        );
+        for row in store.list_webhooks("org/sweep").expect("completed rows") {
+            let stored = row.secret.as_ref().expect("secret");
+            assert_eq!(
+                cipher
+                    .decrypt("org/sweep", stored.expose_secret())
+                    .expect("decrypt")
+                    .secret
+                    .expose_secret(),
+                "original-secret"
+            );
+            if row.id == encrypted.id {
+                assert_eq!(row.secret, preserved);
+            }
+        }
     }
 }

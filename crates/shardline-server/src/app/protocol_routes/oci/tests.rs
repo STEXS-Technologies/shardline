@@ -40,8 +40,9 @@ async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() 
         .unwrap();
     let app = oci_test_router(&cluster.node_a);
     let media = "application/vnd.oci.image.index.v1+json";
+    let subject = format!("sha256:{}", "a".repeat(64));
     let before = format!(
-        r#"{{"schemaVersion":2,"mediaType":"{media}","manifests":[],"annotations":{{"value":"before"}}}}"#
+        r#"{{"schemaVersion":2,"mediaType":"{media}","manifests":[],"annotations":{{"value":"before"}},"subject":{{"mediaType":"{media}","digest":"{subject}","size":1}}}}"#
     );
     let after = before.replace("before", "after");
     let uri = "/v2/ownership/manifest/manifests/latest";
@@ -87,6 +88,26 @@ async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() 
         .await
         .unwrap();
     assert_eq!(body.as_ref(), before.as_bytes());
+    let referrers = send(
+        &app,
+        Method::GET,
+        &format!("/v2/ownership/manifest/referrers/{subject}"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(referrers.status(), StatusCode::OK);
+    let listing: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(referrers.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        listing["manifests"].as_array().unwrap().len(),
+        1,
+        "an indexed but uncommitted manifest must stay hidden after owner loss"
+    );
+    assert_eq!(listing["manifests"][0]["annotations"]["value"], "before");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

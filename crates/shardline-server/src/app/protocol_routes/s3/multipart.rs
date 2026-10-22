@@ -23,6 +23,9 @@
 //! re-acquiring the per-root lock for metadata
 //! mutations.
 
+mod listing;
+pub(super) use listing::{s3_list_parts, s3_list_uploads};
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
@@ -73,7 +76,7 @@ fn io_to_s3(error: std::io::Error) -> S3Error {
 }
 
 /// The `413 EntityTooLarge` envelope for an oversized part body.
-fn entity_too_large() -> S3Error {
+pub(super) fn entity_too_large() -> S3Error {
     S3Error {
         code: "EntityTooLarge",
         message: "Your proposed upload exceeds the maximum allowed part size".to_owned(),
@@ -113,6 +116,8 @@ fn store_error_to_s3(error: S3SessionError) -> S3Error {
 struct DurableS3SessionAttributes {
     bucket: String,
     user_metadata: Vec<(String, String)>,
+    #[serde(default)]
+    initiated_at: Option<u64>,
 }
 
 const fn durable_sessions_enabled(state: &AppState) -> bool {
@@ -133,10 +138,8 @@ pub(super) async fn s3_create_multipart_upload(
     let user_metadata = object::capture_user_metadata(headers)?;
     if durable_sessions_enabled(state) {
         let upload_id = new_upload_id();
-        let expires_at = state
-            .backend
-            .postgres_now()
-            .await?
+        let initiated_at = state.backend.postgres_now().await?;
+        let expires_at = initiated_at
             .checked_add(std::time::Duration::from_secs(
                 state.config.s3_upload_session_ttl_seconds().get(),
             ))
@@ -144,6 +147,7 @@ pub(super) async fn s3_create_multipart_upload(
         let attributes = serde_json::to_string(&DurableS3SessionAttributes {
             bucket: context.bucket.clone(),
             user_metadata,
+            initiated_at: Some(initiated_at.as_secs()),
         })
         .map_err(|_error| S3Error::internal())?;
         let session = ResumableSession::new(

@@ -5,8 +5,11 @@
     clippy::too_many_arguments
 )]
 
+mod native_client_policy;
+mod native_client_requirements;
 mod support;
 
+use native_client_policy::required as native_clients_required;
 use std::{
     error::Error,
     fs::{create_dir_all, read, write as write_file},
@@ -1617,6 +1620,10 @@ async fn start_runtime_with_s3(
     frontends: &[ServerFrontend],
 ) -> Result<Option<FrontendRuntime>, TestError> {
     let Some(deployment) = DockerLocalStack::builder().with_minio().start()? else {
+        assert!(
+            !native_clients_required(),
+            "required native-client qualification needs a working Docker/MinIO runtime"
+        );
         return Ok(None);
     };
     let storage = tempfile::tempdir()?;
@@ -1680,6 +1687,10 @@ async fn wait_for_health(base_url: &str) -> Result<(), TestError> {
 }
 
 fn command_available(program: &str) -> bool {
+    native_client_policy::require_available(program, probe_command(program))
+}
+
+fn probe_command(program: &str) -> bool {
     Command::new(program)
         .arg(if program == "helm" {
             "version"
@@ -1691,13 +1702,17 @@ fn command_available(program: &str) -> bool {
 }
 
 fn bazel_program() -> Option<&'static str> {
-    if command_available("bazel") {
+    if probe_command("bazel") {
         return Some("bazel");
     }
-    if command_available("bazelisk") {
+    if probe_command("bazelisk") {
         return Some("bazelisk");
     }
 
+    assert!(
+        !native_clients_required(),
+        "required native Bazel qualification needs bazel or bazelisk"
+    );
     None
 }
 

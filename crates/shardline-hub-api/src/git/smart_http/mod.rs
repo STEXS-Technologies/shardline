@@ -5,6 +5,8 @@
 //! files from HubStore metadata: tree objects, LFS pointer blobs, and commit
 //! objects are all constructed from the file entries stored per revision.
 
+mod admission;
+mod capabilities;
 pub mod error;
 mod identity;
 mod limits;

@@ -1,3 +1,6 @@
+mod data_integrity_requirements;
+mod native_client_policy;
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -8807,6 +8810,7 @@ async fn postgres_backend_lfs_round_trip() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -9349,6 +9353,7 @@ async fn s3_backend_lfs_round_trip() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -9495,6 +9500,7 @@ async fn s3_backend_dedup_cross_frontend() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -9593,6 +9599,7 @@ async fn postgres_backend_oci_manifest_push_pull() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -12376,6 +12383,7 @@ async fn s3_backend_oci_session_upload() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -12524,6 +12532,7 @@ async fn s3_backend_oci_session_abort() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };

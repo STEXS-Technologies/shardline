@@ -164,6 +164,32 @@ async fn collect_body_bytes(response: axum::response::Response) -> Vec<u8> {
         .to_vec()
 }
 
+async fn advertised_main(test: &common::HubTestContext, repo_id: &str) -> [u8; 20] {
+    let response = test
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/models/{repo_id}/info/refs?service=git-upload-pack"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = collect_body_bytes(response).await;
+    let service_length =
+        usize::from_str_radix(std::str::from_utf8(&body[..4]).unwrap(), 16).unwrap();
+    let lines = pktline::decode_lines(&body[service_length + 4..]);
+    let line = lines
+        .iter()
+        .find(|line| String::from_utf8_lossy(line).contains("refs/heads/main"))
+        .unwrap();
+    let id = std::str::from_utf8(&line[..40]).unwrap();
+    hex::decode(id).unwrap().try_into().unwrap()
+}
+
 // ---- Tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -729,7 +755,7 @@ async fn receive_pack_rejects_non_fast_forward_push() {
     let test = setup();
     let uid = std::process::id();
     let repo_id = format!("test-{}/ff-reject", uid);
-    let _ = create_repo_and_commit(
+    create_repo_and_commit(
         &test,
         "models",
         &format!("test-{uid}"),
@@ -738,13 +764,16 @@ async fn receive_pack_rejects_non_fast_forward_push() {
         "Initial",
     );
 
-    let null_sha = "0000000000000000000000000000000000000000";
-
-    // Step 1: Push commit_A to refs/heads/main (old=0000).
+    // A newly created Hub repository already advertises its initial commit.
+    let initial = advertised_main(&test, &repo_id).await;
     let (objects_a, commit_a_sha) =
-        build_simple_commit("file_a.txt", b"content A", "Commit A", None);
-    let body_a =
-        build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects_a, &commit_a_sha);
+        build_simple_commit("file_a.txt", b"content A", "Commit A", Some(&initial));
+    let body_a = build_receive_pack_with_objects(
+        &hex::encode(initial),
+        "refs/heads/main",
+        &objects_a,
+        &commit_a_sha,
+    );
 
     let response = test
         .app()
@@ -861,6 +890,29 @@ async fn receive_pack_deletes_branch_without_removing_commit_history() {
         "feature push should succeed: {create_body}"
     );
 
+    let unsupported_line =
+        format!("{commit_sha_hex} {null_sha} refs/heads/feature\0report-status push-options\n");
+    let unsupported_body = format!("{}0000", pktline::encode_line(&unsupported_line).unwrap());
+    let rejected = test
+        .app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/models/test-{uid}/delete-branch/git-receive-pack"))
+                .header("content-type", "application/x-git-receive-pack")
+                .body(Body::from(unsupported_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        test.state()
+            .store
+            .resolve_revision(&repo_id, "feature")
+            .unwrap()
+            .is_some()
+    );
     let delete_body = build_receive_pack_request(&commit_sha_hex, null_sha, "refs/heads/feature");
     let delete_response = test
         .app()
@@ -991,7 +1043,9 @@ async fn receive_pack_rejects_stale_or_default_branch_deletion() {
         .resolve_revision(&repo_id, "main")
         .unwrap()
         .expect("main ref exists");
-    let default_delete = build_receive_pack_request(&current_main, null_sha, "refs/heads/main");
+    // The Hub revision is an internal 64-hex ID; Git wire commands use SHA-1.
+    // Default-branch protection must reject even a syntactically valid stale ID.
+    let default_delete = build_receive_pack_request(&commit_sha_hex, null_sha, "refs/heads/main");
     let default_response = test
         .app()
         .oneshot(
@@ -1010,15 +1064,92 @@ async fn receive_pack_rejects_stale_or_default_branch_deletion() {
         default_body.contains("ng refs/heads/main"),
         "default branch deletion must be rejected: {default_body}"
     );
+    assert_eq!(
+        test.state()
+            .store
+            .resolve_revision(&repo_id, "main")
+            .unwrap(),
+        Some(current_main)
+    );
 }
 
 // ---- Git tags ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receive_pack_malformed_tail_cannot_delete_an_earlier_valid_ref() {
+    let test = setup();
+    let namespace = format!("test-{}", std::process::id());
+    let repository = format!("{namespace}/malformed-commands");
+    let _initial = create_repo_and_commit(
+        &test,
+        "models",
+        &namespace,
+        "malformed-commands",
+        vec![],
+        "Initial",
+    );
+    let (objects, commit) = build_simple_commit("file.txt", b"retained content", "Feature", None);
+    let head = hex::encode(commit);
+    let create = build_receive_pack_with_objects(
+        "0000000000000000000000000000000000000000",
+        "refs/heads/feature",
+        &objects,
+        &commit,
+    );
+    let created = test
+        .app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/models/{repository}/git-receive-pack"))
+                .body(Body::from(create))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let create_report = String::from_utf8(collect_body_bytes(created).await).unwrap();
+    assert!(
+        create_report.contains("ok refs/heads/feature"),
+        "{create_report}"
+    );
+    let deletion = pktline::encode_line(&format!(
+        "{head} {} refs/heads/feature\0report-status\n",
+        "0".repeat(40)
+    ))
+    .unwrap();
+    for tail in [
+        "0001".to_owned(),
+        "0005x0000".to_owned(),
+        format!("{}0000", pktline::encode_line("bad command\n").unwrap()),
+    ] {
+        let response = test
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/models/{repository}/git-receive-pack"))
+                    .body(Body::from(format!("{deletion}{tail}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            test.state()
+                .store
+                .resolve_revision(&repository, "feature")
+                .unwrap(),
+            Some(head.clone())
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn receive_pack_pushes_tag() {
     let test = setup();
     let uid = std::process::id();
-    let _ = create_repo_and_commit(
+    create_repo_and_commit(
         &test,
         "models",
         &format!("test-{uid}"),
@@ -1030,10 +1161,15 @@ async fn receive_pack_pushes_tag() {
     let null_sha = "0000000000000000000000000000000000000000";
 
     // Step 1: Push a commit to refs/heads/main.
+    let initial = advertised_main(&test, &format!("test-{uid}/tag-test")).await;
     let (objects_a, commit_a_sha) =
-        build_simple_commit("README.md", b"# Tag Test", "Add README", None);
-    let body_a =
-        build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects_a, &commit_a_sha);
+        build_simple_commit("README.md", b"# Tag Test", "Add README", Some(&initial));
+    let body_a = build_receive_pack_with_objects(
+        &hex::encode(initial),
+        "refs/heads/main",
+        &objects_a,
+        &commit_a_sha,
+    );
 
     let response = test
         .app()
@@ -1140,7 +1276,7 @@ async fn receive_pack_pushes_tag() {
 async fn receive_pack_stores_lfs_objects() {
     let test = setup();
     let uid = std::process::id();
-    let _ = create_repo_and_commit(
+    create_repo_and_commit(
         &test,
         "models",
         &format!("test-{uid}"),
@@ -1148,6 +1284,7 @@ async fn receive_pack_stores_lfs_objects() {
         vec![],
         "Initial",
     );
+    let initial = advertised_main(&test, &format!("test-{uid}/lfs-push")).await;
 
     // Build a commit containing an LFS pointer blob.
     use sha2::Digest;
@@ -1174,7 +1311,7 @@ async fn receive_pack_stores_lfs_objects() {
 
     let commit = create_commit_object(
         &tree_sha,
-        None,
+        Some(&initial),
         "Test User <test@example.com>",
         "Add LFS file",
     );
@@ -1187,8 +1324,12 @@ async fn receive_pack_stores_lfs_objects() {
         tree,
         commit,
     ];
-    let null_sha = "0000000000000000000000000000000000000000";
-    let body = build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects, &commit_sha);
+    let body = build_receive_pack_with_objects(
+        &hex::encode(initial),
+        "refs/heads/main",
+        &objects,
+        &commit_sha,
+    );
 
     let response = test
         .app()

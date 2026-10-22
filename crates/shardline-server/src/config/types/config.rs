@@ -150,6 +150,7 @@ pub struct ServerConfig {
     pub(crate) root_dir: PathBuf,
     pub(crate) object_storage_adapter: ObjectStorageAdapter,
     pub(crate) s3_object_store_config: Option<S3ObjectStoreConfig>,
+    pub(crate) s3_signing_identities: Vec<super::S3SigningIdentity>,
     pub(crate) max_request_body_bytes: NonZeroUsize,
     pub(crate) shard_metadata_limits: ShardMetadataLimits,
     pub(crate) chunk_size: NonZeroUsize,
@@ -226,6 +227,7 @@ impl ServerConfig {
             root_dir,
             object_storage_adapter: ObjectStorageAdapter::Local,
             s3_object_store_config: None,
+            s3_signing_identities: Vec::new(),
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             shard_metadata_limits: DEFAULT_SHARD_METADATA_LIMITS,
             chunk_size,
@@ -1410,6 +1412,11 @@ impl ServerConfig {
     /// Returns [`ServerConfigError::SessionTtlOutOfRange`] when an enabled
     /// PostgreSQL session expiry cannot fit its durable timestamp representation.
     pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
+        if !self.s3_signing_identities.is_empty() && !self.auth_provider_is_configured() {
+            return Err(ServerConfigError::ConfigFileError(
+                "S3 signing identities require an authentication provider".to_owned(),
+            ));
+        }
         crate::admission::validate_capacity(
             "admission_max_weight",
             self.admission_max_weight(),

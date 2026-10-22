@@ -15,6 +15,7 @@ pub(super) mod listing;
 pub(super) mod multipart;
 pub(super) mod object;
 mod repository;
+pub(crate) mod signing;
 
 pub(crate) use bucket::{
     s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_list_buckets,
@@ -24,6 +25,7 @@ pub(crate) use object::{
     s3_delete_object, s3_get_object, s3_head_object, s3_post_object, s3_put_object,
 };
 pub(super) use repository::*;
+pub(crate) use signing::protect as protect_s3_signing;
 
 #[cfg(test)]
 mod poc_audit;

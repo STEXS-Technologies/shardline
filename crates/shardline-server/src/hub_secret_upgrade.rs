@@ -41,12 +41,30 @@ async fn prepare_postgres(
 
 /// Called on the server's existing blocking pool. The work store retains its
 /// original session until the actual sweep finishes, including caller aborts.
+#[cfg(test)]
 pub(crate) fn run(
     config: &ServerConfig,
     local_store: &BoxedHubStore,
     cipher: &WebhookSecretCipher,
     tracker: &EmbeddedTaskTracker,
 ) -> WebhookSecretUpgradeReport {
+    run_until_stopped(config, local_store, cipher, tracker, &|| false)
+}
+
+pub(crate) fn run_until_stopped(
+    config: &ServerConfig,
+    local_store: &BoxedHubStore,
+    cipher: &WebhookSecretCipher,
+    tracker: &EmbeddedTaskTracker,
+    should_stop: &dyn Fn() -> bool,
+) -> WebhookSecretUpgradeReport {
+    if should_stop() {
+        return WebhookSecretUpgradeReport {
+            inspected: 0,
+            upgraded: 0,
+            failures: 1,
+        };
+    }
     let begin = |selected_tracker: &EmbeddedTaskTracker| {
         let tracking = selected_tracker.begin(
             "hub-webhook-secret-upgrade",
@@ -79,10 +97,11 @@ pub(crate) fn run(
                 {
                     crate::task_tracking::embedded::tracking_error(error.as_ref());
                 }
-                let report =
-                    shardline_hub_api::secrets::upgrade_webhook_secrets_with_report_fail_fast(
-                        &store, cipher,
-                    );
+                let report = shardline_hub_api::secrets::upgrade_webhook_secrets_until_stopped(
+                    &store,
+                    cipher,
+                    should_stop,
+                );
                 if let Ok(receipt) = &mut tracking
                     && let Err(error) = receipt.detach_work_history()
                 {
@@ -103,7 +122,11 @@ pub(crate) fn run(
         }
     } else {
         tracking = begin(&tracker.clone().without_history_scope());
-        shardline_hub_api::secrets::upgrade_webhook_secrets_with_report(local_store, cipher)
+        shardline_hub_api::secrets::upgrade_webhook_secrets_until_stopped(
+            local_store,
+            cipher,
+            should_stop,
+        )
     };
     if let Ok(receipt) = tracking
         && let Err(error) = receipt.finish(

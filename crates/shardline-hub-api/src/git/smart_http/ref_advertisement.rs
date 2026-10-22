@@ -228,12 +228,16 @@ pub async fn info_refs(
     }
 
     let (capabilities, content_type) = match service {
+        GitSmartHttpService::ReceivePack if state.store.supports_atomic_ref_updates() => (
+            "report-status report-status-v2 delete-refs quiet side-band-64k atomic",
+            "application/x-git-receive-pack-advertisement",
+        ),
         GitSmartHttpService::ReceivePack => (
-            "report-status delete-refs quiet",
+            "report-status report-status-v2 delete-refs quiet side-band-64k",
             "application/x-git-receive-pack-advertisement",
         ),
         GitSmartHttpService::UploadPack => (
-            "side-band-64k",
+            "side-band-64k shallow deepen-relative",
             "application/x-git-upload-pack-advertisement",
         ),
     };

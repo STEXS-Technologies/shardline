@@ -642,6 +642,22 @@ impl ServerBackend {
             .await?)
     }
 
+    pub(crate) async fn list_scoped_inflight_resumable_sessions(
+        &self,
+        scope: &str,
+        protocol: shardline_index::ResumableSessionProtocol,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResumableSession>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .list_scoped_inflight_resumable_sessions(scope, protocol, after, limit)
+            .await?)
+    }
+
     pub(crate) async fn resumable_session_snapshot(
         &self,
         session_id: &str,

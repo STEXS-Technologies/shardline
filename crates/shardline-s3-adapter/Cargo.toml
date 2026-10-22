@@ -12,10 +12,16 @@ description = "S3-compatible protocol adapter for the Shardline server ecosystem
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
+crc-fast = "1.10"
 getrandom.workspace = true
 hex.workspace = true
+hmac.workspace = true
+percent-encoding = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+subtle.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-reliability.workspace = true
@@ -23,6 +29,7 @@ shardline-server-core.workspace = true
 shardline-storage.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
+zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

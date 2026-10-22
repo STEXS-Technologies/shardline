@@ -53,9 +53,9 @@ pub type QueryMap = Vec<(String, String)>;
 
 /// A recognized S3 sub-resource (the `?subresource` query dispatch set).
 ///
-/// The `Acl`…`Encryption` variants and [`S3SubResource::Other`] are
-/// out-of-scope operations that the handler lane maps to
-/// `501 NotImplemented` (per `docs/S3_FRONTEND.md`).
+/// The handler lane maps unsupported operations to `501 NotImplemented`.
+/// [`S3SubResource::Other`] retains the released catch-all classification;
+/// handlers can refine it without adding a variant to this public enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum S3SubResource {
     /// `?uploads` — `CreateMultipartUpload`.
@@ -86,11 +86,11 @@ pub enum S3SubResource {
     Tagging,
     /// `?encryption` — out of scope (`NotImplemented`).
     Encryption,
-    /// Any other recognized-but-unsupported sub-resource (for example
+    /// Any other recognized sub-resource (for example
     /// `restore`, `select`, `torrent`, `legal-hold`, `retention`, `attributes`,
     /// `replication`, `website`, `versionId`, `versions`, `logging`,
     /// `requestPayment`, `accelerate`, `object-lock`, `list-type=1`, or a
-    /// malformed `partNumber`) — `NotImplemented` at the handler level.
+    /// malformed `partNumber`). Handlers reject unimplemented refinements.
     Other,
 }
 

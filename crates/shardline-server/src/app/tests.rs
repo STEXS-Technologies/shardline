@@ -1662,12 +1662,49 @@ async fn router_lifetime_stops_optional_history_housekeeping() {
         NonZeroUsize::new(4096).unwrap(),
     );
     let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
-    let app = super::router_with_housekeeping_guard(config, guard, stopped.clone())
-        .await
-        .unwrap();
+    let mut background = super::RouterBackgroundTasks::new(stopped.clone());
+    let app =
+        super::router_with_housekeeping_guard(config, guard, stopped.clone(), &mut background)
+            .await
+            .unwrap();
     let cloned = app.clone();
     drop(app);
     assert!(!stopped.load(std::sync::atomic::Ordering::Relaxed));
     drop(cloned);
     assert!(stopped.load(std::sync::atomic::Ordering::Relaxed));
+    background.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires disposable PostgreSQL via DATABASE_URL"]
+async fn hub_server_shutdown_joins_startup_workers_before_runtime_teardown() {
+    let database = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+    let pool = sqlx::PgPool::connect(&database).await.unwrap();
+    crate::apply_database_migrations(&pool).await.unwrap();
+    pool.close().await;
+    for _cycle in 0..3 {
+        let root = TempDir::new().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = ServerConfig::new(
+            address,
+            format!("http://{address}"),
+            root.path().to_owned(),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap()
+        .with_hub_webhook_secret_key(vec![7; 32])
+        .unwrap()
+        .with_index_postgres_url(database.clone())
+        .unwrap()
+        .with_shutdown_timeout(Duration::from_millis(40));
+        timeout(
+            Duration::from_secs(20),
+            serve_with_listener_until(config, listener, async {}),
+        )
+        .await
+        .expect("shutdown must finish")
+        .expect("all startup workers joined without panic");
+    }
 }

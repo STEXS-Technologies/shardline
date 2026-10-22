@@ -18,7 +18,7 @@ use super::{
 use crate::{error::HubApiError, routes::HubState};
 
 const MAX_IDENTITY_BYTES: usize = 20 * 1024 * 1024;
-static IDENTITY_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+pub(super) static IDENTITY_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 fn failure(error: impl std::fmt::Display) -> HubApiError {
     HubApiError::CasError(error.to_string())
@@ -282,8 +282,8 @@ mod tests {
             .store
             .delete_ref("alice/repo", "feature", &internal)
             .unwrap();
-        // A cloned state carries no in-memory identity cache.
-        let restarted = state.clone();
+        // State carries no in-memory identity cache.
+        let restarted = state;
         for name in [&internal, &public] {
             assert_eq!(
                 resolve_commit_id(&restarted, "alice/repo", name, &auth).unwrap(),

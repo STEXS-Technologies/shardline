@@ -70,7 +70,9 @@ pub use lfs_locks::{CreateLfsLockOutcome, LfsLockRecord, LfsLockStore, UnlockLfs
 mod local_sqlite;
 mod memory;
 mod oci_objects;
+mod oci_referrers;
 mod oci_tags;
+pub use oci_referrers::OciManifestSubject;
 mod postgres;
 mod provider;
 mod provider_evidence;

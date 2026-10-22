@@ -1,0 +1,281 @@
+use super::*;
+
+#[tokio::test]
+async fn committed_attributes_survive_overwrite_restart_and_reject_invalid_requests() {
+    exercise(None).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_committed_attributes_survive_overwrite_restart() {
+    let database = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+    exercise(Some(&database)).await;
+}
+
+async fn exercise(database: Option<&str>) {
+    let root = tempfile::tempdir().unwrap();
+    let owner = format!(
+        "attributes-{}",
+        root.path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim_start_matches('.')
+    )
+    .to_ascii_lowercase();
+    let credential = token("writer", &owner, TokenScope::Write);
+    let read = token("reader", &owner, TokenScope::Read);
+    let client = Client::new();
+    let server = start(root.path(), ServerFrontend::S3, true, database).await;
+    let url = format!("{}/{}.locks/object", server.base, owner);
+    for body in ["original", "replacement is a different size"] {
+        let put = client
+            .put(&url)
+            .bearer_auth(&credential)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        let etag = put.headers()["etag"]
+            .to_str()
+            .unwrap()
+            .trim_matches('"')
+            .to_owned();
+        let response = client
+            .get(format!("{url}?attributes"))
+            .bearer_auth(&read)
+            .header(
+                "x-amz-object-attributes",
+                "ETag,ObjectSize,StorageClass,Checksum",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("last-modified"));
+        let xml = response.text().await.unwrap();
+        assert!(xml.contains(&format!("<ETag>{etag}</ETag>")), "{xml}");
+        assert!(
+            xml.contains(&format!("<ObjectSize>{}</ObjectSize>", body.len())),
+            "{xml}"
+        );
+        assert!(xml.contains("<StorageClass>STANDARD</StorageClass>"));
+        assert!(!xml.contains("<Checksum>") && !xml.contains("<ObjectParts>"));
+    }
+    read_conditions(&client, &url, &read).await;
+    for attributes in [
+        None,
+        Some(""),
+        Some("ObjectSize,Unknown"),
+        Some("ETag,ETag"),
+    ] {
+        let mut request = client.get(format!("{url}?attributes")).bearer_auth(&read);
+        if let Some(attributes) = attributes {
+            request = request.header("x-amz-object-attributes", attributes);
+        }
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let response = client
+        .get(format!("{url}?attributes"))
+        .bearer_auth(&read)
+        .header("x-amz-object-attributes", "ObjectSize")
+        .header("x-amz-object-attributes", "ETag")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = client
+        .get(format!("{url}?attributes"))
+        .bearer_auth(&read)
+        .header("x-amz-object-attributes", "ObjectParts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let response = client
+        .get(format!("{url}?attributes&versionId=unavailable"))
+        .bearer_auth(&read)
+        .header("x-amz-object-attributes", "ObjectSize")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let other = token("other", "different-repository", TokenScope::Read);
+    assert_eq!(
+        client
+            .get(format!("{url}?attributes"))
+            .bearer_auth(&other)
+            .header("x-amz-object-attributes", "ObjectSize")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    server.stop().await;
+    let server = start(root.path(), ServerFrontend::S3, true, database).await;
+    let url = format!("{}/{}.locks/object", server.base, owner);
+    let response = client
+        .get(format!("{url}?attributes"))
+        .bearer_auth(&read)
+        .header("x-amz-object-attributes", "ObjectSize")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let xml = response.text().await.unwrap();
+    assert!(!xml.contains("<ETag>") && !xml.contains("<StorageClass>"));
+    assert!(xml.contains("<ObjectSize>31</ObjectSize>"), "{xml}");
+    assert_eq!(
+        client
+            .delete(&url)
+            .bearer_auth(&credential)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        client
+            .get(format!("{url}?attributes"))
+            .bearer_auth(&read)
+            .header("x-amz-object-attributes", "ObjectSize")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    server.stop().await;
+}
+
+async fn read_conditions(client: &Client, url: &str, credential: &str) {
+    let head = client
+        .head(url)
+        .bearer_auth(credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    let modified = head.headers()["last-modified"].to_str().unwrap();
+    let etag = head.headers()["etag"].to_str().unwrap();
+    let past = "Thu, 01 Jan 1970 00:00:00 GMT";
+    let future = "Fri, 01 Jan 2100 00:00:00 GMT";
+    let cases: Vec<(Vec<(&str, &str)>, StatusCode)> = vec![
+        (
+            vec![("if-modified-since", modified)],
+            StatusCode::NOT_MODIFIED,
+        ),
+        (
+            vec![("if-modified-since", future)],
+            StatusCode::NOT_MODIFIED,
+        ),
+        (vec![("if-modified-since", past)], StatusCode::OK),
+        (
+            vec![("if-modified-since", "Fri, 01 Jan 1960 00:00:00 GMT")],
+            StatusCode::OK,
+        ),
+        (
+            vec![("if-unmodified-since", "Fri, 01 Jan 1960 00:00:00 GMT")],
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (vec![("if-unmodified-since", modified)], StatusCode::OK),
+        (vec![("if-unmodified-since", future)], StatusCode::OK),
+        (
+            vec![("if-unmodified-since", past)],
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            vec![("if-match", etag), ("if-unmodified-since", past)],
+            StatusCode::OK,
+        ),
+        (
+            vec![("if-match", "\"different\""), ("if-modified-since", future)],
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            vec![("if-none-match", etag), ("if-modified-since", past)],
+            StatusCode::NOT_MODIFIED,
+        ),
+        (
+            vec![
+                ("if-none-match", "\"different\""),
+                ("if-modified-since", future),
+            ],
+            StatusCode::OK,
+        ),
+        (
+            vec![("if-none-match", etag), ("if-unmodified-since", past)],
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (vec![("if-modified-since", "invalid-date")], StatusCode::OK),
+        (
+            vec![("if-unmodified-since", "invalid-date")],
+            StatusCode::OK,
+        ),
+        (
+            vec![("if-modified-since", past), ("if-modified-since", future)],
+            StatusCode::OK,
+        ),
+    ];
+    for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
+        for attributes in [false, true] {
+            if attributes && method == reqwest::Method::HEAD {
+                continue;
+            }
+            let target = if attributes {
+                format!("{url}?attributes")
+            } else {
+                url.to_owned()
+            };
+            for (headers, expected) in &cases {
+                let mut request = client
+                    .request(method.clone(), &target)
+                    .bearer_auth(credential);
+                if attributes {
+                    request = request.header("x-amz-object-attributes", "ETag,ObjectSize");
+                }
+                for (name, value) in headers {
+                    request = request.header(*name, *value);
+                }
+                let response = request.send().await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    *expected,
+                    "{method} {target} {headers:?}"
+                );
+                if *expected == StatusCode::NOT_MODIFIED {
+                    assert_eq!(response.headers()["etag"], etag);
+                    assert!(response.bytes().await.unwrap().is_empty());
+                } else if *expected == StatusCode::OK
+                    && method == reqwest::Method::GET
+                    && !attributes
+                {
+                    assert_eq!(
+                        response.bytes().await.unwrap().as_ref(),
+                        b"replacement is a different size"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        client
+            .get(url)
+            .bearer_auth(credential)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        b"replacement is a different size"
+    );
+}

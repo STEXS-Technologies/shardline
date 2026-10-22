@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+mod ref_batch;
+
 use futures_util::TryStreamExt;
 use serde_json::from_value;
 use sqlx::{Row, query_scalar};
@@ -246,6 +248,16 @@ where
 }
 
 impl HubStore for PostgresIndexStore {
+    fn supports_atomic_ref_updates(&self) -> bool {
+        true
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[crate::hub::HubRefChange],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply(self, repo_id, changes)
+    }
     type Error = PostgresMetadataStoreError;
 
     fn create_repo(
@@ -1511,6 +1523,78 @@ mod tests {
 
     // block_on_async itself is tested indirectly by every hub_postgres integration
     // test that exercises the HubStore impl (create_repo, get_repo, etc.)
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atomic_ref_batch_contract() {
+        if std::env::var_os("DATABASE_URL").is_none() {
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool);
+        crate::hub::ref_batch_tests::contract(&store);
+        cleanup_repo(&store, "atomic/contract").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atomic_ref_batch_storage_failure_rolls_back_evidence_and_refs() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+        if std::env::var_os("DATABASE_URL").is_none() {
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool.clone());
+        let repo = "atomic/failure";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "old", "main", "Initial")
+            .unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE FUNCTION atomic_ref_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected ref failure'; END $$;
+            CREATE TRIGGER atomic_ref_failure BEFORE INSERT ON shardline_hub_refs FOR EACH ROW WHEN (NEW.ref_name = 'reject') EXECUTE FUNCTION atomic_ref_failure();")
+            .execute(&pool).await.unwrap();
+        let changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("old".into()),
+                new_sha: Some("next".into()),
+                message: "Next".into(),
+            },
+            HubRefChange {
+                ref_name: "reject".into(),
+                expected_sha: None,
+                new_sha: Some("new".into()),
+                message: "New".into(),
+            },
+        ];
+        let result = store.change_refs_atomically(repo, &changes);
+        sqlx::raw_sql("DROP TRIGGER atomic_ref_failure ON shardline_hub_refs; DROP FUNCTION atomic_ref_failure();").execute(&pool).await.unwrap();
+        assert!(result.is_err());
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            store.resolve_revision(repo, "main").unwrap().as_deref(),
+            Some("old")
+        );
+        assert_eq!(store.get_repo(repo).unwrap().unwrap().default_branch, "old");
+        assert!(store.get_revision(repo, "next").unwrap().is_none());
+        assert!(store.resolve_revision(repo, "reject").unwrap().is_none());
+        assert_eq!(
+            store.change_refs_atomically(repo, &changes).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        assert_eq!(store.list_refs(repo).unwrap().len(), 2);
+        cleanup_repo(&store, repo).await;
+    }
 
     async fn connect_postgres() -> Option<PgPool> {
         crate::postgres::connect_isolated_postgres().await

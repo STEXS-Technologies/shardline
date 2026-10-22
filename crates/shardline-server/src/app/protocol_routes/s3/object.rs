@@ -7,6 +7,10 @@
 //! authoritative record. `DeleteObject` drops the listing row first, then the
 //! record + direct object (crash-safe ordering).
 
+mod attributes;
+mod conditions;
+mod copy_part;
+
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -297,8 +301,19 @@ pub(crate) async fn s3_put_object(
         }
     });
     if let (Some(part_number), Some(upload_id)) = (part_number, upload_id) {
-        if resources.len() != 2 || headers.contains_key(COPY_SOURCE) {
+        if resources.len() != 2 {
             return Err(S3Error::not_implemented());
+        }
+        if headers.contains_key(COPY_SOURCE) {
+            return copy_part::upload_part_copy(
+                &state,
+                auth.capability(),
+                &context,
+                part_number,
+                upload_id,
+                &headers,
+            )
+            .await;
         }
         return multipart::s3_upload_part(&state, &context, part_number, upload_id, &headers, body)
             .await;
@@ -597,17 +612,13 @@ fn check_copy_source_preconditions(
         let date = value
             .to_str()
             .ok()
-            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .and_then(conditions::timestamp)
             .ok_or_else(|| S3Error::invalid_argument("Invalid copy-source date header"))?;
         // S3 tag validators take precedence over their corresponding dates.
         if source_headers.contains_key(tag_header) {
             continue;
         }
-        let since = date
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-            .ok_or_else(|| S3Error::invalid_argument("Invalid copy-source date header"))?;
+        let since = date;
         let Some(modified) = snapshot.updated_at_unix_seconds else {
             return Err(S3Error::precondition_failed());
         };
@@ -672,10 +683,13 @@ fn failing_condition(
 /// GET/HEAD use 304 for failed If-None-Match, with no XML or content body.
 fn check_read_precondition(
     stored_etag: Option<&str>,
+    modified_at: Option<i64>,
     headers: &HeaderMap,
     key: &str,
 ) -> Result<Option<Response>, S3Error> {
-    match failing_condition(stored_etag, headers)? {
+    let failed_tag = failing_condition(stored_etag, headers)?;
+    conditions::require_unmodified(modified_at, headers)?;
+    match failed_tag {
         Some(shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_)) => {
             let mut response = StatusCode::NOT_MODIFIED.into_response();
             if let Some(etag) =
@@ -689,7 +703,7 @@ fn check_read_precondition(
             check_precondition(stored_etag, headers, key)?;
             Ok(None)
         }
-        None => Ok(None),
+        None => conditions::modified_response(stored_etag, modified_at, headers),
     }
 }
 
@@ -950,6 +964,15 @@ pub(crate) async fn s3_get_object(
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
+    let resources = classify(&query);
+    if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
+        return multipart::s3_list_parts(&state, &context, upload_id, &query).await;
+    }
+    // Preserve the released public sub-resource enum. Attributes are refined
+    // privately only when they are the sole recognized operation selector.
+    if resources == [S3SubResource::Other] && query.iter().any(|(name, _)| name == "attributes") {
+        return attributes::get(&state, &context, &headers).await;
+    }
     if has_sub_resource(&query) {
         return Err(S3Error::not_implemented());
     }
@@ -968,6 +991,7 @@ pub(crate) async fn s3_get_object(
     // stored S3 ETag (listing-index row) before any bytes are served.
     if let Some(response) = check_read_precondition(
         entry.as_ref().map(|entry| entry.etag.as_str()),
+        entry.as_ref().map(|entry| entry.updated_at_unix_seconds),
         &headers,
         &context.key,
     )? {
@@ -1112,6 +1136,7 @@ pub(crate) async fn s3_head_object(
     // headers are served.
     if let Some(response) = check_read_precondition(
         entry.as_ref().map(|entry| entry.etag.as_str()),
+        entry.as_ref().map(|entry| entry.updated_at_unix_seconds),
         &headers,
         &context.key,
     )? {

@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     http::{StatusCode, Uri, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
@@ -16,6 +16,9 @@ use shardline_index::{CreateLfsLockOutcome, LfsLockRecord, UnlockLfsOutcome};
 use shardline_protocol::RepositoryScope;
 use shardline_server_core::AuthorizedRepository;
 use std::sync::Arc;
+
+#[derive(Clone)]
+pub(crate) struct AnonymousLockNamespace(pub(super) String);
 
 const DEFAULT_LIMIT: u32 = 100;
 const MAX_LIMIT: u32 = 1000;
@@ -52,6 +55,15 @@ fn response(status: StatusCode, body: Value) -> Response {
     (status, [(CONTENT_TYPE, LFS_CONTENT_TYPE)], Json(body)).into_response()
 }
 
+fn lock_request<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, Box<Response>> {
+    request.map(|Json(value)| value).map_err(|rejection| {
+        Box::new(response(
+            rejection.status(),
+            json!({"message":"invalid lock request body"}),
+        ))
+    })
+}
+
 fn identity(auth: &AuthorizedRepository) -> Result<(String, String), ServerError> {
     auth.claims().map_or_else(
         || Ok(("anonymous".to_owned(), "anonymous".to_owned())),
@@ -64,7 +76,15 @@ fn identity(auth: &AuthorizedRepository) -> Result<(String, String), ServerError
     )
 }
 
-fn lock_namespace(auth: &AuthorizedRepository) -> Result<String, ServerError> {
+fn lock_namespace(
+    auth: &AuthorizedRepository,
+    anonymous: Option<&axum::Extension<AnonymousLockNamespace>>,
+) -> Result<String, ServerError> {
+    if auth.claims().is_none()
+        && let Some(namespace) = anonymous
+    {
+        return Ok(namespace.0.0.clone());
+    }
     let repository = auth
         .repository()
         .map(|scope| RepositoryScope::new(scope.provider(), scope.owner(), scope.name(), None))
@@ -108,8 +128,13 @@ fn page_limit(limit: Option<u32>) -> Option<u32> {
 pub(crate) async fn lfs_create_lock(
     repo: LfsWriteRepository,
     State(state): State<Arc<AppState>>,
-    Json(request): Json<CreateRequest>,
+    anonymous: Option<axum::Extension<AnonymousLockNamespace>>,
+    request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<Response, ServerError> {
+    let request = match lock_request(request) {
+        Ok(request) => request,
+        Err(response) => return Ok(*response),
+    };
     let auth = repo.capability();
     if !check_reference(
         auth,
@@ -142,7 +167,7 @@ pub(crate) async fn lfs_create_lock(
     Ok(
         match state
             .backend
-            .create_lfs_lock(&lock_namespace(auth)?, &lock)
+            .create_lfs_lock(&lock_namespace(auth, anonymous.as_ref())?, &lock)
             .await?
         {
             CreateLfsLockOutcome::Created(lock) => {
@@ -159,9 +184,30 @@ pub(crate) async fn lfs_create_lock(
 pub(crate) async fn lfs_list_locks(
     repo: LfsRepository,
     State(state): State<Arc<AppState>>,
+    anonymous: Option<axum::Extension<AnonymousLockNamespace>>,
     uri: Uri,
 ) -> Result<Response, ServerError> {
-    let query = parse_query_map(&uri)?;
+    let query = match parse_query_map(&uri) {
+        Ok(query) => query,
+        Err(ServerError::RequestQueryTooLarge) => {
+            return Ok(response(
+                StatusCode::URI_TOO_LONG,
+                json!({"message":"lock query is too large"}),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    // Do not let a map silently select the last of conflicting filters or
+    // authorization references. The shared parser bounds bytes first.
+    if uri
+        .query()
+        .is_some_and(|raw| url::form_urlencoded::parse(raw.as_bytes()).count() != query.len())
+    {
+        return Ok(response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({"message":"repeated lock query parameter"}),
+        ));
+    }
     let auth = repo.capability();
     if !check_reference(auth, query.get("refspec").map(String::as_str)) {
         return Ok(response(
@@ -187,7 +233,7 @@ pub(crate) async fn lfs_list_locks(
     let mut locks = state
         .backend
         .list_lfs_locks(
-            &lock_namespace(auth)?,
+            &lock_namespace(auth, anonymous.as_ref())?,
             query.get("path").map(String::as_str),
             query.get("id").map(String::as_str),
             query.get("cursor").map(String::as_str),
@@ -209,8 +255,13 @@ pub(crate) async fn lfs_list_locks(
 pub(crate) async fn lfs_verify_locks(
     repo: LfsWriteRepository,
     State(state): State<Arc<AppState>>,
-    Json(request): Json<VerifyRequest>,
+    anonymous: Option<axum::Extension<AnonymousLockNamespace>>,
+    request: Result<Json<VerifyRequest>, JsonRejection>,
 ) -> Result<Response, ServerError> {
+    let request = match lock_request(request) {
+        Ok(request) => request,
+        Err(response) => return Ok(*response),
+    };
     let auth = repo.capability();
     if !check_reference(
         auth,
@@ -234,7 +285,7 @@ pub(crate) async fn lfs_verify_locks(
     let mut locks = state
         .backend
         .list_lfs_locks(
-            &lock_namespace(auth)?,
+            &lock_namespace(auth, anonymous.as_ref())?,
             None,
             None,
             request.cursor.as_deref(),
@@ -257,9 +308,15 @@ pub(crate) async fn lfs_verify_locks(
 pub(crate) async fn lfs_unlock(
     repo: LfsWriteRepository,
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(request): Json<UnlockRequest>,
+    anonymous: Option<axum::Extension<AnonymousLockNamespace>>,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+    request: Result<Json<UnlockRequest>, JsonRejection>,
 ) -> Result<Response, ServerError> {
+    let request = match lock_request(request) {
+        Ok(request) => request,
+        Err(response) => return Ok(*response),
+    };
+    let id = params.get("id").ok_or(ServerError::InsufficientScope)?;
     let auth = repo.capability();
     if !check_reference(
         auth,
@@ -277,7 +334,12 @@ pub(crate) async fn lfs_unlock(
     Ok(
         match state
             .backend
-            .unlock_lfs_lock(&lock_namespace(auth)?, &id, &owner, request.force)
+            .unlock_lfs_lock(
+                &lock_namespace(auth, anonymous.as_ref())?,
+                id,
+                &owner,
+                request.force,
+            )
             .await?
         {
             UnlockLfsOutcome::Removed(lock) => {

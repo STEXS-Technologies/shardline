@@ -483,6 +483,26 @@ fn lfs_action_auth_header(
     )])))
 }
 
+/// Git LFS combines action headers with `http.extraHeader`. Only byte-identical
+/// Authorization repetitions have a single unambiguous credential. Other Hub
+/// routes retain their strict rejection of repeated Authorization fields.
+pub(crate) async fn normalize_lfs_authorization(
+    mut request: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, HubApiError> {
+    let values: Vec<_> = request.headers().get_all(AUTHORIZATION).iter().collect();
+    if values.len() > 1 {
+        let first = values.first().ok_or(HubApiError::InvalidToken)?;
+        if values.iter().any(|value| value != first) {
+            return Err(HubApiError::InvalidToken);
+        }
+        let credential = (*first).clone();
+        request.headers_mut().remove(AUTHORIZATION);
+        request.headers_mut().insert(AUTHORIZATION, credential);
+    }
+    Ok(next.run(request).await)
+}
+
 // ---- LFS upload (requires Write) ----
 
 pub(crate) async fn lfs_upload(
@@ -724,12 +744,25 @@ fn authorize_lfs_upload(
 
     let mut headers = request_headers.clone();
     if let Some(token) = upload_token {
-        if headers.contains_key(AUTHORIZATION) {
-            return Err(HubApiError::InvalidToken);
-        }
+        // Native Git LFS also forwards its configured Authorization header.
+        // Verify both credentials and require the same authority/repository;
+        // the query capability still restricts this upload to its exact OID.
+        let caller = if headers.contains_key(AUTHORIZATION) {
+            Some(auth.authorize(&headers, TokenScope::Write)?)
+        } else {
+            None
+        };
         let value = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_error| HubApiError::InvalidToken)?;
+        headers.remove(AUTHORIZATION);
         headers.insert(AUTHORIZATION, value);
+        let upload = auth.authorize(&headers, TokenScope::Write)?;
+        if caller.as_ref().is_some_and(|caller| {
+            caller.claims().issuer() != upload.claims().issuer()
+                || caller.claims().repository() != upload.claims().repository()
+        }) {
+            return Err(HubApiError::Forbidden);
+        }
     }
     let context = auth.authorize(&headers, TokenScope::Write)?;
     if upload_token.is_some() && context.claims().subject() != format!("shardline-lfs-upload:{oid}")

@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
 
+mod native_client_policy;
+mod native_huggingface_requirements;
 mod support;
 
 use std::{
@@ -921,10 +923,11 @@ fn path_as_str(path: &Path) -> Result<&str, TestError> {
 }
 
 fn command_available(program: &str) -> bool {
-    Command::new(program)
+    let available = Command::new(program)
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| output.status.success());
+    native_client_policy::require_available(program, available)
 }
 
 fn python_package_available(package: &str) -> bool {

@@ -1,5 +1,7 @@
 use std::path::Path;
 
+mod ref_batch;
+
 use rusqlite::{Connection, params};
 use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 
@@ -86,6 +88,16 @@ const fn repo_type_to_str(t: HubRepoType) -> &'static str {
 }
 
 impl HubStore for LocalIndexStore {
+    fn supports_atomic_ref_updates(&self) -> bool {
+        true
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[crate::hub::HubRefChange],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply(self, repo_id, changes)
+    }
     type Error = LocalIndexStoreError;
 
     fn create_repo(
@@ -1131,6 +1143,78 @@ mod tests {
     use crate::hub::{BoxedHubStore, HubRepoType};
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn atomic_ref_batch_contract() {
+        let (_storage, store) = make_store();
+        crate::hub::ref_batch_tests::contract(&store);
+    }
+
+    #[test]
+    fn atomic_ref_batch_storage_failure_rolls_back_evidence_and_refs() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+        let (_storage, store) = make_store();
+        let repo = "atomic/failure";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "old", "main", "Initial")
+            .unwrap();
+        let connection = open_hub_connection_rw(store.root()).unwrap();
+        let before: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_reliability_events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection.execute_batch("CREATE TRIGGER atomic_ref_failure BEFORE INSERT ON shardline_hub_refs WHEN NEW.ref_name = 'reject' BEGIN SELECT RAISE(ABORT, 'injected ref failure'); END;").unwrap();
+        let changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("old".into()),
+                new_sha: Some("next".into()),
+                message: "Next".into(),
+            },
+            HubRefChange {
+                ref_name: "reject".into(),
+                expected_sha: None,
+                new_sha: Some("new".into()),
+                message: "New".into(),
+            },
+        ];
+        let result = store.change_refs_atomically(repo, &changes);
+        connection
+            .execute_batch("DROP TRIGGER atomic_ref_failure")
+            .unwrap();
+        assert!(result.is_err());
+        let after: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_reliability_events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            store.resolve_revision(repo, "main").unwrap().as_deref(),
+            Some("old")
+        );
+        assert_eq!(store.get_repo(repo).unwrap().unwrap().default_branch, "old");
+        assert!(store.get_revision(repo, "next").unwrap().is_none());
+        assert!(store.resolve_revision(repo, "reject").unwrap().is_none());
+        assert_eq!(
+            store.change_refs_atomically(repo, &changes).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        assert_eq!(store.list_refs(repo).unwrap().len(), 2);
+        // Boxed stores must forward the batch primitive, rather than the
+        // compatibility default for third-party stores.
+        let boxed = BoxedHubStore::from_store(store);
+        assert_eq!(
+            boxed.change_refs_atomically(repo, &[]).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+    }
 
     fn make_store() -> (shardline_test_support::TempStorage, LocalIndexStore) {
         let ts = shardline_test_support::TempStorage::new();

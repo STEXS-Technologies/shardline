@@ -7,8 +7,7 @@ use sqlx::{Connection, PgConnection, Postgres, Row, Transaction};
 
 use super::{
     PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, insert_reliability_event,
-    load_postgres_latest_evidence_event, load_postgres_latest_evidence_heads,
-    next_reliability_sequence, u64_to_i64,
+    load_postgres_latest_evidence_heads, next_reliability_sequence, u64_to_i64,
 };
 use crate::{
     CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumablePartRange,
@@ -684,10 +683,16 @@ impl PostgresIndexStore {
             return Ok(None);
         };
         let session = session_from_row(&row)?;
-        let parts = parts_on_transaction(&mut transaction, session_id).await?;
-        verify_resumable_state_digest_strict(&session, &parts, row.try_get("state_digest")?)?;
+        // Keep the row's shared lock until both metadata and lifecycle evidence
+        // are verified. A completion/abort must not advance the evidence head
+        // between reading the session and checking its corresponding event.
+        verify_resumable_session_page(
+            &mut transaction,
+            std::slice::from_ref(&session),
+            &[row.try_get("state_digest")?],
+        )
+        .await?;
         transaction.commit().await?;
-        self.verify_resumable_session_evidence(&session).await?;
         Ok(Some(session))
     }
 
@@ -810,8 +815,8 @@ impl PostgresIndexStore {
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
         verify_resumable_state_digest_strict(&session, &parts, row.try_get("state_digest")?)?;
+        Self::verify_resumable_session_evidence(&mut transaction, &session).await?;
         transaction.commit().await?;
-        self.verify_resumable_session_evidence(&session).await?;
         Ok(Some((session, parts)))
     }
 
@@ -848,8 +853,8 @@ impl PostgresIndexStore {
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
         verify_resumable_state_digest_strict(&session, &parts, row.try_get("state_digest")?)?;
+        Self::verify_resumable_session_evidence(&mut transaction, &session).await?;
         transaction.commit().await?;
-        self.verify_resumable_session_evidence(&session).await?;
         Ok(Some((session, parts)))
     }
 
@@ -1547,6 +1552,39 @@ impl PostgresIndexStore {
         prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
+        self.list_inflight_sessions_filtered(after_session_id, prefix, limit, None, None)
+            .await
+    }
+
+    /// Lists evidence-verified active sessions within one authorized namespace.
+    ///
+    /// # Errors
+    /// Returns database, evidence, or checked-conversion errors.
+    pub async fn list_scoped_inflight_resumable_sessions(
+        &self,
+        scope: &str,
+        protocol: ResumableSessionProtocol,
+        after_session_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
+        self.list_inflight_sessions_filtered(
+            after_session_id,
+            None,
+            limit,
+            Some(scope),
+            Some(protocol),
+        )
+        .await
+    }
+
+    async fn list_inflight_sessions_filtered(
+        &self,
+        after_session_id: Option<&str>,
+        prefix: Option<&str>,
+        limit: usize,
+        scope: Option<&str>,
+        protocol: Option<ResumableSessionProtocol>,
+    ) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
         let limit = i64::try_from(limit)
             .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
         let escaped_prefix = prefix.map(escape_like);
@@ -1558,12 +1596,16 @@ impl PostgresIndexStore {
              WHERE ($1::text IS NULL OR session_id > $1)
                AND state IN ('active', 'completing')
                AND ($2::text IS NULL OR session_id LIKE $2 || '%' ESCAPE '\\')
+               AND ($4::text IS NULL OR scope_namespace = $4)
+               AND ($5::text IS NULL OR protocol = $5)
              ORDER BY session_id
              LIMIT $3",
         )
         .bind(after_session_id)
         .bind(escaped_prefix.as_deref())
         .bind(limit)
+        .bind(scope)
+        .bind(protocol.map(ResumableSessionProtocol::as_str))
         .fetch_all(&mut *transaction)
         .await?;
         let sessions = rows
@@ -1580,16 +1622,16 @@ impl PostgresIndexStore {
     }
 
     async fn verify_resumable_session_evidence(
-        &self,
+        transaction: &mut Transaction<'_, Postgres>,
         session: &ResumableSession,
     ) -> Result<(), PostgresMetadataStoreError> {
-        let Some(event) = load_postgres_latest_evidence_event(
-            self.pool(),
+        let mut heads = load_postgres_latest_evidence_heads(
+            transaction.as_mut(),
             shardline_reliability::OperationKind::ResumableSession,
-            session.session_id(),
+            &[session.session_id().to_owned()],
         )
-        .await?
-        else {
+        .await?;
+        let Some(event) = heads.remove(session.session_id()) else {
             return Err(PostgresMetadataStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));

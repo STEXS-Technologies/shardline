@@ -1,4 +1,6 @@
 mod admin_api;
+mod background_tasks;
+pub use background_tasks::RouterBackgroundTasks;
 mod metadata_routes;
 mod operational;
 mod protocol_routes;
@@ -202,18 +204,48 @@ impl Drop for ActiveProtocolRequestGuard<'_> {
 /// }
 /// ```
 ///
+/// Hosts that shut down their own Tokio runtime should use
+/// [`router_with_background_tasks`] and drain its returned handle first. This
+/// convenience API retains the existing detached startup-worker behavior.
+///
 /// # Errors
 ///
 /// Returns [`ServerError`] when the configured backend cannot initialize.
 pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
+    let (router, _background_tasks) = router_with_background_tasks(config).await?;
+    Ok(router)
+}
+
+/// Builds a router with explicit ownership of its blocking startup workers.
+/// Embedded hosts should stop HTTP serving, drop the router, and await the
+/// returned handle's shutdown before dropping their Tokio runtime. The ordinary
+/// `serve` entry points manage this automatically. The legacy `router` API
+/// remains available for hosts that keep their runtime alive independently.
+///
+/// # Errors
+/// Returns backend or router initialization failures.
+pub async fn router_with_background_tasks(
+    config: ServerConfig,
+) -> Result<(Router, RouterBackgroundTasks), ServerError> {
     let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
-    router_with_housekeeping_guard(config, guard, stopped).await
+    let mut background = RouterBackgroundTasks::new(stopped.clone());
+    let result = router_with_housekeeping_guard(config, guard, stopped, &mut background).await;
+    match result {
+        Ok(router) => Ok((router, background)),
+        Err(error) => {
+            if let Err(worker_error) = background.shutdown().await {
+                tracing::warn!(%worker_error, "startup worker failed while router initialization unwound");
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn router_with_housekeeping_guard(
     config: ServerConfig,
     housekeeping_guard: crate::task_tracking::housekeeping::HousekeepingGuard,
     housekeeping_stopped: Arc<std::sync::atomic::AtomicBool>,
+    background: &mut RouterBackgroundTasks,
 ) -> Result<Router, ServerError> {
     // The Hub frontend negotiates hf_xet for large-file transfers, so its
     // runtime also needs the Xet CAS routes and reconstruction support. Add
@@ -263,7 +295,7 @@ async fn router_with_housekeeping_guard(
     let retention_store = evidence_store.with_housekeeping_stop(housekeeping_stopped.clone());
     let retention_deployment = crate::task_tracking::deployment_fingerprint(&config)?;
     let retention_stopped = housekeeping_stopped.clone();
-    tokio::task::spawn_blocking(move || {
+    background.register(tokio::task::spawn_blocking(move || {
         if let Err(error) = retention_store.prune_completed_incrementally(
             retention_deployment,
             shardline_protocol::unix_now_seconds_lossy(),
@@ -278,7 +310,7 @@ async fn router_with_housekeeping_guard(
                 "legacy task history relocation unavailable; serving continues: {error}"
             );
         }
-    });
+    }));
     tracing::info!("embedded task tracker initialized; no separate tracker service required");
     let auth = build_auth_provider(&config).await?;
     let config_secret_cipher = config.config_secret_key().map_or_else(
@@ -530,7 +562,10 @@ async fn router_with_housekeeping_guard(
     for frontend in state.config.server_frontends() {
         match frontend {
             ServerFrontend::Hub => {
-                hub_state = Some(build_hub_state(&state, task_tracker.clone())?);
+                hub_state = Some(build_hub_state(&state, task_tracker.clone(), background)?);
+                if role.serves_api() {
+                    app = protocol_routes::register_hub_lock_routes(app, state.clone());
+                }
             }
             ServerFrontend::Xet => {
                 app = register_frontend_routes(app, *frontend, role, &state);
@@ -539,7 +574,10 @@ async fn router_with_housekeeping_guard(
                 // Build the S3 router separately and apply the state at build
                 // time so it can be mounted as the app-level fallback service
                 // (an un-applied Router<Arc<AppState>> is not a Service).
-                s3_router = Some(register_s3_routes(Router::new(), role).with_state(state.clone()));
+                s3_router = Some(
+                    register_s3_routes(Router::new(), role, &state.config)
+                        .with_state(state.clone()),
+                );
             }
             ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {
                 app = register_frontend_routes(app, *frontend, role, &state);
@@ -688,8 +726,8 @@ async fn serve_with_listener_until<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
-    let app = router_with_housekeeping_guard(config.clone(), guard, stopped.clone()).await?;
+    let (app, background) = router_with_background_tasks(config.clone()).await?;
+    let stopped = background.stopped_flag();
     shardline_metrics::metrics().system.start_uptime();
     tracing::info!("router initialized, starting HTTP serve");
     let shutdown_timeout = config.shutdown_timeout();
@@ -722,6 +760,13 @@ where
         serve.await.map_err(ServerError::from)
     };
     stopped.store(true, Ordering::Relaxed);
+    let workers_result = background.shutdown().await;
+    if let Err(error) = workers_result {
+        if result.is_ok() {
+            return Err(error);
+        }
+        tracing::warn!(%error, "startup worker failed during HTTP shutdown");
+    }
     result
 }
 
@@ -745,7 +790,7 @@ fn register_frontend_routes(
         ServerFrontend::Lfs => register_lfs_routes(app, role),
         ServerFrontend::BazelHttp => register_bazel_routes(app, role),
         ServerFrontend::Oci => register_oci_routes(app, role),
-        ServerFrontend::S3 => register_s3_routes(app, role),
+        ServerFrontend::S3 => register_s3_routes(app, role, &app_state.config),
         ServerFrontend::Hub => app, // Hub routes are built separately
     }
 }
@@ -879,9 +924,14 @@ fn register_oci_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
 /// real clients (mc, the AWS SDKs, pyarrow) canonicalize bucket paths with a
 /// trailing slash (`PUT /ac.assets/`, `GET /ac.assets/?location=`), and axum
 /// does not match `/{bucket}` against the trailing-slash form.
-fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
+fn register_s3_routes(
+    app: Router<Arc<AppState>>,
+    role: ServerRole,
+    config: &ServerConfig,
+) -> Router<Arc<AppState>> {
+    let mut routes = Router::new();
     if role.serves_api() {
-        app = app
+        routes = routes
             // Service-level `GET /` — `ListBuckets` (the caller's single bucket).
             .route("/", axum::routing::get(s3_list_buckets))
             .route(
@@ -909,7 +959,7 @@ fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Route
                     .delete(s3_delete_object),
             );
     }
-    app
+    app.merge(protocol_routes::protect_s3_signing(routes, config))
 }
 
 fn authorize(
@@ -938,6 +988,7 @@ pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: us
 fn build_hub_state(
     app_state: &AppState,
     task_tracker: Arc<crate::task_tracking::EmbeddedTaskTracker>,
+    background: &mut RouterBackgroundTasks,
 ) -> Result<shardline_hub_api::routes::HubState, ServerError> {
     let hub_auth = app_state
         .auth
@@ -1000,11 +1051,13 @@ fn build_hub_state(
                     let sweep_store = store.clone();
                     let sweep_cipher = cipher.clone();
                     let sweep_config = app_state.config.clone();
-                    let _sweep_handle = tokio::task::spawn_blocking(move || {
-                        crate::hub_secret_upgrade::run(
+                    let sweep_stopped = background.stopped_flag();
+                    background.register(tokio::task::spawn_blocking(move || {
+                        let _report = crate::hub_secret_upgrade::run_until_stopped(
                             &sweep_config, &sweep_store, &sweep_cipher, &task_tracker,
-                        )
-                    });
+                            &|| sweep_stopped.load(Ordering::Relaxed),
+                        );
+                    }));
                     Some(cipher)
                 }
                 Err(e) => {

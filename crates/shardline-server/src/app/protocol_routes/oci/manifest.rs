@@ -185,6 +185,7 @@ pub(crate) async fn oci_put_manifest(
         .backend
         .put_object_bytes_if_absent(&media_type_key, media_type.clone().into_bytes())
         .await?;
+    super::referrers::index_manifest(state, repository, auth, &digest_hex, &document).await?;
     update_oci_tags(
         state,
         &mut repository_guard,

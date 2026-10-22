@@ -968,9 +968,15 @@ async fn embedded_router_clones_keep_housekeeping_alive_until_the_last_router_dr
         NonZeroUsize::new(4096).unwrap(),
     );
     let (guard, stopped) = HousekeepingGuard::new();
-    let app = super::router_with_housekeeping_guard(config.clone(), guard, stopped.clone())
-        .await
-        .unwrap();
+    let mut background = super::RouterBackgroundTasks::new(stopped.clone());
+    let app = super::router_with_housekeeping_guard(
+        config.clone(),
+        guard,
+        stopped.clone(),
+        &mut background,
+    )
+    .await
+    .unwrap();
     let ordinary = TaskEvidenceStore::from_config(&config).unwrap();
     let housekeeping = ordinary.clone().with_housekeeping_stop(stopped.clone());
     let surviving = app.clone();
@@ -1011,6 +1017,7 @@ async fn embedded_router_clones_keep_housekeeping_alive_until_the_last_router_dr
     ordinary
         .publish("fixture/application", b"available")
         .unwrap();
+    background.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1032,9 +1039,15 @@ async fn embedded_postgres_router_lifetime_preserves_shared_metadata_for_every_r
     {
         let config = fixture.config.clone().with_server_role(role);
         let (guard, stopped) = HousekeepingGuard::new();
-        let app = super::router_with_housekeeping_guard(config.clone(), guard, stopped.clone())
-            .await
-            .unwrap();
+        let mut background = super::RouterBackgroundTasks::new(stopped.clone());
+        let app = super::router_with_housekeeping_guard(
+            config.clone(),
+            guard,
+            stopped.clone(),
+            &mut background,
+        )
+        .await
+        .unwrap();
         let (ordinary, scope) = TaskEvidenceStore::from_backend(&config, &fixture.backend)
             .await
             .unwrap();
@@ -1073,6 +1086,7 @@ async fn embedded_postgres_router_lifetime_preserves_shared_metadata_for_every_r
         })
         .await
         .unwrap();
+        background.shutdown().await.unwrap();
     }
     fixture.finish().await;
 }

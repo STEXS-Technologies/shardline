@@ -365,7 +365,7 @@ pub struct LfsBatchRequest {
     /// Transfer adapter operations.
     pub operation: LfsBatchOperation,
     /// Objects to operate on.
-    #[serde(rename = "ref")]
+    #[serde(rename = "ref", default)]
     pub ref_: LfsBatchRef,
     /// Objects.
     pub objects: Vec<LfsObjectRequest>,
@@ -390,7 +390,7 @@ pub enum LfsBatchOperation {
 }
 
 /// LFS batch ref info.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LfsBatchRef {
     /// Branch name.
     pub name: String,

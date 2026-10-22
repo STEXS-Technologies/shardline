@@ -30,9 +30,11 @@ as out of scope until a real client need appears.
    The frontend bridges: the client's `access_key` **is** the Shardline bearer
    token (minted via `shardline admin token`, scoped to `{owner}.{name}`),
    extracted from the `Authorization: AWS4-HMAC-SHA256 Credential=...` header.
-   The SigV4 signature is **not verified** (the access key *is* the credential;
+   In this compatibility mode the SigV4 signature is **not verified** (the access key *is* the credential;
    requires TLS in production — documented deviation). A plain
    `Authorization: Bearer` is also accepted for tooling that supports it.
+   Operators can additionally register signing identities as described below;
+   those access keys require cryptographically valid signatures.
 3. **Multipart + CDC.** `UploadPart` bodies stream to per-part temp files;
    `CompleteMultipartUpload` feeds the parts sequentially through **one CDC
    pass**, producing a single `FileRecord` — preserving whole-object dedup and
@@ -71,11 +73,15 @@ access-key and Bearer auth forms.
 | `PutObject` | streamed through the CDC ingestor; body ≤ `SHARDLINE_S3_MAX_PART_BYTES` (default 1 GiB); larger must use multipart |
 | `GetObject` (+ `Range`) | existing range path; `bytes=a-b`, `bytes=a-`, `bytes=-N`; 206 / 416 |
 | `HeadObject` | size + ETag |
+| `GetObjectAttributes` (partial) | `GET ?attributes` with `x-amz-object-attributes`; selected ETag, object size and `STANDARD` storage class from one verified snapshot. Unavailable S3 checksums are omitted. `ObjectParts` remains unimplemented; no part boundaries are inferred from legacy metadata. |
 | `DeleteObject` | removes direct object **and** record (S3 semantics) |
 | `CreateMultipartUpload` | `POST /{key}?uploads` |
 | `UploadPart` | `PUT ?partNumber&uploadId` → part file |
+| `UploadPartCopy` | same multipart PUT with `x-amz-copy-source`; pinned same-bucket source, optional explicit byte range and source conditions; normal part quotas and verified publication apply |
 | `CompleteMultipartUpload` | single CDC pass → record + ETag |
 | `AbortMultipartUpload` | `DELETE ?uploadId`; discards session |
+| `ListParts` | `GET ?uploadId`; paginated persisted part metadata |
+| `ListMultipartUploads` | `GET /{bucket}?uploads`; prefix, delimiter, key/upload markers and URL encoding |
 | `HeadBucket` | stub (S3A / object_store connect-probe) |
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
@@ -84,27 +90,56 @@ access-key and Bearer auth forms.
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
 | Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
 | Copy source conditions | CopyObject evaluates `x-amz-copy-source-if-match` / `if-none-match` and `if-modified-since` / `if-unmodified-since` against validators from the same pinned source version. Tag conditions take precedence over corresponding date conditions. Legacy sources lacking validators fail closed for concrete conditions; wildcard conditions still use known source existence. |
+| Read date conditions | GetObject, HeadObject and supported GetObjectAttributes honor `If-Modified-Since` (`304`) and `If-Unmodified-Since` (`412`) using the same committed timestamp as their other metadata. `If-Match` takes precedence over `If-Unmodified-Since`; `If-None-Match` takes precedence over `If-Modified-Since`. Invalid/repeated dates and dates on legacy records without a known modification time are ignored. |
 | Conditional ranges | GetObject honors one matching strong `If-Range` ETag; stale, weak, malformed, repeated or date validators return the entire representation (`200`). Date validators are conservatively ignored because the route does not have a strong date validator. |
 | `ListBuckets` | service-level `GET /`; lists the caller's single `{owner}.{name}` bucket |
 
 ### Planned (near-term follow-up)
 
-None — the originally planned operations (`DeleteObjects`, conditional
-requests, `ListBuckets`) are all supported; `CopyObject` was pulled in ahead
-of schedule (Spark rename-commit / `object_store::copy` shape).
+The remaining protocol work includes permanent multipart attributes/checksum
+metadata and the unsupported operations below. The current partial attributes
+response follows the field-selection shape of the
+[S3 GetObjectAttributes API](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html).
+Version selectors and unsupported encryption, payer and expected-owner options
+fail explicitly instead of silently returning attributes for a different request.
 
-### Out-until-demand (explicitly excluded; respond `501 NotImplemented`)
+### Not yet implemented (respond `501 NotImplemented`)
 
 | Operation | Reconsider when |
 |---|---|
-| `ListParts` / `ListMultipartUploads` | a multipart-resume workflow |
 | `ListObjectsV1` | implemented — a bare `GET /{bucket}` (no `list-type=2`) serves the v1 envelope (`marker`/`NextMarker`), the path `s3cmd ls` uses |
 | Multi-range `GetObject` (`bytes=a,b`) | a client using multi-range |
 | `PostObject` (form upload) | — |
-| Object tagging / attributes / restore / select / torrent / legal-hold / retention / ACL | — |
-| Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListBucketMultipartUploads`, `ListObjectVersions` | explicit ruling: no admin/AWS-side surface |
+| Object tagging / multipart attributes / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
+| Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
 
 ## Protocol deviations (documented)
+
+Multipart uploads support `GET ?uploadId=...` (`ListParts`) with
+`part-number-marker` and `max-parts` pagination. Part metadata survives local
+restarts and is shared through PostgreSQL in distributed deployments. Completed,
+aborted, expired, and differently scoped uploads are not exposed. Older local
+sessions without saved ETags recover those checksums from the protected part
+files. Bucket-wide discovery supports prefix/delimiter filtering and key/upload
+markers across restart, including PostgreSQL replicas with separate local roots.
+New sessions retain their initiation time; legacy PostgreSQL sessions without
+that timestamp remain discoverable but omit the historical `Initiated` field.
+Discovery retains one response page plus one look-ahead entry while scanning
+verified metadata; it does not read part bodies. PostgreSQL can continue from
+an aborted marker upload while its verified session metadata is retained.
+Filesystem deployments save the returned page's last upload position in the
+existing SQLite metadata database before sending a truncated response. This
+allows continuation after that upload is deleted, including after a restart,
+without changing existing upload IDs or retaining part files. The position is
+retained for the configured upload-session TTL; expired records are cleaned in
+bounded batches as new positions are saved. Finish paging within that window,
+or restart the listing. These corruption-checked records only guide pagination;
+they never authorize an upload, a deletion or an object publication.
+An expired position follows the unknown manual-marker rules: equal-key uploads
+are filtered by upload-ID order. It cannot recover the earlier chronological
+position, so restart the listing after the retention window to avoid omissions.
+Native Botocore pagination is tested with repeated keys, page sizes of 1, 3 and
+7, and stop/resume tokens on SQLite and PostgreSQL.
 
 - **ETag** is the hex MD5 of the object bytes — the S3 convention for
   single-part PUTs, and the MD5 of the assembled bytes at multipart completion
@@ -112,7 +147,7 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
   like AWS. User metadata (`x-amz-meta-*`) is captured on PutObject and
   CreateMultipartUpload, propagated by CopyObject (`x-amz-metadata-directive`),
   and returned on Head/GetObject.
-- **SigV4 signature is not verified** — the access key *is* the credential;
+- **Legacy token bridge does not verify SigV4 signatures** — the access key *is* the credential;
   production requires TLS.
 - **Bucket names** are `{owner}.{name}`; owners containing `.` are not addressable.
 - **`Content-MD5`** is optional and verified when supplied on PutObject,
@@ -151,6 +186,57 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
   transfer-only role does not serve S3.
 
 ### Authentication (operator)
+
+To use real signing keys, set `SHARDLINE_S3_SIGNING_IDENTITIES_FILE` to a secret
+JSON file containing an array like this:
+
+```json
+[{"access_key":"CLIENTKEY","secret_key":"replace-with-a-long-random-secret","token":"existing-scoped-Shardline-token","region":"us-east-1"}]
+```
+
+Give the client the access key and secret key. Keep the bound token on the
+server. Its normal expiry, permissions and repository restrictions still apply.
+Registered keys require valid SigV4 signatures and support presigned GET/PUT URLs;
+signed payload hashes are checked before publication. Use TLS, including with
+the standard `UNSIGNED-PAYLOAD` signing mode. An optional `session_token` field
+requires that token in signed request headers or presigned URLs. Missing or
+changed session tokens fail; neither signing nor session credentials can outlive
+or expand the permissions of their bound Shardline token. This does not provide
+an AWS STS credential-issuance service. Classic signed streaming uploads
+(`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`) verify every chunk signature, the final
+zero chunk and the declared decoded length before publication. Corrupt or
+incomplete streams cannot replace a published object. Signed trailer uploads
+(`STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER`) additionally verify the trailer
+signature and each declared CRC32, CRC32C, CRC64NVME, SHA-1 or SHA-256 checksum.
+Missing, repeated or undeclared trailers fail before publication.
+Native MinIO Go v7.0.95 signed streams and all five supported checksum trailers are exercised for object
+uploads and multipart parts on SQLite, PostgreSQL with local storage, and
+PostgreSQL with MinIO storage. These checks reject corrupted replacements and
+verify exact object bytes after a graceful server restart. A valid signature over
+an incorrect checksum returns `400 BadDigest`; corrupt signed payloads return
+`403`. Mid-body TCP disconnects are also exercised for classic streams and all
+five trailer algorithms without replacing existing objects or acknowledged
+parts. These disconnect tests do not establish server-crash recovery.
+Its LF-delimited checksum
+trailer format is accepted only in signed mode; chunk headers and the trailer
+signature line still require CRLF. Broader client-version and remote-failure
+qualification remains separate.
+`STREAMING-UNSIGNED-PAYLOAD-TRAILER` checks the same declared checksums and
+decoded length but has no chunk or trailer MAC. As with `UNSIGNED-PAYLOAD`, use
+TLS to protect these uploads in transit; a checksum is not authentication.
+An incorrect trailer checksum returns `400 BadDigest`. Invalid signature or
+stream framing is rejected before publication; neither failure replaces an
+existing object or an acknowledged multipart part.
+SigV4A remains unsupported for registered keys.
+Native MinIO signed-session checks on SQLite and PostgreSQL accept the configured
+session token and reject missing or substituted tokens without replacing stored
+content. Existing Bearer reads remain available. These checks cover classic
+signed streams and signed CRC32 trailers, not session-presigned URLs or STS issuance.
+The file is bounded to 1 MiB, loaded
+at startup, and must be readable only by the operator/server account. Restart
+replicas after changing it. Existing token clients need no configuration change.
+
+For the existing token-as-access-key setup:
 
 The server must run with the Local auth provider and a signing key; the CLI
 must mint with the **same** key material.

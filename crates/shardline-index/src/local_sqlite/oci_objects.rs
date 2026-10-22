@@ -29,7 +29,7 @@ fn oci_snapshot(
     )?)
 }
 
-fn load_oci_evidence(
+pub(super) fn load_oci_evidence(
     transaction: &rusqlite::Transaction<'_>,
     key: &OciObjectKey,
 ) -> Result<OciObjectEvidenceLog, LocalIndexStoreError> {
@@ -66,7 +66,19 @@ fn record_oci_evidence(
 ) -> Result<(), LocalIndexStoreError> {
     let after = oci_snapshot(key, state, deleted_at)?;
     let evidence = load_oci_evidence(transaction, key)?;
-    let fallback = oci_snapshot(key, fallback_state, fallback_deleted_at)?;
+    let fallback = if state == OciObjectLifecycleState::Published
+        && fallback_state == OciObjectLifecycleState::Published
+        && fallback_deleted_at.is_none()
+        && let Some(head) = evidence.events().last()
+        && head.after.state == OciObjectLifecycleState::Reclaimed
+    {
+        // Reclamation removes the tombstone, but its verified lifecycle head
+        // remains authoritative. Republishing identical bytes transitions from
+        // that head rather than inventing an already-published predecessor.
+        oci_snapshot(key, head.after.state, head.after.deleted_at_unix_seconds)?
+    } else {
+        oci_snapshot(key, fallback_state, fallback_deleted_at)?
+    };
     let (evidence, evidence_was_empty) =
         verify_and_append_snapshot_transition(evidence, fallback, after)?;
     let event = evidence.events().last().ok_or_else(|| {
@@ -448,6 +460,7 @@ impl OciObjectStore for LocalIndexStore {
                     OciObjectLifecycleState::Deleted,
                     Some(tombstone.deleted_at_unix_seconds),
                 )?;
+                super::oci_referrers::forget_reclaimed_manifest(&transaction, &tombstone.key)?;
             }
             transaction.commit()?;
             Ok(deleted != 0)
@@ -596,6 +609,110 @@ mod tests {
             )
             .unwrap();
         assert!(store.oci_object_is_deleted(&blob).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn corrupted_reclaimed_head_cannot_publish_or_restore_tags() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let manifest = object(OciObjectKind::Manifest, 'a');
+        let current = tag("latest", 'a');
+        store
+            .publish_oci_object(&manifest, std::slice::from_ref(&current))
+            .await
+            .unwrap();
+        store.delete_oci_object(&manifest).await.unwrap();
+        let tombstone = store
+            .list_oci_object_tombstones()
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(
+            store
+                .delete_oci_object_tombstone_if_unchanged(&tombstone)
+                .await
+                .unwrap()
+        );
+        let connection = store.open_connection().unwrap();
+        let (sequence, event): (i64, String) = connection.query_row(
+            "SELECT sequence, event_json FROM shardline_reliability_events WHERE operation_kind='Visibility' ORDER BY sequence DESC LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        connection.execute(
+            "UPDATE shardline_reliability_events SET event_json='{\"sequence\":99}' WHERE operation_kind='Visibility' AND sequence=?1",
+            [sequence]).unwrap();
+        let reopened = LocalIndexStore::open(storage.path_buf());
+        assert!(
+            reopened
+                .publish_oci_object(&manifest, std::slice::from_ref(&current))
+                .await
+                .is_err()
+        );
+        assert!(
+            reopened
+                .oci_tag(&current.scope_namespace, &current.repository, &current.tag)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Restoring the exact committed evidence permits publication again;
+        // a failed attempt must not leave a tag transition or new event behind.
+        connection.execute(
+            "UPDATE shardline_reliability_events SET event_json=?1 WHERE operation_kind='Visibility' AND sequence=?2",
+            params![event, sequence]).unwrap();
+        reopened
+            .publish_oci_object(&manifest, std::slice::from_ref(&current))
+            .await
+            .unwrap();
+        reopened.verify_reliability_events().unwrap();
+        assert_eq!(
+            reopened
+                .oci_tag(&current.scope_namespace, &current.repository, &current.tag)
+                .await
+                .unwrap(),
+            Some(current)
+        );
+    }
+
+    #[tokio::test]
+    async fn reclaimed_manifest_can_be_republished_after_reopen() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let manifest = object(OciObjectKind::Manifest, 'a');
+        let current = tag("latest", 'a');
+        for _ in 0..3 {
+            store
+                .publish_oci_object(&manifest, std::slice::from_ref(&current))
+                .await
+                .unwrap();
+            store.delete_oci_object(&manifest).await.unwrap();
+            let tombstone = store
+                .list_oci_object_tombstones()
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert!(
+                store
+                    .delete_oci_object_tombstone_if_unchanged(&tombstone)
+                    .await
+                    .unwrap()
+            );
+            let reopened = LocalIndexStore::open(storage.path_buf());
+            reopened
+                .publish_oci_object(&manifest, std::slice::from_ref(&current))
+                .await
+                .unwrap();
+            assert!(!reopened.oci_object_is_deleted(&manifest).await.unwrap());
+            assert_eq!(
+                reopened
+                    .oci_tag(&current.scope_namespace, &current.repository, &current.tag)
+                    .await
+                    .unwrap(),
+                Some(current.clone())
+            );
+            reopened.verify_reliability_events().unwrap();
+        }
     }
 
     #[tokio::test]

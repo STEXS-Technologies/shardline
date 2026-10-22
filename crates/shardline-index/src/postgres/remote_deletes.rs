@@ -173,6 +173,7 @@ impl PostgresIndexStore {
             .execute(&mut *transaction)
             .await?;
         super::task_history_scope::initialize_task_history_scope(&mut transaction, &schema).await?;
+        super::oci_referrers::initialize(transaction.as_mut(), &schema).await?;
         transaction.commit().await
     }
 

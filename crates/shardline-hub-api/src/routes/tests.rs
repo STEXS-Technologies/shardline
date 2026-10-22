@@ -4683,13 +4683,16 @@ fn make_revision_scoped_xet_token_state(
                 "own",
                 self.token_revision.as_deref(),
             )
-            .map_err(|_| AuthError::InvalidToken)?;
+            .map_err(|_invalid_scope| AuthError::InvalidToken)?;
             TokenClaims::new("issuer", "alice", TokenScope::Write, repository, u64::MAX)
-                .map_err(|_| AuthError::InvalidToken)
+                .map_err(|_invalid_claims| AuthError::InvalidToken)
         }
 
         fn mint_token(&self, claims: &TokenClaims) -> Result<String, AuthError> {
-            *self.minted.lock().map_err(|_| AuthError::InvalidToken)? = Some(claims.clone());
+            *self
+                .minted
+                .lock()
+                .map_err(|_poisoned| AuthError::InvalidToken)? = Some(claims.clone());
             Ok("cas-token".to_owned())
         }
     }
