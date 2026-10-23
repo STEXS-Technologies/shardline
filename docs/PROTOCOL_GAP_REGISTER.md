@@ -63,6 +63,11 @@ deliberately changed.
   An initial pool timeout exposed the fixture's one-connection migration pool;
   the fixture now uses the two connections required by the migration helper,
   which fails fast if given a smaller pool.
+- On 2026-10-23, native AWS CLI signing/presigned-read and multipart-resume
+  tests passed; native Git LFS lock/transfer tests passed with both SQLite and
+  disposable PostgreSQL; and all four Hugging Face CLI tests passed, including
+  Hub/Xet negotiation and S3 coexistence. These verify the named workflows,
+  not every operation exposed by AWS, Git LFS or Hugging Face.
 
 For the current supported route contract, use [Compatibility Status](COMPATIBILITY_STATUS.md),
 [Protocol Frontends](PROTOCOLS.md), [S3 Frontend](S3_FRONTEND.md), and
