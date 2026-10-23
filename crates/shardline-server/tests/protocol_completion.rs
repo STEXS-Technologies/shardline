@@ -240,8 +240,10 @@ finally:
 c.put_object(Bucket='aws-resume.locks', Key='session/header.bin', Body=b'header-signed session bytes', ContentType='application/x-shardline-test')
 assert c.get_object(Bucket='aws-resume.locks', Key='session/header.bin')['Body'].read() == b'header-signed session bytes'
 assert c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')['ContentType'] == 'application/x-shardline-test'
-overridden = c.get_object(Bucket='aws-resume.locks', Key='session/header.bin', ResponseContentType='text/plain', ResponseCacheControl='no-cache')
+overridden = c.get_object(Bucket='aws-resume.locks', Key='session/header.bin', ResponseContentType='text/plain', ResponseCacheControl='no-cache', ResponseContentDisposition='inline', ResponseContentEncoding='identity', ResponseContentLanguage='en-US', ResponseExpires=datetime.datetime(2015, 10, 21, 7, 28, tzinfo=datetime.timezone.utc))
 assert overridden['ContentType'] == 'text/plain' and overridden['CacheControl'] == 'no-cache', overridden
+assert overridden['ContentDisposition'] == 'inline' and overridden['ContentEncoding'] == 'identity' and overridden['ContentLanguage'] == 'en-US', overridden
+assert overridden['Expires'] == datetime.datetime(2015, 10, 21, 7, 28, tzinfo=datetime.timezone.utc), overridden
 assert overridden['Body'].read() == b'header-signed session bytes'
 overridden_head = c.head_object(Bucket='aws-resume.locks', Key='session/header.bin', ResponseContentDisposition='attachment')
 assert overridden_head['ContentDisposition'] == 'attachment', overridden_head
