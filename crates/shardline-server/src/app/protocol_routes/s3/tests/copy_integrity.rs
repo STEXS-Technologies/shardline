@@ -49,6 +49,78 @@ async fn postgres_copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flig
     exercise_inflight_copy_overwrite(state).await;
 }
 
+#[tokio::test]
+async fn cancelled_copy_part_preserves_acknowledged_part() {
+    let (state, _root) = build_test_state().await;
+    exercise_cancelled_copy_part(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_cancelled_copy_part_preserves_acknowledged_part() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise_cancelled_copy_part(state).await;
+}
+
+async fn exercise_cancelled_copy_part(state: Arc<AppState>) {
+    let app = s3_router(state.clone());
+    let source = "copy-source-cancelled-at-snapshot";
+    let uploaded = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            b"copy source bytes".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let upload = create_upload_id(&app).await;
+    let acknowledged = b"previously acknowledged part";
+    assert_eq!(
+        upload_part(&app, &upload, 1, acknowledged).await.status(),
+        StatusCode::OK
+    );
+
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let (copy_paused, resume_copy) = super::super::object::copy_part_test_hooks::arm(&source_key)
+        .expect("copy-part pause hook must be available");
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header("x-amz-copy-source", format!("/{BUCKET}/{source}"))
+        .body(Body::empty())
+        .unwrap();
+    let copying = {
+        let app = app.clone();
+        tokio::spawn(async move { app.oneshot(request).await.unwrap() })
+    };
+    copy_paused.await.unwrap();
+
+    // Cancel while the request has a source snapshot but before it can read or
+    // publish replacement part bytes.
+    copying.abort();
+    let cancelled = copying.await.unwrap_err();
+    assert!(cancelled.is_cancelled());
+    drop(resume_copy);
+
+    let completed = complete_upload(&app, &upload, complete_body(&upload, &[1])).await;
+    assert_eq!(completed.status(), StatusCode::OK);
+    assert_eq!(
+        body_bytes(get_etag_request(&app, KEY).await).await,
+        acknowledged
+    );
+}
+
 async fn exercise_inflight_copy_overwrite(state: Arc<AppState>) {
     let app = s3_router(state.clone());
     let source = "copy-source-inflight-overwrite";
