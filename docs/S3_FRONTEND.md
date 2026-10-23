@@ -113,14 +113,21 @@ parameter is not accepted and returns `501 NotImplemented`.
 `GetObjectAttributes` reports the verified total part count for multipart objects
 completed after this change. It does not return individual `Part` entries or
 checksums: Shardline verifies a supplied `x-amz-checksum-*` payload checksum on
-`PutObject` and `UploadPart`, but does not durably retain the per-part checksum
-metadata needed to report it later. Checksum negotiation (`x-amz-checksum-type`
-and `x-amz-checksum-algorithm`) and checksum headers on copy/completion requests
+`PutObject` and `UploadPart` but does not retain the per-part checksum metadata
+needed to report it later. Checksum negotiation (`x-amz-checksum-type` and
+`x-amz-checksum-algorithm`) and checksum headers on copy/completion requests
 return `501 NotImplemented`; they are not silently treated as persisted
-checksums. Existing objects have no durable part-count metadata; those counts
-remain unknown and are not inferred from CDC chunks or legacy records. Botocore
-1.x real-client coverage checks the modeled `ObjectParts.TotalPartsCount` field
-and verifies that a single-PUT object has no `ObjectParts` response.
+checksums.
+Existing objects have no durable part-count metadata; those counts remain unknown
+and are not inferred from CDC chunks or legacy records. Botocore 1.x real-client
+coverage checks the modeled `ObjectParts.TotalPartsCount` field and verifies that
+a single-PUT object has no `ObjectParts` response.
+
+For general-purpose S3 buckets, AWS only returns individual `ObjectParts.Part`
+entries when an additional checksum was applied to the object. Implementing part
+sizes alone would therefore be misleading. Shardline must first persist and
+report negotiated multipart checksums consistently; until then, it returns the
+verified total count only.
 
 ## Protocol deviations (documented)
 
