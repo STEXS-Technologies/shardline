@@ -25,7 +25,7 @@ async fn native_boto3_presigned_post_uploads_and_reads_object() {
             .arg("-c")
             .arg(
                 r#"
-import base64, hashlib, sys, urllib.request, urllib.error, urllib.parse
+import base64, gzip, hashlib, sys, urllib.request, urllib.error, urllib.parse
 import boto3
 from botocore.config import Config
 
@@ -69,13 +69,14 @@ assert client.head_object(Bucket=bucket, Key='uploads/weights.bin')['ContentType
 # Native SDK signed policy plus browser-style form, with a redirect destination
 # that already has a query parameter. The response must preserve it and append
 # the stored object's bucket, expanded key, and ETag.
-redirect_payload = b'native boto3 redirect upload'
+redirect_payload = gzip.compress(b'native boto3 redirect upload')
 redirect_url = 'https://uploads.example.test/complete?state=kept'
 redirect_post = client.generate_presigned_post(
     Bucket=bucket, Key='redirect/${filename}',
-    Fields={'success_action_redirect': redirect_url},
+    Fields={'success_action_redirect': redirect_url, 'Content-Encoding': 'gzip'},
     Conditions=[{'bucket': bucket}, ['starts-with', '$key', 'redirect/'],
-        {'success_action_redirect': redirect_url}, ['content-length-range', 1, 1024]],
+        {'success_action_redirect': redirect_url}, {'Content-Encoding': 'gzip'},
+        ['content-length-range', 1, 1024]],
     ExpiresIn=300)
 boundary = 'shardline-boto3-redirect-boundary'
 body = bytearray()
@@ -102,6 +103,7 @@ except urllib.error.HTTPError as response:
     assert values['key'] == ['redirect/weights.bin'], values
     assert values['etag'] == ['"' + hashlib.md5(redirect_payload).hexdigest() + '"'], values
 assert client.get_object(Bucket=bucket, Key='redirect/weights.bin')['Body'].read() == redirect_payload
+assert client.head_object(Bucket=bucket, Key='redirect/weights.bin')['ContentEncoding'] == 'gzip'
 "#,
             )
             .arg(&endpoint)
@@ -152,6 +154,25 @@ async fn signed_browser_post_object_expands_filename_and_checks_policy_before_pu
     assert_eq!(
         response.headers().get("content-type").unwrap(),
         "application/x-shardline-model"
+    );
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "max-age=3600"
+    );
+    assert_eq!(
+        response.headers().get("content-disposition").unwrap(),
+        "inline; filename=weights.bin"
+    );
+    assert_eq!(
+        response.headers().get("expires").unwrap(),
+        "Wed, 21 Oct 2030 07:28:00 GMT"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amz-website-redirect-location")
+            .unwrap(),
+        "/latest"
     );
     assert_eq!(response.bytes().await.unwrap().as_ref(), file);
 
@@ -332,6 +353,10 @@ async fn post_object_form(
         { "x-amz-credential": credential },
         { "x-amz-date": timestamp },
         { "Content-Type": "application/x-shardline-model" },
+        { "Cache-Control": "max-age=3600" },
+        { "Content-Disposition": "inline; filename=weights.bin" },
+        { "Expires": "Wed, 21 Oct 2030 07:28:00 GMT" },
+        { "x-amz-website-redirect-location": "/latest" },
         { "x-amz-meta-model": "release-1" },
         { "x-amz-checksum-sha256": checksum },
         { "Content-MD5": content_md5 },
@@ -366,6 +391,13 @@ async fn post_object_form(
     let mut fields = vec![
         ("key", key.to_owned()),
         ("Content-Type", "application/x-shardline-model".to_owned()),
+        ("Cache-Control", "max-age=3600".to_owned()),
+        (
+            "Content-Disposition",
+            "inline; filename=weights.bin".to_owned(),
+        ),
+        ("Expires", "Wed, 21 Oct 2030 07:28:00 GMT".to_owned()),
+        ("x-amz-website-redirect-location", "/latest".to_owned()),
         ("x-amz-meta-model", "release-1".to_owned()),
         ("x-amz-checksum-sha256", checksum),
         ("Content-MD5", content_md5),

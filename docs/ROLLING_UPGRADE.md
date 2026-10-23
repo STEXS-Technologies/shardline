@@ -52,14 +52,15 @@ those requests, hold them until every replica is upgraded. A 1.12.1 replica can
 still read and write the tested object data, but it does not understand the new
 lock or identity records.
 
-S3 checksum and `Content-Type` writes need the same routing care. Their records
-are stored in the S3 object's private metadata. A 1.12.1 replica can read the
-object bytes, but it does not know these metadata keys are private; it may expose
-them as ordinary `x-amz-meta-*` metadata and returns the default content type.
-During a mixed-version rollout, keep reads and writes for these newly written
-objects on upgraded replicas, or wait until all replicas are upgraded before
-enabling the features. This does not alter object bytes, but old replicas return
-different metadata and content-type headers.
+S3 checksum and standard object HTTP metadata writes need the same routing care.
+Their records are stored in the S3 object's private metadata. A 1.12.1 replica
+can read the object bytes, but does not know the newer private keys are internal;
+it may expose them as ordinary `x-amz-meta-*` metadata and omit the corresponding
+checksum, content type, cache, disposition, encoding, expiry or website redirect
+headers. During a mixed-version rollout, keep reads and writes for objects using
+these properties on upgraded replicas, or wait until all replicas are upgraded
+before enabling them. This does not alter object bytes, but old replicas return
+different S3 metadata and response headers.
 
 Restarting an old binary does not require dropping the additive tables or
 restoring an old backup. Keep those tables: they contain persistent identities

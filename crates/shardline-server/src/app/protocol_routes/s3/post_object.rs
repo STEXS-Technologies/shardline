@@ -281,7 +281,9 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
         if name == "x-amz-meta-" {
             return Err(S3Error::invalid_argument("Invalid S3 user metadata name"));
         }
-        if name.starts_with("x-amz-meta-")
+        if super::object_headers::is_property_header(&name) {
+            super::object_headers::attach_form_field(&mut payload_headers, &name, value)?;
+        } else if name.starts_with("x-amz-meta-")
             || matches!(
                 name.as_str(),
                 "content-md5"
@@ -306,9 +308,7 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
         return Err(S3Error::invalid_argument("Reserved S3 user metadata name"));
     }
     let mut user_metadata = super::object::capture_user_metadata(&payload_headers)?;
-    if let Some(value) = get("Content-Type") {
-        super::content_type::attach(&mut user_metadata, value)?;
-    }
+    super::object_headers::capture_headers(&payload_headers, &mut user_metadata)?;
     Ok(S3PostObjectForm {
         key,
         user_metadata,
@@ -319,11 +319,12 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
 }
 
 fn supported_field(name: &str) -> bool {
-    name.to_ascii_lowercase().starts_with("x-ignore-")
+    let lower_name = name.to_ascii_lowercase();
+    lower_name.starts_with("x-ignore-")
+        || super::object_headers::is_property_header(&lower_name)
         || matches!(
-            name.to_ascii_lowercase().as_str(),
+            lower_name.as_str(),
             "key"
-                | "content-type"
                 | "policy"
                 | "x-amz-signature"
                 | "x-amz-algorithm"

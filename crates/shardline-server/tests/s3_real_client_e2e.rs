@@ -729,6 +729,8 @@ fn run_boto3(endpoint: &str, token: &str, tmp: &TempDir) -> std::process::Output
         &script,
         r#"
 import base64
+import datetime
+import gzip
 import hashlib
 import io
 import os
@@ -786,13 +788,31 @@ assert listed_parts["Parts"][0]["ChecksumCRC32"] == listed_checksum, listed_part
 s3.abort_multipart_upload(Bucket=B, Key="list-parts-checksum.bin", UploadId=listed_upload_id)
 
 # PutObject with user metadata; HeadObject returns it back.
-payload = b"metadata roundtrip\n"
-s3.put_object(Bucket=B, Key="meta.txt", Body=payload, ContentType="application/x-shardline-test", Metadata={"purpose": "client-breadth"})
+payload = gzip.compress(b"metadata roundtrip\n")
+expires = datetime.datetime(2030, 10, 21, 7, 28, tzinfo=datetime.timezone.utc)
+s3.put_object(
+    Bucket=B, Key="meta.txt", Body=payload,
+    ContentType="application/x-shardline-test", CacheControl="max-age=3600",
+    ContentDisposition="inline; filename=weights.bin", ContentEncoding="gzip",
+    Expires=expires, WebsiteRedirectLocation="/latest",
+    Metadata={"purpose": "client-breadth"})
 head = s3.head_object(Bucket=B, Key="meta.txt")
 assert head["ContentLength"] == len(payload), head["ContentLength"]
 assert head["Metadata"].get("purpose") == "client-breadth", head["Metadata"]
 assert head["ContentType"] == "application/x-shardline-test", head
-assert s3.get_object(Bucket=B, Key="meta.txt")["Body"].read() == payload
+assert head["CacheControl"] == "max-age=3600", head
+assert head["ContentDisposition"] == "inline; filename=weights.bin", head
+assert head["ContentEncoding"] == "gzip", head
+assert head["Expires"] == expires, head
+assert head["WebsiteRedirectLocation"] == "/latest", head
+assert not any(key.startswith("shardline-internal-s3-") for key in head["Metadata"]), head["Metadata"]
+metadata_get = s3.get_object(Bucket=B, Key="meta.txt")
+assert metadata_get["Body"].read() == payload
+assert metadata_get["CacheControl"] == head["CacheControl"], metadata_get
+assert metadata_get["ContentDisposition"] == head["ContentDisposition"], metadata_get
+assert metadata_get["ContentEncoding"] == head["ContentEncoding"], metadata_get
+assert metadata_get["Expires"] == head["Expires"], metadata_get
+assert metadata_get["WebsiteRedirectLocation"] == head["WebsiteRedirectLocation"], metadata_get
 
 # Single-PUT checksums remain available after publication through both S3
 # checksum read APIs.
@@ -880,11 +900,15 @@ assert sha1_attrs["ObjectParts"]["Parts"][0]["ChecksumSHA1"] == sha1_part_checks
 
 # FULL_OBJECT CRC64NVME checksums are verified against the assembled bytes and
 # remain available through checksum-enabled reads and GetObjectAttributes.
-full_payload = b"native multipart full-object CRC64NVME"
+full_payload = gzip.compress(b"native multipart full-object CRC64NVME")
 full_checksum = crc64nvme(full_payload)
 full_upload = s3.create_multipart_upload(
     Bucket=B, Key="multipart-full-crc64.bin",
-    ChecksumAlgorithm="CRC64NVME", ChecksumType="FULL_OBJECT"
+    ChecksumAlgorithm="CRC64NVME", ChecksumType="FULL_OBJECT",
+    ContentType="application/x-shardline-full-object", CacheControl="max-age=7200",
+    ContentEncoding="gzip",
+    ContentDisposition="attachment; filename=full-object.bin", Expires=expires,
+    WebsiteRedirectLocation="/full-object"
 )
 full_upload_id = full_upload["UploadId"]
 full_part_checksum = crc64nvme(full_payload)
@@ -920,6 +944,13 @@ full_get = s3.get_object(
 )
 assert full_get["ChecksumCRC64NVME"] == full_checksum, full_get
 assert full_get["Body"].read() == full_payload
+full_head = s3.head_object(Bucket=B, Key="multipart-full-crc64.bin")
+assert full_head["ContentType"] == "application/x-shardline-full-object", full_head
+assert full_head["CacheControl"] == "max-age=7200", full_head
+assert full_head["ContentEncoding"] == "gzip", full_head
+assert full_head["ContentDisposition"] == "attachment; filename=full-object.bin", full_head
+assert full_head["Expires"] == expires, full_head
+assert full_head["WebsiteRedirectLocation"] == "/full-object", full_head
 
 # Conditional CopyObject (CopySourceIfMatch) — exercises If-Match + CopyObject.
 etag = head["ETag"].strip('"')
@@ -930,6 +961,23 @@ s3.copy_object(
     CopySourceIfMatch=etag,
 )
 assert s3.head_object(Bucket=B, Key="meta-copy.txt")["ContentType"] == "application/x-shardline-test"
+copied_headers = s3.head_object(Bucket=B, Key="meta-copy.txt")
+for name in ("CacheControl", "ContentDisposition", "ContentEncoding", "Expires", "WebsiteRedirectLocation"):
+    assert copied_headers[name] == head[name], (name, copied_headers, head)
+s3.copy_object(
+    Bucket=B, Key="meta-replace.txt", CopySource={"Bucket": B, "Key": "meta.txt"},
+    MetadataDirective="REPLACE", ContentType="application/x-shardline-replaced",
+    CacheControl="no-cache", ContentDisposition="attachment; filename=replaced.bin",
+    ContentEncoding="gzip", Expires=expires, WebsiteRedirectLocation="/replaced",
+    Metadata={"purpose": "replacement"})
+replaced_headers = s3.head_object(Bucket=B, Key="meta-replace.txt")
+assert replaced_headers["ContentType"] == "application/x-shardline-replaced", replaced_headers
+assert replaced_headers["CacheControl"] == "no-cache", replaced_headers
+assert replaced_headers["ContentDisposition"] == "attachment; filename=replaced.bin", replaced_headers
+assert replaced_headers["ContentEncoding"] == "gzip", replaced_headers
+assert replaced_headers["Expires"] == expires, replaced_headers
+assert replaced_headers["WebsiteRedirectLocation"] == "/replaced", replaced_headers
+assert replaced_headers["Metadata"]["purpose"] == "replacement", replaced_headers
 
 # ListObjectsV2 with prefix and pagination.
 keys = []
@@ -963,7 +1011,7 @@ assert "shardline-internal-s3-checksum-v1" not in s3.head_object(Bucket=B, Key="
 s3.delete_objects(
     Bucket=B,
     Delete={"Objects": [
-        {"Key": "meta.txt"}, {"Key": "meta-copy.txt"}, {"Key": "big.bin"},
+        {"Key": "meta.txt"}, {"Key": "meta-copy.txt"}, {"Key": "meta-replace.txt"}, {"Key": "big.bin"},
         {"Key": "single-checksum.bin"}, {"Key": "multipart-sha256.bin"},
         {"Key": "multipart-sha1.bin"}, {"Key": "multipart-full-crc64.bin"},
     ]},

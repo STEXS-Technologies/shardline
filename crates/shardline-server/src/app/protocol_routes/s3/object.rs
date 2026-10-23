@@ -8,7 +8,7 @@
 //! record + direct object (crash-safe ordering).
 
 mod attributes;
-use super::{checksum, content_type};
+use super::{checksum, object_headers};
 
 pub(super) struct ObjectUploadOptions<'headers> {
     pub(super) multipart_part_count: u32,
@@ -519,7 +519,7 @@ pub(crate) async fn s3_put_object(
     // the object bytes) while the body streams — standard S3 semantics that
     // checksum-verifying clients (s3cmd, the AWS SDKs) depend on.
     let mut user_metadata = capture_user_metadata(&headers)?;
-    content_type::capture_header(&headers, &mut user_metadata)?;
+    object_headers::capture_headers(&headers, &mut user_metadata)?;
     if let Some((header, value)) = &response_checksum {
         checksum::attach_object_checksum(&mut user_metadata, header, value)?;
     }
@@ -628,14 +628,14 @@ async fn s3_copy_object(
     let user_metadata = match directive {
         MetadataDirective::Replace => {
             let mut metadata = capture_user_metadata(headers)?;
-            content_type::capture_header(headers, &mut metadata)?;
+            object_headers::capture_headers(headers, &mut metadata)?;
             metadata
         }
         MetadataDirective::Copy => snapshot
             .user_metadata
             .into_iter()
             .filter(|(name, _value)| {
-                !checksum::is_internal_metadata(name) || content_type::is_internal_metadata(name)
+                !checksum::is_internal_metadata(name) || object_headers::is_internal_metadata(name)
             })
             .collect(),
     };
@@ -1254,15 +1254,12 @@ pub(crate) async fn s3_get_object(
             total_length,
         )
     };
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        content_type::read(
-            entry
-                .as_ref()
-                .map_or(&[][..], |entry| entry.user_metadata.as_slice()),
-        )?
-        .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream")),
-    );
+    object_headers::apply_response_headers(
+        &mut response,
+        entry
+            .as_ref()
+            .map_or(&[][..], |entry| entry.user_metadata.as_slice()),
+    )?;
     // Real clients (mc, the AWS SDKs) parse `Last-Modified` on GetObject
     // responses; derive it from the entry captured above so it is never torn
     // against the ETag/metadata (fallback: Unix epoch when no row exists).
@@ -1373,11 +1370,7 @@ pub(crate) async fn s3_head_object(
     response
         .headers_mut()
         .insert(CONTENT_LENGTH, HeaderValue::from(size));
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        content_type::read(&snapshot.user_metadata)?
-            .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream")),
-    );
+    object_headers::apply_response_headers(&mut response, &snapshot.user_metadata)?;
     // Clients (pyarrow, the AWS SDKs) use `Accept-Ranges` on HeadObject to
     // decide the object supports ranged (seekable) access; without it pyarrow
     // opens a non-seekable stream and parquet reads fail.

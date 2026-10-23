@@ -24,6 +24,21 @@ fn sha256_checksum(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(bytes))
 }
 
+fn crc_checksum(algorithm: &str, bytes: &[u8]) -> String {
+    let crc64 = algorithm == "CRC64NVME";
+    let algorithm = match algorithm {
+        "CRC32" => crc_fast::CrcAlgorithm::Crc32IsoHdlc,
+        "CRC32C" => crc_fast::CrcAlgorithm::Crc32Iscsi,
+        "CRC64NVME" => crc_fast::CrcAlgorithm::Crc64Nvme,
+        _ => panic!("unsupported test checksum algorithm: {algorithm}"),
+    };
+    let mut digest = crc_fast::Digest::new(algorithm);
+    digest.update(bytes);
+    let digest = digest.finalize().to_be_bytes();
+    let checksum = if crc64 { &digest[..] } else { &digest[4..] };
+    base64::engine::general_purpose::STANDARD.encode(checksum)
+}
+
 fn upload_id(xml: &str) -> &str {
     xml.split_once("<UploadId>")
         .unwrap()
@@ -305,9 +320,6 @@ async fn assert_request_integrity(database_url: Option<&str>) {
     assert!(head.headers().contains_key("x-amz-checksum-sha256"));
     assert_eq!(head.headers()["x-amz-checksum-type"], "COMPOSITE");
     for (algorithm, checksum_type) in [
-        ("CRC32", "FULL_OBJECT"),
-        ("CRC32C", "FULL_OBJECT"),
-        ("CRC64NVME", "FULL_OBJECT"),
         ("CRC64NVME", "COMPOSITE"),
         ("SHA1", "FULL_OBJECT"),
         ("SHA256", "FULL_OBJECT"),
@@ -321,6 +333,52 @@ async fn assert_request_integrity(database_url: Option<&str>) {
             .await
             .unwrap();
         assert_eq!(rejected.status(), 501, "{algorithm} {checksum_type}");
+    }
+    for (algorithm, checksum_header) in [
+        ("CRC32", "x-amz-checksum-crc32"),
+        ("CRC32C", "x-amz-checksum-crc32c"),
+        ("CRC64NVME", "x-amz-checksum-crc64nvme"),
+    ] {
+        let payload = format!("{algorithm} FULL_OBJECT multipart payload");
+        let create = client
+            .post(format!("{multipart}?uploads"))
+            .bearer_auth(&token)
+            .header("x-amz-checksum-algorithm", algorithm)
+            .header("x-amz-checksum-type", "FULL_OBJECT")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(create.status(), 200, "{algorithm} FULL_OBJECT");
+        let id = upload_id(&create.text().await.unwrap()).to_owned();
+        let part = client
+            .put(format!("{multipart}?uploadId={id}&partNumber=1"))
+            .bearer_auth(&token)
+            .body(payload.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(part.status(), 200, "{algorithm} part upload");
+        let etag = part.headers()["etag"].to_str().unwrap().to_owned();
+        let expected = crc_checksum(algorithm, payload.as_bytes());
+        let completed = client
+            .post(format!("{multipart}?uploadId={id}"))
+            .bearer_auth(&token)
+            .header(checksum_header, &expected)
+            .body(completion(&etag))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(completed.status(), 200, "{algorithm} completion");
+        let object = client
+            .head(&multipart)
+            .bearer_auth(&token)
+            .header("x-amz-checksum-mode", "ENABLED")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(object.status(), 200, "{algorithm} HEAD");
+        assert_eq!(object.headers()[checksum_header], expected);
+        assert_eq!(object.headers()["x-amz-checksum-type"], "FULL_OBJECT");
     }
     let response = client
         .post(format!("{multipart}?uploads"))

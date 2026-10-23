@@ -16,8 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   retaining recovery checks and legacy inventory reconciliation.
 - Add optional S3 SigV4 identities, presigned requests, authenticated streaming
   checksums, multipart listing and range-based UploadPartCopy.
-- Preserve S3 object `Content-Type` across PUT, browser POST, multipart upload,
-  copy, GET and HEAD without rewriting stored object bytes.
+- Preserve S3 object `Content-Type`, `Cache-Control`, `Content-Disposition`,
+  `Content-Encoding`, `Expires` and website redirect metadata across PUT,
+  browser POST, multipart upload, copy, GET and HEAD without rewriting object
+  bytes.
 - Support negotiated multipart CRC32, CRC32C, SHA-1 and SHA-256 COMPOSITE checksums, verifying
   part bytes before publication and exposing checksums and part sizes through
   object attributes and active `ListParts` responses while preserving existing

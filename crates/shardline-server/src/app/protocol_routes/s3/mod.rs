@@ -12,10 +12,10 @@
 pub(super) mod aws_chunked;
 pub(super) mod bucket;
 mod checksum;
-mod content_type;
 pub(super) mod listing;
 pub(super) mod multipart;
 pub(super) mod object;
+mod object_headers;
 pub(crate) mod post_object;
 mod repository;
 pub(crate) mod signing;

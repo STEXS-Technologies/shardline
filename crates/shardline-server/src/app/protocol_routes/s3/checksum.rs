@@ -228,7 +228,7 @@ const fn default_multipart_checksum_type() -> MultipartChecksumType {
 }
 
 pub(super) const fn is_internal_metadata(name: &str) -> bool {
-    is_checksum_internal_metadata(name) || super::content_type::is_internal_metadata(name)
+    is_checksum_internal_metadata(name) || super::object_headers::is_internal_metadata(name)
 }
 
 const fn is_checksum_internal_metadata(name: &str) -> bool {
@@ -265,6 +265,9 @@ pub(super) fn negotiate_multipart(
     if algorithm == MultipartChecksumAlgorithm::Crc64Nvme
         && checksum_type == MultipartChecksumType::Composite
     {
+        return Err(shardline_s3_adapter::S3Error::not_implemented());
+    }
+    if checksum_type == MultipartChecksumType::FullObject && !algorithm.supports_full_object() {
         return Err(shardline_s3_adapter::S3Error::not_implemented());
     }
     if headers.contains_key("x-amz-sdk-checksum-algorithm") {
