@@ -240,6 +240,10 @@ finally:
 c.put_object(Bucket='aws-resume.locks', Key='session/header.bin', Body=b'header-signed session bytes', ContentType='application/x-shardline-test')
 assert c.get_object(Bucket='aws-resume.locks', Key='session/header.bin')['Body'].read() == b'header-signed session bytes'
 assert c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')['ContentType'] == 'application/x-shardline-test'
+c.put_object_tagging(Bucket='aws-resume.locks', Key='session/header.bin', Tagging={'TagSet': [
+    {'Key': 'environment', 'Value': 'integration'}, {'Key': 'owner', 'Value': 'shardline'}]})
+assert c.get_object_tagging(Bucket='aws-resume.locks', Key='session/header.bin')['TagSet'] == [
+    {'Key': 'environment', 'Value': 'integration'}, {'Key': 'owner', 'Value': 'shardline'}]
 attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key='session/header.bin', ObjectAttributes=['ETag', 'ObjectSize', 'StorageClass', 'Checksum'])
 assert attributes['ObjectSize'] == len(b'header-signed session bytes')
 assert attributes['ETag'] == c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')['ETag'].strip('"')
@@ -394,6 +398,8 @@ c = botocore.session.get_session().create_client('s3', endpoint_url=sys.argv[1],
     region_name='us-east-1', aws_access_key_id='SIGNINGKEY',
     aws_secret_access_key='legacy-token-bridge', aws_session_token='fixture-session-token',
     config=Config(signature_version='s3v4', retries={'max_attempts': 0}))
+assert c.get_object_tagging(Bucket='aws-resume.locks', Key='session/header.bin')['TagSet'] == [
+    {'Key': 'environment', 'Value': 'integration'}, {'Key': 'owner', 'Value': 'shardline'}]
 for algorithm in ('CRC32', 'CRC32C', 'CRC64NVME'):
     key = 'session/full-object-' + algorithm.lower() + '.bin'
     payload = ('native botocore FULL_OBJECT ' + algorithm).encode()

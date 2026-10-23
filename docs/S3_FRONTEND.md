@@ -119,7 +119,9 @@ It does not implement other form fields that need object properties or service
 behavior Shardline does not persist yet, including ACLs, storage class and
 encryption. Object tags are stored in the object's evidence-bound private
 metadata and are available through `GetObjectTagging`, `PutObjectTagging`, and
-`DeleteObjectTagging`; these features need upgraded replicas during a
+`DeleteObjectTagging`. `PutObjectTagging` verifies the supplied Content-MD5 or
+supported request checksum before committing the tag change. These features
+need upgraded replicas during a
 mixed-version rollout because older writers may discard tags on same-key
 updates. Forms without a valid
 SigV4 policy are rejected; bearer-token authentication alone is not accepted
