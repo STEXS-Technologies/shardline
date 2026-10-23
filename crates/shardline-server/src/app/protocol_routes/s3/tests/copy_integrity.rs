@@ -49,6 +49,55 @@ async fn postgres_copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flig
     exercise_inflight_copy_overwrite(state).await;
 }
 
+#[cfg(feature = "docker")]
+#[tokio::test]
+async fn minio_copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flight() {
+    let (state, _root, _stack) = build_minio_payload_test_state().await;
+    exercise_inflight_copy_overwrite(state).await;
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+async fn minio_disconnected_copy_part_can_be_reconciled_from_list_parts() {
+    let (state, _root, _stack) = build_minio_payload_test_state().await;
+    exercise_disconnected_copy_part(state).await;
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+async fn postgres_minio_disconnected_copy_part_can_be_reconciled_from_list_parts() {
+    use shardline_protocol::SecretString;
+    use shardline_test_support::DockerLocalStack;
+
+    let stack = DockerLocalStack::builder()
+        .with_postgres()
+        .with_minio()
+        .start()
+        .unwrap()
+        .expect("Docker PostgreSQL and MinIO");
+    let prefix = stack.unique_s3_key_prefix("copy-integrity");
+    let raw = stack
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO configuration");
+    let storage = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
+    let database_url = stack.postgres_url().expect("PostgreSQL URL");
+    let migration_pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+    crate::apply_database_migrations(&migration_pool)
+        .await
+        .unwrap();
+    migration_pool.close().await;
+    let (state, _root) = build_s3_payload_test_state_with_index(storage, Some(database_url)).await;
+    exercise_disconnected_copy_part(state).await;
+}
+
 #[tokio::test]
 async fn disconnected_copy_part_can_be_reconciled_from_list_parts() {
     let (state, _root) = build_test_state().await;
@@ -389,6 +438,92 @@ async fn exercise_inflight_copy_overwrite(state: Arc<AppState>) {
     drop(client);
     let _shutdown_sent = shutdown_tx.send(());
     server.await.unwrap();
+}
+
+#[cfg(feature = "docker")]
+async fn build_minio_payload_test_state() -> (
+    Arc<AppState>,
+    TempDir,
+    shardline_test_support::DockerLocalStack,
+) {
+    use shardline_protocol::SecretString;
+    use shardline_test_support::DockerLocalStack;
+
+    let stack = DockerLocalStack::builder()
+        .with_minio()
+        .start()
+        .unwrap()
+        .expect("Docker MinIO");
+    let prefix = stack.unique_s3_key_prefix("copy-integrity");
+    let raw = stack
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO configuration");
+    let storage = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
+    let (state, root) = build_s3_payload_test_state(storage).await;
+    (state, root, stack)
+}
+
+#[cfg(feature = "docker")]
+async fn build_s3_payload_test_state(
+    storage: shardline_storage::S3ObjectStoreConfig,
+) -> (Arc<AppState>, TempDir) {
+    build_s3_payload_test_state_with_index(storage, None).await
+}
+
+#[cfg(feature = "docker")]
+async fn build_s3_payload_test_state_with_index(
+    storage: shardline_storage::S3ObjectStoreConfig,
+    database_url: Option<String>,
+) -> (Arc<AppState>, TempDir) {
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65_536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_frontends([ServerFrontend::S3])
+    .expect("server frontends")
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .expect("token signing key")
+    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
+    .expect("S3 max part size")
+    .with_s3_min_part_bytes(NonZeroU64::MIN)
+    .expect("S3 min part size")
+    .with_object_storage(crate::ObjectStorageAdapter::S3, Some(storage));
+    let config = match database_url {
+        Some(database_url) => config
+            .with_index_postgres_url(database_url)
+            .expect("PostgreSQL metadata URL"),
+        None => config,
+    };
+    let backend = crate::ServerBackend::from_config(&config)
+        .await
+        .expect("S3 payload backend");
+    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("server auth");
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend,
+        auth: Some(auth),
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256).unwrap()),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+    (state, tmp)
 }
 
 async fn exercise_snapshot_pinning(state: Arc<AppState>) {
