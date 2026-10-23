@@ -39,6 +39,7 @@ use shardline_server::{
 };
 use shardline_server_core::{AuthProvider, ServerObjectStoreError, auth::LocalHmacProvider};
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore as _, S3ObjectStoreConfig};
+use shardline_test_support::{S3FaultProxy, S3ProxyFault};
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
@@ -1118,6 +1119,25 @@ impl DeploymentServer {
 
     fn base_url(&self) -> String {
         self.base_url.clone()
+    }
+
+    fn kill_hard(&mut self) {
+        self.child.kill().expect("kill deployment server process");
+        self.child
+            .wait()
+            .expect("wait for killed deployment server");
+    }
+
+    fn restart(&mut self) {
+        let bind_addr = self
+            .base_url
+            .strip_prefix("http://")
+            .expect("deployment base URL uses HTTP")
+            .to_owned();
+        let binary = self.binary.clone();
+        let extra_env = self.extra_env.clone();
+        let root = self.root.clone();
+        *self = Self::spawn_process(&binary, &bind_addr, &extra_env, root);
     }
 }
 
@@ -3050,6 +3070,43 @@ async fn s3_upload_part_deployment(
     (status, etag)
 }
 
+/// Issues S3 `UploadPartCopy` and parses its acknowledged part ETag.
+async fn s3_upload_part_copy_deployment(
+    base: &str,
+    token: &str,
+    destination_key: &str,
+    upload_id: &str,
+    part_number: u32,
+    source_key: &str,
+) -> Result<(u16, Option<String>), reqwest::Error> {
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{base}/{BUCKET}/{destination_key}?partNumber={part_number}&uploadId={upload_id}"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-amz-copy-source", format!("/{BUCKET}/{source_key}"))
+        .send()
+        .await?;
+    let status = response.status().as_u16();
+    let body = response.text().await?;
+    Ok((status, extract_xml_tag(&body, "ETag")))
+}
+
+/// Returns the provider's current S3 multipart-part listing as XML.
+async fn s3_list_parts_deployment(
+    base: &str,
+    token: &str,
+    key: &str,
+    upload_id: &str,
+) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{base}/{BUCKET}/{key}?uploadId={upload_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("s3 list parts")
+}
+
 /// POSTs `?uploadId` to complete a multipart upload.
 async fn s3_complete_multipart_deployment(
     base: &str,
@@ -3256,5 +3313,140 @@ async fn drill_deploy_postgres_kill_mid_s3_multipart() {
     );
     eprintln!(
         "chaos({drill}): PASS - durable resumable S3 multipart survived postgres kill; object byte-exact after recovery"
+    );
+}
+
+// ===========================================================================
+// SHARDLINE PROCESS KILL DURING UPLOAD-PART-COPY: the interrupted copy must
+// not publish a partial part. After restarting the real server process, the
+// multipart session remains usable, and retrying the copy completes exactly.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill_deploy_server_kill_during_s3_upload_part_copy() {
+    let drill = "drill_deploy_server_kill_during_s3_upload_part_copy";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    // Hold the source object's successful backend GET after MinIO has returned
+    // it. This proves the child process is inside UploadPartCopy before SIGKILL.
+    let s3_proxy = S3FaultProxy::start_disarmed(
+        &stack.s3_endpoint,
+        S3ProxyFault::DelaySuccessfulGetBody(Duration::from_secs(8)),
+    )
+    .expect("start S3 response fault proxy");
+    let proxy_endpoint = s3_proxy.endpoint().to_owned();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "s3"),
+            ("SHARDLINE_S3_ENDPOINT", &proxy_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+    let suffix = lfs_run_nonce();
+    let source_key = format!("copy-crash-{suffix}-source");
+    let destination_key = format!("copy-crash-{suffix}-destination");
+    let source_bytes = deterministic_bytes(12 * 1024 * 1024, 3737 ^ suffix);
+
+    let source_put = s3_put(&base, &token, &source_key, source_bytes.clone()).await;
+    assert_eq!(source_put.status().as_u16(), 200, "source object stored");
+    let upload_id = s3_create_multipart_deployment(&base, &token, &destination_key).await;
+
+    s3_proxy.arm();
+    let copy_base = base.clone();
+    let copy_token = token.clone();
+    let copy_destination = destination_key.clone();
+    let copy_source = source_key.clone();
+    let copy_upload = upload_id.clone();
+    let copy_request = tokio::spawn(async move {
+        s3_upload_part_copy_deployment(
+            &copy_base,
+            &copy_token,
+            &copy_destination,
+            &copy_upload,
+            1,
+            &copy_source,
+        )
+        .await
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !s3_proxy.fault_was_injected() {
+        assert!(
+            server.alive(),
+            "server exited before UploadPartCopy reached the paused S3 read"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "UploadPartCopy did not reach the paused source read"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    server.kill_hard();
+    assert!(!server.alive(), "the Shardline child process was killed");
+    // Let the one-shot proxy finish its delayed response to the now-dead server
+    // before restarting and using the same proxy for recovery traffic.
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    assert!(
+        copy_request
+            .await
+            .expect("copy request task did not panic")
+            .is_err(),
+        "the in-flight request must lose its response when Shardline is killed"
+    );
+
+    server.restart();
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let listed = s3_list_parts_deployment(&base, &token, &destination_key, &upload_id).await;
+    assert_eq!(
+        listed.status().as_u16(),
+        200,
+        "multipart session survives restart"
+    );
+    let listing = listed.text().await.unwrap();
+    assert!(
+        !listing.contains("<PartNumber>1</PartNumber>"),
+        "a copy killed before publication must not expose a partial part: {listing}"
+    );
+
+    let (copy_status, copy_etag) =
+        s3_upload_part_copy_deployment(&base, &token, &destination_key, &upload_id, 1, &source_key)
+            .await
+            .expect("retry UploadPartCopy after restart");
+    assert_eq!(copy_status, 200, "copy retry succeeds after restart");
+    let copy_etag = copy_etag.expect("CopyPartResult ETag");
+
+    let complete = s3_complete_multipart_deployment(
+        &base,
+        &token,
+        &destination_key,
+        &upload_id,
+        &[(1, &copy_etag)],
+    )
+    .await;
+    assert_eq!(complete, 200, "complete retry after restart");
+    let copied = s3_get(&base, &token, &destination_key).await;
+    assert_eq!(copied.status().as_u16(), 200, "copied object is readable");
+    assert_eq!(
+        copied.bytes().await.unwrap().as_ref(),
+        source_bytes.as_slice(),
+        "retried copy is byte-exact after process death"
+    );
+    eprintln!(
+        "chaos({drill}): PASS - process killed during paused UploadPartCopy; no partial part published; retry completed byte-exactly"
     );
 }
