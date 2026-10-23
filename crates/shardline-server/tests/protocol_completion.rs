@@ -178,10 +178,16 @@ assert c.get_object(Bucket='aws-resume.locks', Key='session/header.bin')['Body']
 attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key='session/header.bin', ObjectAttributes=['ETag', 'ObjectSize', 'StorageClass', 'Checksum'])
 assert attributes['ObjectSize'] == len(b'header-signed session bytes')
 assert attributes['ETag'] == c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')['ETag'].strip('"')
-assert attributes['StorageClass'] == 'STANDARD'
+assert 'StorageClass' not in attributes
 assert 'Checksum' not in attributes and 'ObjectParts' not in attributes
 size_only = c.get_object_attributes(Bucket='aws-resume.locks', Key='session/header.bin', ObjectAttributes=['ObjectSize'])
 assert size_only['ObjectSize'] == attributes['ObjectSize'] and 'ETag' not in size_only and 'StorageClass' not in size_only
+upload = c.create_multipart_upload(Bucket='aws-resume.locks', Key='session/multipart.bin')
+part = c.upload_part(Bucket='aws-resume.locks', Key='session/multipart.bin', UploadId=upload['UploadId'], PartNumber=1, Body=b'multipart attribute part')
+c.complete_multipart_upload(Bucket='aws-resume.locks', Key='session/multipart.bin', UploadId=upload['UploadId'], MultipartUpload={'Parts': [{'PartNumber': 1, 'ETag': part['ETag']}]})
+multipart_attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key='session/multipart.bin', ObjectAttributes=['ObjectParts'])
+assert multipart_attributes['ObjectParts']['TotalPartsCount'] == 1, multipart_attributes
+assert 'Parts' not in multipart_attributes['ObjectParts']
 head = c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')
 for operation in (c.get_object, c.head_object):
     for condition, expected in (({'IfModifiedSince': head['LastModified']}, 304), ({'IfUnmodifiedSince': datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)}, 412)):

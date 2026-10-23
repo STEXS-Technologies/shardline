@@ -219,9 +219,11 @@ reachable record remain protected.
   preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search,
   webhooks, Git Smart HTTP clone/fetch/push, SDK live-reference listing, and SDK
   branch/lightweight-tag creation and deletion
-- S3 frontend: object `PUT`, `GET` (with `Range`/`Content-Range`), `HEAD`, and `DELETE`;
+- S3 frontend: object `PUT`, `GET` (with `Range`/`Content-Range`), `HEAD`, `DELETE`, and
+  partial `GetObjectAttributes` (`ETag`, `ObjectSize`, and multipart total-part count);
   multipart upload (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`,
-  `AbortMultipartUpload`); `HeadBucket`/`GetBucketLocation`/`CreateBucket` stubs;
+  `AbortMultipartUpload`, `ListParts`, and `ListMultipartUploads`); `HeadBucket`/
+  `GetBucketLocation`/`CreateBucket` stubs;
   `ListObjectsV2` (`prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`)
   and `ListObjects` v1 (`marker`/`NextMarker`, the `s3cmd ls` path); standard MD5
   ETags and user metadata (`x-amz-meta-*`); with the SigV4 access-key and Bearer

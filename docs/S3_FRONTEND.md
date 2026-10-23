@@ -110,10 +110,14 @@ parameter is not accepted and returns `501 NotImplemented`.
 | Object tagging / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
 
-`GetObjectAttributes` reports verified part counts for multipart objects
-completed after this change. Individual part entries and per-part checksums are
-not stored. Existing objects have no durable part-count metadata; those counts
-remain unknown and are not inferred from CDC chunks or legacy records.
+`GetObjectAttributes` reports the verified total part count for multipart objects
+completed after this change. It does not return individual `Part` entries or
+checksums: Shardline does not accept the additional checksum headers that cause
+general-purpose S3 to include those entries. Existing objects have no durable
+part-count metadata; those counts remain unknown and are not inferred from CDC
+chunks or legacy records. Botocore 1.x real-client coverage checks the modeled
+`ObjectParts.TotalPartsCount` field and verifies that a single-PUT object has no
+`ObjectParts` response.
 
 ## Protocol deviations (documented)
 
