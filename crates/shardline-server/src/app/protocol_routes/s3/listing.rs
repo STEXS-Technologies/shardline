@@ -162,17 +162,14 @@ pub(crate) async fn s3_list_object_versions(
             "Only the null version exists in this unversioned bucket",
         ));
     }
-    if query
-        .iter()
-        .any(|(name, value)| name == "fetch-owner" && value.eq_ignore_ascii_case("true"))
-    {
-        return Err(S3Error::not_implemented());
-    }
     if _headers.contains_key("x-amz-optional-object-attributes") {
         return Err(S3Error::not_implemented());
     }
 
     let scope_namespace = scope_namespace(auth.capability().namespace());
+    // S3 owner IDs are opaque. Use Shardline's stable, repository-scoped
+    // namespace ID so the owner field is consistent across requests
+    // and does not expose the repository name or credential material.
     let page = logical_listing_page(
         &state,
         &scope_namespace,
@@ -236,6 +233,9 @@ pub(crate) async fn s3_list_object_versions(
         );
         push_xml_element(&mut xml, "Size", &content.size_bytes.to_string());
         push_xml_element(&mut xml, "StorageClass", "STANDARD");
+        xml.push_str("<Owner>");
+        push_xml_element(&mut xml, "ID", &scope_namespace);
+        xml.push_str("</Owner>");
         xml.push_str("</Version>");
     }
     xml.push_str("</ListVersionsResult>");

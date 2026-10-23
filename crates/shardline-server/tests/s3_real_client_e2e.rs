@@ -769,6 +769,15 @@ def crc64nvme(payload):
 # CreateBucket (boto3 sends PUT /bucket without a trailing slash).
 s3.create_bucket(Bucket=B)
 
+# Version listing returns the required owner structure without claiming that
+# Shardline has historical versions or delete markers.
+s3.put_object(Bucket=B, Key="owner-check.txt", Body=b"owner")
+versions = s3.list_object_versions(Bucket=B, Prefix="owner-check")
+assert len(versions.get("Versions", [])) == 1, versions
+assert versions["Versions"][0]["VersionId"] == "null", versions
+assert versions["Versions"][0]["Owner"]["ID"], versions
+s3.delete_object(Bucket=B, Key="owner-check.txt")
+
 # ListParts returns the negotiated algorithm and checksum for an active upload.
 # Use the SDK's modeled checksum fields instead of hand-parsing HTTP XML.
 listed_payload = b"native list-parts checksum"

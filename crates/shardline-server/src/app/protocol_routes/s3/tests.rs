@@ -1730,6 +1730,7 @@ async fn s3_list_object_versions_pages_null_versions_and_encodes_keys() {
     assert!(first.contains("<IsTruncated>true</IsTruncated>"), "{first}");
 
     let second = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -1748,6 +1749,9 @@ async fn s3_list_object_versions_pages_null_versions_and_encodes_keys() {
         second.contains("<IsTruncated>false</IsTruncated>"),
         "{second}"
     );
+
+    assert!(second.contains("<Owner><ID>"), "{second}");
+    assert!(second.contains("</ID></Owner>"), "{second}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
