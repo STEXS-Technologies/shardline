@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   retaining recovery checks and legacy inventory reconciliation.
 - Add optional S3 SigV4 identities, presigned requests, authenticated streaming
   checksums, multipart listing and range-based UploadPartCopy.
+- Support negotiated multipart CRC32 COMPOSITE checksums, verifying part bytes
+  before publication and exposing checksums and part sizes through object attributes.
 - Support atomic Git pushes, report-status-v2, side-band responses, shallow
   history by depth, date or excluded refs, and blob/tree partial clones.
 - Support Git protocol v2 upload-pack discovery, reference listing and fetch,
