@@ -1472,6 +1472,8 @@ async fn s3_multipart_crc32_mismatch_does_not_publish_and_can_retry() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
     let bytes = b"verified multipart checksum";
+    let previous = b"previous committed object";
+    put_object(&app, KEY, previous).await;
     let mut digest = CrcDigest::new(CrcAlgorithm::Crc32IsoHdlc);
     digest.update(bytes);
     let [_, _, _, _, byte0, byte1, byte2, byte3] = digest.finalize().to_be_bytes();
@@ -1526,8 +1528,13 @@ async fn s3_multipart_crc32_mismatch_does_not_publish_and_can_retry() {
     };
     let rejected = complete_upload(&app, &upload_id, completion(&wrong)).await;
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8(body_bytes(rejected).await)
+            .unwrap()
+            .contains("<Code>BadDigest</Code>")
+    );
 
-    let missing = Request::builder()
+    let unchanged = Request::builder()
         .method("GET")
         .uri(format!("/{BUCKET}/{KEY}"))
         .header(
@@ -1537,8 +1544,8 @@ async fn s3_multipart_crc32_mismatch_does_not_publish_and_can_retry() {
         .body(Body::empty())
         .unwrap();
     assert_eq!(
-        app.clone().oneshot(missing).await.unwrap().status(),
-        StatusCode::NOT_FOUND
+        body_bytes(app.clone().oneshot(unchanged).await.unwrap()).await,
+        previous
     );
 
     let accepted = complete_upload(&app, &upload_id, completion(&expected)).await;
