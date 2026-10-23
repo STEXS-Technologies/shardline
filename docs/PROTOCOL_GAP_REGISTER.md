@@ -20,7 +20,7 @@ deliberately changed.
 | --- | --- | --- | --- |
 | P2 | Live provider bridge | Live GitHub/Gitea provider tests require external credentials and repositories and are not part of the ordinary local run. | Execute the explicitly selected live tests with isolated test repositories and verify identity, token refresh, webhook and cleanup behavior. |
 | P2 | Deployment clients | The disposable kind profile now passes both split-role smoke and `k8s_cluster_protocol_e2e`, including native Xet uploads and downloads against separate API and transfer services. A customer or production cluster endpoint has not been qualified. | Run the same native protocol suite with `SHARDLINE_K8S_E2E_*` configured for each target deployment, then review its backend, readiness, sparse-transfer, and metrics results. |
-| P2 | S3 object tagging | Local route tests and native Boto3 workflows cover the tagging APIs, copy directives, multipart and POST tags. SQLite and PostgreSQL/MinIO persistence across real server restarts pass. Mixed-version writer qualification remains open. | Exercise an older writer's same-key replacement during rollout and verify the documented routing prevents tag loss or exposes the changed tag state clearly. |
+| P2 | S3 object tagging | Local route tests and native Boto3 workflows cover the tagging APIs, copy directives, multipart and POST tags. SQLite and PostgreSQL/MinIO persistence across real server restarts pass. Released 1.12.1/current binary drills against SQLite and PostgreSQL confirm that old replicas can read tagged object bytes, lack the tagging API and clear tags on same-key PUT. Customer load-balancer routing remains deployment-specific. | Verify in each target deployment that requests which need tag preservation cannot reach an old replica; otherwise enable tagging after every replica is upgraded. |
 | P1 | S3 multipart checksum deployment coverage | Composite checksums (CRC32, CRC32C, SHA-1 and SHA-256) and FULL_OBJECT checksums (CRC32, CRC32C and CRC64NVME) validate before publication. The native Botocore restart matrix passes all these algorithms with PostgreSQL metadata and MinIO object storage, including `ListParts`, `GetObjectAttributes`, and checksum-enabled reads. Production S3 providers still need equivalent deployment coverage. | Repeat the native client matrix against each supported production S3 provider and record provider-specific compatibility results. |
 
 ## Clarifications
@@ -78,7 +78,10 @@ deliberately changed.
   replacement, and multipart upload. A separate Botocore test verified tags
   survive a server stop/start against SQLite. The native Botocore PostgreSQL
   and MinIO restart test also passed with tag persistence enabled. Mixed-version
-  writer routing remains unqualified.
+  tests with the released 1.12.1 binary passed against SQLite and PostgreSQL;
+  they confirm old same-key PUTs clear tags, so protection depends on the
+  documented rollout routing rule. Production load-balancer rules remain
+  unqualified.
 
 For the current supported route contract, use [Compatibility Status](COMPATIBILITY_STATUS.md),
 [Protocol Frontends](PROTOCOLS.md), [S3 Frontend](S3_FRONTEND.md), and

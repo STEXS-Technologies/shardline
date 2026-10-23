@@ -222,6 +222,60 @@ async fn rolling_upgrade(postgres: Option<&str>) {
         "old reader of checksummed write",
     )
     .await;
+    let tagged_bytes = b"tagged object during rolling upgrade";
+    let tagged_write = reqwest::Client::new()
+        .put(format!("{}/{BUCKET}/tagged-rollout", upgraded.base))
+        .bearer_auth(&token)
+        .header("x-amz-tagging", "rollout=active")
+        .body(tagged_bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(tagged_write.status().is_success());
+    assert_s3_bytes(
+        &previous.base,
+        &token,
+        "tagged-rollout",
+        tagged_bytes,
+        "old reader of newly tagged object",
+    )
+    .await;
+    let old_tagging_route = reqwest::Client::new()
+        .get(format!("{}/{BUCKET}/tagged-rollout?tagging", previous.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        old_tagging_route.status(),
+        reqwest::StatusCode::NOT_IMPLEMENTED
+    );
+
+    // The released writer has no tagging support. A same-key PutObject without
+    // an x-amz-tagging header replaces the object's tag set with the empty set,
+    // matching S3 semantics. Deployments must keep tagged-key mutations on the
+    // upgraded replicas until the old writer is drained.
+    let old_replacement = b"old writer replacement without tags";
+    assert!(
+        s3_put(
+            &previous.base,
+            &token,
+            "tagged-rollout",
+            old_replacement.to_vec(),
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    let tags_after_old_write = reqwest::Client::new()
+        .get(format!("{}/{BUCKET}/tagged-rollout?tagging", upgraded.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags_after_old_write.status(), reqwest::StatusCode::OK);
+    let tags_after_old_write = tags_after_old_write.text().await.unwrap();
+    assert!(tags_after_old_write.contains("<TagSet></TagSet>"));
     drop(previous);
     // A rollout must tolerate an old replica restarting, without deleting
     // migration records, downgrading SQL, or discarding newly acknowledged data.
