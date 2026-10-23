@@ -3,8 +3,9 @@
 //! `CreateBucket` is a no-op `200` for S3A / object_store missing-bucket
 //! probes, `HeadBucket` answers the connect probe (`200`, `404 NoSuchBucket`,
 //! `403 AccessDenied`), `GetBucketLocation` returns the `us-east-1` stub,
+//! `GetBucketVersioning` reports the never-enabled configuration,
 //! `ListObjectsV2` (`?list-type=2`) serves the index-backed listing, and
-//! `DeleteBucket` plus every other bucket sub-resource respond
+//! `DeleteBucket` plus unsupported bucket sub-resources respond
 //! `501 NotImplemented`.
 
 use std::sync::Arc;
@@ -97,6 +98,8 @@ pub(crate) async fn s3_head_bucket(
 ///
 /// `?location` serves the `GetBucketLocation` stub
 /// (`<LocationConstraint>us-east-1</LocationConstraint>`); `?list-type=2`
+/// `?versioning` reports the truthful empty configuration (versioning has
+/// never been enabled); `?list-type=2`
 /// dispatches to [`s3_list_objects_v2`](listing::s3_list_objects_v2); a bare
 /// `GET /{bucket}` (no sub-resource) is the S3-default `ListObjects` v1 —
 /// which `s3cmd` and other legacy clients send for `ls` — and dispatches to
@@ -122,6 +125,9 @@ pub(crate) async fn s3_get_bucket(
     {
         return Ok(get_bucket_location_response());
     }
+    if resources.as_slice() == [S3SubResource::Versioning] {
+        return Ok(get_bucket_versioning_response());
+    }
     if resources
         .iter()
         .any(|resource| matches!(resource, S3SubResource::ListObjects))
@@ -132,6 +138,15 @@ pub(crate) async fn s3_get_bucket(
         return listing::s3_list_objects_v1(auth, State(state), Path(bucket), uri, headers).await;
     }
     Err(S3Error::not_implemented())
+}
+
+fn get_bucket_versioning_response() -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>",
+    )
+        .into_response()
 }
 
 /// `DELETE /{bucket}` — `DeleteBucket` is explicitly out of scope:

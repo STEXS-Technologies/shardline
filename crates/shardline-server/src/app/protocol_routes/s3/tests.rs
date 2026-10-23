@@ -1607,6 +1607,67 @@ async fn s3_bucket_stubs_create_head_location() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_get_bucket_versioning_reports_never_enabled_configuration() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/{BUCKET}?versioning"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let xml = String::from_utf8(body_bytes(response).await).unwrap();
+    assert!(xml.contains("<VersioningConfiguration"), "{xml}");
+    assert!(
+        !xml.contains("<Status>"),
+        "unversioned has no status: {xml}"
+    );
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}?versioning"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let list = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/{BUCKET}?versions"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_head_bucket_rejects_mismatched_token() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);

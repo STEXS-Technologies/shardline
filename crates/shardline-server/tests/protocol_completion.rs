@@ -211,6 +211,17 @@ def checksum_field(algorithm):
 def client(token):
     return botocore.session.get_session().create_client('s3', endpoint_url=sys.argv[1], region_name='us-east-1', aws_access_key_id='SIGNINGKEY', aws_secret_access_key='legacy-token-bridge', aws_session_token=token, config=Config(signature_version='s3v4', retries={'max_attempts': 0}))
 c = client('fixture-session-token')
+versioning = c.get_bucket_versioning(Bucket='aws-resume.locks')
+assert 'Status' not in versioning, versioning
+for operation in (
+    lambda: c.put_bucket_versioning(Bucket='aws-resume.locks', VersioningConfiguration={'Status': 'Enabled'}),
+    lambda: c.list_object_versions(Bucket='aws-resume.locks'),
+):
+    try:
+        operation()
+        raise AssertionError('unsupported version history operation was accepted')
+    except ClientError as error:
+        assert error.response['ResponseMetadata']['HTTPStatusCode'] == 501, error.response
 created = []
 try:
     for index in range(41):

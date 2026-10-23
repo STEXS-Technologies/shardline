@@ -13,6 +13,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Support S3 object tags through object and multipart uploads, browser forms,
   copy directives and the Get/Put/DeleteObjectTagging APIs, storing tags inside
   the existing evidence-bound object metadata and verifying request checksums.
+- Support the truthful empty `GetBucketVersioning` response for buckets where
+  Shardline has never enabled versioning; enabling versioning and listing object
+  versions remain explicitly unsupported.
 - Support durable Git LFS locks shared across replicas, including owner checks,
   pagination and the Hub's LFS routes.
 - Support OCI 1.1 referrer discovery with artifact filtering and pagination,
