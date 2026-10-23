@@ -240,6 +240,13 @@ finally:
 c.put_object(Bucket='aws-resume.locks', Key='session/header.bin', Body=b'header-signed session bytes', ContentType='application/x-shardline-test')
 assert c.get_object(Bucket='aws-resume.locks', Key='session/header.bin')['Body'].read() == b'header-signed session bytes'
 assert c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')['ContentType'] == 'application/x-shardline-test'
+overridden = c.get_object(Bucket='aws-resume.locks', Key='session/header.bin', ResponseContentType='text/plain', ResponseCacheControl='no-cache')
+assert overridden['ContentType'] == 'text/plain' and overridden['CacheControl'] == 'no-cache', overridden
+assert overridden['Body'].read() == b'header-signed session bytes'
+overridden_head = c.head_object(Bucket='aws-resume.locks', Key='session/header.bin', ResponseContentDisposition='attachment')
+assert overridden_head['ContentDisposition'] == 'attachment', overridden_head
+partial = c.get_object(Bucket='aws-resume.locks', Key='session/header.bin', Range='bytes=0-3', ResponseContentType='text/plain')
+assert partial['ResponseMetadata']['HTTPStatusCode'] == 206 and partial['ContentType'] != 'text/plain', partial
 c.put_object_tagging(Bucket='aws-resume.locks', Key='session/header.bin', Tagging={'TagSet': [
     {'Key': 'environment', 'Value': 'integration'}, {'Key': 'owner', 'Value': 'shardline'}]})
 assert c.get_object_tagging(Bucket='aws-resume.locks', Key='session/header.bin')['TagSet'] == [

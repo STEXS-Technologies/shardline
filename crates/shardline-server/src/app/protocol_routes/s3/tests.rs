@@ -604,6 +604,99 @@ async fn s3_bearer_auth_is_accepted() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_get_and_head_response_overrides_follow_status_semantics() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let auth = sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME));
+    let content = b"response override bytes";
+    assert_eq!(
+        app.clone()
+            .oneshot(put_request(format!("/{BUCKET}/{KEY}"), content.to_vec()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/{BUCKET}/{KEY}?response-content-type=text%2Fplain&response-cache-control=no-cache"
+                ))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(get.headers()[header::CONTENT_TYPE], "text/plain");
+    assert_eq!(get.headers()["cache-control"], "no-cache");
+    assert_eq!(body_bytes(get).await, content);
+
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!(
+                    "/{BUCKET}/{KEY}?response-content-disposition=attachment"
+                ))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()["content-disposition"], "attachment");
+
+    let range = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/{BUCKET}/{KEY}?response-content-type=text%2Fplain"
+                ))
+                .header(header::AUTHORIZATION, &auth)
+                .header(header::RANGE, "bytes=0-3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_ne!(range.headers()[header::CONTENT_TYPE], "text/plain");
+
+    let unsupported = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}?response-custom-header=value"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let write_override = app
+        .oneshot(put_request(
+            format!("/{BUCKET}/{KEY}?response-content-type=text%2Fplain"),
+            content.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(write_override.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_get_range_serves_206_with_content_range() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);

@@ -146,6 +146,51 @@ const METADATA_DIRECTIVE: axum::http::header::HeaderName =
 const TAGGING_DIRECTIVE: axum::http::header::HeaderName =
     axum::http::header::HeaderName::from_static("x-amz-tagging-directive");
 
+fn parse_response_overrides(
+    query: &[(String, String)],
+) -> Result<Vec<(HeaderName, HeaderValue)>, S3Error> {
+    let mut overrides = Vec::new();
+    for (name, value) in query {
+        let header_name = match name.as_str() {
+            "response-cache-control" => HeaderName::from_static("cache-control"),
+            "response-content-disposition" => HeaderName::from_static("content-disposition"),
+            "response-content-encoding" => HeaderName::from_static("content-encoding"),
+            "response-content-language" => HeaderName::from_static("content-language"),
+            "response-content-type" => HeaderName::from_static("content-type"),
+            "response-expires" => HeaderName::from_static("expires"),
+            _ if name.starts_with("response-") => return Err(S3Error::not_implemented()),
+            _ => continue,
+        };
+        if overrides
+            .iter()
+            .any(|(existing, _): &(HeaderName, HeaderValue)| *existing == header_name)
+        {
+            return Err(S3Error::invalid_argument(
+                "Repeated S3 response override parameter",
+            ));
+        }
+        let value = HeaderValue::from_str(value)
+            .map_err(|_error| S3Error::invalid_argument("Invalid S3 response override value"))?;
+        overrides.push((header_name, value));
+    }
+    Ok(overrides)
+}
+
+fn reject_response_overrides(query: &[(String, String)]) -> Result<(), S3Error> {
+    if query.iter().any(|(name, _)| name.starts_with("response-")) {
+        return Err(S3Error::not_implemented());
+    }
+    Ok(())
+}
+
+fn apply_response_overrides(response: &mut Response, overrides: Vec<(HeaderName, HeaderValue)>) {
+    if response.status() == StatusCode::OK {
+        for (name, value) in overrides {
+            response.headers_mut().insert(name, value);
+        }
+    }
+}
+
 /// S3 user-metadata request header prefix.
 const META_PREFIX: &str = "x-amz-meta-";
 
@@ -410,6 +455,7 @@ pub(crate) async fn s3_put_object(
     // rejected as 501.
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
+    reject_response_overrides(&query)?;
     if resources.as_slice() == [S3SubResource::Tagging] {
         return put_object_tagging(&state, &context, headers, body).await;
     }
@@ -1187,6 +1233,10 @@ pub(crate) async fn s3_get_object(
 
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
+    let response_overrides = parse_response_overrides(&query)?;
+    if !resources.is_empty() && !response_overrides.is_empty() {
+        return Err(S3Error::not_implemented());
+    }
     if resources.as_slice() == [S3SubResource::Tagging] {
         let entry = s3_object_entry(&state, &context)
             .await?
@@ -1319,6 +1369,7 @@ pub(crate) async fn s3_get_object(
             .as_ref()
             .map_or(&[][..], |entry| entry.user_metadata.as_slice()),
     )?;
+    apply_response_overrides(&mut response, response_overrides);
     // Real clients (mc, the AWS SDKs) parse `Last-Modified` on GetObject
     // responses; derive it from the entry captured above so it is never torn
     // against the ETag/metadata (fallback: Unix epoch when no row exists).
@@ -1392,6 +1443,7 @@ pub(crate) async fn s3_head_object(
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
+    let response_overrides = parse_response_overrides(&query)?;
     if has_sub_resource(&query) {
         return Err(S3Error::not_implemented());
     }
@@ -1478,6 +1530,7 @@ pub(crate) async fn s3_head_object(
         LAST_MODIFIED,
         HeaderValue::from_str(&last_modified).map_err(|_error| S3Error::internal())?,
     );
+    apply_response_overrides(&mut response, response_overrides);
     Ok(response)
 }
 
@@ -1502,6 +1555,7 @@ pub(crate) async fn s3_delete_object(
     // `?uploadId` dispatches to AbortMultipartUpload; other sub-resources are
     // out of scope.
     let query = parse_s3_query(&uri)?;
+    reject_response_overrides(&query)?;
     let resources = classify(&query);
     if resources.as_slice() == [S3SubResource::Tagging] {
         replace_object_tagging(&state, &context, &[]).await?;
@@ -1639,6 +1693,7 @@ pub(crate) async fn s3_post_object(
     // `?uploads` → CreateMultipartUpload, `?uploadId` → CompleteMultipartUpload;
     // anything else (PostObject) is out of scope.
     let query = parse_s3_query(&uri)?;
+    reject_response_overrides(&query)?;
     let resources = classify(&query);
     if let [S3SubResource::Uploads] = resources.as_slice() {
         return multipart::s3_create_multipart_upload(&state, &context, &headers).await;
@@ -1666,6 +1721,47 @@ fn last_modified_from_entry(entry: Option<&S3ObjectEntry>) -> String {
 mod conditional_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn response_overrides_accept_standard_headers_and_reject_invalid_parameters() {
+        let query = vec![
+            ("response-content-type".to_owned(), "text/plain".to_owned()),
+            ("response-cache-control".to_owned(), "no-cache".to_owned()),
+        ];
+        let overrides = parse_response_overrides(&query).unwrap();
+        assert_eq!(overrides.len(), 2);
+        let mut response = Response::new(Body::empty());
+        apply_response_overrides(&mut response, overrides);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
+        assert_eq!(response.headers()["cache-control"], "no-cache");
+
+        let repeated = vec![
+            ("response-content-type".to_owned(), "text/plain".to_owned()),
+            (
+                "response-content-type".to_owned(),
+                "application/json".to_owned(),
+            ),
+        ];
+        assert!(parse_response_overrides(&repeated).is_err());
+        let invalid = vec![("response-content-type".to_owned(), "bad\nvalue".to_owned())];
+        assert!(parse_response_overrides(&invalid).is_err());
+        let unsupported = vec![("response-custom-header".to_owned(), "value".to_owned())];
+        assert!(parse_response_overrides(&unsupported).is_err());
+    }
+
+    #[test]
+    fn response_overrides_apply_only_to_full_success_responses() {
+        let overrides = vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("text/plain"),
+        )];
+        let mut partial = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .body(Body::empty())
+            .unwrap();
+        apply_response_overrides(&mut partial, overrides);
+        assert!(!partial.headers().contains_key(CONTENT_TYPE));
+    }
     #[test]
     fn metadata_legacy_pairs_and_unprintable_values_are_served_without_loss() {
         let mut response = axum::response::Response::new(Body::empty());

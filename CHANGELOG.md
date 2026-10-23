@@ -32,6 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   are optional for FULL_OBJECT uploads, and CRC64NVME defaults to FULL_OBJECT.
 - Retain verified single-PUT S3 checksums and return them through
   `GetObjectAttributes` and checksum-enabled `GetObject`/`HeadObject` responses.
+- Support S3 `GetObject` and `HeadObject` response overrides for cache
+  control, content disposition/encoding/language/type and expiry on full `200`
+  responses; reject unsupported override parameters rather than ignoring them.
 - Support signed path-style S3 browser `PostObject` uploads with policy-condition
   checks, `${filename}` expansion, bounded temporary spooling, user metadata,
   Content-MD5 and CRC32/CRC32C/SHA-1/SHA-256 checksums, using atomic object
