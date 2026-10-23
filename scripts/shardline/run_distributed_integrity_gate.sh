@@ -38,8 +38,12 @@ if rg -ni 'SKIP:|SKIPPED:|skipping:|panicked at' "$output/deployment.log"; then
     echo 'FAIL: a deployment drill skipped or a task panicked' >&2
     exit 1
 fi
-rg 'Starting 24 tests across 1 binary' "$output/deployment.log"
-rg 'Summary.*24 tests run: 24 passed' "$output/deployment.log"
+expected_deployment_tests=$(cargo nextest list --locked -p shardline-server --all-features \
+    --test deployment_chaos --message-format json \
+    | jq -er '[."rust-suites"[]?.testcases[]? | select(.ignored != true)] | length')
+rg "Starting ${expected_deployment_tests} tests across 1 binary" "$output/deployment.log"
+rg "Summary.*${expected_deployment_tests} tests run: ${expected_deployment_tests} passed" \
+    "$output/deployment.log"
 
 cargo nextest run --locked -p shardline-server --all-features --test multinode_chaos \
     --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \
@@ -48,6 +52,10 @@ if rg -ni 'SKIP:|SKIPPED:|skipping:|panicked at' "$output/multinode.log"; then
     echo 'FAIL: a multi-node drill skipped or a task panicked' >&2
     exit 1
 fi
-rg 'Starting 5 tests across 1 binary' "$output/multinode.log"
-rg 'Summary.*5 tests run: 5 passed' "$output/multinode.log"
+expected_multinode_tests=$(cargo nextest list --locked -p shardline-server --all-features \
+    --test multinode_chaos --message-format json \
+    | jq -er '[."rust-suites"[]?.testcases[]? | select(.ignored != true)] | length')
+rg "Starting ${expected_multinode_tests} tests across 1 binary" "$output/multinode.log"
+rg "Summary.*${expected_multinode_tests} tests run: ${expected_multinode_tests} passed" \
+    "$output/multinode.log"
 echo 'PASS: deployment faults, mixed-version rollback and multi-node role integrity'
