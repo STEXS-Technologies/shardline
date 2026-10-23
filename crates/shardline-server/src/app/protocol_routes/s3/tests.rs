@@ -50,6 +50,7 @@ use super::{
     format_http_date,
     object::{s3_delete_object, s3_get_object, s3_head_object, s3_post_object, s3_put_object},
 };
+use crc_fast::{CrcAlgorithm, Digest as CrcDigest};
 
 /// Test signing key matching the one used in e2e tests.
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
@@ -1462,6 +1463,96 @@ async fn s3_multipart_roundtrip_assembles_parts_and_ranges() {
         .unwrap();
     assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(body_bytes(range).await, &part2[0..4]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_multipart_crc32_mismatch_does_not_publish_and_can_retry() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let bytes = b"verified multipart checksum";
+    let mut digest = CrcDigest::new(CrcAlgorithm::Crc32IsoHdlc);
+    digest.update(bytes);
+    let [_, _, _, _, byte0, byte1, byte2, byte3] = digest.finalize().to_be_bytes();
+    let expected = STANDARD.encode([byte0, byte1, byte2, byte3]);
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/{KEY}?uploads"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header("x-amz-checksum-algorithm", "CRC32")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let upload_id = extract_tag(
+        &String::from_utf8(body_bytes(create).await).unwrap(),
+        "UploadId",
+    );
+
+    let upload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header("x-amz-checksum-crc32", &expected)
+                .body(Body::from(bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), StatusCode::OK);
+    let etag = upload.headers()[header::ETAG].to_str().unwrap().to_owned();
+
+    let wrong = STANDARD.encode([0_u8, 0, 0, 0]);
+    let completion = |checksum: &str| {
+        format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag><ChecksumCRC32>{checksum}</ChecksumCRC32></Part></CompleteMultipartUpload>"
+        )
+    };
+    let rejected = complete_upload(&app, &upload_id, completion(&wrong)).await;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let missing = Request::builder()
+        .method("GET")
+        .uri(format!("/{BUCKET}/{KEY}"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+        )
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(missing).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let accepted = complete_upload(&app, &upload_id, completion(&expected)).await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let get = Request::builder()
+        .method("GET")
+        .uri(format!("/{BUCKET}/{KEY}"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+        )
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(body_bytes(app.oneshot(get).await.unwrap()).await, bytes);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
