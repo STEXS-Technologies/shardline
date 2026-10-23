@@ -264,6 +264,11 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
         .filter(|key| !key.is_empty())
         .ok_or_else(S3Error::access_denied)?
         .to_owned();
+    if get("x-amz-storage-class")
+        .is_some_and(|storage_class| !storage_class.eq_ignore_ascii_case("STANDARD"))
+    {
+        return Err(S3Error::not_implemented());
+    }
     let success_status = match get("success_action_status") {
         None => 204,
         Some("200") => 200,
@@ -345,6 +350,7 @@ fn supported_field(name: &str) -> bool {
                 | "x-amz-checksum-sha1"
                 | "x-amz-checksum-sha256"
                 | "x-amz-tagging"
+                | "x-amz-storage-class"
         )
         || name.to_ascii_lowercase().starts_with("x-amz-meta-")
 }

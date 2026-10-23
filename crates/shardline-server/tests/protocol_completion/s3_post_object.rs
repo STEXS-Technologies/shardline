@@ -42,12 +42,14 @@ post = client.generate_presigned_post(
     Fields={'success_action_status': '201', 'Content-Type': 'application/x-shardline-model',
         'x-amz-meta-model': 'release-1',
         'x-amz-tagging': 'channel=stable&model=weights',
+        'x-amz-storage-class': 'STANDARD',
         'x-amz-checksum-sha256': checksum, 'x-ignore-client-note': 'ignored'},
     Conditions=[
         {'bucket': bucket}, ['starts-with', '$key', 'uploads/'],
         {'success_action_status': '201'}, {'Content-Type': 'application/x-shardline-model'},
         {'x-amz-meta-model': 'release-1'},
         {'x-amz-tagging': 'channel=stable&model=weights'},
+        {'x-amz-storage-class': 'STANDARD'},
         {'x-amz-checksum-sha256': checksum},
         ['content-length-range', 1, 1024],
     ],
@@ -69,6 +71,27 @@ assert client.get_object(Bucket=bucket, Key='uploads/weights.bin')['Body'].read(
 assert client.head_object(Bucket=bucket, Key='uploads/weights.bin')['ContentType'] == 'application/x-shardline-model'
 assert client.get_object_tagging(Bucket=bucket, Key='uploads/weights.bin')['TagSet'] == [
     {'Key': 'channel', 'Value': 'stable'}, {'Key': 'model', 'Value': 'weights'}]
+
+# STANDARD is the default storage class and is safe to accept as an explicit
+# browser-form option; a non-default class must fail rather than be ignored.
+unsupported_post = client.generate_presigned_post(
+    Bucket=bucket, Key='uploads/glacier.bin',
+    Fields={'x-amz-storage-class': 'GLACIER'},
+    Conditions=[{'bucket': bucket}, {'key': 'uploads/glacier.bin'},
+        {'x-amz-storage-class': 'GLACIER'}, ['content-length-range', 1, 1024]],
+    ExpiresIn=300)
+boundary = 'shardline-boto3-glacier-boundary'
+body = bytearray()
+for name, value in unsupported_post['fields'].items():
+    body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="weights.bin"\r\n\r\nglacier\r\n--{boundary}--\r\n'.encode())
+request = urllib.request.Request(unsupported_post['url'], data=bytes(body), method='POST',
+    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+try:
+    urllib.request.urlopen(request)
+    raise AssertionError('non-standard storage class was accepted')
+except urllib.error.HTTPError as response:
+    assert response.code == 501, (response.code, response.read())
 
 # Exercise the normal object header, the dedicated tagging APIs, copy defaults
 # and replacement semantics, and multipart upload persistence through Boto3.

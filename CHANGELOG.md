@@ -52,7 +52,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Reject unsupported S3 ACL, encryption, expected-owner and requester-payer
   options instead of silently acknowledging them; accept only the STANDARD
-  object storage class on object writes.
+  object storage class on object writes and signed browser forms.
 - Bound Git request buffering, projection, packing and slow-consumer responses
   through shared admission.
 - Keep additive LFS-lock and Xet-identity migrations outside the released core
