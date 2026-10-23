@@ -67,7 +67,8 @@ pub(super) async fn upload_part_copy(
         return Err(multipart::entity_too_large());
     }
     #[cfg(test)]
-    super::copy_part_test_hooks::pause_after_snapshot(&context.object_key).await;
+    let test_completion =
+        super::copy_part_test_hooks::pause_after_snapshot(&context.object_key).await;
     let stream = state
         .backend
         .read_object_stream_pinned(
@@ -89,6 +90,10 @@ pub(super) async fn upload_part_copy(
         Body::from_stream(bounded_byte_stream(stream, length)),
     )
     .await?;
+    #[cfg(test)]
+    if let Some(test_completion) = test_completion {
+        test_completion.mark_published();
+    }
     let etag = part
         .headers()
         .get(ETAG)

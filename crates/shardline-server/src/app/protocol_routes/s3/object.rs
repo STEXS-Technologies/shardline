@@ -13,47 +13,76 @@ mod copy_part;
 
 #[cfg(test)]
 pub(crate) mod copy_part_test_hooks {
-    use std::sync::{LazyLock, Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{LazyLock, Mutex},
+    };
 
     use shardline_storage::ObjectKey;
     use tokio::sync::oneshot;
 
-    type Pause = (String, oneshot::Sender<()>, oneshot::Receiver<()>);
+    type Pause = (
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+        oneshot::Sender<bool>,
+    );
 
-    static AFTER_SNAPSHOT: LazyLock<Mutex<Option<Pause>>> = LazyLock::new(|| Mutex::new(None));
+    static AFTER_SNAPSHOT: LazyLock<Mutex<HashMap<String, Pause>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     pub(crate) fn arm(
         object_key: &ObjectKey,
-    ) -> Option<(oneshot::Receiver<()>, oneshot::Sender<()>)> {
+    ) -> Option<(
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        oneshot::Receiver<bool>,
+    )> {
         let (reached_tx, reached_rx) = oneshot::channel();
         let (resume_tx, resume_rx) = oneshot::channel();
+        let (published_tx, published_rx) = oneshot::channel();
         let mut pause = AFTER_SNAPSHOT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pause.is_some() {
+        let key = object_key.as_str().to_owned();
+        if pause.contains_key(&key) {
             return None;
         }
-        *pause = Some((object_key.as_str().to_owned(), reached_tx, resume_rx));
-        Some((reached_rx, resume_tx))
+        pause.insert(key, (reached_tx, resume_rx, published_tx));
+        Some((reached_rx, resume_tx, published_rx))
     }
 
-    pub(super) async fn pause_after_snapshot(object_key: &ObjectKey) {
+    pub(crate) struct CompletionGuard(Option<oneshot::Sender<bool>>);
+
+    impl CompletionGuard {
+        pub(super) fn mark_published(mut self) {
+            if let Some(published) = self.0.take() {
+                let _published_sent = published.send(true);
+            }
+        }
+    }
+
+    impl Drop for CompletionGuard {
+        fn drop(&mut self) {
+            if let Some(published) = self.0.take() {
+                let _cancelled_sent = published.send(false);
+            }
+        }
+    }
+
+    pub(super) async fn pause_after_snapshot(object_key: &ObjectKey) -> Option<CompletionGuard> {
         let pause = {
             let mut armed = AFTER_SNAPSHOT
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if armed
-                .as_ref()
-                .is_some_and(|(key, _, _)| key == object_key.as_str())
-            {
-                armed.take()
-            } else {
-                None
-            }
+            armed.remove(object_key.as_str())
         };
-        if let Some((_, reached, resume)) = pause {
+        if let Some((reached, resume, published)) = pause {
+            let completion = CompletionGuard(Some(published));
             let _ = reached.send(());
             let _ = resume.await;
+            Some(completion)
+        } else {
+            None
         }
     }
 }

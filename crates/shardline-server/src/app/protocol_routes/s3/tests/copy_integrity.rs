@@ -50,6 +50,159 @@ async fn postgres_copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flig
 }
 
 #[tokio::test]
+async fn disconnected_copy_part_can_be_reconciled_from_list_parts() {
+    let (state, _root) = build_test_state().await;
+    exercise_disconnected_copy_part(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_disconnected_copy_part_can_be_reconciled_from_list_parts() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise_disconnected_copy_part(state).await;
+}
+
+async fn exercise_disconnected_copy_part(state: Arc<AppState>) {
+    use tokio::io::AsyncWriteExt;
+
+    let app = s3_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let base = format!("http://{address}");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _shutdown_received = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let credential = mint_token(TokenScope::Write, OWNER, NAME);
+    let source = "copy-source-lost-ack";
+    let source_bytes = b"source-version-pinned-before-disconnect";
+    let acknowledged = b"previous-acknowledged-part";
+
+    let uploaded = client
+        .put(format!("{base}/{BUCKET}/{source}"))
+        .bearer_auth(&credential)
+        .body(source_bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let created = client
+        .post(format!("{base}/{BUCKET}/{KEY}?uploads"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_xml = created.text().await.unwrap();
+    let upload = created_xml
+        .split_once("<UploadId>")
+        .unwrap()
+        .1
+        .split_once("</UploadId>")
+        .unwrap()
+        .0
+        .to_owned();
+
+    let first_part = client
+        .put(format!(
+            "{base}/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1"
+        ))
+        .bearer_auth(&credential)
+        .body(acknowledged.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first_part.status(), StatusCode::OK);
+
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let (copy_paused, resume_copy, published) =
+        super::super::object::copy_part_test_hooks::arm(&source_key)
+            .expect("copy-part pause hook must be available");
+    let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!(
+        "PUT /{BUCKET}/{KEY}?uploadId={upload}&partNumber=1 HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {credential}\r\nx-amz-copy-source: /{BUCKET}/{source}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    socket.write_all(request.as_bytes()).await.unwrap();
+    copy_paused.await.unwrap();
+
+    // The client disconnects after source resolution but before receiving the
+    // response. Once the operation settles, ListParts recovers the durable ETag.
+    drop(socket);
+    let replaced = client
+        .put(format!("{base}/{BUCKET}/{source}"))
+        .bearer_auth(&credential)
+        .body(b"later-source-version".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replaced.status(), StatusCode::OK);
+    let _resume_sent = resume_copy.send(());
+    let copied_part_was_published =
+        tokio::time::timeout(std::time::Duration::from_secs(5), published)
+            .await
+            .expect("copy-part request must settle after client disconnect")
+            .unwrap();
+
+    let listed = client
+        .get(format!("{base}/{BUCKET}/{KEY}?uploadId={upload}"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed_xml = listed.text().await.unwrap();
+    let part_etag = listed_xml
+        .split_once("<ETag>")
+        .unwrap()
+        .1
+        .split_once("</ETag>")
+        .unwrap()
+        .0;
+    let completion = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let completed = client
+        .post(format!("{base}/{BUCKET}/{KEY}?uploadId={upload}"))
+        .bearer_auth(&credential)
+        .header("content-type", "application/xml")
+        .body(completion)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::OK);
+    let downloaded = client
+        .get(format!("{base}/{BUCKET}/{KEY}"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(downloaded.status(), StatusCode::OK);
+    let downloaded = downloaded.bytes().await.unwrap();
+    let expected = if copied_part_was_published {
+        source_bytes.as_slice()
+    } else {
+        acknowledged.as_slice()
+    };
+    assert_eq!(downloaded.as_ref(), expected);
+
+    drop(client);
+    let _shutdown_sent = shutdown_tx.send(());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn cancelled_copy_part_preserves_acknowledged_part() {
     let (state, _root) = build_test_state().await;
     exercise_cancelled_copy_part(state).await;
@@ -88,8 +241,9 @@ async fn exercise_cancelled_copy_part(state: Arc<AppState>) {
     let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
     let namespace = crate::protocol_support::scope_namespace(Some(&repository));
     let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
-    let (copy_paused, resume_copy) = super::super::object::copy_part_test_hooks::arm(&source_key)
-        .expect("copy-part pause hook must be available");
+    let (copy_paused, resume_copy, published) =
+        super::super::object::copy_part_test_hooks::arm(&source_key)
+            .expect("copy-part pause hook must be available");
     let request = Request::builder()
         .method("PUT")
         .uri(format!("/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1"))
@@ -112,6 +266,7 @@ async fn exercise_cancelled_copy_part(state: Arc<AppState>) {
     let cancelled = copying.await.unwrap_err();
     assert!(cancelled.is_cancelled());
     drop(resume_copy);
+    assert!(!published.await.unwrap());
 
     let completed = complete_upload(&app, &upload, complete_body(&upload, &[1])).await;
     assert_eq!(completed.status(), StatusCode::OK);
@@ -167,8 +322,9 @@ async fn exercise_inflight_copy_overwrite(state: Arc<AppState>) {
     let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
     let namespace = crate::protocol_support::scope_namespace(Some(&repository));
     let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
-    let (copy_paused, resume_copy) = super::super::object::copy_part_test_hooks::arm(&source_key)
-        .expect("copy-part pause hook must be available");
+    let (copy_paused, resume_copy, published) =
+        super::super::object::copy_part_test_hooks::arm(&source_key)
+            .expect("copy-part pause hook must be available");
     let copy_url = format!("{base}/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1");
     let copy_source = format!("/{BUCKET}/{source}");
     let copying = {
@@ -199,6 +355,7 @@ async fn exercise_inflight_copy_overwrite(state: Arc<AppState>) {
     let copied = copying.await.unwrap();
     assert_eq!(replaced.status(), StatusCode::OK);
     assert_eq!(copied.status(), StatusCode::OK);
+    assert!(published.await.unwrap());
 
     let copied_xml = copied.text().await.unwrap();
     let copied_etag = copied_xml
