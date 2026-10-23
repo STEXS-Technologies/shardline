@@ -11,8 +11,10 @@ log_dir="${SHARDLINE_KIND_LOG_DIR:-$(mktemp -d -t shardline-kind-smoke.XXXXXX)}"
 mkdir -p "$log_dir"
 api_port=""
 transfer_port=""
-api_port_forward_pid=""
-transfer_port_forward_pid=""
+postgres_port=""
+redis_port=""
+minio_port=""
+port_forward_pids=()
 initial_run_id="before-restart-${cluster_suffix}"
 recovery_run_id="after-restart-${cluster_suffix}"
 
@@ -44,25 +46,33 @@ PY
 }
 
 stop_port_forwards() {
-    for pid in "$api_port_forward_pid" "$transfer_port_forward_pid"; do
-        if [[ -n "$pid" ]]; then
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
+    for pid in "${port_forward_pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     done
-    api_port_forward_pid=""
-    transfer_port_forward_pid=""
+    port_forward_pids=()
 }
 
 start_port_forwards() {
     api_port="$(reserve_port)"
     transfer_port="$(reserve_port)"
-    kubectl --context "$context" -n "$namespace" port-forward "service/shardline-api" "${api_port}:8080" \
-        >"$log_dir/api-port-forward.log" 2>&1 &
-    api_port_forward_pid=$!
-    kubectl --context "$context" -n "$namespace" port-forward "service/shardline-transfer" "${transfer_port}:8080" \
-        >"$log_dir/transfer-port-forward.log" 2>&1 &
-    transfer_port_forward_pid=$!
+    postgres_port="$(reserve_port)"
+    redis_port="$(reserve_port)"
+    minio_port="$(reserve_port)"
+    local services=(
+        "shardline-api ${api_port} 8080"
+        "shardline-transfer ${transfer_port} 8080"
+        "postgres ${postgres_port} 5432"
+        "redis ${redis_port} 6379"
+        "minio ${minio_port} 9000"
+    )
+    local service local_port target_port
+    for mapping in "${services[@]}"; do
+        read -r service local_port target_port <<<"$mapping"
+        kubectl --context "$context" -n "$namespace" port-forward "service/${service}" "${local_port}:${target_port}" \
+            >"$log_dir/${service}-port-forward.log" 2>&1 &
+        port_forward_pids+=("$!")
+    done
 }
 
 collect_diagnostics() {
@@ -134,6 +144,27 @@ run_e2e_smoke() {
     cargo nextest run --manifest-path e2e/Cargo.toml --test kind_deployment_smoke --run-ignored ignored-only
 }
 
+run_cluster_protocol_e2e() {
+    SHARDLINE_K8S_E2E_BASE_URL="http://127.0.0.1:${api_port}" \
+    SHARDLINE_K8S_E2E_TRANSFER_URL="http://127.0.0.1:${transfer_port}" \
+    SHARDLINE_K8S_E2E_METRICS_URL="http://127.0.0.1:${api_port}/metrics" \
+    SHARDLINE_K8S_E2E_METRICS_TOKEN="kind-smoke-metrics-token" \
+    SHARDLINE_K8S_E2E_POSTGRES_URL="postgres://shardline:kind-smoke-postgres@127.0.0.1:${postgres_port}/shardline" \
+    SHARDLINE_K8S_E2E_REDIS_URL="redis://127.0.0.1:${redis_port}" \
+    SHARDLINE_K8S_E2E_S3_BUCKET="shardline" \
+    SHARDLINE_K8S_E2E_S3_REGION="us-east-1" \
+    SHARDLINE_K8S_E2E_S3_ENDPOINT="http://127.0.0.1:${minio_port}" \
+    SHARDLINE_K8S_E2E_S3_ACCESS_KEY_ID="kind-smoke" \
+    SHARDLINE_K8S_E2E_S3_SECRET_ACCESS_KEY="kind-smoke-minio-secret" \
+    SHARDLINE_K8S_E2E_S3_ALLOW_HTTP="true" \
+    SHARDLINE_K8S_E2E_PROVIDER="generic" \
+    SHARDLINE_K8S_E2E_OWNER="kind-smoke" \
+    SHARDLINE_K8S_E2E_REPO="assets" \
+    SHARDLINE_K8S_E2E_SUBJECT="kind-smoke-user" \
+    SHARDLINE_K8S_E2E_PROVIDER_KEY="kind-smoke-provider-key" \
+    cargo nextest run --manifest-path e2e/Cargo.toml --test k8s_cluster_protocol_e2e --run-ignored ignored-only
+}
+
 echo "Validating seeded split-role traffic"
 run_e2e_smoke "$initial_run_id"
 
@@ -157,5 +188,8 @@ start_port_forwards
 
 echo "Validating persisted data and concurrent split-role traffic after recovery"
 run_e2e_smoke "$recovery_run_id" "$initial_run_id"
+
+echo "Validating native Xet upload and download through deployed API and transfer roles"
+run_cluster_protocol_e2e
 
 echo "kind deployment smoke test passed; deleting $cluster_name"
