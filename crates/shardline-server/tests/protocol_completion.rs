@@ -176,7 +176,7 @@ async fn exercise_botocore_session_credentials(
     // external client under test; Rust owns server setup and assertions.
     let output = tokio::task::spawn_blocking(move || std::process::Command::new(python)
         .arg("-c").arg(r#"
-import datetime, json, sys
+import base64, datetime, hashlib, json, sys, zlib
 import botocore.session
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -190,6 +190,24 @@ def crc64nvme(payload):
             value = (value >> 1) ^ (polynomial if value & 1 else 0)
     value ^= 0xFFFFFFFFFFFFFFFF
     return base64.b64encode(value.to_bytes(8, 'big')).decode()
+def crc32c(payload):
+    value = 0xFFFFFFFF
+    for byte in payload:
+        value ^= byte
+        for _ in range(8):
+            value = (value >> 1) ^ (0x82F63B78 if value & 1 else 0)
+    value ^= 0xFFFFFFFF
+    return base64.b64encode(value.to_bytes(4, 'big')).decode()
+def checksum_for(algorithm, payload):
+    if algorithm == 'CRC32':
+        return base64.b64encode(zlib.crc32(payload).to_bytes(4, 'big')).decode()
+    if algorithm == 'CRC32C':
+        return crc32c(payload)
+    if algorithm in ('SHA1', 'SHA256'):
+        return base64.b64encode(hashlib.new(algorithm.lower(), payload).digest()).decode()
+    return crc64nvme(payload)
+def checksum_field(algorithm):
+    return 'Checksum' + algorithm
 def client(token):
     return botocore.session.get_session().create_client('s3', endpoint_url=sys.argv[1], region_name='us-east-1', aws_access_key_id='SIGNINGKEY', aws_secret_access_key='legacy-token-bridge', aws_session_token=token, config=Config(signature_version='s3v4', retries={'max_attempts': 0}))
 c = client('fixture-session-token')
@@ -238,22 +256,42 @@ multipart_attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key='s
 assert multipart_attributes['ObjectParts']['TotalPartsCount'] == 1, multipart_attributes
 assert multipart_attributes['Checksum']['ChecksumType'] == 'COMPOSITE', multipart_attributes
 assert multipart_attributes['ObjectParts']['Parts'] == [{'PartNumber': 1, 'Size': len(b'multipart attribute part'), 'ChecksumCRC32': part['ChecksumCRC32']}], multipart_attributes
-full_payload = b'native botocore FULL_OBJECT CRC64NVME'
-full_checksum = crc64nvme(full_payload)
-full_upload = c.create_multipart_upload(Bucket='aws-resume.locks', Key='session/full-object.bin', ChecksumAlgorithm='CRC64NVME', ChecksumType='FULL_OBJECT', ContentType='application/x-shardline-full-object')
-full_part_checksum = crc64nvme(full_payload)
-full_part = c.upload_part(Bucket='aws-resume.locks', Key='session/full-object.bin', UploadId=full_upload['UploadId'], PartNumber=1, Body=full_payload, ChecksumCRC64NVME=full_part_checksum)
-full_list = c.list_parts(Bucket='aws-resume.locks', Key='session/full-object.bin', UploadId=full_upload['UploadId'])
-assert full_list['ChecksumAlgorithm'] == 'CRC64NVME' and full_list['ChecksumType'] == 'FULL_OBJECT', full_list
-assert full_list['Parts'][0]['ChecksumCRC64NVME'] == full_part_checksum, full_list
-full_complete = c.complete_multipart_upload(Bucket='aws-resume.locks', Key='session/full-object.bin', UploadId=full_upload['UploadId'], MultipartUpload={'Parts': [{'PartNumber': 1, 'ETag': full_part['ETag'], 'ChecksumCRC64NVME': full_part_checksum}]}, ChecksumCRC64NVME=full_checksum, ChecksumType='FULL_OBJECT')
-assert full_complete['ChecksumCRC64NVME'] == full_checksum, full_complete
-full_attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key='session/full-object.bin', ObjectAttributes=['Checksum', 'ObjectParts'])
-assert full_attributes['Checksum'] == {'ChecksumCRC64NVME': full_checksum, 'ChecksumType': 'FULL_OBJECT'}, full_attributes
-assert full_attributes['ObjectParts']['TotalPartsCount'] == 1, full_attributes
-full_get = c.get_object(Bucket='aws-resume.locks', Key='session/full-object.bin', ChecksumMode='ENABLED')
-assert full_get['ChecksumCRC64NVME'] == full_checksum and full_get['Body'].read() == full_payload, full_get
-assert c.head_object(Bucket='aws-resume.locks', Key='session/full-object.bin')['ContentType'] == 'application/x-shardline-full-object'
+for algorithm in ('CRC32', 'CRC32C', 'CRC64NVME'):
+    field = checksum_field(algorithm)
+    key = 'session/full-object-' + algorithm.lower() + '.bin'
+    payload = ('native botocore FULL_OBJECT ' + algorithm).encode()
+    expected = checksum_for(algorithm, payload)
+    upload = c.create_multipart_upload(Bucket='aws-resume.locks', Key=key, ChecksumAlgorithm=algorithm, ChecksumType='FULL_OBJECT', ContentType='application/x-shardline-full-object')
+    part_checksum = checksum_for(algorithm, payload)
+    part = c.upload_part(Bucket='aws-resume.locks', Key=key, UploadId=upload['UploadId'], PartNumber=1, Body=payload, **{field: part_checksum})
+    listing = c.list_parts(Bucket='aws-resume.locks', Key=key, UploadId=upload['UploadId'])
+    assert listing['ChecksumAlgorithm'] == algorithm and listing['ChecksumType'] == 'FULL_OBJECT', listing
+    assert listing['Parts'][0][field] == part_checksum, listing
+    completed = c.complete_multipart_upload(Bucket='aws-resume.locks', Key=key, UploadId=upload['UploadId'], MultipartUpload={'Parts': [{'PartNumber': 1, 'ETag': part['ETag'], field: part_checksum}]}, **{field: expected, 'ChecksumType': 'FULL_OBJECT'})
+    assert completed[field] == expected, completed
+    attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key=key, ObjectAttributes=['Checksum', 'ObjectParts'])
+    assert attributes['Checksum'] == {field: expected, 'ChecksumType': 'FULL_OBJECT'}, attributes
+    assert attributes['ObjectParts']['TotalPartsCount'] == 1, attributes
+    read = c.get_object(Bucket='aws-resume.locks', Key=key, ChecksumMode='ENABLED')
+    assert read[field] == expected and read['Body'].read() == payload, read
+    assert c.head_object(Bucket='aws-resume.locks', Key=key)['ContentType'] == 'application/x-shardline-full-object'
+for algorithm in ('CRC32C', 'SHA1', 'SHA256'):
+    field = checksum_field(algorithm)
+    key = 'session/composite-' + algorithm.lower() + '.bin'
+    payload = ('native botocore COMPOSITE ' + algorithm).encode()
+    part_checksum = checksum_for(algorithm, payload)
+    upload = c.create_multipart_upload(Bucket='aws-resume.locks', Key=key, ChecksumAlgorithm=algorithm, ChecksumType='COMPOSITE')
+    part = c.upload_part(Bucket='aws-resume.locks', Key=key, UploadId=upload['UploadId'], PartNumber=1, Body=payload, **{field: part_checksum})
+    listing = c.list_parts(Bucket='aws-resume.locks', Key=key, UploadId=upload['UploadId'])
+    assert listing['ChecksumAlgorithm'] == algorithm and listing['ChecksumType'] == 'COMPOSITE', listing
+    assert listing['Parts'][0][field] == part_checksum, listing
+    completed = c.complete_multipart_upload(Bucket='aws-resume.locks', Key=key, UploadId=upload['UploadId'], MultipartUpload={'Parts': [{'PartNumber': 1, 'ETag': part['ETag'], field: part_checksum}]})
+    expected = checksum_for(algorithm, base64.b64decode(part_checksum)) + '-1'
+    attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key=key, ObjectAttributes=['Checksum', 'ObjectParts'])
+    assert attributes['Checksum'] == {field: expected, 'ChecksumType': 'COMPOSITE'}, attributes
+    assert attributes['ObjectParts']['Parts'][0][field] == part_checksum, attributes
+    read = c.get_object(Bucket='aws-resume.locks', Key=key, ChecksumMode='ENABLED')
+    assert read[field] == expected and read['Body'].read() == payload, read
 head = c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')
 for operation in (c.get_object, c.head_object):
     for condition, expected in (({'IfModifiedSince': head['LastModified']}, 304), ({'IfUnmodifiedSince': datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)}, 412)):
@@ -349,21 +387,35 @@ print(json.dumps({'put': c.generate_presigned_url('put_object', Params=params, E
             .arg("-c")
             .arg(
                 r#"
-import base64, sys
+import sys
 import botocore.session
 from botocore.config import Config
 c = botocore.session.get_session().create_client('s3', endpoint_url=sys.argv[1],
     region_name='us-east-1', aws_access_key_id='SIGNINGKEY',
     aws_secret_access_key='legacy-token-bridge', aws_session_token='fixture-session-token',
     config=Config(signature_version='s3v4', retries={'max_attempts': 0}))
-payload = b'native botocore FULL_OBJECT CRC64NVME'
-attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key='session/full-object.bin', ObjectAttributes=['Checksum', 'ObjectParts'])
-assert attributes['Checksum']['ChecksumType'] == 'FULL_OBJECT', attributes
-assert attributes['Checksum']['ChecksumCRC64NVME'], attributes
-assert attributes['ObjectParts']['TotalPartsCount'] == 1, attributes
-response = c.get_object(Bucket='aws-resume.locks', Key='session/full-object.bin', ChecksumMode='ENABLED')
-assert response['Body'].read() == payload, response
-assert response['ChecksumCRC64NVME'] == attributes['Checksum']['ChecksumCRC64NVME'], response
+for algorithm in ('CRC32', 'CRC32C', 'CRC64NVME'):
+    key = 'session/full-object-' + algorithm.lower() + '.bin'
+    payload = ('native botocore FULL_OBJECT ' + algorithm).encode()
+    field = 'Checksum' + algorithm
+    attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key=key, ObjectAttributes=['Checksum', 'ObjectParts'])
+    assert attributes['Checksum']['ChecksumType'] == 'FULL_OBJECT', attributes
+    assert attributes['Checksum'][field], attributes
+    assert attributes['ObjectParts']['TotalPartsCount'] == 1, attributes
+    response = c.get_object(Bucket='aws-resume.locks', Key=key, ChecksumMode='ENABLED')
+    assert response['Body'].read() == payload, response
+    assert response[field] == attributes['Checksum'][field], response
+for algorithm in ('CRC32C', 'SHA1', 'SHA256'):
+    key = 'session/composite-' + algorithm.lower() + '.bin'
+    payload = ('native botocore COMPOSITE ' + algorithm).encode()
+    field = 'Checksum' + algorithm
+    attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key=key, ObjectAttributes=['Checksum', 'ObjectParts'])
+    assert attributes['Checksum']['ChecksumType'] == 'COMPOSITE', attributes
+    assert attributes['Checksum'][field], attributes
+    assert attributes['ObjectParts']['TotalPartsCount'] == 1, attributes
+    response = c.get_object(Bucket='aws-resume.locks', Key=key, ChecksumMode='ENABLED')
+    assert response['Body'].read() == payload, response
+    assert response[field] == attributes['Checksum'][field], response
 "#,
             )
             .arg(&restart_endpoint)
