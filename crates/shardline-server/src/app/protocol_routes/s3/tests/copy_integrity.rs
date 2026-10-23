@@ -123,57 +123,84 @@ async fn exercise_cancelled_copy_part(state: Arc<AppState>) {
 
 async fn exercise_inflight_copy_overwrite(state: Arc<AppState>) {
     let app = s3_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let base = format!("http://{address}");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _shutdown_received = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let credential = mint_token(TokenScope::Write, OWNER, NAME);
     let source = "copy-source-inflight-overwrite";
     let original = b"original-bytes-pinned-by-copy-part";
-    let uploaded = app
-        .clone()
-        .oneshot(put_request(
-            format!("/{BUCKET}/{source}"),
-            original.to_vec(),
-        ))
+    let uploaded = client
+        .put(format!("{base}/{BUCKET}/{source}"))
+        .bearer_auth(&credential)
+        .body(original.to_vec())
+        .send()
         .await
         .unwrap();
     assert_eq!(uploaded.status(), StatusCode::OK);
 
-    let upload = create_upload_id(&app).await;
+    let created = client
+        .post(format!("{base}/{BUCKET}/{KEY}?uploads"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_xml = created.text().await.unwrap();
+    let upload = created_xml
+        .split_once("<UploadId>")
+        .unwrap()
+        .1
+        .split_once("</UploadId>")
+        .unwrap()
+        .0
+        .to_owned();
     let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
     let namespace = crate::protocol_support::scope_namespace(Some(&repository));
     let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
     let (copy_paused, resume_copy) = super::super::object::copy_part_test_hooks::arm(&source_key)
         .expect("copy-part pause hook must be available");
-    let request = Request::builder()
-        .method("PUT")
-        .uri(format!("/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1"))
-        .header(
-            header::AUTHORIZATION,
-            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
-        )
-        .header("x-amz-copy-source", format!("/{BUCKET}/{source}"))
-        .body(Body::empty())
-        .unwrap();
+    let copy_url = format!("{base}/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1");
+    let copy_source = format!("/{BUCKET}/{source}");
     let copying = {
-        let app = app.clone();
-        tokio::spawn(async move { app.oneshot(request).await.unwrap() })
+        let client = client.clone();
+        let credential = credential.clone();
+        tokio::spawn(async move {
+            client
+                .put(copy_url)
+                .bearer_auth(credential)
+                .header("x-amz-copy-source", copy_source)
+                .send()
+                .await
+                .unwrap()
+        })
     };
     copy_paused.await.unwrap();
 
     // The handler has committed to the old source snapshot but has not opened
-    // its byte stream yet. Replace the source through an independent request.
-    let replaced = app
-        .clone()
-        .oneshot(put_request(
-            format!("/{BUCKET}/{source}"),
-            b"new-source-version-with-a-different-length".to_vec(),
-        ))
+    // its byte stream yet. Replace the source through an independent TCP request.
+    let replaced = client
+        .put(format!("{base}/{BUCKET}/{source}"))
+        .bearer_auth(&credential)
+        .body(b"new-source-version-with-a-different-length".to_vec())
+        .send()
         .await
         .unwrap();
-    let replace_status = replaced.status();
     let _resume_sent = resume_copy.send(());
     let copied = copying.await.unwrap();
-    assert_eq!(replace_status, StatusCode::OK);
+    assert_eq!(replaced.status(), StatusCode::OK);
     assert_eq!(copied.status(), StatusCode::OK);
 
-    let copied_xml = String::from_utf8(body_bytes(copied).await).unwrap();
+    let copied_xml = copied.text().await.unwrap();
     let copied_etag = copied_xml
         .split_once("<ETag>")
         .unwrap()
@@ -184,12 +211,27 @@ async fn exercise_inflight_copy_overwrite(state: Arc<AppState>) {
     let completion_body = format!(
         "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{copied_etag}</ETag></Part></CompleteMultipartUpload>"
     );
-    let completed = complete_upload(&app, &upload, completion_body).await;
+    let completed = client
+        .post(format!("{base}/{BUCKET}/{KEY}?uploadId={upload}"))
+        .bearer_auth(&credential)
+        .header("content-type", "application/xml")
+        .body(completion_body)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(completed.status(), StatusCode::OK);
-    assert_eq!(
-        body_bytes(get_etag_request(&app, KEY).await).await,
-        original
-    );
+    let copied = client
+        .get(format!("{base}/{BUCKET}/{KEY}"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(copied.status(), StatusCode::OK);
+    assert_eq!(copied.bytes().await.unwrap().as_ref(), original);
+
+    drop(client);
+    let _shutdown_sent = shutdown_tx.send(());
+    server.await.unwrap();
 }
 
 async fn exercise_snapshot_pinning(state: Arc<AppState>) {
