@@ -717,6 +717,22 @@ async fn s3_get_unsatisfiable_range_returns_416_invalid_range() {
     assert_eq!(get.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     let body = String::from_utf8(body_bytes(get).await).unwrap();
     assert!(body.contains("<Code>InvalidRange</Code>"), "{body}");
+
+    let multi_range = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, &auth)
+                .header(header::RANGE, "bytes=0-1,4-5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(multi_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    let body = String::from_utf8(body_bytes(multi_range).await).unwrap();
+    assert!(body.contains("<Code>InvalidRange</Code>"), "{body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

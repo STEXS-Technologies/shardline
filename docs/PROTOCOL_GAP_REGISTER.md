@@ -11,7 +11,6 @@ deliberately changed.
 | Priority | Surface | Remaining gap | Required proof |
 | --- | --- | --- | --- |
 | P1 | S3 checksums | Multipart checksum negotiation supports CRC32 COMPOSITE only. CRC32C, CRC64NVME, SHA-1, SHA-256, FULL_OBJECT modes, and persisted checksum attributes for single PUT remain unsupported. | Native SDK tests for each advertised mode; wrong checksums must return `BadDigest`, preserve the previous object, and permit retry. Verify `GetObjectAttributes` before and after restart. |
-| P1 | S3 ranges | `GetObject` accepts one byte range; multi-range requests are unsupported. | Native AWS SDK/CLI requests covering disjoint, overlapping, malformed, unsatisfiable and mixed-satisfiability ranges; exact MIME framing and bytes, with integrity validation preserved. |
 | P2 | S3 form upload | `PostObject` browser form uploads are not implemented. | Signed-policy and unsigned-policy client flows, size and key constraints, bad-policy rejection, and atomic publication tests. |
 | P2 | S3 service APIs | Object tagging, versioning/`ListObjectVersions`, lifecycle, bucket policy/CORS/notifications/replication, encryption, ACL, restore/select/torrent/legal-hold/retention, and bucket deletion remain outside the current route set. | Add only with an explicit client requirement and a complete persistence, authorization, lifecycle, and native-client contract for each API family. |
 | P2 | Hugging Face Hub | The Hub frontend implements the repository, commit, tree, resolve, LFS/Xet, and other routes listed in its guide; it does not implement every Hub product API. | For each additional Hub API, test with the official SDK/CLI and preserve repository scoping and Git/Xet identity behavior. |
@@ -32,6 +31,9 @@ deliberately changed.
   a separate implementation requirement in the current Git protocol-v2
   specification. Push compatibility must continue to be verified through real
   Git clients and the receive-pack tests.
+- S3 multi-range `GetObject` is not an open gap: AWS S3 itself does not support
+  multiple byte ranges in one request. Shardline rejects it with `416
+  InvalidRange`, as documented in [S3 Frontend](S3_FRONTEND.md).
 - OCI Distribution v1.1.1 conformance currently passes its executed cases, but
   the upstream suite deliberately skips four mutually exclusive setup cases.
   Those are reported as skipped, not counted as passing coverage. See

@@ -105,7 +105,6 @@ parameter is not accepted and returns `501 NotImplemented`.
 
 | Operation | Reconsider when |
 |---|---|
-| Multi-range `GetObject` (`bytes=a,b`) | a client using multi-range |
 | `PostObject` (form upload) | — |
 | Object tagging / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
@@ -130,6 +129,11 @@ that behavior: negotiated CRC32 COMPOSITE objects include checksummed parts;
 unnegotiated and legacy multipart objects return the verified total count only.
 
 ## Protocol deviations (documented)
+
+AWS S3 does not support multiple byte ranges in one `GetObject` request. Shardline
+rejects such a request with `416 InvalidRange`, matching its single-range parser
+and the AWS service's documented limitation. See the [AWS GetObject range
+documentation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html).
 
 Multipart uploads support `GET ?uploadId=...` (`ListParts`) with
 `part-number-marker` and `max-parts` pagination. Part metadata survives local
