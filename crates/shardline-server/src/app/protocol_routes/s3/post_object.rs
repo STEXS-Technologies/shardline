@@ -28,6 +28,7 @@ pub(crate) struct S3PostObjectForm {
     pub(super) user_metadata: Vec<(String, String)>,
     pub(super) payload_headers: HeaderMap,
     pub(super) success_status: u16,
+    pub(super) success_redirect: Option<String>,
 }
 
 /// Authenticates a SigV4 POST policy, bounds and spools its file part, and
@@ -270,9 +271,10 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
         Some("204") => 204,
         Some(_) => 204,
     };
-    if get("success_action_redirect").is_some() || get("redirect").is_some() {
-        return Err(S3Error::not_implemented());
-    }
+    let success_redirect = get("success_action_redirect")
+        .or_else(|| get("redirect"))
+        .and_then(valid_redirect_url)
+        .map(str::to_owned);
     let mut payload_headers = HeaderMap::new();
     for (name, value) in fields {
         let name = name.to_ascii_lowercase();
@@ -312,6 +314,7 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
         user_metadata,
         payload_headers,
         success_status,
+        success_redirect,
     })
 }
 
@@ -328,6 +331,8 @@ fn supported_field(name: &str) -> bool {
                 | "x-amz-date"
                 | "x-amz-security-token"
                 | "success_action_status"
+                | "success_action_redirect"
+                | "redirect"
                 | "bucket"
                 | "content-md5"
                 | "x-amz-checksum-crc32"
@@ -336,6 +341,20 @@ fn supported_field(name: &str) -> bool {
                 | "x-amz-checksum-sha256"
         )
         || name.to_ascii_lowercase().starts_with("x-amz-meta-")
+}
+
+/// S3 ignores redirect values it cannot interpret. Restrict redirects to
+/// absolute HTTP(S) URLs so a form cannot turn a successful upload response
+/// into a `javascript:`, `data:`, or credential-bearing redirect.
+fn valid_redirect_url(value: &str) -> Option<&str> {
+    let parsed = url::Url::parse(value).ok()?;
+    matches!(parsed.scheme(), "http" | "https")
+        .then_some(value)
+        .filter(|_| {
+            parsed.host_str().is_some()
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+        })
 }
 
 fn expand_filename(fields: &[(String, String)], filename: &str) -> Vec<(String, String)> {

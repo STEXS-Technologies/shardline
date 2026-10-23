@@ -354,29 +354,44 @@ async fn s3_post_object(
         },
     )
     .await?;
-    let mut response = match form.success_status {
-        200 => StatusCode::OK.into_response(),
-        204 => StatusCode::NO_CONTENT.into_response(),
-        201 => {
-            let bucket = xml_escape(&context.bucket);
-            let key = xml_escape(&form.key);
-            let etag = xml_escape(&shardline_s3_adapter::etag_header(&etag));
-            let location = xml_escape(&post_object_location(
-                state.config.public_base_url(),
-                &context.bucket,
-                &form.key,
-            )?);
-            let xml = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<PostResponse><Location>{location}</Location><Bucket>{bucket}</Bucket><Key>{key}</Key><ETag>{etag}</ETag></PostResponse>"
-            );
-            (
-                StatusCode::CREATED,
-                [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
-                xml,
-            )
-                .into_response()
+    let mut response = if let Some(redirect) = form.success_redirect.as_deref() {
+        let location = post_object_redirect(
+            redirect,
+            &context.bucket,
+            &form.key,
+            &shardline_s3_adapter::etag_header(&etag),
+        )?;
+        let mut response = StatusCode::SEE_OTHER.into_response();
+        response.headers_mut().insert(
+            axum::http::header::LOCATION,
+            axum::http::HeaderValue::from_str(&location).map_err(|_error| S3Error::internal())?,
+        );
+        response
+    } else {
+        match form.success_status {
+            200 => StatusCode::OK.into_response(),
+            204 => StatusCode::NO_CONTENT.into_response(),
+            201 => {
+                let bucket = xml_escape(&context.bucket);
+                let key = xml_escape(&form.key);
+                let etag = xml_escape(&shardline_s3_adapter::etag_header(&etag));
+                let location = xml_escape(&post_object_location(
+                    state.config.public_base_url(),
+                    &context.bucket,
+                    &form.key,
+                )?);
+                let xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<PostResponse><Location>{location}</Location><Bucket>{bucket}</Bucket><Key>{key}</Key><ETag>{etag}</ETag></PostResponse>"
+                );
+                (
+                    StatusCode::CREATED,
+                    [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+                    xml,
+                )
+                    .into_response()
+            }
+            _ => return Err(S3Error::internal()),
         }
-        _ => return Err(S3Error::internal()),
     };
     if let Some((header, value)) = response_checksum {
         response.headers_mut().insert(
@@ -399,6 +414,21 @@ fn post_object_location(base: &str, bucket: &str, key: &str) -> Result<String, S
             segments.push(segment);
         }
     }
+    Ok(location.into())
+}
+
+fn post_object_redirect(
+    destination: &str,
+    bucket: &str,
+    key: &str,
+    etag: &str,
+) -> Result<String, S3Error> {
+    let mut location = url::Url::parse(destination).map_err(|_error| S3Error::internal())?;
+    location
+        .query_pairs_mut()
+        .append_pair("bucket", bucket)
+        .append_pair("key", key)
+        .append_pair("etag", etag);
     Ok(location.into())
 }
 

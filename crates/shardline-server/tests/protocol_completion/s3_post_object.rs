@@ -25,7 +25,7 @@ async fn native_boto3_presigned_post_uploads_and_reads_object() {
             .arg("-c")
             .arg(
                 r#"
-import base64, hashlib, sys, urllib.request
+import base64, hashlib, sys, urllib.request, urllib.error, urllib.parse
 import boto3
 from botocore.config import Config
 
@@ -65,6 +65,43 @@ with urllib.request.urlopen(request) as response:
     assert b'<Key>uploads/weights.bin</Key>' in response.read()
 assert client.get_object(Bucket=bucket, Key='uploads/weights.bin')['Body'].read() == payload
 assert client.head_object(Bucket=bucket, Key='uploads/weights.bin')['ContentType'] == 'application/x-shardline-model'
+
+# Native SDK signed policy plus browser-style form, with a redirect destination
+# that already has a query parameter. The response must preserve it and append
+# the stored object's bucket, expanded key, and ETag.
+redirect_payload = b'native boto3 redirect upload'
+redirect_url = 'https://uploads.example.test/complete?state=kept'
+redirect_post = client.generate_presigned_post(
+    Bucket=bucket, Key='redirect/${filename}',
+    Fields={'success_action_redirect': redirect_url},
+    Conditions=[{'bucket': bucket}, ['starts-with', '$key', 'redirect/'],
+        {'success_action_redirect': redirect_url}, ['content-length-range', 1, 1024]],
+    ExpiresIn=300)
+boundary = 'shardline-boto3-redirect-boundary'
+body = bytearray()
+for name, value in redirect_post['fields'].items():
+    body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="weights.bin"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
+body.extend(redirect_payload)
+body.extend(f'\r\n--{boundary}--\r\n'.encode())
+request = urllib.request.Request(redirect_post['url'], data=bytes(body), method='POST',
+    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+try:
+    urllib.request.build_opener(NoRedirect).open(request)
+    raise AssertionError('expected HTTP 303 redirect')
+except urllib.error.HTTPError as response:
+    assert response.code == 303, (response.code, response.read())
+    redirected = urllib.parse.urlparse(response.headers['Location'])
+    values = urllib.parse.parse_qs(redirected.query)
+    assert redirected.path == '/complete', redirected
+    assert values['state'] == ['kept'], values
+    assert values['bucket'] == [bucket], values
+    assert values['key'] == ['redirect/weights.bin'], values
+    assert values['etag'] == ['"' + hashlib.md5(redirect_payload).hexdigest() + '"'], values
+assert client.get_object(Bucket=bucket, Key='redirect/weights.bin')['Body'].read() == redirect_payload
 "#,
             )
             .arg(&endpoint)
@@ -96,7 +133,7 @@ async fn signed_browser_post_object_expands_filename_and_checks_policy_before_pu
     let client = Client::new();
     let url = format!("{}/aws-resume.locks", server.base);
     let file = b"browser form upload bytes";
-    let response = post_object_form(&client, &url, file, false, false, false, false).await;
+    let response = post_object_form(&client, &url, file, PostObjectFormOptions::default()).await;
     let status = response.status();
     let xml = response.text().await.unwrap();
     assert_eq!(status, StatusCode::CREATED, "{xml}");
@@ -152,19 +189,45 @@ async fn signed_browser_post_object_expands_filename_and_checks_policy_before_pu
         &client,
         &url,
         b"tampered request",
-        true,
-        false,
-        false,
-        false,
+        PostObjectFormOptions {
+            corrupt_signature: true,
+            ..PostObjectFormOptions::default()
+        },
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let response = post_object_form(&client, &url, b"wrong key", false, true, false, false).await;
+    let response = post_object_form(
+        &client,
+        &url,
+        b"wrong key",
+        PostObjectFormOptions {
+            invalid_key: true,
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let response =
-        post_object_form(&client, &url, b"bad checksum", false, false, true, false).await;
+    let response = post_object_form(
+        &client,
+        &url,
+        b"bad checksum",
+        PostObjectFormOptions {
+            invalid_checksum: true,
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let response = post_object_form(&client, &url, b"too large", false, false, false, true).await;
+    let response = post_object_form(
+        &client,
+        &url,
+        b"too large",
+        PostObjectFormOptions {
+            too_large_for_policy: true,
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let response = signed_request(&client, reqwest::Method::GET, &object_url, b"")
         .send()
@@ -174,15 +237,83 @@ async fn signed_browser_post_object_expands_filename_and_checks_policy_before_pu
     assert_eq!(response.bytes().await.unwrap().as_ref(), file);
 }
 
-async fn post_object_form(
-    client: &Client,
-    url: &str,
-    file: &[u8],
+#[tokio::test]
+async fn signed_browser_post_redirects_with_bucket_key_and_etag() {
+    let root = tempfile::tempdir().unwrap();
+    let credential = token("writer", "aws-resume", TokenScope::Write);
+    let server = start_configured(
+        root.path(),
+        ServerFrontend::S3,
+        true,
+        None,
+        None,
+        Some(signing_identity(credential)),
+    )
+    .await;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let url = format!("{}/aws-resume.locks", server.base);
+    let response = post_object_form(
+        &client,
+        &url,
+        b"redirected upload",
+        PostObjectFormOptions {
+            redirect_url: Some("https://uploads.example.test/complete?state=kept"),
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = url::Url::parse(
+        response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let params: std::collections::HashMap<_, _> = location.query_pairs().into_owned().collect();
+    assert_eq!(location.path(), "/complete");
+    assert_eq!(params.get("state").map(String::as_str), Some("kept"));
+    assert_eq!(
+        params.get("bucket").map(String::as_str),
+        Some("aws-resume.locks")
+    );
+    assert_eq!(
+        params.get("key").map(String::as_str),
+        Some("uploads/weights model.bin")
+    );
+    assert_eq!(
+        params.get("etag").map(String::as_str),
+        Some("\"8497bf831fcbba8ab40264f7b909f903\"")
+    );
+}
+
+#[derive(Default)]
+struct PostObjectFormOptions<'redirect> {
     corrupt_signature: bool,
     invalid_key: bool,
     invalid_checksum: bool,
     too_large_for_policy: bool,
+    redirect_url: Option<&'redirect str>,
+}
+
+async fn post_object_form(
+    client: &Client,
+    url: &str,
+    file: &[u8],
+    options: PostObjectFormOptions<'_>,
 ) -> reqwest::Response {
+    let PostObjectFormOptions {
+        corrupt_signature,
+        invalid_key,
+        invalid_checksum,
+        too_large_for_policy,
+        redirect_url,
+    } = options;
     let now = chrono::Utc::now();
     let date = now.format("%Y%m%d").to_string();
     let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -194,25 +325,32 @@ async fn post_object_form(
     };
     let content_md5 = STANDARD.encode(md5::Md5::digest(file));
     let policy_max = if too_large_for_policy { 4 } else { 1024 };
+    let mut conditions = json!([
+        { "bucket": "aws-resume.locks" },
+        ["starts-with", "$key", "uploads/"],
+        { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+        { "x-amz-credential": credential },
+        { "x-amz-date": timestamp },
+        { "Content-Type": "application/x-shardline-model" },
+        { "x-amz-meta-model": "release-1" },
+        { "x-amz-checksum-sha256": checksum },
+        { "Content-MD5": content_md5 },
+        { "success_action_status": "201" },
+        ["content-length-range", 1, policy_max]
+    ]);
+    if let Some(redirect_url) = redirect_url {
+        conditions
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "success_action_redirect": redirect_url }));
+    }
     let policy = STANDARD.encode(
         serde_json::to_vec(&json!({
             "expiration": now
                 .checked_add_signed(chrono::Duration::minutes(5))
                 .unwrap()
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            "conditions": [
-                { "bucket": "aws-resume.locks" },
-                ["starts-with", "$key", "uploads/"],
-                { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
-                { "x-amz-credential": credential },
-                { "x-amz-date": timestamp },
-                { "Content-Type": "application/x-shardline-model" },
-                { "x-amz-meta-model": "release-1" },
-                { "x-amz-checksum-sha256": checksum },
-                { "Content-MD5": content_md5 },
-                { "success_action_status": "201" },
-                ["content-length-range", 1, policy_max]
-            ]
+            "conditions": conditions
         }))
         .unwrap(),
     );
@@ -225,7 +363,7 @@ async fn post_object_form(
     } else {
         "uploads/${filename}"
     };
-    let fields = [
+    let mut fields = vec![
         ("key", key.to_owned()),
         ("Content-Type", "application/x-shardline-model".to_owned()),
         ("x-amz-meta-model", "release-1".to_owned()),
@@ -238,6 +376,9 @@ async fn post_object_form(
         ("policy", policy),
         ("x-amz-signature", signature),
     ];
+    if let Some(redirect_url) = redirect_url {
+        fields.push(("success_action_redirect", redirect_url.to_owned()));
+    }
     let boundary = "shardline-post-object-test-boundary";
     let mut body = Vec::new();
     for (name, value) in fields {

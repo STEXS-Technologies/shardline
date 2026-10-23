@@ -85,7 +85,7 @@ operation supports them.
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
 | `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
 | `ListObjects` v1 | bare `GET /{bucket}`; `prefix`/`delimiter`/`max-keys`/`marker`; emits `NextMarker` when truncated |
-| `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, `Content-Type`, `x-amz-meta-*`, `x-ignore-*`, `success_action_status`, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums |
+| `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, `Content-Type`, `x-amz-meta-*`, `x-ignore-*`, `success_action_status`, `success_action_redirect`/deprecated `redirect`, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
 | Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
@@ -110,9 +110,13 @@ parameter is not accepted and returns `501 NotImplemented`.
 | Object tagging / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
 
-`PostObject` currently supports the signed path-style form described above. It
-does not implement other form fields that need object properties or service behavior
-Shardline does not persist yet, including additional HTTP metadata, redirects,
+`PostObject` currently supports the signed path-style form described above. A
+valid HTTP(S) `success_action_redirect` (or deprecated `redirect`) receives a
+`303 See Other`; Shardline appends the stored bucket, expanded key and ETag to
+the destination's query parameters. Existing query parameters are preserved.
+Unparseable or non-HTTP(S) redirect values are ignored, following S3 behavior.
+It does not implement other form fields that need object properties or service
+behavior Shardline does not persist yet, including additional HTTP metadata,
 ACLs, tagging, storage class and encryption. Forms without a valid
 SigV4 policy are rejected; bearer-token authentication alone is not accepted
 for browser forms. The file part must be last and is size-bounded. Its bytes are

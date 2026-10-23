@@ -30,7 +30,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Support signed path-style S3 browser `PostObject` uploads with policy-condition
   checks, `${filename}` expansion, bounded temporary spooling, user metadata,
   Content-MD5 and CRC32/CRC32C/SHA-1/SHA-256 checksums, using atomic object
-  publication.
+  publication; honor successful-upload redirects with bucket, expanded key and
+  ETag query parameters.
 - Support atomic Git pushes, report-status-v2, side-band responses, shallow
   history by depth, date or excluded refs, and blob/tree partial clones.
 - Support Git protocol v2 upload-pack discovery, reference listing and fetch,

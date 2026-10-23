@@ -10,7 +10,7 @@ deliberately changed.
 
 | Priority | Surface | Remaining gap | Required proof |
 | --- | --- | --- | --- |
-| P2 | S3 form upload | The signed path-style `PostObject` workflow, object `Content-Type`, checksums and user metadata are implemented and tested with Boto3. Other HTTP metadata, redirects, ACLs, tagging, storage class and encryption remain unsupported. | Add each field only with its persistence and response contract; use native SDK form coverage plus failure, size, checksum and atomic replacement checks. |
+| P2 | S3 form upload | The signed path-style `PostObject` workflow, object `Content-Type`, checksums, user metadata and success redirects are implemented. Other HTTP metadata, ACLs, tagging, storage class and encryption remain unsupported. | Add each field only with its persistence and response contract; use native SDK form coverage plus failure, size, checksum and atomic replacement checks. Redirects have signed-form integration coverage; run the optional native Boto3 case when `BOTOCORE_PYTHON` is configured. |
 | P2 | S3 service APIs | Object tagging, versioning/`ListObjectVersions`, lifecycle, bucket policy/CORS/notifications/replication, encryption, ACL, restore/select/torrent/legal-hold/retention, and bucket deletion remain outside the current route set. | Add only with an explicit client requirement and a complete persistence, authorization, lifecycle, and native-client contract for each API family. |
 | P2 | Hugging Face Hub | The Hub frontend implements the repository, commit, tree, resolve, LFS/Xet, and other routes listed in its guide; it does not implement every Hub product API. | For each additional Hub API, test with the official SDK/CLI and preserve repository scoping and Git/Xet identity behavior. |
 
