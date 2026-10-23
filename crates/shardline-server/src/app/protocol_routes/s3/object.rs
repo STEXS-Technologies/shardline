@@ -11,6 +11,53 @@ mod attributes;
 mod conditions;
 mod copy_part;
 
+#[cfg(test)]
+pub(crate) mod copy_part_test_hooks {
+    use std::sync::{LazyLock, Mutex};
+
+    use shardline_storage::ObjectKey;
+    use tokio::sync::oneshot;
+
+    type Pause = (String, oneshot::Sender<()>, oneshot::Receiver<()>);
+
+    static AFTER_SNAPSHOT: LazyLock<Mutex<Option<Pause>>> = LazyLock::new(|| Mutex::new(None));
+
+    pub(crate) fn arm(
+        object_key: &ObjectKey,
+    ) -> Option<(oneshot::Receiver<()>, oneshot::Sender<()>)> {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let mut pause = AFTER_SNAPSHOT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pause.is_some() {
+            return None;
+        }
+        *pause = Some((object_key.as_str().to_owned(), reached_tx, resume_rx));
+        Some((reached_rx, resume_tx))
+    }
+
+    pub(super) async fn pause_after_snapshot(object_key: &ObjectKey) {
+        let pause = {
+            let mut armed = AFTER_SNAPSHOT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if armed
+                .as_ref()
+                .is_some_and(|(key, _, _)| key == object_key.as_str())
+            {
+                armed.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, reached, resume)) = pause {
+            let _ = reached.send(());
+            let _ = resume.await;
+        }
+    }
+}
+
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,

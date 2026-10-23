@@ -66,6 +66,8 @@ pub(super) async fn upload_part_copy(
     if length > state.config.s3_max_part_bytes().get() {
         return Err(multipart::entity_too_large());
     }
+    #[cfg(test)]
+    super::copy_part_test_hooks::pause_after_snapshot(&context.object_key).await;
     let stream = state
         .backend
         .read_object_stream_pinned(

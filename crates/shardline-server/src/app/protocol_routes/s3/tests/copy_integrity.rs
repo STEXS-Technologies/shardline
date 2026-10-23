@@ -33,6 +33,93 @@ async fn postgres_copy_source_snapshot_stays_pinned_if_source_is_replaced_before
     exercise_snapshot_pinning(state).await;
 }
 
+#[tokio::test]
+async fn copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flight() {
+    let (state, _root) = build_test_state().await;
+    exercise_inflight_copy_overwrite(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flight() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise_inflight_copy_overwrite(state).await;
+}
+
+async fn exercise_inflight_copy_overwrite(state: Arc<AppState>) {
+    let app = s3_router(state.clone());
+    let source = "copy-source-inflight-overwrite";
+    let original = b"original-bytes-pinned-by-copy-part";
+    let uploaded = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            original.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let upload = create_upload_id(&app).await;
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let (copy_paused, resume_copy) = super::super::object::copy_part_test_hooks::arm(&source_key)
+        .expect("copy-part pause hook must be available");
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header("x-amz-copy-source", format!("/{BUCKET}/{source}"))
+        .body(Body::empty())
+        .unwrap();
+    let copying = {
+        let app = app.clone();
+        tokio::spawn(async move { app.oneshot(request).await.unwrap() })
+    };
+    copy_paused.await.unwrap();
+
+    // The handler has committed to the old source snapshot but has not opened
+    // its byte stream yet. Replace the source through an independent request.
+    let replaced = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            b"new-source-version-with-a-different-length".to_vec(),
+        ))
+        .await
+        .unwrap();
+    let replace_status = replaced.status();
+    let _resume_sent = resume_copy.send(());
+    let copied = copying.await.unwrap();
+    assert_eq!(replace_status, StatusCode::OK);
+    assert_eq!(copied.status(), StatusCode::OK);
+
+    let copied_xml = String::from_utf8(body_bytes(copied).await).unwrap();
+    let copied_etag = copied_xml
+        .split_once("<ETag>")
+        .unwrap()
+        .1
+        .split_once("</ETag>")
+        .unwrap()
+        .0;
+    let completion_body = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{copied_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let completed = complete_upload(&app, &upload, completion_body).await;
+    assert_eq!(completed.status(), StatusCode::OK);
+    assert_eq!(
+        body_bytes(get_etag_request(&app, KEY).await).await,
+        original
+    );
+}
+
 async fn exercise_snapshot_pinning(state: Arc<AppState>) {
     let app = s3_router(state.clone());
     let source = "copy-source-snapshot-race";
