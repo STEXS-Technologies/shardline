@@ -221,16 +221,26 @@ for operation in (
         raise AssertionError('unsupported version history operation was accepted')
     except ClientError as error:
         assert error.response['ResponseMetadata']['HTTPStatusCode'] == 501, error.response
-for key, body in (('versions/a.txt', b'a'), ('versions/b.txt', b'b')):
+for key, body in (('versions/a+one.txt', b'a'), ('versions/b.txt', b'b')):
     c.put_object(Bucket='aws-resume.locks', Key=key, Body=body)
 version_page = c.list_object_versions(Bucket='aws-resume.locks', Prefix='versions/', MaxKeys=1)
-assert version_page['Versions'][0]['Key'] == 'versions/a.txt', version_page
+assert version_page['Versions'][0]['Key'] == 'versions/a+one.txt', version_page
 assert version_page['Versions'][0]['VersionId'] == 'null' and version_page['Versions'][0]['IsLatest'], version_page
-assert version_page['IsTruncated'] and version_page['NextKeyMarker'] == 'versions/a.txt', version_page
+assert version_page['IsTruncated'] and version_page['NextKeyMarker'] == 'versions/a+one.txt', version_page
 assert version_page['NextVersionIdMarker'] == 'null', version_page
 next_version_page = c.list_object_versions(Bucket='aws-resume.locks', Prefix='versions/', MaxKeys=1, KeyMarker=version_page['NextKeyMarker'], VersionIdMarker=version_page['NextVersionIdMarker'])
 assert next_version_page['Versions'][0]['Key'] == 'versions/b.txt', next_version_page
 assert not next_version_page['IsTruncated'], next_version_page
+encoded_page = c.list_object_versions(Bucket='aws-resume.locks', Prefix='versions/', MaxKeys=1, EncodingType='url')
+assert encoded_page['EncodingType'] == 'url', encoded_page
+assert encoded_page['Versions'][0]['Key'] == 'versions%2Fa%2Bone.txt', encoded_page
+for marker_args in ({'VersionIdMarker': 'null'}, {'KeyMarker': 'versions/a+one.txt', 'VersionIdMarker': 'not-null'}):
+    try:
+        c.list_object_versions(Bucket='aws-resume.locks', **marker_args)
+        raise AssertionError('invalid version marker was accepted')
+    except ClientError as error:
+        assert error.response['ResponseMetadata']['HTTPStatusCode'] == 400, error.response
+        assert error.response['Error']['Code'] == 'InvalidArgument', error.response
 created = []
 try:
     for index in range(41):
