@@ -1,11 +1,7 @@
 # S3 Frontend — Compatibility & Scope
 
-**Status:** implemented on `feat/s3-frontend` — every operation in the
-SUPPORTED matrix below is implemented and covered by the client-shaped e2e
-suite (`crates/shardline-server/tests/s3_frontend_e2e.rs`); targeting a
-post-1.5.0 release.
-**Tracking issue:** #15.
-**Design review:** oracle, 2026-08-13.
+**Status:** scoped S3 compatibility contract; see the operation matrix and
+current evidence in [Compatibility Status](COMPATIBILITY_STATUS.md).
 
 ## Purpose
 
@@ -86,6 +82,7 @@ access-key and Bearer auth forms.
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
 | `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
+| `ListObjects` v1 | bare `GET /{bucket}`; `prefix`/`delimiter`/`max-keys`/`marker`; emits `NextMarker` when truncated |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
 | Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
@@ -96,22 +93,28 @@ access-key and Bearer auth forms.
 
 ### Planned (near-term follow-up)
 
-The remaining protocol work includes permanent multipart attributes/checksum
+The remaining protocol work includes permanent multipart part/checksum
 metadata and the unsupported operations below. The current partial attributes
 response follows the field-selection shape of the
 [S3 GetObjectAttributes API](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html).
 Version selectors and unsupported encryption, payer and expected-owner options
 fail explicitly instead of silently returning attributes for a different request.
+The v1 listing is selected by a bare bucket GET; an explicit `list-type=1`
+parameter is not accepted and returns `501 NotImplemented`.
 
 ### Not yet implemented (respond `501 NotImplemented`)
 
 | Operation | Reconsider when |
 |---|---|
-| `ListObjectsV1` | implemented — a bare `GET /{bucket}` (no `list-type=2`) serves the v1 envelope (`marker`/`NextMarker`), the path `s3cmd ls` uses |
 | Multi-range `GetObject` (`bytes=a,b`) | a client using multi-range |
 | `PostObject` (form upload) | — |
-| Object tagging / multipart attributes / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
+| Object tagging / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
+
+`GetObjectAttributes` currently supports object-level ETag, size and storage
+class. `ObjectParts`, per-part checksums and durable multipart part metadata for
+completed objects are not implemented; Shardline does not infer them from CDC
+chunks or legacy records.
 
 ## Protocol deviations (documented)
 
