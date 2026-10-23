@@ -30,6 +30,8 @@ use axum::{
     http::{Request, StatusCode, header},
     routing::{get, put},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use md5::{Digest, Md5};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tempfile::TempDir;
@@ -1034,6 +1036,239 @@ async fn s3_delete_object_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_object_tagging_round_trips_without_changing_object_bytes_or_validators() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let key = "tagged/model.bin";
+    let bytes = b"tagged model bytes";
+    put_object(&app, key, bytes).await;
+    let before_head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let before_etag = before_head.headers()[header::ETAG].clone();
+    let before_modified = before_head.headers()[header::LAST_MODIFIED].clone();
+    let unverified_tags =
+        r#"<Tagging><TagSet><Tag><Key>env</Key><Value>unverified</Value></Tag></TagSet></Tagging>"#;
+    let rejected_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{key}?tagging"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::from(unverified_tags))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected_put.status(), StatusCode::BAD_REQUEST);
+
+    let put_tags = app
+        .clone()
+        .oneshot(
+            {
+                let body = r#"<Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><TagSet><Tag><Key>env</Key><Value>test&amp;dev</Value></Tag><Tag><Key>version</Key><Value>1</Value></Tag></TagSet></Tagging>"#;
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/{BUCKET}/{key}?tagging"))
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                    )
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .header("content-md5", STANDARD.encode(Md5::digest(body.as_bytes())))
+                    .body(Body::from(body))
+                    .unwrap()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_tags.status(), StatusCode::OK);
+
+    let get_tags = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{key}?tagging"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_tags.status(), StatusCode::OK);
+    let tag_xml = String::from_utf8(body_bytes(get_tags).await).unwrap();
+    assert!(tag_xml.contains("<Key>env</Key><Value>test&amp;dev</Value>"));
+    assert!(tag_xml.contains("<Key>version</Key><Value>1</Value>"));
+
+    let after_head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_head.headers()[header::ETAG], before_etag);
+    assert_eq!(after_head.headers()[header::LAST_MODIFIED], before_modified);
+
+    let delete_tags = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/{BUCKET}/{key}?tagging"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_tags.status(), StatusCode::NO_CONTENT);
+
+    let get_tags = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{key}?tagging"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_tags.status(), StatusCode::OK);
+    assert!(
+        String::from_utf8(body_bytes(get_tags).await)
+            .unwrap()
+            .contains("<TagSet></TagSet>")
+    );
+
+    let get_object = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_object.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get_object).await, bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_put_and_copy_object_preserve_tagging_directive_semantics() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let source = format!("/{BUCKET}/tagging-source");
+    let mut put = put_request(source.clone(), b"copy with tags".to_vec());
+    put.headers_mut()
+        .insert("x-amz-tagging", "team=ml&env=prod".parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(put).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let copied = format!("/{BUCKET}/tagging-copy");
+    let mut copy = copy_request(copied.clone(), &source);
+    copy.headers_mut()
+        .insert("x-amz-metadata-directive", "REPLACE".parse().unwrap());
+    copy.headers_mut()
+        .insert("x-amz-meta-origin", "copy".parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(copy).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let copied_tags = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{copied}?tagging"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(copied_tags.status(), StatusCode::OK);
+    let copied_tags = String::from_utf8(body_bytes(copied_tags).await).unwrap();
+    assert!(copied_tags.contains("<Key>env</Key><Value>prod</Value>"));
+    assert!(copied_tags.contains("<Key>team</Key><Value>ml</Value>"));
+
+    let replaced = format!("/{BUCKET}/tagging-replaced");
+    let mut copy = copy_request(replaced.clone(), &source);
+    copy.headers_mut()
+        .insert("x-amz-tagging-directive", "REPLACE".parse().unwrap());
+    copy.headers_mut()
+        .insert("x-amz-tagging", "team=ops".parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(copy).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let replaced_tags = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{replaced}?tagging"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replaced_tags.status(), StatusCode::OK);
+    let replaced_tags = String::from_utf8(body_bytes(replaced_tags).await).unwrap();
+    assert!(replaced_tags.contains("<Key>team</Key><Value>ops</Value>"));
+    assert!(!replaced_tags.contains("<Key>env</Key>"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

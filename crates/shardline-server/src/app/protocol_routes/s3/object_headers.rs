@@ -17,6 +17,7 @@ const CONTENT_DISPOSITION_KEY: &str = "shardline-internal-s3-content-disposition
 const CONTENT_ENCODING_KEY: &str = "shardline-internal-s3-content-encoding-v1";
 const EXPIRES_KEY: &str = "shardline-internal-s3-expires-v1";
 const WEBSITE_REDIRECT_KEY: &str = "shardline-internal-s3-website-redirect-v1";
+pub(super) const TAGGING_KEY: &str = "shardline-internal-s3-tagging-v1";
 
 const PROPERTIES: [(&str, &str); 6] = [
     ("content-type", CONTENT_TYPE_KEY),
@@ -133,6 +134,7 @@ pub(super) const fn is_internal_metadata(name: &str) -> bool {
         || name.eq_ignore_ascii_case(CONTENT_ENCODING_KEY)
         || name.eq_ignore_ascii_case(EXPIRES_KEY)
         || name.eq_ignore_ascii_case(WEBSITE_REDIRECT_KEY)
+        || name.eq_ignore_ascii_case(TAGGING_KEY)
 }
 
 pub(super) const fn is_property_header(name: &str) -> bool {

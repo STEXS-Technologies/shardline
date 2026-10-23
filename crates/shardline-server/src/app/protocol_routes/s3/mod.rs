@@ -19,6 +19,7 @@ mod object_headers;
 pub(crate) mod post_object;
 mod repository;
 pub(crate) mod signing;
+mod tagging;
 
 pub(crate) use bucket::{
     s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_list_buckets,

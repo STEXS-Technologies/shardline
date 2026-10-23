@@ -787,6 +787,43 @@ pub(super) fn parse(
     Ok(supplied)
 }
 
+/// Validates the SDK checksum negotiation header against the checksum value
+/// supplied with a request. Never silently accept an algorithm the body path
+/// does not verify.
+pub(super) fn validate_sdk_checksum_algorithm(
+    headers: &HeaderMap,
+    checksum: Option<&PayloadChecksum>,
+) -> Result<(), shardline_s3_adapter::S3Error> {
+    let mut values = headers.get_all("x-amz-sdk-checksum-algorithm").iter();
+    let Some(value) = values.next() else {
+        return Ok(());
+    };
+    if values.next().is_some() {
+        return Err(shardline_s3_adapter::S3Error::invalid_argument(
+            "Repeated x-amz-sdk-checksum-algorithm header",
+        ));
+    }
+    let value = value.to_str().map_err(|_error| {
+        shardline_s3_adapter::S3Error::invalid_argument(
+            "Invalid x-amz-sdk-checksum-algorithm header",
+        )
+    })?;
+    let expected_header = match value {
+        "CRC32" => "x-amz-checksum-crc32",
+        "CRC32C" => "x-amz-checksum-crc32c",
+        "CRC64NVME" => "x-amz-checksum-crc64nvme",
+        "SHA1" => "x-amz-checksum-sha1",
+        "SHA256" => "x-amz-checksum-sha256",
+        _ => return Err(shardline_s3_adapter::S3Error::not_implemented()),
+    };
+    if checksum.is_none_or(|checksum| checksum.header() != expected_header) {
+        return Err(shardline_s3_adapter::S3Error::invalid_argument(
+            "SDK checksum algorithm requires a matching checksum header",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn full_object_completion_checksum(
     headers: &HeaderMap,
     config: MultipartChecksumConfig,

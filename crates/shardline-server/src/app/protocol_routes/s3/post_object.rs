@@ -284,6 +284,7 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
         if super::object_headers::is_property_header(&name) {
             super::object_headers::attach_form_field(&mut payload_headers, &name, value)?;
         } else if name.starts_with("x-amz-meta-")
+            || name == "x-amz-tagging"
             || matches!(
                 name.as_str(),
                 "content-md5"
@@ -309,6 +310,9 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
     }
     let mut user_metadata = super::object::capture_user_metadata(&payload_headers)?;
     super::object_headers::capture_headers(&payload_headers, &mut user_metadata)?;
+    if let Some(tags) = super::tagging::parse_header(&payload_headers)? {
+        super::tagging::replace_metadata(&mut user_metadata, &tags)?;
+    }
     Ok(S3PostObjectForm {
         key,
         user_metadata,
@@ -340,6 +344,7 @@ fn supported_field(name: &str) -> bool {
                 | "x-amz-checksum-crc32c"
                 | "x-amz-checksum-sha1"
                 | "x-amz-checksum-sha256"
+                | "x-amz-tagging"
         )
         || name.to_ascii_lowercase().starts_with("x-amz-meta-")
 }

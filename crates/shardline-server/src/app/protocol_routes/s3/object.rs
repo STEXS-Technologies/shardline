@@ -127,7 +127,7 @@ use crate::{
     metrics,
     overflow::checked_add,
     protocol_support::scope_namespace,
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
 use super::{
@@ -143,6 +143,8 @@ const COPY_SOURCE: axum::http::header::HeaderName =
 /// The `x-amz-metadata-directive` request header (CopyObject semantics).
 const METADATA_DIRECTIVE: axum::http::header::HeaderName =
     axum::http::header::HeaderName::from_static("x-amz-metadata-directive");
+const TAGGING_DIRECTIVE: axum::http::header::HeaderName =
+    axum::http::header::HeaderName::from_static("x-amz-tagging-directive");
 
 /// S3 user-metadata request header prefix.
 const META_PREFIX: &str = "x-amz-meta-";
@@ -407,6 +409,9 @@ pub(crate) async fn s3_put_object(
     // rejected as 501.
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
+    if resources.as_slice() == [S3SubResource::Tagging] {
+        return put_object_tagging(&state, &context, headers, body).await;
+    }
     let part_number = resources.iter().find_map(|resource| {
         if let S3SubResource::PartNumber(number) = resource {
             Some(*number)
@@ -520,6 +525,9 @@ pub(crate) async fn s3_put_object(
     // checksum-verifying clients (s3cmd, the AWS SDKs) depend on.
     let mut user_metadata = capture_user_metadata(&headers)?;
     object_headers::capture_headers(&headers, &mut user_metadata)?;
+    if let Some(tags) = super::tagging::parse_header(&headers)? {
+        super::tagging::replace_metadata(&mut user_metadata, &tags)?;
+    }
     if let Some((header, value)) = &response_checksum {
         checksum::attach_object_checksum(&mut user_metadata, header, value)?;
     }
@@ -625,7 +633,8 @@ async fn s3_copy_object(
     // — resolved from the SAME snapshot as the source bytes, so the copied
     // metadata always belongs to the copied content (F-79); REPLACE overrides
     // it with the x-amz-meta-* headers of this request.
-    let user_metadata = match directive {
+    let source_tagging = super::tagging::from_metadata(&snapshot.user_metadata)?;
+    let mut user_metadata = match directive {
         MetadataDirective::Replace => {
             let mut metadata = capture_user_metadata(headers)?;
             object_headers::capture_headers(headers, &mut metadata)?;
@@ -639,6 +648,42 @@ async fn s3_copy_object(
             })
             .collect(),
     };
+    let supplied_tagging = super::tagging::parse_header(headers)?;
+    let mut tagging_directives = headers.get_all(&TAGGING_DIRECTIVE).iter();
+    let tagging_directive = tagging_directives
+        .next()
+        .map(|value| {
+            if tagging_directives.next().is_some() {
+                return Err(S3Error::invalid_argument(
+                    "Repeated x-amz-tagging-directive header",
+                ));
+            }
+            let value = value.to_str().map_err(|_error| {
+                S3Error::invalid_argument("Invalid x-amz-tagging-directive header")
+            })?;
+            if value.eq_ignore_ascii_case("COPY") {
+                Ok(false)
+            } else if value.eq_ignore_ascii_case("REPLACE") {
+                Ok(true)
+            } else {
+                Err(S3Error::invalid_argument(
+                    "Invalid x-amz-tagging-directive header",
+                ))
+            }
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if supplied_tagging.is_some() && !tagging_directive {
+        return Err(S3Error::invalid_argument(
+            "x-amz-tagging requires x-amz-tagging-directive: REPLACE",
+        ));
+    }
+    let copied_or_replaced_tagging = if tagging_directive {
+        supplied_tagging.unwrap_or_default()
+    } else {
+        source_tagging
+    };
+    super::tagging::replace_metadata(&mut user_metadata, &copied_or_replaced_tagging)?;
 
     // Stream the source through the same pinned read path as GetObject (no
     // unbounded full-object `read_object` buffer), bounded mid-stream by the
@@ -1140,6 +1185,18 @@ pub(crate) async fn s3_get_object(
 
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
+    if resources.as_slice() == [S3SubResource::Tagging] {
+        let entry = s3_object_entry(&state, &context)
+            .await?
+            .ok_or_else(|| S3Error::no_such_key(&context.key))?;
+        let tags = super::tagging::from_metadata(&entry.user_metadata)?;
+        return Ok((
+            StatusCode::OK,
+            [(CONTENT_TYPE, s3_xml_content_type())],
+            super::tagging::to_xml(&tags),
+        )
+            .into_response());
+    }
     if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
         return multipart::s3_list_parts(&state, &context, upload_id, &query).await;
     }
@@ -1442,6 +1499,10 @@ pub(crate) async fn s3_delete_object(
     // out of scope.
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
+    if resources.as_slice() == [S3SubResource::Tagging] {
+        replace_object_tagging(&state, &context, &[]).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
         return multipart::s3_abort_multipart_upload(&state, &context, upload_id).await;
     }
@@ -1485,6 +1546,76 @@ pub(crate) async fn s3_delete_object(
         )
         .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn put_object_tagging(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext<'_>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let max_bytes = state.config.max_request_body_bytes();
+    checksum::reject_unpersisted_negotiation(&headers)?;
+    let expected_md5 = parse_content_md5(&headers)?;
+    let payload_checksum = checksum::parse(&headers)?;
+    checksum::validate_sdk_checksum_algorithm(&headers, payload_checksum.as_ref())?;
+    if expected_md5.is_none() && payload_checksum.is_none() {
+        return Err(S3Error::invalid_argument(
+            "PutObjectTagging requires Content-MD5 or a supported S3 checksum",
+        ));
+    }
+    let mut reader = RequestBodyReader::from_body(body, max_bytes).map_err(S3Error::from)?;
+    if let Some(expected_md5) = expected_md5 {
+        reader = reader.with_expected_md5(expected_md5);
+    }
+    if let Some(payload_checksum) = payload_checksum {
+        reader = checksum::verify_body(reader, payload_checksum);
+    }
+    let bytes = read_body_to_bytes(&mut reader)
+        .await
+        .map_err(S3Error::from)?;
+    let tags = super::tagging::parse(&bytes)?;
+    replace_object_tagging(state, context, &tags).await?;
+    Ok((
+        StatusCode::OK,
+        [(CONTENT_TYPE, s3_xml_content_type())],
+        String::new(),
+    )
+        .into_response())
+}
+
+async fn replace_object_tagging(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext<'_>,
+    tags: &[(String, String)],
+) -> Result<(), S3Error> {
+    let _resource_guard = state
+        .backend
+        .acquire_resource_write_lock(
+            state.config.root_dir(),
+            &ResourceLockKey::s3_object(&context.scope_namespace, &context.key),
+        )
+        .await?;
+    let expected = s3_object_entry(state, context)
+        .await?
+        .ok_or_else(|| S3Error::no_such_key(&context.key))?;
+    let mut replacement = expected.clone();
+    super::tagging::replace_metadata(&mut replacement.user_metadata, tags)?;
+    if replacement.user_metadata == expected.user_metadata {
+        return Ok(());
+    }
+    let changed = state
+        .backend
+        .compare_and_swap_s3_object_metadata(&expected, &replacement)
+        .await?;
+    if !changed {
+        return Err(S3Error {
+            code: "OperationAborted",
+            message: "The object changed while tagging was being updated".to_owned(),
+            status: StatusCode::CONFLICT,
+        });
+    }
+    Ok(())
 }
 
 /// `POST /{bucket}/{*key}` dispatches multipart creation or completion.

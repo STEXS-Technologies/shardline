@@ -126,6 +126,7 @@ async fn compare_and_swap_s3_object_with_optional_count(
     expected: Option<&S3ObjectEntry>,
     replacement: &S3ObjectEntry,
     part_count: Option<u32>,
+    update_part_count: bool,
 ) -> Result<bool, PostgresMetadataStoreError> {
     let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
     let mut transaction = store.pool.begin().await?;
@@ -135,6 +136,12 @@ async fn compare_and_swap_s3_object_with_optional_count(
         &replacement.object_key,
     )
     .await?;
+    let preserved_part_count = if update_part_count {
+        None
+    } else {
+        read_multipart_count_on_connection(&mut transaction, expected.unwrap_or(replacement))
+            .await?
+    };
     if expected == Some(replacement) {
         let matches: bool = query_scalar(
             "SELECT EXISTS (
@@ -157,7 +164,11 @@ async fn compare_and_swap_s3_object_with_optional_count(
         .fetch_one(&mut *transaction)
         .await?;
         if matches {
-            persist_multipart_count(&mut transaction, replacement, part_count).await?;
+            if update_part_count {
+                persist_multipart_count(&mut transaction, replacement, part_count).await?;
+            } else if let Some(part_count) = preserved_part_count {
+                persist_multipart_count(&mut transaction, replacement, Some(part_count)).await?;
+            }
             record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
         }
         transaction.commit().await?;
@@ -211,7 +222,11 @@ async fn compare_and_swap_s3_object_with_optional_count(
     };
     let changed = result.rows_affected() == 1;
     if changed {
-        persist_multipart_count(&mut transaction, replacement, part_count).await?;
+        if update_part_count {
+            persist_multipart_count(&mut transaction, replacement, part_count).await?;
+        } else if let Some(part_count) = preserved_part_count {
+            persist_multipart_count(&mut transaction, replacement, Some(part_count)).await?;
+        }
         record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
     }
     transaction.commit().await?;
@@ -267,6 +282,41 @@ pub(super) async fn persist_multipart_count(
         .await?;
     }
     Ok(())
+}
+
+async fn read_multipart_count_on_connection(
+    connection: &mut PgConnection,
+    entry: &S3ObjectEntry,
+) -> Result<Option<u32>, PostgresMetadataStoreError> {
+    let row = query(
+        "SELECT part_count, proof FROM shardline_s3_multipart_counts
+         WHERE scope_namespace=$1 AND object_key=$2 AND file_id=$3
+           AND content_hash=$4 AND updated_at_unix_seconds=$5",
+    )
+    .bind(&entry.scope_namespace)
+    .bind(&entry.object_key)
+    .bind(&entry.file_id)
+    .bind(&entry.content_hash)
+    .bind(entry.updated_at_unix_seconds)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let count: i32 = row.try_get("part_count")?;
+    let Ok(count) = u32::try_from(count) else {
+        return Ok(None);
+    };
+    let proof: String = row.try_get("proof")?;
+    let expected = s3_multipart_count_proof(
+        &entry.scope_namespace,
+        &entry.object_key,
+        &entry.file_id,
+        &entry.content_hash,
+        count,
+        entry.updated_at_unix_seconds,
+    )?;
+    Ok((proof == expected).then_some(count))
 }
 
 /// Serializes S3 user metadata as JSON text for the index row.
@@ -617,7 +667,8 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
     ) -> Result<bool, Self::Error> {
-        compare_and_swap_s3_object_with_optional_count(self, expected, replacement, None).await
+        compare_and_swap_s3_object_with_optional_count(self, expected, replacement, None, true)
+            .await
     }
 
     async fn compare_and_swap_s3_object_with_multipart_count(
@@ -631,6 +682,22 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             expected,
             replacement,
             Some(part_count),
+            true,
+        )
+        .await
+    }
+
+    async fn compare_and_swap_s3_object_metadata(
+        &self,
+        expected: &S3ObjectEntry,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, Self::Error> {
+        compare_and_swap_s3_object_with_optional_count(
+            self,
+            Some(expected),
+            replacement,
+            None,
+            false,
         )
         .await
     }
@@ -804,6 +871,45 @@ mod tests {
             user_metadata: Vec::new(),
             updated_at_unix_seconds: 1000,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_metadata_cas_preserves_verified_multipart_count() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-metadata-cas-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        let expected = entry(&scope, "tagged.bin", "file-a");
+        S3ObjectIndexStore::upsert_s3_object_with_multipart_count(&store, &expected, 3)
+            .await
+            .expect("publish multipart object");
+        let mut replacement = expected.clone();
+        replacement.user_metadata.push((
+            "shardline-internal-s3-tagging-v1".to_owned(),
+            r#"[["env","test"]]"#.to_owned(),
+        ));
+
+        assert!(
+            S3ObjectIndexStore::compare_and_swap_s3_object_metadata(
+                &store,
+                &expected,
+                &replacement,
+            )
+            .await
+            .expect("replace evidence-bound metadata")
+        );
+        let stored = S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "tagged.bin")
+            .await
+            .expect("read object")
+            .expect("object exists");
+        assert_eq!(stored, replacement);
+        assert_eq!(
+            store.s3_multipart_part_count(&stored).await.unwrap(),
+            Some(3)
+        );
+        cleanup(&pool, &scope).await;
     }
 
     async fn cleanup(pool: &sqlx::PgPool, scope_namespace: &str) {

@@ -161,7 +161,13 @@ fn compare_and_swap_s3_object_sql(
     expected: Option<&S3ObjectEntry>,
     replacement: &S3ObjectEntry,
     part_count: Option<u32>,
+    update_part_count: bool,
 ) -> Result<bool, LocalIndexStoreError> {
+    let preserved_part_count = if update_part_count {
+        None
+    } else {
+        read_multipart_count_sql(transaction, expected.unwrap_or(replacement))?
+    };
     if expected == Some(replacement) {
         // The caller holds an IMMEDIATE transaction, so the comparison and
         // evidence append retain the same writer exclusion as a real UPDATE.
@@ -173,7 +179,11 @@ fn compare_and_swap_s3_object_sql(
         if current.as_ref() != expected {
             return Ok(false);
         }
-        persist_multipart_count_sql(transaction, replacement, part_count)?;
+        if update_part_count {
+            persist_multipart_count_sql(transaction, replacement, part_count)?;
+        } else if let Some(part_count) = preserved_part_count {
+            persist_multipart_count_sql(transaction, replacement, Some(part_count))?;
+        }
         record_s3_object_transition(transaction, expected, Some(replacement))?;
         return Ok(true);
     }
@@ -225,7 +235,11 @@ fn compare_and_swap_s3_object_sql(
         )?
     };
     if changed == 1 {
-        persist_multipart_count_sql(transaction, replacement, part_count)?;
+        if update_part_count {
+            persist_multipart_count_sql(transaction, replacement, part_count)?;
+        } else if let Some(part_count) = preserved_part_count {
+            persist_multipart_count_sql(transaction, replacement, Some(part_count))?;
+        }
         let before = expected;
         record_s3_object_transition(transaction, before, Some(replacement))?;
     }
@@ -529,8 +543,13 @@ impl S3ObjectIndexStore for LocalIndexStore {
         replacement: &S3ObjectEntry,
         part_count: u32,
     ) -> Result<bool, LocalIndexStoreError> {
-        self.compare_and_swap_s3_object_with_optional_count(expected, replacement, Some(part_count))
-            .await
+        self.compare_and_swap_s3_object_with_optional_count(
+            expected,
+            replacement,
+            Some(part_count),
+            true,
+        )
+        .await
     }
 
     async fn compare_and_swap_s3_object(
@@ -538,8 +557,22 @@ impl S3ObjectIndexStore for LocalIndexStore {
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
     ) -> Result<bool, Self::Error> {
-        self.compare_and_swap_s3_object_with_optional_count(expected, replacement, None)
+        self.compare_and_swap_s3_object_with_optional_count(expected, replacement, None, true)
             .await
+    }
+
+    async fn compare_and_swap_s3_object_metadata(
+        &self,
+        expected: &S3ObjectEntry,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, Self::Error> {
+        self.compare_and_swap_s3_object_with_optional_count(
+            Some(expected),
+            replacement,
+            None,
+            false,
+        )
+        .await
     }
 
     async fn delete_s3_object(
@@ -681,6 +714,7 @@ impl LocalIndexStore {
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
         part_count: Option<u32>,
+        update_part_count: bool,
     ) -> Result<bool, LocalIndexStoreError> {
         let store = self.clone();
         let expected = expected.cloned();
@@ -695,6 +729,7 @@ impl LocalIndexStore {
                     expected.as_ref(),
                     &replacement,
                     part_count,
+                    update_part_count,
                 )?;
                 transaction.commit()?;
                 Ok(changed)
@@ -880,6 +915,39 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(store.s3_multipart_part_count(&stored).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn metadata_cas_preserves_verified_multipart_count_and_appends_evidence() {
+        let store = make_store();
+        let expected = entry("global", "tagged.bin", &file_id(9), 123, 1000);
+        store
+            .upsert_s3_object_with_multipart_count(&expected, 3)
+            .await
+            .unwrap();
+        let mut replacement = expected.clone();
+        replacement.user_metadata.push((
+            "shardline-internal-s3-tagging-v1".to_owned(),
+            r#"[["env","test"]]"#.to_owned(),
+        ));
+
+        assert!(
+            store
+                .compare_and_swap_s3_object_metadata(&expected, &replacement)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .scan_s3_object_exact("global", "tagged.bin")
+                .await
+                .unwrap(),
+            Some(replacement.clone())
+        );
+        assert_eq!(
+            store.s3_multipart_part_count(&replacement).await.unwrap(),
+            Some(3)
+        );
     }
 
     #[tokio::test]

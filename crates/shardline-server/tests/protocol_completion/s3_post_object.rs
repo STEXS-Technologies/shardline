@@ -41,11 +41,13 @@ post = client.generate_presigned_post(
     Key='uploads/${filename}',
     Fields={'success_action_status': '201', 'Content-Type': 'application/x-shardline-model',
         'x-amz-meta-model': 'release-1',
+        'x-amz-tagging': 'channel=stable&model=weights',
         'x-amz-checksum-sha256': checksum, 'x-ignore-client-note': 'ignored'},
     Conditions=[
         {'bucket': bucket}, ['starts-with', '$key', 'uploads/'],
         {'success_action_status': '201'}, {'Content-Type': 'application/x-shardline-model'},
         {'x-amz-meta-model': 'release-1'},
+        {'x-amz-tagging': 'channel=stable&model=weights'},
         {'x-amz-checksum-sha256': checksum},
         ['content-length-range', 1, 1024],
     ],
@@ -65,6 +67,39 @@ with urllib.request.urlopen(request) as response:
     assert b'<Key>uploads/weights.bin</Key>' in response.read()
 assert client.get_object(Bucket=bucket, Key='uploads/weights.bin')['Body'].read() == payload
 assert client.head_object(Bucket=bucket, Key='uploads/weights.bin')['ContentType'] == 'application/x-shardline-model'
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/weights.bin')['TagSet'] == [
+    {'Key': 'channel', 'Value': 'stable'}, {'Key': 'model', 'Value': 'weights'}]
+
+# Exercise the normal object header, the dedicated tagging APIs, copy defaults
+# and replacement semantics, and multipart upload persistence through Boto3.
+client.put_object(Bucket=bucket, Key='uploads/tag-source.bin', Body=payload,
+    Tagging='team=storage&stage=initial')
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin')['TagSet'] == [
+    {'Key': 'stage', 'Value': 'initial'}, {'Key': 'team', 'Value': 'storage'}]
+client.put_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin', Tagging={'TagSet': [
+    {'Key': 'stage', 'Value': 'verified'}, {'Key': 'team', 'Value': 'storage'}]})
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin')['TagSet'] == [
+    {'Key': 'stage', 'Value': 'verified'}, {'Key': 'team', 'Value': 'storage'}]
+client.copy_object(Bucket=bucket, Key='uploads/tag-copy.bin', CopySource={
+    'Bucket': bucket, 'Key': 'uploads/tag-source.bin'})
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-copy.bin')['TagSet'] == [
+    {'Key': 'stage', 'Value': 'verified'}, {'Key': 'team', 'Value': 'storage'}]
+client.copy_object(Bucket=bucket, Key='uploads/tag-replace.bin', CopySource={
+    'Bucket': bucket, 'Key': 'uploads/tag-source.bin'}, TaggingDirective='REPLACE',
+    Tagging='release=1')
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-replace.bin')['TagSet'] == [
+    {'Key': 'release', 'Value': '1'}]
+upload = client.create_multipart_upload(Bucket=bucket, Key='uploads/tag-multipart.bin',
+    Tagging='workflow=release')
+part = client.upload_part(Bucket=bucket, Key='uploads/tag-multipart.bin',
+    UploadId=upload['UploadId'], PartNumber=1, Body=payload)
+client.complete_multipart_upload(Bucket=bucket, Key='uploads/tag-multipart.bin',
+    UploadId=upload['UploadId'], MultipartUpload={'Parts': [
+        {'PartNumber': 1, 'ETag': part['ETag']}]})
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-multipart.bin')['TagSet'] == [
+    {'Key': 'workflow', 'Value': 'release'}]
+client.delete_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin')
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin')['TagSet'] == []
 
 # Native SDK signed policy plus browser-style form, with a redirect destination
 # that already has a query parameter. The response must preserve it and append

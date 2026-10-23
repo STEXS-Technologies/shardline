@@ -106,6 +106,7 @@ xet-runtime = "=1.5.2"
 prometheus = { version = "0.14", default-features = false }
 tower = "0.5"
 tower-http = { version = "0.6", default-features = false }
+quick-xml = { version = "0.40.1", features = ["serialize"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 zeroize = "1.8"

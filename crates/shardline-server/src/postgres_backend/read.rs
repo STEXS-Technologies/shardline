@@ -580,6 +580,17 @@ impl super::PostgresBackend {
             .map_err(ServerError::from)
     }
 
+    pub(crate) async fn compare_and_swap_s3_object_metadata(
+        &self,
+        expected: &S3ObjectEntry,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .compare_and_swap_s3_object_metadata(expected, replacement)
+            .await
+            .map_err(ServerError::from)
+    }
+
     /// Deletes one S3 object listing-index row, returning whether a row was removed.
     ///
     /// # Errors

@@ -153,6 +153,21 @@ pub trait S3ObjectIndexStore: Send + Sync {
         replacement: &S3ObjectEntry,
     ) -> Result<bool, Self::Error>;
 
+    /// Replaces evidence-bound S3 metadata without invalidating verified
+    /// derived metadata such as multipart part counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when persistence fails.
+    async fn compare_and_swap_s3_object_metadata(
+        &self,
+        expected: &S3ObjectEntry,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, Self::Error> {
+        self.compare_and_swap_s3_object(Some(expected), replacement)
+            .await
+    }
+
     /// Atomically publishes an object and its multipart part count.
     async fn compare_and_swap_s3_object_with_multipart_count(
         &self,

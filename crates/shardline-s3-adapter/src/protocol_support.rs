@@ -82,7 +82,7 @@ pub enum S3SubResource {
     Cors,
     /// `?notification` — out of scope (`NotImplemented`).
     Notification,
-    /// `?tagging` — out of scope (`NotImplemented`).
+    /// `?tagging` — `GetObjectTagging`, `PutObjectTagging`, or `DeleteObjectTagging`.
     Tagging,
     /// `?encryption` — out of scope (`NotImplemented`).
     Encryption,

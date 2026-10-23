@@ -175,6 +175,9 @@ pub(super) async fn s3_create_multipart_upload(
     // completed object.
     let mut user_metadata = object::capture_user_metadata(headers)?;
     super::object_headers::capture_headers(headers, &mut user_metadata)?;
+    if let Some(tags) = super::tagging::parse_header(headers)? {
+        super::tagging::replace_metadata(&mut user_metadata, &tags)?;
+    }
     user_metadata.retain(|(name, _)| {
         !checksum::is_internal_metadata(name) || super::object_headers::is_internal_metadata(name)
     });

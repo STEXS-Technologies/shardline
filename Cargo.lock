@@ -4344,6 +4344,7 @@ dependencies = [
  "percent-encoding",
  "prometheus",
  "proptest",
+ "quick-xml",
  "redis",
  "reqwest 0.12.28",
  "rusqlite",

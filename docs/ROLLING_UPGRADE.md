@@ -62,6 +62,15 @@ these properties on upgraded replicas, or wait until all replicas are upgraded
 before enabling them. This does not alter object bytes, but old replicas return
 different S3 metadata and response headers.
 
+S3 object tags use another reserved private metadata entry bound by the same
+object evidence. A 1.12.1 replica can still read the object's bytes, but does
+not understand the tag entry and may expose it as user metadata. An older
+same-key write or copy can also discard the tags. During a mixed-version
+rollout, route tagged-object reads and mutations to upgraded replicas; if that
+routing is unavailable, wait until all replicas are upgraded before using
+object tagging. Existing object bytes and evidence formats remain unchanged,
+but tag visibility and preservation are not seamless across old and new writers.
+
 Restarting an old binary does not require dropping the additive tables or
 restoring an old backup. Keep those tables: they contain persistent identities
 and locks for upgraded replicas. Do not run downgrade SQL blindly or restore an
