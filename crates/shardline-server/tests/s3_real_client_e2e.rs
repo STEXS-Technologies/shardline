@@ -787,10 +787,11 @@ s3.abort_multipart_upload(Bucket=B, Key="list-parts-checksum.bin", UploadId=list
 
 # PutObject with user metadata; HeadObject returns it back.
 payload = b"metadata roundtrip\n"
-s3.put_object(Bucket=B, Key="meta.txt", Body=payload, Metadata={"purpose": "client-breadth"})
+s3.put_object(Bucket=B, Key="meta.txt", Body=payload, ContentType="application/x-shardline-test", Metadata={"purpose": "client-breadth"})
 head = s3.head_object(Bucket=B, Key="meta.txt")
 assert head["ContentLength"] == len(payload), head["ContentLength"]
 assert head["Metadata"].get("purpose") == "client-breadth", head["Metadata"]
+assert head["ContentType"] == "application/x-shardline-test", head
 assert s3.get_object(Bucket=B, Key="meta.txt")["Body"].read() == payload
 
 # Single-PUT checksums remain available after publication through both S3
@@ -928,6 +929,7 @@ s3.copy_object(
     CopySource={"Bucket": B, "Key": "meta.txt"},
     CopySourceIfMatch=etag,
 )
+assert s3.head_object(Bucket=B, Key="meta-copy.txt")["ContentType"] == "application/x-shardline-test"
 
 # ListObjectsV2 with prefix and pagination.
 keys = []

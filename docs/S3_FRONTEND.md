@@ -85,7 +85,7 @@ operation supports them.
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
 | `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
 | `ListObjects` v1 | bare `GET /{bucket}`; `prefix`/`delimiter`/`max-keys`/`marker`; emits `NextMarker` when truncated |
-| `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, `x-amz-meta-*`, `x-ignore-*`, `success_action_status`, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums |
+| `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, `Content-Type`, `x-amz-meta-*`, `x-ignore-*`, `success_action_status`, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
 | Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
@@ -111,9 +111,9 @@ parameter is not accepted and returns `501 NotImplemented`.
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
 
 `PostObject` currently supports the signed path-style form described above. It
-does not implement form fields that need object properties or service behavior
-Shardline does not persist yet, including `Content-Type`, other HTTP metadata,
-redirects, ACLs, tagging, storage class and encryption. Forms without a valid
+does not implement other form fields that need object properties or service behavior
+Shardline does not persist yet, including additional HTTP metadata, redirects,
+ACLs, tagging, storage class and encryption. Forms without a valid
 SigV4 policy are rejected; bearer-token authentication alone is not accepted
 for browser forms. The file part must be last and is size-bounded. Its bytes are
 spooled to an anonymous temporary file, then passed through the normal verified
@@ -128,7 +128,9 @@ part checksums. Full-object uploads accept optional part checksums and verify
 the assembled object's checksum before publication; a mismatch leaves the
 previous object and multipart session intact so the client can retry. The
 completed checksum is retained with the object and returned by checksum-enabled
-reads and `GetObjectAttributes`. No schema migration is required. Legacy CRC32
+reads and `GetObjectAttributes`. S3 `Content-Type` is retained separately from
+user metadata and returned by GET and HEAD, including values received from
+signed browser forms. No schema migration is required. Legacy CRC32
 multipart metadata remains readable. Active `ListParts` exposes negotiated
 checksum data when it is available.
 The in-progress `ListParts` response includes the negotiated algorithm and
@@ -143,9 +145,11 @@ Checksum headers on single `PutObject` are validated before publication and
 retained for later `GetObjectAttributes` reads and `GetObject`/`HeadObject`
 requests using `x-amz-checksum-mode: ENABLED`. During a rolling deployment, keep
 each checksummed object's reads and writes on upgraded replicas, or wait until
-all replicas are upgraded before enabling checksum writes. A 1.12.1 replica can
-read the object bytes but may expose the private checksum record as ordinary
-`x-amz-meta-*` metadata. Existing CRC32 uploads and objects remain readable.
+all replicas are upgraded before enabling new checksum or content-type writes.
+A 1.12.1 replica can read the object bytes but may expose private metadata as
+ordinary `x-amz-meta-*` metadata and will return the default content type for
+objects written with the new content-type property. Existing CRC32 uploads and
+objects remain readable.
 Existing objects have no durable part-count metadata; those counts remain unknown
 and are not inferred from CDC chunks or legacy records. Botocore 1.x real-client
 coverage exercises negotiated multipart CRC32, SHA-1 and SHA-256 COMPOSITE,

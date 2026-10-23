@@ -174,7 +174,10 @@ pub(super) async fn s3_create_multipart_upload(
     // S3 user metadata is supplied at CreateMultipartUpload and applied to the
     // completed object.
     let mut user_metadata = object::capture_user_metadata(headers)?;
-    user_metadata.retain(|(name, _)| !checksum::is_internal_metadata(name));
+    super::content_type::capture_header(headers, &mut user_metadata)?;
+    user_metadata.retain(|(name, _)| {
+        !checksum::is_internal_metadata(name) || super::content_type::is_internal_metadata(name)
+    });
     let checksum_algorithm = checksum::negotiate_multipart(headers, &mut user_metadata)?;
     let checksum_config = checksum::multipart_checksum_config(&user_metadata);
     if durable_sessions_enabled(state) {

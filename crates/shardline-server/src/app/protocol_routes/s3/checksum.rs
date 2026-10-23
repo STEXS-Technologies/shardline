@@ -228,6 +228,10 @@ const fn default_multipart_checksum_type() -> MultipartChecksumType {
 }
 
 pub(super) const fn is_internal_metadata(name: &str) -> bool {
+    is_checksum_internal_metadata(name) || super::content_type::is_internal_metadata(name)
+}
+
+const fn is_checksum_internal_metadata(name: &str) -> bool {
     name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY)
         || name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY)
 }
@@ -266,7 +270,7 @@ pub(super) fn negotiate_multipart(
     if headers.contains_key("x-amz-sdk-checksum-algorithm") {
         return Err(shardline_s3_adapter::S3Error::not_implemented());
     }
-    user_metadata.retain(|(name, _)| !is_internal_metadata(name));
+    user_metadata.retain(|(name, _)| !is_checksum_internal_metadata(name));
     user_metadata.push((
         MULTIPART_CONFIG_KEY.to_owned(),
         format!("{}:{}", algorithm.s3_name(), checksum_type.s3_name()),
@@ -448,7 +452,7 @@ pub(super) fn attach_multipart_manifest(
     };
     let value = serde_json::to_string(&manifest)
         .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
-    user_metadata.retain(|(name, _)| !is_internal_metadata(name));
+    user_metadata.retain(|(name, _)| !is_checksum_internal_metadata(name));
     user_metadata.push((MULTIPART_MANIFEST_KEY.to_owned(), value));
     Ok(manifest)
 }

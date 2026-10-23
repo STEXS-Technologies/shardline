@@ -303,7 +303,10 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
     }) {
         return Err(S3Error::invalid_argument("Reserved S3 user metadata name"));
     }
-    let user_metadata = super::object::capture_user_metadata(&payload_headers)?;
+    let mut user_metadata = super::object::capture_user_metadata(&payload_headers)?;
+    if let Some(value) = get("Content-Type") {
+        super::content_type::attach(&mut user_metadata, value)?;
+    }
     Ok(S3PostObjectForm {
         key,
         user_metadata,
@@ -317,6 +320,7 @@ fn supported_field(name: &str) -> bool {
         || matches!(
             name.to_ascii_lowercase().as_str(),
             "key"
+                | "content-type"
                 | "policy"
                 | "x-amz-signature"
                 | "x-amz-algorithm"

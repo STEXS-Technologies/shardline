@@ -39,11 +39,13 @@ client = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
 post = client.generate_presigned_post(
     Bucket=bucket,
     Key='uploads/${filename}',
-    Fields={'success_action_status': '201', 'x-amz-meta-model': 'release-1',
+    Fields={'success_action_status': '201', 'Content-Type': 'application/x-shardline-model',
+        'x-amz-meta-model': 'release-1',
         'x-amz-checksum-sha256': checksum, 'x-ignore-client-note': 'ignored'},
     Conditions=[
         {'bucket': bucket}, ['starts-with', '$key', 'uploads/'],
-        {'success_action_status': '201'}, {'x-amz-meta-model': 'release-1'},
+        {'success_action_status': '201'}, {'Content-Type': 'application/x-shardline-model'},
+        {'x-amz-meta-model': 'release-1'},
         {'x-amz-checksum-sha256': checksum},
         ['content-length-range', 1, 1024],
     ],
@@ -62,6 +64,7 @@ with urllib.request.urlopen(request) as response:
     assert response.status == 201, (response.status, response.read())
     assert b'<Key>uploads/weights.bin</Key>' in response.read()
 assert client.get_object(Bucket=bucket, Key='uploads/weights.bin')['Body'].read() == payload
+assert client.head_object(Bucket=bucket, Key='uploads/weights.bin')['ContentType'] == 'application/x-shardline-model'
 "#,
             )
             .arg(&endpoint)
@@ -109,6 +112,10 @@ async fn signed_browser_post_object_expands_filename_and_checks_policy_before_pu
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/x-shardline-model"
+    );
     assert_eq!(response.bytes().await.unwrap().as_ref(), file);
 
     let response = client
@@ -199,6 +206,7 @@ async fn post_object_form(
                 { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
                 { "x-amz-credential": credential },
                 { "x-amz-date": timestamp },
+                { "Content-Type": "application/x-shardline-model" },
                 { "x-amz-meta-model": "release-1" },
                 { "x-amz-checksum-sha256": checksum },
                 { "Content-MD5": content_md5 },
@@ -219,6 +227,7 @@ async fn post_object_form(
     };
     let fields = [
         ("key", key.to_owned()),
+        ("Content-Type", "application/x-shardline-model".to_owned()),
         ("x-amz-meta-model", "release-1".to_owned()),
         ("x-amz-checksum-sha256", checksum),
         ("Content-MD5", content_md5),
