@@ -197,6 +197,96 @@ async fn exercise(database: Option<&str>) {
         .unwrap();
     assert_eq!(uploaded.status(), StatusCode::OK);
     let part_etag = uploaded.headers()["etag"].to_str().unwrap().to_owned();
+    // Active checksum state must survive a normal server restart before the
+    // client asks ListParts for resume information.
+    server.stop().await;
+    let server = start(root.path(), ServerFrontend::S3, true, database).await;
+    let url = format!("{}/{}.locks/object", server.base, owner);
+    // Model an older writer that updates an active part without the new
+    // checksum metadata; ListParts must verify and derive the missing value.
+    if database.is_none() {
+        let initial = client
+            .get(format!("{url}?uploadId={upload_id}"))
+            .bearer_auth(&credential)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(initial.status(), StatusCode::OK);
+        let initial_xml = initial.text().await.unwrap();
+        assert!(
+            initial_xml.contains(&format!("<ChecksumCRC32C>{part_checksum}</ChecksumCRC32C>")),
+            "{initial_xml}"
+        );
+        let ttl = std::num::NonZeroU64::new(3_600).unwrap();
+        let session = shardline_s3_adapter::read_session(root.path(), &upload_id, ttl)
+            .await
+            .unwrap();
+        let part = session.parts.get(&1).unwrap().clone();
+        let _sessions = shardline_s3_adapter::lock_upload_sessions(root.path())
+            .await
+            .unwrap();
+        let part_lock =
+            shardline_s3_adapter::acquire_session_part_lock_for_root(root.path(), &upload_id);
+        let _part_guard = part_lock.lock().await;
+        let _part_files = shardline_s3_adapter::lock_session_parts(root.path(), &upload_id)
+            .await
+            .unwrap();
+        shardline_s3_adapter::store_versioned_part_locked(
+            root.path(),
+            &upload_id,
+            1,
+            part,
+            &session.scope_namespace,
+            &session.key,
+            ttl,
+            std::num::NonZeroU64::new(1 << 30).unwrap(),
+            std::num::NonZeroU64::new(1 << 30).unwrap(),
+            std::num::NonZeroUsize::new(100).unwrap(),
+        )
+        .await
+        .unwrap();
+    } else if let Some(database) = database {
+        // Model an older Postgres writer overwriting the part while leaving
+        // the newer checksum entry behind. The generation binding must make
+        // ListParts recompute from the verified staging object.
+        let pool = sqlx::PgPool::connect(database).await.unwrap();
+        let index = shardline_index::PostgresIndexStore::new(pool.clone());
+        let (_session, parts) = index
+            .resumable_session_snapshot(&upload_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let part = parts.first().unwrap();
+        index
+            .publish_resumable_part_bounded(
+                &upload_id,
+                part.part_number(),
+                part.staging_key(),
+                part.size_bytes(),
+                part.etag(),
+                None,
+                1 << 30,
+                1 << 30,
+                100,
+            )
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+    let listed = client
+        .get(format!("{url}?uploadId={upload_id}"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed_xml = listed.text().await.unwrap();
+    assert!(listed_xml.contains("<ChecksumAlgorithm>CRC32C</ChecksumAlgorithm>"));
+    assert!(listed_xml.contains("<ChecksumType>COMPOSITE</ChecksumType>"));
+    assert!(
+        listed_xml.contains(&format!("<ChecksumCRC32C>{part_checksum}</ChecksumCRC32C>")),
+        "{listed_xml}"
+    );
     let rejected = client
         .post(format!("{url}?uploadId={upload_id}"))
         .bearer_auth(&credential)
@@ -259,6 +349,13 @@ async fn exercise(database: Option<&str>) {
         xml.contains(&format!("<ChecksumCRC32C>{part_checksum}</ChecksumCRC32C>")),
         "{xml}"
     );
+    let head = client.head(&url).bearer_auth(&read).send().await.unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert!(head.headers().keys().all(|name| {
+        !name
+            .as_str()
+            .starts_with("x-amz-meta-shardline-internal-s3-part-checksum-v1-")
+    }));
 
     let response = client
         .get(format!("{url}?attributes&versionId=unavailable"))

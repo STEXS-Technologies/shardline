@@ -76,7 +76,7 @@ access-key and Bearer auth forms.
 | `UploadPartCopy` | same multipart PUT with `x-amz-copy-source`; pinned same-bucket source, optional explicit byte range and source conditions; normal part quotas and verified publication apply |
 | `CompleteMultipartUpload` | single CDC pass → record + ETag |
 | `AbortMultipartUpload` | `DELETE ?uploadId`; discards session |
-| `ListParts` | `GET ?uploadId`; paginated persisted part metadata |
+| `ListParts` | `GET ?uploadId`; paginated persisted part metadata, including negotiated CRC32/CRC32C COMPOSITE algorithm and per-part checksums |
 | `ListMultipartUploads` | `GET /{bucket}?uploads`; prefix, delimiter, key/upload markers and URL encoding |
 | `HeadBucket` | stub (S3A / object_store connect-probe) |
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
@@ -117,7 +117,14 @@ before publication. The verified per-part sizes and checksums are retained with
 the completed object and returned by `GetObjectAttributes`; no database schema
 migration is required. Legacy CRC32 multipart metadata remains readable. Other
 multipart algorithms and `FULL_OBJECT` checksum mode return `501 NotImplemented`.
-The in-progress `ListParts` response does not yet include checksum fields.
+The in-progress `ListParts` response includes the negotiated algorithm,
+`COMPOSITE` type, and each part checksum. If an older binary wrote an active
+checksum-enabled upload without persisting its part checksum, the upgraded
+server derives it from the stored part after verifying the part's content.
+Local sessions retain checksums in their integrity-protected metadata, bound to
+the immutable part filename. PostgreSQL sessions retain them with session state,
+bound to the part generation. Both backends derive missing or stale values from
+verified bytes.
 Direct checksum headers on single `PutObject`
 are validated for that request but are not yet retained for later metadata reads.
 During a rolling deployment, wait until every S3 replica runs the upgraded
@@ -125,10 +132,10 @@ version before clients negotiate CRC32C; older replicas do not recognize that mo
 Existing CRC32 uploads and objects remain supported throughout the rollout.
 Existing objects have no durable part-count metadata; those counts remain unknown
 and are not inferred from CDC chunks or legacy records. Botocore 1.x real-client
-coverage exercises negotiated multipart CRC32 and its completion and attribute
-responses. The Rust HTTP integration suite covers CRC32C negotiation, checksum
-failure and retry, completion, attributes, restart reads, and byte-for-byte object
-reads. A single-PUT object has no
+coverage exercises negotiated multipart CRC32, active `ListParts`, completion,
+and attribute responses. The Rust HTTP integration suite covers CRC32C
+negotiation, checksum failure and retry, active `ListParts`, completion,
+attributes, restart reads, and byte-for-byte object reads. A single-PUT object has no
 `ObjectParts` response.
 
 For general-purpose S3 buckets, AWS only returns individual `ObjectParts.Part`

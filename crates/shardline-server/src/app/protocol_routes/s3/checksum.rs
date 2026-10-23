@@ -101,7 +101,7 @@ pub(super) fn negotiate_multipart(
     if headers.contains_key("x-amz-sdk-checksum-algorithm") {
         return Err(shardline_s3_adapter::S3Error::not_implemented());
     }
-    user_metadata.retain(|(name, _)| !name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY));
+    user_metadata.retain(|(name, _)| !is_internal_metadata(name));
     user_metadata.push((
         MULTIPART_CONFIG_KEY.to_owned(),
         format!("{}:COMPOSITE", algorithm.s3_name()),
@@ -121,6 +121,95 @@ pub(super) fn multipart_checksum_algorithm(
             .then(|| MultipartChecksumAlgorithm::from_s3_name(algorithm))
             .flatten()
     })
+}
+
+pub(super) fn part_checksum_metadata_key(part_number: u32) -> String {
+    format!("PART_CHECKSUM:{part_number}:")
+}
+
+pub(super) fn part_checksum_from_metadata(
+    user_metadata: &[(String, String)],
+    part_number: u32,
+    file_name: &str,
+    algorithm: MultipartChecksumAlgorithm,
+) -> Result<Option<String>, shardline_s3_adapter::S3Error> {
+    let key_prefix = part_checksum_metadata_key(part_number);
+    let mut found = None;
+    for (name, value) in user_metadata {
+        if !name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY) {
+            continue;
+        }
+        let Some(payload) = value.strip_prefix("PART_CHECKSUM:") else {
+            continue;
+        };
+        let mut fields = payload.splitn(4, ':');
+        let Some(stored_part_number) = fields.next() else {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        };
+        let stored_part_number = stored_part_number
+            .parse::<u32>()
+            .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
+        let Some(stored_algorithm) = fields.next() else {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        };
+        let Some(checksum_value) = fields.next() else {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        };
+        let Some(stored_file_name) = fields.next() else {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        };
+        if stored_part_number != part_number {
+            continue;
+        }
+        if found.is_some() {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        }
+        if !value.starts_with(&key_prefix)
+            || stored_algorithm != algorithm.s3_name()
+            || stored_file_name != file_name
+        {
+            continue;
+        }
+        let decoded = STANDARD
+            .decode(checksum_value)
+            .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
+        if decoded.len() != 4 || STANDARD.encode(decoded) != checksum_value {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        }
+        found = Some(checksum_value.to_owned());
+    }
+    Ok(found)
+}
+
+/// Computes a negotiated checksum while consuming a bounded internal reader.
+/// The reader's own integrity checks remain in the stream and must reach EOF.
+pub(super) async fn checksum_reader(
+    algorithm: MultipartChecksumAlgorithm,
+    reader: &mut RequestBodyReader,
+    expected_size: u64,
+) -> Result<String, shardline_s3_adapter::S3Error> {
+    let mut digest = DigestState::new(algorithm.header());
+    let mut size = 0_u64;
+    while let Some(bytes) = reader
+        .next_bytes()
+        .await
+        .map_err(shardline_s3_adapter::S3Error::from)?
+    {
+        size = size
+            .checked_add(
+                u64::try_from(bytes.len())
+                    .map_err(|_error| shardline_s3_adapter::S3Error::internal())?,
+            )
+            .ok_or_else(shardline_s3_adapter::S3Error::internal)?;
+        if size > expected_size {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        }
+        digest.update(&bytes);
+    }
+    if size != expected_size {
+        return Err(shardline_s3_adapter::S3Error::internal());
+    }
+    Ok(digest.encoded())
 }
 
 pub(super) fn attach_multipart_manifest(
@@ -157,10 +246,7 @@ pub(super) fn attach_multipart_manifest(
     };
     let value = serde_json::to_string(&manifest)
         .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
-    user_metadata.retain(|(name, _)| {
-        !name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY)
-            && !name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY)
-    });
+    user_metadata.retain(|(name, _)| !is_internal_metadata(name));
     user_metadata.push((MULTIPART_MANIFEST_KEY.to_owned(), value));
     Ok(manifest)
 }
@@ -493,7 +579,8 @@ pub(super) fn reject_unverified_headers(
 mod tests {
     use super::{
         DigestState, MultipartChecksumAlgorithm, MultipartPartChecksum, PayloadChecksum,
-        attach_multipart_manifest, negotiate_multipart, parse, read_multipart_manifest,
+        attach_multipart_manifest, multipart_checksum_algorithm, negotiate_multipart, parse,
+        part_checksum_from_metadata, read_multipart_manifest,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -514,6 +601,48 @@ mod tests {
             digest.update(b"123456789");
             assert_eq!(digest.encoded(), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn persisted_part_checksum_is_bound_to_its_immutable_filename() {
+        let checksum = STANDARD.encode([1_u8, 2, 3, 4]);
+        let metadata = vec![
+            (
+                "shardline-internal-s3-multipart-checksum-v1".to_owned(),
+                "CRC32C:COMPOSITE".to_owned(),
+            ),
+            (
+                "shardline-internal-s3-multipart-checksum-v1".to_owned(),
+                format!(
+                    "PART_CHECKSUM:5:CRC32C:{checksum}:part-5-{}",
+                    "a".repeat(64)
+                ),
+            ),
+        ];
+        assert_eq!(
+            multipart_checksum_algorithm(&metadata),
+            Some(MultipartChecksumAlgorithm::Crc32c)
+        );
+        assert_eq!(
+            part_checksum_from_metadata(
+                &metadata,
+                5,
+                &format!("part-5-{}", "a".repeat(64)),
+                MultipartChecksumAlgorithm::Crc32c,
+            )
+            .unwrap(),
+            Some(checksum)
+        );
+        assert_eq!(
+            part_checksum_from_metadata(
+                &metadata,
+                5,
+                &format!("part-5-{}", "b".repeat(64)),
+                MultipartChecksumAlgorithm::Crc32c,
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

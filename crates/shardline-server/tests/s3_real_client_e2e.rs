@@ -756,6 +756,24 @@ B = "ac.assets"
 # CreateBucket (boto3 sends PUT /bucket without a trailing slash).
 s3.create_bucket(Bucket=B)
 
+# ListParts returns the negotiated algorithm and checksum for an active upload.
+# Use the SDK's modeled checksum fields instead of hand-parsing HTTP XML.
+listed_payload = b"native list-parts checksum"
+listed_checksum = base64.b64encode(struct.pack(">I", zlib.crc32(listed_payload) & 0xffffffff)).decode()
+listed_upload = s3.create_multipart_upload(
+    Bucket=B, Key="list-parts-checksum.bin", ChecksumAlgorithm="CRC32", ChecksumType="COMPOSITE"
+)
+listed_upload_id = listed_upload["UploadId"]
+s3.upload_part(
+    Bucket=B, Key="list-parts-checksum.bin", UploadId=listed_upload_id,
+    PartNumber=1, Body=listed_payload, ChecksumCRC32=listed_checksum
+)
+listed_parts = s3.list_parts(Bucket=B, Key="list-parts-checksum.bin", UploadId=listed_upload_id)
+assert listed_parts["ChecksumAlgorithm"] == "CRC32", listed_parts
+assert listed_parts["ChecksumType"] == "COMPOSITE", listed_parts
+assert listed_parts["Parts"][0]["ChecksumCRC32"] == listed_checksum, listed_parts
+s3.abort_multipart_upload(Bucket=B, Key="list-parts-checksum.bin", UploadId=listed_upload_id)
+
 # PutObject with user metadata; HeadObject returns it back.
 payload = b"metadata roundtrip\n"
 s3.put_object(Bucket=B, Key="meta.txt", Body=payload, Metadata={"purpose": "client-breadth"})

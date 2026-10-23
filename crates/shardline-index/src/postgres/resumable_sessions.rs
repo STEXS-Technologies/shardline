@@ -964,8 +964,43 @@ impl PostgresIndexStore {
         aggregate_max_bytes: u64,
         max_active_parts: usize,
     ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
+        self.publish_resumable_part_bounded_with_checksum(
+            session_id,
+            part_number,
+            staging_key,
+            size_bytes,
+            etag,
+            range,
+            None,
+            session_max_bytes,
+            aggregate_max_bytes,
+            max_active_parts,
+        )
+        .await
+    }
+
+    /// Publishes a part and its optional negotiated checksum in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres rejects the transaction or a bound cannot
+    /// be represented.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_resumable_part_bounded_with_checksum(
+        &self,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        range: Option<ResumablePartRange>,
+        checksum: Option<(&str, &str)>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
         let mut connection = self.pool().acquire().await?;
-        Self::publish_resumable_part_bounded_on_connection(
+        Self::publish_resumable_part_bounded_on_connection_with_checksum(
             &mut connection,
             session_id,
             part_number,
@@ -973,6 +1008,7 @@ impl PostgresIndexStore {
             size_bytes,
             etag,
             range,
+            checksum,
             session_max_bytes,
             aggregate_max_bytes,
             max_active_parts,
@@ -998,6 +1034,42 @@ impl PostgresIndexStore {
         aggregate_max_bytes: u64,
         max_active_parts: usize,
     ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
+        Self::publish_resumable_part_bounded_on_connection_with_checksum(
+            connection,
+            session_id,
+            part_number,
+            staging_key,
+            size_bytes,
+            etag,
+            range,
+            None,
+            session_max_bytes,
+            aggregate_max_bytes,
+            max_active_parts,
+        )
+        .await
+    }
+
+    /// Publishes a part and its checksum using the caller's lock-owning connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection is lost, Postgres rejects the
+    /// transaction, or a bound cannot be represented.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_resumable_part_bounded_on_connection_with_checksum(
+        connection: &mut PgConnection,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        range: Option<ResumablePartRange>,
+        checksum: Option<(&str, &str)>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(SESSION_ACCOUNTING_LOCK_ID)
@@ -1017,7 +1089,7 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(PublishResumablePartOutcome::SessionUnavailable);
         };
-        let session = session_from_row(&row)?;
+        let mut session = session_from_row(&row)?;
         let generation = u64_to_i64(session.generation().get())?;
         let part_number_i64 = u64_to_i64(part_number.get())?;
         let mut parts = parts_on_transaction(&mut transaction, session_id).await?;
@@ -1073,6 +1145,35 @@ impl PostgresIndexStore {
         {
             transaction.rollback().await?;
             return Ok(PublishResumablePartOutcome::TooManyParts);
+        }
+        if let Some((algorithm, checksum_value)) = checksum {
+            let updated = sqlx::query(
+                "UPDATE shardline_resumable_sessions
+                 SET attributes_json = (
+                     attributes_json::jsonb || jsonb_build_object(
+                         'part_checksums',
+                         COALESCE(attributes_json::jsonb -> 'part_checksums', '{}'::jsonb)
+                         || jsonb_build_object(
+                             $2::text,
+                             jsonb_build_object(
+                                 'algorithm', $3::text,
+                                 'checksum', $4::text,
+                                 'generation', $5::bigint
+                             )
+                         )
+                     )
+                 )::text
+                 WHERE session_id = $1 AND generation = $5 AND state = 'active'
+                 RETURNING attributes_json",
+            )
+            .bind(session_id)
+            .bind(part_number.get().to_string())
+            .bind(algorithm)
+            .bind(checksum_value)
+            .bind(generation)
+            .fetch_one(&mut *transaction)
+            .await?;
+            session = session.with_attributes_json(updated.try_get("attributes_json")?)?;
         }
         sqlx::query(
             "INSERT INTO shardline_resumable_session_parts (

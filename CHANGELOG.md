@@ -18,7 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   checksums, multipart listing and range-based UploadPartCopy.
 - Support negotiated multipart CRC32 and CRC32C COMPOSITE checksums, verifying
   part bytes before publication and exposing checksums and part sizes through
-  object attributes while preserving existing CRC32 metadata reads.
+  object attributes and active `ListParts` responses while preserving existing
+  CRC32 metadata reads and deriving missing checksums for in-progress uploads.
 - Support atomic Git pushes, report-status-v2, side-band responses, shallow
   history by depth, date or excluded refs, and blob/tree partial clones.
 - Support Git protocol v2 upload-pack discovery, reference listing and fetch,

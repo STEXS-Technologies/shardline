@@ -29,6 +29,7 @@ pub(super) use listing::{s3_list_parts, s3_list_uploads};
 use super::checksum::{self, MultipartChecksumAlgorithm, PayloadChecksum};
 
 use std::{
+    collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
     time::Instant,
@@ -51,8 +52,8 @@ use shardline_s3_adapter::{
     PartQuotaLimits, S3Error, S3SessionError, acquire_session_part_lock_for_root, create_session,
     delete_session_locked, lock_session_parts, lock_upload_sessions, new_upload_id,
     parse_complete_multipart_parts, parse_content_md5, read_conditional_headers,
-    read_session_locked, session_dir, store_versioned_part_locked, stored_part_file_path,
-    validate_part_quota_for_session_locked, versioned_part_file_name,
+    read_session_locked, session_dir, store_versioned_part_with_checksum_locked,
+    stored_part_file_path, validate_part_quota_for_session_locked, versioned_part_file_name,
 };
 use shardline_storage::ObjectKey;
 use tokio::io::AsyncWriteExt;
@@ -134,8 +135,17 @@ fn store_error_to_s3(error: S3SessionError) -> S3Error {
 struct DurableS3SessionAttributes {
     bucket: String,
     user_metadata: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    part_checksums: BTreeMap<u32, DurableS3PartChecksum>,
     #[serde(default)]
     initiated_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableS3PartChecksum {
+    algorithm: String,
+    checksum: String,
+    generation: u64,
 }
 
 const fn durable_sessions_enabled(state: &AppState) -> bool {
@@ -154,6 +164,7 @@ pub(super) async fn s3_create_multipart_upload(
     // S3 user metadata is supplied at CreateMultipartUpload and applied to the
     // completed object.
     let mut user_metadata = object::capture_user_metadata(headers)?;
+    user_metadata.retain(|(name, _)| !checksum::is_internal_metadata(name));
     let checksum_algorithm = checksum::negotiate_multipart(headers, &mut user_metadata)?;
     if durable_sessions_enabled(state) {
         let upload_id = new_upload_id();
@@ -166,6 +177,7 @@ pub(super) async fn s3_create_multipart_upload(
         let attributes = serde_json::to_string(&DurableS3SessionAttributes {
             bucket: context.bucket.clone(),
             user_metadata,
+            part_checksums: BTreeMap::new(),
             initiated_at: Some(initiated_at.as_secs()),
         })
         .map_err(|_error| S3Error::internal())?;
@@ -549,13 +561,20 @@ pub(super) async fn s3_upload_part(
         }
         Err(error) => return Err(io_to_s3(error.error)),
     };
-    let publication = store_versioned_part_locked(
+    let part_checksum =
+        checksum::multipart_checksum_algorithm(&current.user_metadata).and_then(|algorithm| {
+            response_checksum
+                .as_ref()
+                .map(|(_, value)| (algorithm.s3_name(), value.as_str()))
+        });
+    let publication = store_versioned_part_with_checksum_locked(
         root,
         upload_id,
         part_number,
         new_part.clone(),
         &context.scope_namespace,
         &context.key,
+        part_checksum,
         ttl,
         session_quota,
         total_quota,
@@ -716,15 +735,22 @@ async fn durable_s3_upload_part(
 
     let part_number = NonZeroU64::new(u64::from(part_number)).ok_or_else(S3Error::invalid_part)?;
     let etag = shardline_s3_adapter::etag_header(&object::md5_hasher_hex(&md5));
+    let part_checksum = checksum::multipart_checksum_algorithm(&session_attributes.user_metadata)
+        .and_then(|algorithm| {
+            response_checksum
+                .as_ref()
+                .map(|(_, value)| (algorithm.s3_name(), value.as_str()))
+        });
     match state
         .backend
-        .publish_resumable_part_bounded(
+        .publish_resumable_part_bounded_with_checksum(
             upload_id,
             part_number,
             staging_key.as_str(),
             size_bytes,
             Some(&etag),
             None,
+            part_checksum,
             state.config.s3_upload_session_max_bytes().get(),
             state.config.s3_upload_total_max_bytes().get(),
             state.config.s3_upload_max_active_part_files().get(),

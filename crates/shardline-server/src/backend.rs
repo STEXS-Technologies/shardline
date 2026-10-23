@@ -725,6 +725,35 @@ impl ServerBackend {
         aggregate_max_bytes: u64,
         max_active_parts: usize,
     ) -> Result<PublishResumablePartOutcome, ServerError> {
+        self.publish_resumable_part_bounded_with_checksum(
+            session_id,
+            part_number,
+            staging_key,
+            size_bytes,
+            etag,
+            range,
+            None,
+            session_max_bytes,
+            aggregate_max_bytes,
+            max_active_parts,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn publish_resumable_part_bounded_with_checksum(
+        &self,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        range: Option<ResumablePartRange>,
+        checksum: Option<(&str, &str)>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, ServerError> {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
@@ -735,30 +764,23 @@ impl ServerBackend {
         {
             let connection = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
             return Ok(
-                shardline_index::PostgresIndexStore::publish_resumable_part_bounded_on_connection(
-                    connection,
-                    session_id,
-                    part_number,
-                    staging_key,
-                    size_bytes,
-                    etag,
-                    range,
-                    session_max_bytes,
-                    aggregate_max_bytes,
-                    max_active_parts,
+                shardline_index::PostgresIndexStore::publish_resumable_part_bounded_on_connection_with_checksum(
+                    connection, session_id, part_number, staging_key, size_bytes, etag, range,
+                    checksum, session_max_bytes, aggregate_max_bytes, max_active_parts,
                 )
                 .await?,
             );
         }
         Ok(backend
             .index_store()
-            .publish_resumable_part_bounded(
+            .publish_resumable_part_bounded_with_checksum(
                 session_id,
                 part_number,
                 staging_key,
                 size_bytes,
                 etag,
                 range,
+                checksum,
                 session_max_bytes,
                 aggregate_max_bytes,
                 max_active_parts,

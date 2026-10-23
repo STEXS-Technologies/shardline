@@ -291,6 +291,11 @@ impl super::PostgresRecordStore {
 
     /// Like [`Self::publish_s3_object_on_connection`], with optional S3
     /// multipart metadata committed in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry does not describe `record`, metadata
+    /// serialization fails, or Postgres cannot commit the transaction.
     pub async fn publish_s3_object_on_connection_with_multipart_count(
         &self,
         connection: &mut PgConnection,

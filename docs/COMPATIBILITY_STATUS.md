@@ -222,7 +222,9 @@ reachable record remain protected.
 - S3 frontend: object `PUT`, `GET` (with `Range`/`Content-Range`), `HEAD`, `DELETE`, and
   partial `GetObjectAttributes` (`ETag`, `ObjectSize`, multipart total-part count,
   and CRC32/CRC32C COMPOSITE checksums with verified per-part sizes/checksums when the
-  upload negotiated that checksum mode);
+  upload negotiated that checksum mode); active `ListParts` returns the negotiated
+  checksum algorithm and per-part CRC values, deriving missing values for older
+  in-progress sessions from integrity-checked part bytes;
   multipart upload (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`,
   `AbortMultipartUpload`, `ListParts`, and `ListMultipartUploads`); `HeadBucket`/
   `GetBucketLocation`/`CreateBucket` stubs;
