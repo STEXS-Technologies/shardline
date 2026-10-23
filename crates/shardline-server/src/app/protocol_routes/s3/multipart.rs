@@ -689,8 +689,8 @@ async fn durable_s3_upload_part(
 /// object (upload-then-swap, like `PutObject`): the new record is streamed
 /// first, then the listing-index row is upserted and any stale direct object
 /// dropped. Responds `200` with the `CompleteMultipartUploadResult` XML
-/// envelope (`ETag` = the BLAKE3 root content hash — identical to a single
-/// `PutObject` of the same bytes).
+/// envelope. The ETag is the hex MD5 of the assembled object bytes, matching
+/// the frontend's single-PUT validator and checksum-verifying S3 clients.
 pub(super) async fn s3_complete_multipart_upload(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
