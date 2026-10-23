@@ -583,7 +583,7 @@ async fn aws_run(endpoint: &str, token: &str, args: &[&str]) -> std::process::Ou
             .env("AWS_ENDPOINT_URL", &endpoint)
             .env("AWS_EC2_METADATA_DISABLED", "true")
             .env("AWS_PAGER", "")
-            .env("AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
+            .env("AWS_REQUEST_CHECKSUM_CALCULATION", "when_supported")
             .output()
             .unwrap()
     })
@@ -728,8 +728,11 @@ fn run_boto3(endpoint: &str, token: &str, tmp: &TempDir) -> std::process::Output
     std::fs::write(
         &script,
         r#"
+import base64
 import io
 import os
+import struct
+import zlib
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BConfig
@@ -744,10 +747,8 @@ s3 = boto3.client(
         signature_version="s3v4",
         s3={"addressing_style": "path"},
         retries={"max_attempts": 1},
-        # Note: request_checksum_calculation / response_checksum_validation are
-        # intentionally NOT set here: they only exist in newer botocore and the
-        # test must run against whatever boto3 CI resolves (the server ignores
-        # checksum headers and returns none, so defaults are fine).
+        # Leave checksum behavior at Botocore's default so current SDK checksum
+        # negotiation and the multipart CRC32 path are exercised.
     ),
 )
 B = "ac.assets"
@@ -785,6 +786,20 @@ s3.upload_fileobj(io.BytesIO(big), B, "big.bin", Config=cfg)
 got = io.BytesIO()
 s3.download_fileobj(B, "big.bin", got)
 assert got.getvalue() == big, "multipart roundtrip byte mismatch"
+attributes = s3.get_object_attributes(Bucket=B, Key="big.bin", ObjectAttributes=["Checksum", "ObjectParts"])
+assert attributes["Checksum"]["ChecksumType"] == "COMPOSITE", attributes
+assert attributes["Checksum"]["ChecksumCRC32"].endswith("-3"), attributes
+parts = attributes["ObjectParts"]["Parts"]
+assert [part["PartNumber"] for part in parts] == [1, 2, 3], parts
+assert [part["Size"] for part in parts] == [8 * 1024 * 1024, 8 * 1024 * 1024, 4 * 1024 * 1024], parts
+assert all("ChecksumCRC32" in part for part in parts), parts
+part_bytes = [big[:8 * 1024 * 1024], big[8 * 1024 * 1024:16 * 1024 * 1024], big[16 * 1024 * 1024:]]
+part_checksums = [struct.pack(">I", zlib.crc32(data) & 0xffffffff) for data in part_bytes]
+expected_part_checksums = [base64.b64encode(value).decode() for value in part_checksums]
+assert [part["ChecksumCRC32"] for part in parts] == expected_part_checksums, parts
+expected_composite = base64.b64encode(struct.pack(">I", zlib.crc32(b"".join(part_checksums)) & 0xffffffff)).decode() + "-3"
+assert attributes["Checksum"]["ChecksumCRC32"] == expected_composite, attributes
+assert "shardline-internal-s3-checksum-v1" not in s3.head_object(Bucket=B, Key="big.bin")["Metadata"]
 
 # DeleteObjects batch.
 s3.delete_objects(

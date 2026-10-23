@@ -152,6 +152,9 @@ pub(super) fn capture_user_metadata(headers: &HeaderMap) -> Result<Vec<(String, 
         let Some(suffix) = name.as_str().strip_prefix(META_PREFIX) else {
             continue;
         };
+        if checksum::is_internal_metadata(&suffix.to_ascii_lowercase()) {
+            return Err(S3Error::invalid_argument("Reserved S3 user metadata name"));
+        }
         let mut values = Vec::new();
         for value in headers.get_all(name) {
             let text = std::str::from_utf8(value.as_bytes())
@@ -277,6 +280,9 @@ fn metadata_directive(headers: &HeaderMap) -> Result<MetadataDirective, S3Error>
 fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) {
     let mut combined: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for (name, value) in metadata {
+        if checksum::is_internal_metadata(name) {
+            continue;
+        }
         combined
             .entry(name.to_ascii_lowercase())
             .or_default()
@@ -576,7 +582,11 @@ async fn s3_copy_object(
     // it with the x-amz-meta-* headers of this request.
     let user_metadata = match directive {
         MetadataDirective::Replace => capture_user_metadata(headers)?,
-        MetadataDirective::Copy => snapshot.user_metadata,
+        MetadataDirective::Copy => snapshot
+            .user_metadata
+            .into_iter()
+            .filter(|(name, _value)| !checksum::is_internal_metadata(name))
+            .collect(),
     };
 
     // Stream the source through the same pinned read path as GetObject (no

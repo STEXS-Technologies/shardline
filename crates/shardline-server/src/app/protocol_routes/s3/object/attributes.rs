@@ -61,10 +61,23 @@ pub(super) async fn get(
         Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
         Err(error) => return Err(error.into()),
     };
+    let known_part_count = snapshot.multipart_part_count;
     let part_count = if selected.contains("ObjectParts") {
-        match snapshot.multipart_part_count {
+        match known_part_count {
             Some(count) => Some(count),
             None => return Err(S3Error::not_implemented()),
+        }
+    } else {
+        None
+    };
+    let checksum_manifest = if selected.contains("Checksum") || selected.contains("ObjectParts") {
+        match known_part_count {
+            Some(count) => checksum::read_multipart_manifest(
+                &snapshot.user_metadata,
+                count,
+                snapshot.total_bytes,
+            )?,
+            None => None,
         }
     } else {
         None
@@ -90,8 +103,17 @@ pub(super) async fn get(
             return Err(S3Error::not_implemented());
         }
     }
-    // No S3 checksum metadata is persisted yet. Omit unavailable Checksum
-    // rather than presenting the internal content commitment as an S3 checksum.
+    if selected.contains("Checksum")
+        && let Some(manifest) = &checksum_manifest
+    {
+        write!(
+            xml,
+            "<Checksum><ChecksumCRC32>{}</ChecksumCRC32><ChecksumType>COMPOSITE</ChecksumType></Checksum>",
+            xml_escape(&manifest.checksum_crc32)
+        )
+        .map_err(|_format_error| S3Error::internal())?;
+    }
+    // Never present Shardline's internal content commitment as an S3 checksum.
     // Standard is S3's default storage class and S3 omits this response field
     // for Standard objects.
     if selected.contains("ObjectSize") {
@@ -101,11 +123,49 @@ pub(super) async fn get(
     if let Some(part_count) = part_count.filter(|count| *count > 0) {
         let max_parts = max_parts.unwrap_or(1000);
         let part_number_marker = part_number_marker.unwrap_or(0);
+        let page = checksum_manifest.as_ref().map(|manifest| {
+            let mut parts = manifest
+                .parts
+                .iter()
+                .filter(|part| part.part_number > part_number_marker);
+            let page: Vec<_> = parts.by_ref().take(max_parts as usize).collect();
+            let is_truncated = parts.next().is_some();
+            (page, is_truncated)
+        });
+        let (page, is_truncated) = page.map_or_else(
+            || (Vec::new(), false),
+            |(parts, truncated)| (parts, truncated),
+        );
         write!(
             xml,
-            "<ObjectParts><IsTruncated>false</IsTruncated><MaxParts>{max_parts}</MaxParts><PartNumberMarker>{part_number_marker}</PartNumberMarker><PartsCount>{part_count}</PartsCount></ObjectParts>"
+            "<ObjectParts><IsTruncated>{is_truncated}</IsTruncated><MaxParts>{max_parts}</MaxParts>"
         )
         .map_err(|_format_error| S3Error::internal())?;
+        if is_truncated && let Some(last) = page.last() {
+            write!(
+                xml,
+                "<NextPartNumberMarker>{}</NextPartNumberMarker>",
+                last.part_number
+            )
+            .map_err(|_format_error| S3Error::internal())?;
+        }
+        write!(
+            xml,
+            "<PartNumberMarker>{part_number_marker}</PartNumberMarker>"
+        )
+        .map_err(|_format_error| S3Error::internal())?;
+        for part in page {
+            write!(
+                xml,
+                "<Part><PartNumber>{}</PartNumber><Size>{}</Size><ChecksumCRC32>{}</ChecksumCRC32></Part>",
+                part.part_number,
+                part.size_bytes,
+                xml_escape(&part.checksum_crc32)
+            )
+            .map_err(|_format_error| S3Error::internal())?;
+        }
+        write!(xml, "<PartsCount>{part_count}</PartsCount></ObjectParts>")
+            .map_err(|_format_error| S3Error::internal())?;
     }
     xml.push_str("</GetObjectAttributesResponse>");
     let mut response =
