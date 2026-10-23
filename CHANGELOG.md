@@ -10,6 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Support native Hugging Face Xet uploads through Hub negotiation, scoped CAS
   credentials, repository-scoped file identities and verified reconstruction.
+- Support S3 object tags through object and multipart uploads, browser forms,
+  copy directives and the Get/Put/DeleteObjectTagging APIs, storing tags inside
+  the existing evidence-bound object metadata and verifying request checksums.
 - Support durable Git LFS locks shared across replicas, including owner checks,
   pagination and the Hub's LFS routes.
 - Support OCI 1.1 referrer discovery with artifact filtering and pagination,
