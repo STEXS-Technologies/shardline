@@ -49,6 +49,11 @@ deliberately changed.
   rerun separately against all three backends after adding the filtered-clone
   checks. External provider credentials and deployment-specific clients were
   not part of this run.
+- On 2026-10-23, `bash scripts/k8s/kind-smoke.sh` passed against a disposable
+  kind cluster. It checked split API/transfer traffic, authenticated Xorb upload
+  and range download, then deleted one pod from each role and verified readiness
+  and persisted data after recovery. This qualifies that smoke profile only; it
+  does not qualify the separate cluster protocol suite or live provider bridge.
 
 For the current supported route contract, use [Compatibility Status](COMPATIBILITY_STATUS.md),
 [Protocol Frontends](PROTOCOLS.md), [S3 Frontend](S3_FRONTEND.md), and
