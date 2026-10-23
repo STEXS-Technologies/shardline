@@ -32,10 +32,11 @@ use std::{
 
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, State},
+    body::Body,
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, Method, header},
     middleware::{self, Next},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, head, post},
     serve as serve_http,
     serve::ListenerExt,
@@ -43,6 +44,7 @@ use axum::{
 use shardline_protocol::TokenScope;
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use shardline_server_core::{VerifiedAuthContext, auth::Ed25519AuthProvider};
@@ -65,8 +67,8 @@ use crate::{
     server_role::ServerRole,
     transfer_limiter::TransferLimiter,
     xet_adapter::{
-        XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE, XET_REVISIONS_ROUTE,
-        XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
+        XET_METADATA_ACCEPT, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
+        XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
     },
 };
 use admin_api::{
@@ -593,7 +595,31 @@ async fn router_with_housekeeping_guard(
 
     // Merge hub routes (Router<()>) into the main app (Router<()>).
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs, true))
+        let hub_routes = shardline_hub_api::hub_routes(hs, true);
+        let xet_metadata_routes = if role.serves_api()
+            && state
+                .config
+                .server_frontends()
+                .contains(&ServerFrontend::Xet)
+        {
+            Some(
+                Router::new()
+                    .route(XET_TREE_ROUTE, get(tree_lookup))
+                    .route(XET_REVISIONS_ROUTE, get(list_revisions))
+                    .with_state(state.clone()),
+            )
+        } else {
+            None
+        };
+        let hub_routes = if let Some(xet_routes) = xet_metadata_routes {
+            hub_routes.route_layer(middleware::from_fn_with_state(
+                NativeXetMetadataDispatch { xet_routes },
+                dispatch_native_xet_metadata,
+            ))
+        } else {
+            hub_routes
+        };
+        app.merge(hub_routes)
     } else {
         app
     };
@@ -784,10 +810,9 @@ fn register_frontend_routes(
     role: ServerRole,
     app_state: &AppState,
 ) -> Router<Arc<AppState>> {
-    // The Hub frontend already owns the `/api/{type}/{ns}/{repo}/tree/{rev}` and
-    // `/api/{type}/{ns}/{repo}/revisions` path shapes, which structurally collide
-    // with the M5 metadata routes. When Hub is enabled the Hub's routes win and the
-    // Xet M5 routes are omitted to avoid an axum route-insertion conflict.
+    // Hub owns the overlapping tree and revision-list paths. Those two Xet
+    // operations are content-negotiated by a layer on the Hub router; the
+    // non-overlapping path and single-revision routes remain mounted here.
     let hub_enabled = app_state
         .config
         .server_frontends()
@@ -826,7 +851,17 @@ fn register_xet_routes(
             .route("/v2/reconstructions/{file_id}", get(reconstruction_v2))
             .route("/shards", post(upload_shard))
             .route("/v1/shards", post(upload_shard));
-        if !hub_enabled {
+        if hub_enabled {
+            app = app
+                .route(
+                    XET_PATH_ROUTE,
+                    axum::routing::put(register_path).delete(delete_path),
+                )
+                .route(
+                    XET_REVISION_ROUTE,
+                    axum::routing::post(create_revision).delete(delete_revision),
+                );
+        } else {
             app = app
                 .route(XET_TREE_ROUTE, get(tree_lookup))
                 .route(
@@ -854,6 +889,53 @@ fn register_xet_routes(
             );
     }
     app
+}
+
+#[derive(Clone)]
+struct NativeXetMetadataDispatch {
+    xet_routes: Router,
+}
+
+async fn dispatch_native_xet_metadata(
+    State(dispatch): State<NativeXetMetadataDispatch>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !accepts_native_xet_metadata(&request) || !is_native_xet_metadata_route(request.uri().path())
+    {
+        return next.run(request).await;
+    }
+    // The Hub route has already inserted its path parameters into request
+    // extensions. Remove those router-local parameters before routing the same
+    // URI through the native Xet trie, which will insert its own captures.
+    let (mut parts, body) = request.into_parts();
+    parts.extensions.clear();
+    let request = Request::from_parts(parts, body);
+    match dispatch.xet_routes.oneshot(request).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    }
+}
+
+fn accepts_native_xet_metadata(request: &Request<Body>) -> bool {
+    request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|media_type| {
+                media_type
+                    .split(';')
+                    .next()
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case(XET_METADATA_ACCEPT))
+            })
+        })
+}
+
+fn is_native_xet_metadata_route(path: &str) -> bool {
+    let segments: Vec<_> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
+    (segments.len() == 5 && segments[0] == "api" && segments[4] == "revisions")
+        || (segments.len() == 6 && segments[0] == "api" && segments[4] == "tree")
 }
 
 fn register_lfs_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {

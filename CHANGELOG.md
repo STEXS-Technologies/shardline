@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
+- Keep native Xet tree and revision-list metadata routes available alongside the
+  Hub frontend through an explicit Accept media type; Hub client responses remain
+  unchanged.
 - Support native Hugging Face Xet uploads through Hub negotiation, scoped CAS
   credentials, repository-scoped file identities and verified reconstruction.
 - Support S3 object tags through object and multipart uploads, browser forms,

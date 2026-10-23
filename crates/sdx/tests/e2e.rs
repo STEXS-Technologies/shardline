@@ -79,6 +79,13 @@ impl TestServer {
     }
 
     async fn start_with_chunk_size(chunk_size: NonZeroUsize) -> Self {
+        Self::start_with_frontends(chunk_size, vec![ServerFrontend::Xet]).await
+    }
+
+    async fn start_with_frontends(
+        chunk_size: NonZeroUsize,
+        frontends: Vec<ServerFrontend>,
+    ) -> Self {
         configure_test_pools();
         let dir = TempDir::new().unwrap();
         let cfg_dir = dir.path().join("cfg");
@@ -102,7 +109,7 @@ impl TestServer {
         let config =
             ServerConfig::new(addr, base_url.clone(), dir.path().to_path_buf(), chunk_size)
                 .with_server_role(ServerRole::All)
-                .with_server_frontends(vec![ServerFrontend::Xet])
+                .with_server_frontends(frontends)
                 .unwrap()
                 .with_token_signing_key(SIGNING_KEY.to_vec())
                 .unwrap()
@@ -1036,6 +1043,50 @@ async fn metadata_listing_nested_prefixes_and_dedup() {
             entry.path
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_xet_metadata_routes_work_with_hub_frontend_enabled() {
+    let server = TestServer::start_with_frontends(
+        NonZeroUsize::new(128).unwrap(),
+        vec![ServerFrontend::Hub, ServerFrontend::Xet],
+    )
+    .await;
+    let client = server.client_for_revision("release");
+
+    let initial = client.list_revisions().await.unwrap();
+    assert!(initial.is_empty(), "{initial:?}");
+    client.create_revision("release").await.unwrap();
+    assert!(
+        client
+            .list_revisions()
+            .await
+            .unwrap()
+            .iter()
+            .any(|revision| revision.name == "release")
+    );
+
+    let upload = client
+        .upload_bytes("combined/frontends.txt", b"native xet metadata".to_vec())
+        .await
+        .unwrap();
+    let root_entries = client.list_dir_all("").await.unwrap();
+    assert!(
+        root_entries
+            .iter()
+            .any(|entry| entry.path == "combined/" && entry.is_dir),
+        "{root_entries:?}"
+    );
+    let entries = client.list_dir_all("combined").await.unwrap();
+    assert!(
+        entries.iter().any(|entry| {
+            entry.path == "combined/frontends.txt"
+                && entry.file_id.as_deref() == Some(upload.file_id.as_str())
+        }),
+        "{entries:?}"
+    );
+    let resolved = client.resolve_path("combined/frontends.txt").await.unwrap();
+    assert_eq!(resolved.file_id, upload.file_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

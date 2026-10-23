@@ -12,10 +12,10 @@ pub(crate) use shardline_xet_adapter::{
 };
 
 pub(crate) use shardline_xet_adapter::{
-    ShardUploadResponse, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
-    XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
-    XetAdapterError, XorbParseError, XorbVisitError, build_batch_reconstruction_response,
-    build_reconstruction_response, reconstruction_v2_from_v1,
+    ShardUploadResponse, XET_METADATA_ACCEPT, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE,
+    XET_REVISION_ROUTE, XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE,
+    XORB_TRANSFER_ROUTE, XetAdapterError, XorbParseError, XorbVisitError,
+    build_batch_reconstruction_response, build_reconstruction_response, reconstruction_v2_from_v1,
     register_uploaded_shard_bytes_with_member_references,
     register_uploaded_shard_file_with_member_references, resolve_dedupe_shard_object,
     shard_hash_from_object_key_if_present, store_uploaded_xorb_bytes,

@@ -293,6 +293,88 @@ async fn router_builds_with_xet_frontend() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_and_xet_share_tree_route_by_accept_media_type() {
+    use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope, TokenSigner};
+
+    let (app, _tmp) =
+        build_test_router(&[ServerFrontend::Hub, ServerFrontend::Xet], ServerRole::All).await;
+    let scope =
+        RepositoryScope::new(RepositoryProvider::Generic, "team", "assets", Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Read, scope, u64::MAX).unwrap();
+    let token = TokenSigner::new(&[0; 32]).unwrap().sign(&claims).unwrap();
+    let hub_tree = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/generic/team/assets/tree/main")
+                .header(header::ACCEPT, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hub_tree.status(), StatusCode::UNAUTHORIZED);
+
+    let xet_tree = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/generic/team/assets/tree/main")
+                .header(
+                    header::ACCEPT,
+                    format!(
+                        "{}, application/json",
+                        crate::xet_adapter::XET_METADATA_ACCEPT
+                    ),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let xet_status = xet_tree.status();
+    let xet_bytes = axum::body::to_bytes(xet_tree.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        xet_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&xet_bytes)
+    );
+    let xet_tree: serde_json::Value = serde_json::from_slice(&xet_bytes).unwrap();
+    assert!(xet_tree.get("entries").is_some(), "{xet_tree}");
+    assert!(xet_tree.get("nextCursor").is_some(), "{xet_tree}");
+
+    let xet_revisions = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/generic/team/assets/revisions")
+                .header(
+                    header::ACCEPT,
+                    format!(
+                        "{}, application/json",
+                        crate::xet_adapter::XET_METADATA_ACCEPT
+                    ),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xet_revisions.status(), StatusCode::OK);
+    let xet_revisions: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(xet_revisions.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(xet_revisions.get("nextCursor").is_some(), "{xet_revisions}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn router_xet_api_routes_are_registered() {
     let (app, _tmp) = build_test_router(&[ServerFrontend::Xet], ServerRole::All).await;
 

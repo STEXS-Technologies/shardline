@@ -58,9 +58,10 @@ mod xorb_visit;
 
 pub use error::XetAdapterError;
 pub use frontend::{
-    XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE, XET_REVISIONS_ROUTE, XET_TREE_ROUTE,
-    XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE, build_xorb_transfer_url, validate_hash_path,
-    validate_optional_content_hash, validate_xorb_transfer_namespace,
+    XET_METADATA_ACCEPT, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
+    XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
+    build_xorb_transfer_url, validate_hash_path, validate_optional_content_hash,
+    validate_xorb_transfer_namespace,
 };
 pub use ingest::{
     register_uploaded_shard_bytes, register_uploaded_shard_bytes_with_member_references,

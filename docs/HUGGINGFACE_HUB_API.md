@@ -75,10 +75,14 @@ the ordinary Hub LFS upload route. Shardline records the file's LFS SHA-256 in i
 repository-scoped Xet identity, so the committed pointer remains readable by Hub
 downloads. Clients without Xet support continue to use the basic LFS upload path.
 
-Hub owns overlapping `/api/.../tree` and `/api/.../revisions` routes when Hub and Xet
-frontends run together. The tested CLI upload, commit, and download flow works with
-that combined configuration; the native Xet frontend's separate metadata operations
-on those paths are not exposed in that mode.
+Hub and native Xet both use the `/api/{provider}/{owner}/{repo}/tree/{rev}` and
+`/revisions` paths. Hub requests keep their existing `application/json` behavior.
+Native Xet metadata clients send
+`Accept: application/vnd.stexs.xet-metadata+json, application/json`, which selects
+the Xet tree and revision-list response shapes on those overlapping paths. The
+non-overlapping Xet path registration and single-revision routes remain available
+when both frontends are enabled. The `hf` CLI flow is unchanged and continues to use
+the Hub response format.
 
 ## Using with Git
 

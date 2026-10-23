@@ -569,7 +569,13 @@ impl TransferClient {
     ) -> Result<Response, TransferError> {
         let mut request = self
             .with_session(self.client.request(method.clone(), url).bearer_auth(token))
-            .header(header::ACCEPT, "application/json");
+            .header(
+                header::ACCEPT,
+                format!(
+                    "{}, application/json",
+                    shardline_xet_adapter::XET_METADATA_ACCEPT
+                ),
+            );
         if let Some(body) = body {
             request = request
                 .header(header::CONTENT_TYPE, "application/json")
