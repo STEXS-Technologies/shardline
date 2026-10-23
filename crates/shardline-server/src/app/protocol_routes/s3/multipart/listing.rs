@@ -239,7 +239,7 @@ pub(crate) async fn s3_list_parts(
 ) -> Result<Response, S3Error> {
     let marker = number(query, "part-number-marker", 0, 10000)?;
     let limit = number(query, "max-parts", 1000, 1000)? as usize;
-    let checksum_algorithm;
+    let checksum_config;
     let mut parts = Vec::new();
     if durable_sessions_enabled(state) {
         let (session, snapshot) = state
@@ -262,7 +262,8 @@ pub(crate) async fn s3_list_parts(
         {
             return Err(S3Error::no_such_upload());
         }
-        checksum_algorithm = checksum::multipart_checksum_algorithm(&attributes.user_metadata);
+        checksum_config = checksum::multipart_checksum_config(&attributes.user_metadata);
+        let checksum_algorithm = checksum_config.map(|config| config.algorithm);
         for part in snapshot {
             let number = u32::try_from(part.part_number().get())
                 .map_err(|_invalid_part_number| S3Error::internal())?;
@@ -327,7 +328,8 @@ pub(crate) async fn s3_list_parts(
         {
             return Err(S3Error::no_such_upload());
         }
-        checksum_algorithm = checksum::multipart_checksum_algorithm(&session.user_metadata);
+        checksum_config = checksum::multipart_checksum_config(&session.user_metadata);
+        let checksum_algorithm = checksum_config.map(|config| config.algorithm);
         for (number, part) in session
             .parts
             .range((
@@ -378,6 +380,7 @@ pub(crate) async fn s3_list_parts(
             parts.push((*number, part.size_bytes, etag, checksum_value));
         }
     }
+    let checksum_algorithm = checksum_config.map(|config| config.algorithm);
     parts.sort_by_key(|part| part.0);
     let truncated = parts.len() > limit;
     parts.truncate(limit);
@@ -388,11 +391,12 @@ pub(crate) async fn s3_list_parts(
         xml_escape(&context.key),
         xml_escape(upload_id)
     );
-    if let Some(algorithm) = checksum_algorithm {
+    if let Some(config) = checksum_config {
         write!(
             xml,
-            "<ChecksumAlgorithm>{}</ChecksumAlgorithm><ChecksumType>COMPOSITE</ChecksumType>",
-            algorithm.s3_name()
+            "<ChecksumAlgorithm>{}</ChecksumAlgorithm><ChecksumType>{}</ChecksumType>",
+            config.algorithm.s3_name(),
+            config.checksum_type.s3_name()
         )
         .map_err(|_| S3Error::internal())?;
     }

@@ -250,6 +250,103 @@ fn credential() -> SigV4Credential<'static> {
     }
 }
 
+fn signed_post_policy(policy: &str) -> String {
+    let prefixed_secret = format!("AWS4{SECRET}");
+    let date_key = mac(prefixed_secret.as_bytes(), b"20130524").unwrap();
+    let region_key = mac(&date_key, b"us-east-1").unwrap();
+    let service_key = mac(&region_key, b"s3").unwrap();
+    let signing_key = mac(&service_key, b"aws4_request").unwrap();
+    let mut signer = Hmac::<Sha256>::new_from_slice(&signing_key).unwrap();
+    signer.update(policy.as_bytes());
+    hex::encode(signer.finalize().into_bytes())
+}
+
+#[test]
+fn sigv4_post_policy_checks_signature_conditions_and_file_size() {
+    let policy_json = serde_json::json!({
+        "expiration": "2013-05-24T00:15:00.000Z",
+        "conditions": [
+            { "bucket": "team.models" },
+            ["starts-with", "$key", "uploads/"],
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request" },
+            { "x-amz-date": "20130524T000000Z" },
+            ["content-length-range", 1, 1024]
+        ]
+    });
+    let policy = STANDARD.encode(serde_json::to_vec(&policy_json).unwrap());
+    let signature = signed_post_policy(&policy);
+    let verified = verify_sigv4_post_policy(
+        &policy,
+        &SigV4PostPolicyAuth {
+            credential_scope: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request",
+            date: "20130524T000000Z",
+            security_token: None,
+            signature: &signature,
+        },
+        &credential(),
+        "us-east-1",
+        1369353600,
+    )
+    .unwrap();
+    let fields = vec![
+        ("key".to_owned(), "uploads/model.bin".to_owned()),
+        ("x-amz-algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
+        (
+            "x-amz-credential".to_owned(),
+            "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request".to_owned(),
+        ),
+        ("x-amz-date".to_owned(), "20130524T000000Z".to_owned()),
+        ("policy".to_owned(), policy.clone()),
+        ("x-amz-signature".to_owned(), signature),
+    ];
+    verified
+        .validate_form_fields(&fields, "team.models")
+        .unwrap();
+    assert_eq!(verified.maximum_file_size().unwrap(), Some(1024));
+    verified.validate_form(&fields, "team.models", 512).unwrap();
+    assert!(
+        verified
+            .validate_form(&fields, "other.models", 512)
+            .is_err()
+    );
+    assert!(
+        verified
+            .validate_form(&fields, "team.models", 1025)
+            .is_err()
+    );
+
+    let mut unconditioned = fields.clone();
+    unconditioned.push(("acl".to_owned(), "public-read".to_owned()));
+    assert!(
+        verified
+            .validate_form(&unconditioned, "team.models", 512)
+            .is_err()
+    );
+    let mut duplicate = fields;
+    duplicate.push(("key".to_owned(), "uploads/other.bin".to_owned()));
+    assert!(
+        verified
+            .validate_form(&duplicate, "team.models", 512)
+            .is_err()
+    );
+    assert!(
+        verify_sigv4_post_policy(
+            &policy,
+            &SigV4PostPolicyAuth {
+                credential_scope: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request",
+                date: "20130524T000000Z",
+                security_token: None,
+                signature: &"00".repeat(32),
+            },
+            &credential(),
+            "us-east-1",
+            1369353600,
+        )
+        .is_err()
+    );
+}
+
 fn official_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(

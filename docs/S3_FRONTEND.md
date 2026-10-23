@@ -58,31 +58,34 @@ as out of scope until a real client need appears.
 
 ### Supported (this branch)
 
-All operations in this table are **implemented** and exercised by the
-client-shaped e2e suite (`crates/shardline-server/tests/s3_frontend_e2e.rs`):
-pyarrow (PUT/GET/Range/multipart), Polars / object_store (HeadObject),
-S3A (bucket probes), and DuckDB (ListObjectsV2) shapes, over both the SigV4
-access-key and Bearer auth forms.
+Operations in this table are **implemented** and exercised by the
+client-shaped e2e suites in `crates/shardline-server/tests/s3_frontend_e2e.rs`
+and `crates/shardline-server/tests/protocol_completion.rs`: pyarrow
+(PUT/GET/Range/multipart), Polars / object_store (HeadObject), S3A (bucket
+probes), DuckDB (ListObjectsV2), and Boto3-generated signed browser forms.
+Coverage uses both SigV4 access-key and Bearer authentication where the
+operation supports them.
 
 | Operation | Notes |
 |---|---|
 | `PutObject` | streamed through the CDC ingestor; body ≤ `SHARDLINE_S3_MAX_PART_BYTES` (default 1 GiB); larger must use multipart |
 | `GetObject` (+ `Range`) | existing range path; `bytes=a-b`, `bytes=a-`, `bytes=-N`; 206 / 416; stored checksums when requested with `x-amz-checksum-mode: ENABLED` |
 | `HeadObject` | size + ETag; stored checksum headers when requested with `x-amz-checksum-mode: ENABLED` |
-| `GetObjectAttributes` (partial) | `GET ?attributes` with `x-amz-object-attributes`; selected ETag, object size and stored checksum from one verified snapshot. `StorageClass` is omitted for STANDARD objects as S3 does. Newly completed multipart uploads report `ObjectParts.PartsCount`; checksum-negotiated CRC32, CRC32C, SHA-1 or SHA-256 COMPOSITE uploads also report verified per-part sizes and checksums. Unnegotiated and legacy multipart objects report the count only. Legacy objects with unknown multipart counts return `NotImplemented` rather than guessing. |
+| `GetObjectAttributes` (partial) | `GET ?attributes` with `x-amz-object-attributes`; selected ETag, object size and stored checksum from one verified snapshot. `StorageClass` is omitted for STANDARD objects as S3 does. Newly completed multipart uploads report `ObjectParts.PartsCount`; COMPOSITE uploads also report verified part sizes/checksums, and FULL_OBJECT uploads report the verified whole-object checksum. Unnegotiated and legacy multipart objects report the count only. Legacy objects with unknown multipart counts return `NotImplemented` rather than guessing. |
 | `DeleteObject` | removes direct object **and** record (S3 semantics) |
 | `CreateMultipartUpload` | `POST /{key}?uploads` |
 | `UploadPart` | `PUT ?partNumber&uploadId` → part file |
 | `UploadPartCopy` | same multipart PUT with `x-amz-copy-source`; pinned same-bucket source, optional explicit byte range and source conditions; normal part quotas and verified publication apply |
 | `CompleteMultipartUpload` | single CDC pass → record + ETag |
 | `AbortMultipartUpload` | `DELETE ?uploadId`; discards session |
-| `ListParts` | `GET ?uploadId`; paginated persisted part metadata, including negotiated CRC32/CRC32C/SHA-1/SHA-256 COMPOSITE algorithm and per-part checksums |
+| `ListParts` | `GET ?uploadId`; paginated persisted part metadata, including negotiated COMPOSITE checksums and optional CRC32/CRC32C/CRC64NVME FULL_OBJECT part checksums |
 | `ListMultipartUploads` | `GET /{bucket}?uploads`; prefix, delimiter, key/upload markers and URL encoding |
 | `HeadBucket` | stub (S3A / object_store connect-probe) |
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
 | `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
 | `ListObjects` v1 | bare `GET /{bucket}`; `prefix`/`delimiter`/`max-keys`/`marker`; emits `NextMarker` when truncated |
+| `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, `x-amz-meta-*`, `x-ignore-*`, `success_action_status`, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
 | Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
@@ -93,8 +96,7 @@ access-key and Bearer auth forms.
 
 ### Planned (near-term follow-up)
 
-The remaining protocol work includes multipart FULL_OBJECT and CRC64NVME checksum
-modes plus the unsupported operations below. The current partial attributes response follows the field-selection shape of the
+The remaining protocol work includes the unsupported operations below. The current partial attributes response follows the field-selection shape of the
 [S3 GetObjectAttributes API](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html).
 Version selectors and unsupported encryption, payer and expected-owner options
 fail explicitly instead of silently returning attributes for a different request.
@@ -105,22 +107,34 @@ parameter is not accepted and returns `501 NotImplemented`.
 
 | Operation | Reconsider when |
 |---|---|
-| `PostObject` (form upload) | — |
 | Object tagging / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
 
+`PostObject` currently supports the signed path-style form described above. It
+does not implement form fields that need object properties or service behavior
+Shardline does not persist yet, including `Content-Type`, other HTTP metadata,
+redirects, ACLs, tagging, storage class and encryption. Forms without a valid
+SigV4 policy are rejected; bearer-token authentication alone is not accepted
+for browser forms. The file part must be last and is size-bounded. Its bytes are
+spooled to an anonymous temporary file, then passed through the normal verified
+object publication path; a failed policy or checksum does not replace an
+existing object.
+
 `CreateMultipartUpload` supports negotiated `CRC32`, `CRC32C`, `SHA1`, and `SHA256`
-with the default or explicit `COMPOSITE` type. `UploadPart` validates the
-required negotiated payload checksum, and `CompleteMultipartUpload` verifies each echoed part checksum against the bytes
-before publication. The verified per-part sizes and checksums are retained with
-the completed object and returned by `GetObjectAttributes`; no database schema
-migration is required. Legacy CRC32 multipart metadata remains readable. Multipart
-`FULL_OBJECT` checksum modes and CRC64NVME return `501 NotImplemented`; S3 requires
-CRC64NVME to use FULL_OBJECT.
-The in-progress `ListParts` response includes the negotiated algorithm,
-`COMPOSITE` type, and each part checksum. If an older binary wrote an active
-checksum-enabled upload without persisting its part checksum, the upgraded
-server derives it from the stored part after verifying the part's content.
+with the default or explicit `COMPOSITE` type, and `CRC32`, `CRC32C`, or
+`CRC64NVME` with `FULL_OBJECT`. CRC64NVME defaults to `FULL_OBJECT`; its
+`COMPOSITE` form is rejected. Composite uploads require and verify the echoed
+part checksums. Full-object uploads accept optional part checksums and verify
+the assembled object's checksum before publication; a mismatch leaves the
+previous object and multipart session intact so the client can retry. The
+completed checksum is retained with the object and returned by checksum-enabled
+reads and `GetObjectAttributes`. No schema migration is required. Legacy CRC32
+multipart metadata remains readable. Active `ListParts` exposes negotiated
+checksum data when it is available.
+The in-progress `ListParts` response includes the negotiated algorithm and
+checksum type, plus part checksums where available. If an older binary wrote an
+active checksum-enabled upload without persisting its part checksum, the
+upgraded server derives it from the stored part after verifying the part's content.
 Local sessions retain checksums in their integrity-protected metadata, bound to
 the immutable part filename. PostgreSQL sessions retain them with session state,
 bound to the part generation. Both backends derive missing or stale values from
@@ -135,16 +149,18 @@ read the object bytes but may expose the private checksum record as ordinary
 Existing objects have no durable part-count metadata; those counts remain unknown
 and are not inferred from CDC chunks or legacy records. Botocore 1.x real-client
 coverage exercises negotiated multipart CRC32, SHA-1 and SHA-256 COMPOSITE,
-active `ListParts`, completion, and attribute responses, plus single-PUT
-checksum HEAD and attributes. The Rust HTTP integration suite covers CRC32C and
-SHA-256 negotiation, checksum failure and retry, active `ListParts`, completion,
-attributes, restart reads, and byte-for-byte object reads. A single-PUT object
-has no `ObjectParts` response.
+CRC64NVME FULL_OBJECT, active `ListParts`, completion, and attribute responses,
+plus single-PUT checksum HEAD and attributes. The Rust HTTP integration suite
+covers CRC32C and SHA-256 negotiation, CRC64NVME FULL_OBJECT checksum failure
+and retry, active `ListParts`, completion, attributes, and byte-for-byte object
+reads. A single-PUT object has no `ObjectParts` response.
 
 For general-purpose S3 buckets, AWS only returns individual `ObjectParts.Part`
 entries when an additional checksum was applied to the object. Shardline follows
 that behavior: negotiated CRC32/CRC32C/SHA-1/SHA-256 COMPOSITE objects include checksummed parts;
-unnegotiated and legacy multipart objects return the verified total count only.
+FULL_OBJECT objects return a verified whole-object checksum and total count, and
+part checksums when the upload supplied them. Unnegotiated and legacy multipart
+objects return the verified total count only.
 
 ## Protocol deviations (documented)
 

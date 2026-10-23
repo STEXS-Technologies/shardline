@@ -754,6 +754,16 @@ s3 = boto3.client(
 )
 B = "ac.assets"
 
+def crc64nvme(payload):
+    polynomial = 0x9A6C9329AC4BC9B5
+    value = 0xFFFFFFFFFFFFFFFF
+    for byte in payload:
+        value ^= byte
+        for _ in range(8):
+            value = (value >> 1) ^ (polynomial if value & 1 else 0)
+    value ^= 0xFFFFFFFFFFFFFFFF
+    return base64.b64encode(value.to_bytes(8, "big")).decode()
+
 # CreateBucket (boto3 sends PUT /bucket without a trailing slash).
 s3.create_bucket(Bucket=B)
 
@@ -867,6 +877,49 @@ assert sha1_attrs["Checksum"]["ChecksumType"] == "COMPOSITE", sha1_attrs
 assert sha1_attrs["Checksum"]["ChecksumSHA1"].endswith("-1"), sha1_attrs
 assert sha1_attrs["ObjectParts"]["Parts"][0]["ChecksumSHA1"] == sha1_part_checksum, sha1_attrs
 
+# FULL_OBJECT CRC64NVME checksums are verified against the assembled bytes and
+# remain available through checksum-enabled reads and GetObjectAttributes.
+full_payload = b"native multipart full-object CRC64NVME"
+full_checksum = crc64nvme(full_payload)
+full_upload = s3.create_multipart_upload(
+    Bucket=B, Key="multipart-full-crc64.bin",
+    ChecksumAlgorithm="CRC64NVME", ChecksumType="FULL_OBJECT"
+)
+full_upload_id = full_upload["UploadId"]
+full_part_checksum = crc64nvme(full_payload)
+full_part = s3.upload_part(
+    Bucket=B, Key="multipart-full-crc64.bin", UploadId=full_upload_id,
+    PartNumber=1, Body=full_payload, ChecksumCRC64NVME=full_part_checksum
+)
+full_list = s3.list_parts(Bucket=B, Key="multipart-full-crc64.bin", UploadId=full_upload_id)
+assert full_list["ChecksumAlgorithm"] == "CRC64NVME", full_list
+assert full_list["ChecksumType"] == "FULL_OBJECT", full_list
+assert full_list["Parts"][0]["ChecksumCRC64NVME"] == full_part_checksum, full_list
+full_complete = s3.complete_multipart_upload(
+    Bucket=B, Key="multipart-full-crc64.bin", UploadId=full_upload_id,
+    MultipartUpload={"Parts": [{
+        "PartNumber": 1,
+        "ETag": full_part["ETag"],
+        "ChecksumCRC64NVME": full_part_checksum,
+    }]},
+    ChecksumCRC64NVME=full_checksum,
+    ChecksumType="FULL_OBJECT",
+)
+assert full_complete["ChecksumCRC64NVME"] == full_checksum, full_complete
+full_attrs = s3.get_object_attributes(
+    Bucket=B, Key="multipart-full-crc64.bin", ObjectAttributes=["Checksum", "ObjectParts"]
+)
+assert full_attrs["Checksum"] == {
+    "ChecksumCRC64NVME": full_checksum,
+    "ChecksumType": "FULL_OBJECT",
+}, full_attrs
+assert full_attrs["ObjectParts"]["TotalPartsCount"] == 1, full_attrs
+full_get = s3.get_object(
+    Bucket=B, Key="multipart-full-crc64.bin", ChecksumMode="ENABLED"
+)
+assert full_get["ChecksumCRC64NVME"] == full_checksum, full_get
+assert full_get["Body"].read() == full_payload
+
 # Conditional CopyObject (CopySourceIfMatch) — exercises If-Match + CopyObject.
 etag = head["ETag"].strip('"')
 s3.copy_object(
@@ -910,7 +963,7 @@ s3.delete_objects(
     Delete={"Objects": [
         {"Key": "meta.txt"}, {"Key": "meta-copy.txt"}, {"Key": "big.bin"},
         {"Key": "single-checksum.bin"}, {"Key": "multipart-sha256.bin"},
-        {"Key": "multipart-sha1.bin"},
+        {"Key": "multipart-sha1.bin"}, {"Key": "multipart-full-crc64.bin"},
     ]},
 )
 remaining = s3.list_objects_v2(Bucket=B)

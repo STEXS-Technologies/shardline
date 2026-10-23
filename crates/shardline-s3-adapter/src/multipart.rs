@@ -1001,9 +1001,9 @@ async fn store_part_metadata_locked(
 fn validate_part_checksum(algorithm: &str, checksum: &str) -> Result<(), S3SessionError> {
     let expected_len = match algorithm {
         "CRC32" | "CRC32C" => 4,
+        "CRC64NVME" => 8,
         "SHA1" => 20,
         "SHA256" => 32,
-        // CRC64NVME is only valid as a FULL_OBJECT multipart checksum.
         _ => {
             return Err(S3SessionError::Reliability(
                 "unsupported persisted multipart checksum algorithm".into(),

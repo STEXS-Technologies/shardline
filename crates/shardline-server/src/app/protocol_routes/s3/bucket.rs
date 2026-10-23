@@ -11,18 +11,20 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
+use md5::{Digest, Md5};
 use shardline_index::ResourceLockKey;
 use shardline_s3_adapter::{
     ListBucketsResult, MAX_S3_DELETE_KEYS, S3Error, S3SubResource, classify, encode_bucket,
-    parse_delete_object_keys, s3_object_key, xml_escape,
+    parse_content_md5, parse_delete_object_keys, s3_object_key, xml_escape,
 };
 
 use super::{
-    S3Repository, acquire_object_upload_lock_for_root, listing, parse_s3_query, s3_xml_content_type,
+    S3Repository, acquire_object_upload_lock_for_root, listing, object, parse_s3_query,
+    post_object::S3PostObjectForm, s3_xml_content_type,
 };
 use crate::{
     app::AppState,
@@ -167,17 +169,25 @@ pub(crate) async fn s3_delete_bucket(
 /// overwrite paths hold), so a concurrent PUT/Copy/Complete on the same key
 /// cannot have its just-committed record deleted out from under it (F-18). The
 /// request body is read and parsed in full before any lock is taken.
-#[tracing::instrument(skip(auth, state, headers, body), fields(bucket))]
+#[tracing::instrument(skip(auth, state, headers, body, post_form), fields(bucket))]
 pub(crate) async fn s3_post_bucket(
     auth: S3Repository,
     State(state): State<Arc<AppState>>,
     Path(_bucket): Path<String>,
     uri: Uri,
     headers: HeaderMap,
+    post_form: Option<Extension<S3PostObjectForm>>,
     body: Body,
 ) -> Result<Response, S3Error> {
     let query = parse_s3_query(&uri)?;
-    if !classify(&query)
+    let resources = classify(&query);
+    if resources.is_empty() {
+        let Some(Extension(form)) = post_form else {
+            return Err(S3Error::not_implemented());
+        };
+        return s3_post_object(auth, &state, form, body).await;
+    }
+    if !resources
         .iter()
         .any(|resource| matches!(resource, S3SubResource::DeleteObjects))
     {
@@ -296,7 +306,102 @@ enum DeleteOutcome {
 ///
 /// Rows are emitted in request order: `<Deleted>` for successes and `<Error>`
 /// (with `<Key>`, `<Code>`, `<Message>`) for the per-key failures.
-#[must_use]
+async fn s3_post_object(
+    auth: S3Repository,
+    state: &Arc<AppState>,
+    form: S3PostObjectForm,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let context = super::require_s3_object_context(auth.capability(), &form.key)?;
+    let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
+        .map_err(|_error| S3Error::internal())?;
+    let max_bytes = std::num::NonZeroUsize::new(max_bytes).ok_or_else(S3Error::internal)?;
+    let payload_checksum = super::checksum::parse(&form.payload_headers)?;
+    let response_checksum = payload_checksum
+        .as_ref()
+        .map(|checksum| (checksum.header(), checksum.expected().to_owned()));
+    let expected_md5 = parse_content_md5(&form.payload_headers)?;
+    let mut body = match RequestBodyReader::from_body(body, max_bytes) {
+        Ok(reader) => reader,
+        Err(crate::ServerError::RequestBodyTooLarge) => {
+            return Err(S3Error {
+                code: "EntityTooLarge",
+                message: "Your proposed upload exceeds the maximum allowed object size".to_owned(),
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+            });
+        }
+        Err(error) => return Err(S3Error::from(error)),
+    };
+    if let Some(payload_checksum) = payload_checksum {
+        body = super::checksum::verify_body(body, payload_checksum);
+    }
+    let hasher = Arc::new(std::sync::Mutex::new(Md5::new()));
+    let body = body.with_md5_tee_and_expected(hasher.clone(), expected_md5);
+    let mut user_metadata = form.user_metadata;
+    if let Some((header, value)) = &response_checksum {
+        super::checksum::attach_object_checksum(&mut user_metadata, header, value)?;
+    }
+    let (_uploaded, etag) = object::s3_upload_object_body(
+        state,
+        &context,
+        body,
+        user_metadata,
+        hasher,
+        object::ObjectUploadOptions {
+            multipart_part_count: 0,
+            full_object_checksum: None,
+            precondition: Some(&form.payload_headers),
+        },
+    )
+    .await?;
+    let mut response = match form.success_status {
+        200 => StatusCode::OK.into_response(),
+        204 => StatusCode::NO_CONTENT.into_response(),
+        201 => {
+            let bucket = xml_escape(&context.bucket);
+            let key = xml_escape(&form.key);
+            let etag = xml_escape(&shardline_s3_adapter::etag_header(&etag));
+            let location = xml_escape(&post_object_location(
+                state.config.public_base_url(),
+                &context.bucket,
+                &form.key,
+            )?);
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<PostResponse><Location>{location}</Location><Bucket>{bucket}</Bucket><Key>{key}</Key><ETag>{etag}</ETag></PostResponse>"
+            );
+            (
+                StatusCode::CREATED,
+                [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+                xml,
+            )
+                .into_response()
+        }
+        _ => return Err(S3Error::internal()),
+    };
+    if let Some((header, value)) = response_checksum {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_bytes(header.as_bytes())
+                .map_err(|_error| S3Error::internal())?,
+            axum::http::HeaderValue::from_str(&value).map_err(|_error| S3Error::internal())?,
+        );
+    }
+    Ok(response)
+}
+
+fn post_object_location(base: &str, bucket: &str, key: &str) -> Result<String, S3Error> {
+    let mut location = url::Url::parse(base).map_err(|_error| S3Error::internal())?;
+    {
+        let mut segments = location
+            .path_segments_mut()
+            .map_err(|_error| S3Error::internal())?;
+        segments.pop_if_empty().push(bucket);
+        for segment in key.split('/') {
+            segments.push(segment);
+        }
+    }
+    Ok(location.into())
+}
+
 fn delete_result_xml(outcomes: &[DeleteOutcome]) -> String {
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\

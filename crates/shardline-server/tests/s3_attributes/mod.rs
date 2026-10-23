@@ -622,7 +622,7 @@ async fn read_conditions(client: &Client, url: &str, credential: &str) {
 fn xml_tag(xml: &str, tag: &str) -> String {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
-    let start = xml.find(&open).unwrap() + open.len();
+    let start = xml.find(&open).unwrap().checked_add(open.len()).unwrap();
     let end = xml.find(&close).unwrap();
     xml[start..end].to_owned()
 }

@@ -6,7 +6,7 @@ git lfs version
 command -v aws >/dev/null
 aws --version
 export BOTOCORE_PYTHON="${BOTOCORE_PYTHON:-python3}"
-"$BOTOCORE_PYTHON" -c 'import botocore.session'
+"$BOTOCORE_PYTHON" -c 'import boto3, botocore.session'
 
 if [[ -z "${MINIO_SIGNER_BIN:-}" ]]; then
   command -v go >/dev/null

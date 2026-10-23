@@ -20,8 +20,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   part bytes before publication and exposing checksums and part sizes through
   object attributes and active `ListParts` responses while preserving existing
   CRC32 metadata reads and deriving missing checksums for in-progress uploads.
+- Support multipart CRC32, CRC32C and CRC64NVME FULL_OBJECT checksums. The
+  assembled object checksum is verified before publication; part-level checksums
+  are optional for FULL_OBJECT uploads, and CRC64NVME defaults to FULL_OBJECT.
 - Retain verified single-PUT S3 checksums and return them through
   `GetObjectAttributes` and checksum-enabled `GetObject`/`HeadObject` responses.
+- Support signed path-style S3 browser `PostObject` uploads with policy-condition
+  checks, `${filename}` expansion, bounded temporary spooling, user metadata,
+  Content-MD5 and CRC32/CRC32C/SHA-1/SHA-256 checksums, using atomic object
+  publication.
 - Support atomic Git pushes, report-status-v2, side-band responses, shallow
   history by depth, date or excluded refs, and blob/tree partial clones.
 - Support Git protocol v2 upload-pack discovery, reference listing and fetch,

@@ -9,6 +9,12 @@
 
 mod attributes;
 use super::checksum;
+
+pub(super) struct ObjectUploadOptions<'headers> {
+    pub(super) multipart_part_count: u32,
+    pub(super) full_object_checksum: Option<checksum::FullObjectChecksum>,
+    pub(super) precondition: Option<&'headers HeaderMap>,
+}
 mod conditions;
 mod copy_part;
 
@@ -528,8 +534,11 @@ pub(crate) async fn s3_put_object(
         body,
         user_metadata,
         hasher,
-        0,
-        Some(&headers),
+        ObjectUploadOptions {
+            multipart_part_count: 0,
+            full_object_checksum: None,
+            precondition: Some(&headers),
+        },
     )
     .await?;
 
@@ -649,8 +658,11 @@ async fn s3_copy_object(
         body,
         user_metadata,
         hasher,
-        0,
-        Some(headers),
+        ObjectUploadOptions {
+            multipart_part_count: 0,
+            full_object_checksum: None,
+            precondition: Some(headers),
+        },
     )
     .await?;
 
@@ -914,11 +926,15 @@ pub(super) async fn s3_upload_object_body(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
     body: RequestBodyReader,
-    user_metadata: Vec<(String, String)>,
+    mut user_metadata: Vec<(String, String)>,
     hasher: Arc<Mutex<Md5>>,
-    multipart_part_count: u32,
-    precondition: Option<&HeaderMap>,
+    options: ObjectUploadOptions<'_>,
 ) -> Result<(crate::model::UploadFileResponse, String), S3Error> {
+    let ObjectUploadOptions {
+        multipart_part_count,
+        full_object_checksum,
+        precondition,
+    } = options;
     // Serialize concurrent overwrites of the same key; the swap below (index
     // upsert + stale-direct drop) is atomic with respect to other overwrites.
     let object_lock =
@@ -1009,6 +1025,17 @@ pub(super) async fn s3_upload_object_body(
     // The body stream has been fully drained: the shared hasher now holds the
     // MD5 of the object bytes — the standard S3 ETag.
     let etag = md5_hasher_hex(&hasher);
+
+    if let Some(full_object_checksum) = full_object_checksum {
+        let checksum_value = full_object_checksum.value()?;
+        checksum::attach_multipart_manifest(
+            &mut user_metadata,
+            full_object_checksum.algorithm(),
+            checksum::MultipartChecksumType::FullObject,
+            Some(&checksum_value),
+            Vec::new(),
+        )?;
+    }
 
     // Swap: point the index at the new record version, then drop any stale
     // direct object that would shadow the record (the old record version is

@@ -15,6 +15,7 @@ mod checksum;
 pub(super) mod listing;
 pub(super) mod multipart;
 pub(super) mod object;
+pub(crate) mod post_object;
 mod repository;
 pub(crate) mod signing;
 

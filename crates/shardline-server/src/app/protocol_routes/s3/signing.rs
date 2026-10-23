@@ -1,6 +1,7 @@
 //! Opt-in signing identities; legacy token clients keep their existing path.
 use std::{
     io,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -24,6 +25,8 @@ use crate::{S3SigningIdentity, ServerConfig, app::AppState};
 struct SigningState {
     identities: Arc<Vec<S3SigningIdentity>>,
     control_body_limit: usize,
+    root_dir: PathBuf,
+    max_upload_bytes: u64,
 }
 
 pub(crate) fn protect(
@@ -37,6 +40,8 @@ pub(crate) fn protect(
         SigningState {
             identities: Arc::new(config.s3_signing_identities.clone()),
             control_body_limit: config.max_request_body_bytes().get(),
+            root_dir: config.root_dir().to_path_buf(),
+            max_upload_bytes: config.s3_max_part_bytes().get(),
         },
         authenticate,
     ))
@@ -47,6 +52,16 @@ async fn authenticate(
     request: Request,
     next: Next,
 ) -> Result<Response, S3Error> {
+    if is_post_object_form(&request) {
+        let request = super::post_object::authenticate_and_spool(
+            request,
+            &state.identities,
+            &state.root_dir,
+            state.max_upload_bytes,
+        )
+        .await?;
+        return Ok(next.run(request).await);
+    }
     let query = super::parse_s3_query(request.uri())?;
     let header_key = extract_access_key(request.headers());
     let query_key = extract_access_key_from_query(&query);
@@ -168,6 +183,25 @@ async fn authenticate(
         return Err(error);
     }
     Ok(response)
+}
+
+fn is_post_object_form(request: &Request) -> bool {
+    request.method() == Method::POST
+        && request.uri().query().is_none()
+        && request
+            .uri()
+            .path()
+            .strip_prefix('/')
+            .is_some_and(|bucket| !bucket.is_empty() && !bucket.contains('/'))
+        && request
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .get(.."multipart/form-data".len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("multipart/form-data"))
+            })
 }
 
 fn payload_failure(failure: &Mutex<Option<S3Error>>, error: S3Error) -> io::Error {

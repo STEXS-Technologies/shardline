@@ -7,6 +7,7 @@ use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256};
+use std::sync::{Arc, Mutex};
 
 use crate::{ServerError, upload_ingest::RequestBodyReader};
 
@@ -195,13 +196,12 @@ pub(super) fn read_object_checksum(
         })
         .transpose()?;
     let checksum = match manifest {
-        Some(manifest) if manifest.parts.is_empty() => Some(ObjectChecksum {
-            algorithm: manifest.algorithm,
-            checksum_type: manifest.checksum_type,
-            checksum_value: manifest.checksum_value,
-        }),
         Some(manifest) if manifest.checksum_type == MultipartChecksumType::FullObject => {
-            return Err(shardline_s3_adapter::S3Error::internal());
+            Some(ObjectChecksum {
+                algorithm: manifest.algorithm,
+                checksum_type: manifest.checksum_type,
+                checksum_value: manifest.checksum_value,
+            })
         }
         Some(_) | None => None,
     };
@@ -258,12 +258,8 @@ pub(super) fn negotiate_multipart(
         None => MultipartChecksumType::Composite,
         Some(_) => return Err(shardline_s3_adapter::S3Error::not_implemented()),
     };
-    // Multipart FULL_OBJECT requires a digest over the assembled object, not
-    // the part checksum-of-checksums used by the current completion path.
-    // Reject it until completion can verify that digest before publication.
-    if checksum_type == MultipartChecksumType::FullObject
-        || (algorithm == MultipartChecksumAlgorithm::Crc64Nvme
-            && checksum_type == MultipartChecksumType::Composite)
+    if algorithm == MultipartChecksumAlgorithm::Crc64Nvme
+        && checksum_type == MultipartChecksumType::Composite
     {
         return Err(shardline_s3_adapter::S3Error::not_implemented());
     }
@@ -401,7 +397,9 @@ pub(super) fn attach_multipart_manifest(
     full_object_checksum: Option<&str>,
     parts: Vec<MultipartPartChecksum>,
 ) -> Result<MultipartChecksumManifest, shardline_s3_adapter::S3Error> {
-    if parts.is_empty() || parts.len() > 10_000 {
+    if parts.len() > 10_000
+        || (parts.is_empty() && checksum_type != MultipartChecksumType::FullObject)
+    {
         return Err(shardline_s3_adapter::S3Error::invalid_part());
     }
     let mut previous = 0;
@@ -502,8 +500,13 @@ pub(super) fn read_multipart_manifest(
                 .checked_add(part.size_bytes)
                 .ok_or_else(shardline_s3_adapter::S3Error::internal)?;
         }
-        if manifest.parts.len() != usize::try_from(expected_count).unwrap_or(usize::MAX)
-            || total_size != expected_size
+        let full_object_without_part_checksums = manifest.checksum_type
+            == MultipartChecksumType::FullObject
+            && manifest.parts.is_empty()
+            && expected_count > 0;
+        if (!full_object_without_part_checksums
+            && manifest.parts.len() != usize::try_from(expected_count).unwrap_or(usize::MAX))
+            || (!full_object_without_part_checksums && total_size != expected_size)
         {
             return Err(shardline_s3_adapter::S3Error::internal());
         }
@@ -630,6 +633,87 @@ pub(super) struct PayloadChecksum {
     digest: DigestState,
 }
 
+/// Tracks the checksum of the assembled multipart object. The stream verifies
+/// an optional client value and publishes the computed value for metadata
+/// persistence only after the complete body has been consumed.
+#[derive(Clone)]
+pub(super) struct FullObjectChecksum {
+    algorithm: MultipartChecksumAlgorithm,
+    actual: Arc<Mutex<Option<String>>>,
+}
+
+pub(super) fn validate_part_checksum_header(
+    config: Option<MultipartChecksumConfig>,
+    supplied: Option<&PayloadChecksum>,
+) -> Result<(), shardline_s3_adapter::S3Error> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    if supplied.is_some_and(|checksum| checksum.header() != config.algorithm.header()) {
+        return Err(shardline_s3_adapter::S3Error::invalid_argument(
+            "Part checksum does not match the negotiated algorithm",
+        ));
+    }
+    if config.checksum_type == MultipartChecksumType::Composite && supplied.is_none() {
+        return Err(shardline_s3_adapter::S3Error::invalid_argument(
+            "The negotiated part checksum is required for this multipart upload",
+        ));
+    }
+    Ok(())
+}
+
+impl FullObjectChecksum {
+    pub(super) fn value(&self) -> Result<String, shardline_s3_adapter::S3Error> {
+        self.actual
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(shardline_s3_adapter::S3Error::internal)
+    }
+
+    pub(super) const fn algorithm(&self) -> MultipartChecksumAlgorithm {
+        self.algorithm
+    }
+}
+
+pub(super) fn verify_full_object(
+    body: RequestBodyReader,
+    algorithm: MultipartChecksumAlgorithm,
+    expected: Option<String>,
+) -> (RequestBodyReader, FullObjectChecksum) {
+    let actual = Arc::new(Mutex::new(None));
+    let output = Arc::clone(&actual);
+    let header = algorithm.header();
+    let body_stream = stream::try_unfold(
+        (body, DigestState::new(header), expected, output),
+        |(mut body, mut digest, expected, output)| async move {
+            match body.next_bytes().await? {
+                Some(bytes) => {
+                    digest.update(&bytes);
+                    Ok(Some((bytes, (body, digest, expected, output))))
+                }
+                None => {
+                    let checksum = digest.encoded();
+                    if expected
+                        .as_ref()
+                        .is_some_and(|expected| *expected != checksum)
+                    {
+                        return Err(ServerError::RequestBodyChecksumMismatch);
+                    }
+                    *output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(checksum);
+                    Ok(None)
+                }
+            }
+        },
+    );
+    (
+        RequestBodyReader::from_stream(body_stream),
+        FullObjectChecksum { algorithm, actual },
+    )
+}
+
 impl PayloadChecksum {
     pub(super) const fn header(&self) -> &'static str {
         self.header
@@ -694,6 +778,43 @@ pub(super) fn parse(
         }
     }
     Ok(supplied)
+}
+
+pub(super) fn full_object_completion_checksum(
+    headers: &HeaderMap,
+    config: MultipartChecksumConfig,
+) -> Result<Option<String>, shardline_s3_adapter::S3Error> {
+    if config.checksum_type != MultipartChecksumType::FullObject {
+        reject_unverified_headers(headers)?;
+        return Ok(None);
+    }
+    let mut payload_headers = headers.clone();
+    payload_headers.remove("x-amz-checksum-algorithm");
+    payload_headers.remove("x-amz-checksum-type");
+    let supplied = parse(&payload_headers)?;
+    if supplied
+        .as_ref()
+        .is_some_and(|checksum| checksum.header() != config.algorithm.header())
+    {
+        return Err(shardline_s3_adapter::S3Error::invalid_argument(
+            "Completion checksum does not match the negotiated algorithm",
+        ));
+    }
+    if let Some(value) = singleton_header(headers, "x-amz-checksum-algorithm")?
+        && value != config.algorithm.s3_name()
+    {
+        return Err(shardline_s3_adapter::S3Error::invalid_argument(
+            "Completion checksum algorithm does not match the upload",
+        ));
+    }
+    if let Some(value) = singleton_header(headers, "x-amz-checksum-type")?
+        && value != MultipartChecksumType::FullObject.s3_name()
+    {
+        return Err(shardline_s3_adapter::S3Error::invalid_argument(
+            "Completion checksum type does not match the upload",
+        ));
+    }
+    Ok(supplied.map(|checksum| checksum.expected().to_owned()))
 }
 
 pub(super) fn verify_body(body: RequestBodyReader, checksum: PayloadChecksum) -> RequestBodyReader {
@@ -860,10 +981,13 @@ mod tests {
     use super::{
         DigestState, MultipartChecksumAlgorithm, MultipartChecksumType, MultipartPartChecksum,
         PayloadChecksum, attach_multipart_manifest, multipart_checksum_algorithm,
-        negotiate_multipart, parse, part_checksum_from_metadata, read_multipart_manifest,
+        multipart_checksum_config, negotiate_multipart, parse, part_checksum_from_metadata,
+        read_multipart_manifest, verify_full_object,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use bytes::Bytes;
+    use futures_util::stream;
 
     #[test]
     fn checksum_algorithms_match_standard_vectors() {
@@ -1035,5 +1159,72 @@ mod tests {
             read_multipart_manifest(&metadata, 1, 9).unwrap(),
             Some(manifest)
         );
+    }
+
+    #[test]
+    fn multipart_full_object_negotiation_enforces_supported_algorithm_types() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-amz-checksum-algorithm",
+            HeaderValue::from_static("CRC64NVME"),
+        );
+        let mut metadata = Vec::new();
+        negotiate_multipart(&headers, &mut metadata).unwrap();
+        assert_eq!(
+            multipart_checksum_config(&metadata),
+            Some(super::MultipartChecksumConfig {
+                algorithm: MultipartChecksumAlgorithm::Crc64Nvme,
+                checksum_type: MultipartChecksumType::FullObject,
+            })
+        );
+
+        headers.insert("x-amz-checksum-type", HeaderValue::from_static("COMPOSITE"));
+        assert!(negotiate_multipart(&headers, &mut Vec::new()).is_err());
+        headers.insert(
+            "x-amz-checksum-algorithm",
+            HeaderValue::from_static("SHA256"),
+        );
+        headers.insert(
+            "x-amz-checksum-type",
+            HeaderValue::from_static("FULL_OBJECT"),
+        );
+        assert!(negotiate_multipart(&headers, &mut Vec::new()).is_err());
+    }
+
+    #[tokio::test]
+    async fn full_object_checksum_verifies_assembled_bytes_before_exposing_value() {
+        let bytes = Bytes::from_static(b"full-object multipart checksum");
+        let mut digest = DigestState::new("x-amz-checksum-crc32c");
+        digest.update(&bytes);
+        let expected = digest.encoded();
+        let input = crate::upload_ingest::RequestBodyReader::from_stream(stream::iter(vec![Ok(
+            bytes.clone(),
+        )]));
+        let (mut verified, state) = verify_full_object(
+            input,
+            MultipartChecksumAlgorithm::Crc32c,
+            Some(expected.clone()),
+        );
+        assert_eq!(
+            crate::upload_ingest::read_body_to_bytes(&mut verified)
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(state.value().unwrap(), expected);
+
+        let input =
+            crate::upload_ingest::RequestBodyReader::from_stream(stream::iter(vec![Ok(bytes)]));
+        let (mut verified, state) = verify_full_object(
+            input,
+            MultipartChecksumAlgorithm::Crc32c,
+            Some(STANDARD.encode([0_u8; 4])),
+        );
+        assert!(
+            crate::upload_ingest::read_body_to_bytes(&mut verified)
+                .await
+                .is_err()
+        );
+        assert!(state.value().is_err());
     }
 }

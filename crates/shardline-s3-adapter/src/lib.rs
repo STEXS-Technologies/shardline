@@ -76,7 +76,10 @@ pub use protocol_support::{
     S3SubResource, classify, etag_header, parse_content_md5, parse_copy_source, parse_s3_range,
     parse_subresource, read_conditional_headers,
 };
-pub use sigv4::{SigV4ChunkVerifier, SigV4Credential, VerifiedSigV4, verify_sigv4};
+pub use sigv4::{
+    SigV4ChunkVerifier, SigV4Credential, SigV4PostPolicyAuth, VerifiedSigV4,
+    VerifiedSigV4PostPolicy, verify_sigv4, verify_sigv4_post_policy,
+};
 pub use types::{
     CompleteMultipartUploadResult, CompleteParts, Contents, CopyObjectResult, HeadObjectHeaders,
     InitiateMultipartUploadResult, ListBucketResult, ListBucketResultV1, ListBucketsResult,

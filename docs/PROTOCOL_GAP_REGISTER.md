@@ -10,8 +10,7 @@ deliberately changed.
 
 | Priority | Surface | Remaining gap | Required proof |
 | --- | --- | --- | --- |
-| P1 | S3 checksums | CRC32, CRC32C, SHA-1, and SHA-256 COMPOSITE multipart checksums are supported, including active `ListParts`; single-PUT checksum attributes persist and are returned by checksum-enabled HEAD and `GetObjectAttributes`. Multipart FULL_OBJECT modes and CRC64NVME multipart checksums remain unsupported. | Add remaining modes only with native SDK coverage, wrong-checksum rejection, object-preservation and retry checks, and restart verification. |
-| P2 | S3 form upload | `PostObject` browser form uploads are not implemented. | Signed-policy and unsigned-policy client flows, size and key constraints, bad-policy rejection, and atomic publication tests. |
+| P2 | S3 form upload | The signed path-style `PostObject` workflow is implemented and tested with Boto3. Form `Content-Type`/other HTTP metadata, redirects, ACLs, tagging, storage class, and encryption remain unsupported because their object properties or service behavior are not persisted. | Add each field only with its persistence and response contract; use the native Boto3 form test plus failure, size, checksum, and atomic replacement coverage. |
 | P2 | S3 service APIs | Object tagging, versioning/`ListObjectVersions`, lifecycle, bucket policy/CORS/notifications/replication, encryption, ACL, restore/select/torrent/legal-hold/retention, and bucket deletion remain outside the current route set. | Add only with an explicit client requirement and a complete persistence, authorization, lifecycle, and native-client contract for each API family. |
 | P2 | Hugging Face Hub | The Hub frontend implements the repository, commit, tree, resolve, LFS/Xet, and other routes listed in its guide; it does not implement every Hub product API. | For each additional Hub API, test with the official SDK/CLI and preserve repository scoping and Git/Xet identity behavior. |
 
@@ -21,6 +20,7 @@ deliberately changed.
 | --- | --- | --- | --- |
 | P2 | Live provider bridge | Live GitHub/Gitea provider tests require external credentials and repositories and are not part of the ordinary local run. | Execute the explicitly selected live tests with isolated test repositories and verify identity, token refresh, webhook and cleanup behavior. |
 | P2 | Deployment clients | Kubernetes/kind and other deployment-specific E2E targets need their dedicated fixtures; a local protocol pass does not qualify those environments. | Run the documented deployment suites and review their actual results, including all prerequisite and skip reporting. |
+| P1 | S3 multipart checksum deployment coverage | Composite checksums and CRC32/CRC32C/CRC64NVME FULL_OBJECT checksums validate before publication. Botocore and Boto3 FULL_OBJECT flows pass against the SQLite-backed server, including `ListParts`, `GetObjectAttributes`, and checksum-enabled reads. PostgreSQL/MinIO persistence and post-restart reads remain unqualified. | Run the native AWS client flow against PostgreSQL/MinIO, restart the replica, and verify the checksum and object parts remain readable. |
 
 ## Clarifications
 

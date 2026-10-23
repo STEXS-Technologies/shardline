@@ -1579,6 +1579,113 @@ async fn s3_multipart_crc32_mismatch_does_not_publish_and_can_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_multipart_full_object_checksum_rejects_bad_digest_and_retries() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let bytes = b"full object multipart checksum";
+    let previous = b"previous object stays published";
+    put_object(&app, KEY, previous).await;
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/{KEY}?uploads"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header("x-amz-checksum-algorithm", "CRC64NVME")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let upload_id = extract_tag(
+        &String::from_utf8(body_bytes(create).await).unwrap(),
+        "UploadId",
+    );
+    let upload = upload_part(&app, &upload_id, 1, bytes).await;
+    assert_eq!(upload.status(), StatusCode::OK);
+    let etag = upload.headers()[header::ETAG].to_str().unwrap().to_owned();
+
+    let mut digest = CrcDigest::new(CrcAlgorithm::Crc64Nvme);
+    digest.update(bytes);
+    let checksum = STANDARD.encode(digest.finalize().to_be_bytes());
+    let complete = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let send_completion = |checksum: &str| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/{KEY}?uploadId={upload_id}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header("x-amz-checksum-crc64nvme", checksum)
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(complete.clone()))
+                .unwrap(),
+        )
+    };
+    let rejected = send_completion(&STANDARD.encode([0_u8; 4])).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_bytes(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/{BUCKET}/{KEY}"))
+                        .header(
+                            header::AUTHORIZATION,
+                            sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        )
+        .await,
+        previous
+    );
+
+    let accepted = send_completion(&checksum).await.unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    assert!(
+        String::from_utf8(body_bytes(accepted).await)
+            .unwrap()
+            .contains(&format!(
+                "<ChecksumCRC64NVME>{checksum}</ChecksumCRC64NVME>"
+            ))
+    );
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .header("x-amz-checksum-mode", "ENABLED")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.headers()["x-amz-checksum-crc64nvme"], checksum.as_str());
+    assert_eq!(body_bytes(get).await, bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_invalid_completion_keeps_parts_writable() {
     for case in ["malformed", "missing", "too-small"] {
         let Some((mut state, _tmp)) = build_postgres_test_state().await else {
