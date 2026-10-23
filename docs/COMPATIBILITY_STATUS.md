@@ -220,7 +220,9 @@ reachable record remain protected.
   webhooks, Git Smart HTTP clone/fetch/push, SDK live-reference listing, and SDK
   branch/lightweight-tag creation and deletion
 - S3 frontend: object `PUT`, `GET` (with `Range`/`Content-Range`), `HEAD`, `DELETE`, and
-  partial `GetObjectAttributes` (`ETag`, `ObjectSize`, and multipart total-part count);
+  partial `GetObjectAttributes` (`ETag`, `ObjectSize`, multipart total-part count,
+  and CRC32 COMPOSITE checksums with verified per-part sizes/checksums when the
+  upload negotiated that checksum mode);
   multipart upload (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`,
   `AbortMultipartUpload`, `ListParts`, and `ListMultipartUploads`); `HeadBucket`/
   `GetBucketLocation`/`CreateBucket` stubs;
