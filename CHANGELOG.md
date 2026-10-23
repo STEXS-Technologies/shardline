@@ -54,6 +54,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Fail fast with a clear minimum-pool-size error when applying Postgres
+  migrations through a pool that cannot provide separate lock and work
+  connections.
 - Apply repository-scoped read authorization before returning Git protocol-v2
   capability discovery.
 - Propagate LFS object-store lookup failures instead of reporting them as

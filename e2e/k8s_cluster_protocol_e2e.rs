@@ -132,10 +132,16 @@ async fn start_local_cluster_runtime() -> Result<Option<LocalClusterRuntime>, Te
         .postgres_url()
         .ok_or_else(|| ServerE2eInvariantError::new("postgres url was unavailable"))?;
     let migration_pool = PgPoolOptions::new()
-        .max_connections(1)
+        // The migration helper holds its advisory-lock transaction while
+        // reading and applying through the same pool, so it needs one additional
+        // pooled connection for migration work.
+        .max_connections(2)
         .connect(&postgres_url)
-        .await?;
-    apply_database_migrations(&migration_pool).await?;
+        .await
+        .map_err(|error| IoError::other(format!("connect migration pool: {error}")))?;
+    apply_database_migrations(&migration_pool)
+        .await
+        .map_err(|error| IoError::other(format!("apply cluster fixture migrations: {error}")))?;
     migration_pool.close().await;
     let redis_url = services
         .redis_url()
@@ -305,7 +311,10 @@ async fn k8s_cluster_native_xet_sparse_mutation_flow_uses_s3_postgres_and_garnet
         let local_runtime = if let Some(config) = ClusterConfig::from_env() {
             (config, None)
         } else {
-            let Some(runtime) = start_local_cluster_runtime().await? else {
+            let Some(runtime) = start_local_cluster_runtime()
+                .await
+                .map_err(|error| IoError::other(format!("start local cluster fixture: {error}")))?
+            else {
                 return Ok(());
             };
             (runtime.config.clone(), Some(runtime))
@@ -327,7 +336,8 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
     let postgres_pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&config.postgres_url)
-        .await?;
+        .await
+        .map_err(|error| IoError::other(format!("connect E2E inventory pool: {error}")))?;
     let object_store = S3ObjectStore::new(config.s3_config.clone())?;
 
     let before_storage = storage_inventory(&object_store)?;
@@ -403,8 +413,14 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
     };
     let mut asset_runs = Vec::with_capacity(scenarios.len());
     for scenario in scenarios {
-        let asset_run =
-            exercise_asset_scenario(&asset_harness, scenario, previous_snapshot).await?;
+        let asset_run = exercise_asset_scenario(&asset_harness, scenario, previous_snapshot)
+            .await
+            .map_err(|error| {
+                IoError::other(format!(
+                    "asset scenario {} failed: {error}",
+                    scenario.logical_name
+                ))
+            })?;
         previous_snapshot = InventorySnapshot {
             storage: storage_inventory(&object_store)?,
             metadata: metadata_inventory(&postgres_pool).await?,
@@ -605,7 +621,8 @@ async fn exercise_asset_scenario(
         &format!("{}-first.bin", scenario.logical_name),
         &first_bytes,
     )
-    .await?;
+    .await
+    .map_err(|error| IoError::other(format!("upload first version: {error}")))?;
     let after_first_storage = storage_inventory(harness.object_store)?;
     let after_first_metadata = metadata_inventory(harness.postgres_pool).await?;
 
@@ -614,7 +631,8 @@ async fn exercise_asset_scenario(
         &format!("{}-second.bin", scenario.logical_name),
         &second_bytes,
     )
-    .await?;
+    .await
+    .map_err(|error| IoError::other(format!("upload second version: {error}")))?;
     let after_second_storage = storage_inventory(harness.object_store)?;
     let after_second_metadata = metadata_inventory(harness.postgres_pool).await?;
     let latest_version = latest_version_identity(harness.postgres_pool).await?;
@@ -803,23 +821,28 @@ async fn metadata_inventory(pool: &PgPool) -> Result<MetadataInventory, TestErro
             "SELECT COUNT(*) FROM shardline_file_records WHERE record_kind = 'latest'",
         )
         .fetch_one(pool)
-        .await?,
+        .await
+        .map_err(|error| IoError::other(format!("count latest file records: {error}")))?,
         version_records: query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM shardline_file_records WHERE record_kind = 'version'",
         )
         .fetch_one(pool)
-        .await?,
+        .await
+        .map_err(|error| IoError::other(format!("count version file records: {error}")))?,
         reconstructions: query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM shardline_file_reconstructions",
         )
         .fetch_one(pool)
-        .await?,
+        .await
+        .map_err(|error| IoError::other(format!("count file reconstructions: {error}")))?,
         xorbs: query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_stored_objects")
             .fetch_one(pool)
-            .await?,
+            .await
+            .map_err(|error| IoError::other(format!("count stored objects: {error}")))?,
         dedupe_shards: query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_dedupe_shards")
             .fetch_one(pool)
-            .await?,
+            .await
+            .map_err(|error| IoError::other(format!("count dedupe shards: {error}")))?,
     })
 }
 
@@ -832,7 +855,8 @@ async fn latest_version_identity(pool: &PgPool) -> Result<StoredVersionIdentity,
          LIMIT 1",
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .map_err(|error| IoError::other(format!("read latest version identity: {error}")))?;
     Ok(StoredVersionIdentity {
         file_id: row.0,
         content_hash: row.1,

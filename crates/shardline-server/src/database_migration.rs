@@ -233,6 +233,11 @@ pub enum DatabaseMigrationError {
     /// The database URL was empty.
     #[error("database URL must not be empty")]
     EmptyDatabaseUrl,
+    /// The migration pool cannot provide a lock connection and a work connection.
+    #[error(
+        "database migration pool must allow at least two connections; configured maximum is {configured}"
+    )]
+    MigrationPoolCapacity { configured: u32 },
     /// Postgres access failed.
     #[error(transparent)]
     Sqlx(#[from] SqlxError),
@@ -576,11 +581,18 @@ pub const fn bundled_database_migrations() -> &'static [DatabaseMigration] {
 
 /// Applies pending Shardline migrations to an existing Postgres pool.
 ///
+/// The pool must allow at least two connections. The migration lock is held on
+/// one connection while migration reads and writes use another.
+///
 /// # Errors
 ///
 /// Returns [`DatabaseMigrationError`] when the migration history is inconsistent or
 /// when Postgres rejects the schema updates.
 pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
+    let configured = pool.options().get_max_connections();
+    if configured < 2 {
+        return Err(DatabaseMigrationError::MigrationPoolCapacity { configured });
+    }
     ensure_migration_history_table(pool).await?;
     let _migration_guard = acquire_migration_lock(pool).await?;
     verify_applied_migrations(pool).await?;
@@ -2694,15 +2706,15 @@ fn migration_checksum(migration: &DatabaseMigration) -> String {
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use sqlx::{PgPool, Row, query};
+    use sqlx::{PgPool, Row, postgres::PgPoolOptions, query};
 
     use super::{
         DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand,
         DatabaseMigrationError, DatabaseMigrationOptions, DatabaseMigrationReport,
-        DatabaseMigrationStatusEntry, acquire_migration_lock, bundled_database_migrations,
-        ensure_migration_history_table, lock_authoritative_operation, migration_by_version,
-        migration_checksum, migration_fault_injection, repair_reliability_operation,
-        run_database_migration,
+        DatabaseMigrationStatusEntry, acquire_migration_lock, apply_database_migrations,
+        bundled_database_migrations, ensure_migration_history_table, lock_authoritative_operation,
+        migration_by_version, migration_checksum, migration_fault_injection,
+        repair_reliability_operation, run_database_migration,
     };
 
     async fn run_test_migration_command(
@@ -2715,6 +2727,20 @@ mod tests {
 
     fn quoted_identifier(identifier: &str) -> String {
         format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+
+    #[tokio::test]
+    async fn apply_database_migrations_rejects_pool_that_cannot_make_progress() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let result = apply_database_migrations(&pool).await;
+        assert!(matches!(
+            result,
+            Err(DatabaseMigrationError::MigrationPoolCapacity { configured: 1 })
+        ));
+        pool.close().await;
     }
 
     #[tokio::test]

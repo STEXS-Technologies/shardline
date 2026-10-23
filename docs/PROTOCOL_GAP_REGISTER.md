@@ -19,7 +19,7 @@ deliberately changed.
 | Priority | Surface | Remaining qualification | Required proof |
 | --- | --- | --- | --- |
 | P2 | Live provider bridge | Live GitHub/Gitea provider tests require external credentials and repositories and are not part of the ordinary local run. | Execute the explicitly selected live tests with isolated test repositories and verify identity, token refresh, webhook and cleanup behavior. |
-| P2 | Deployment clients | Kubernetes/kind and other deployment-specific E2E targets need their dedicated fixtures; a local protocol pass does not qualify those environments. | Run the documented deployment suites and review their actual results, including all prerequisite and skip reporting. |
+| P2 | Deployment clients | The disposable kind smoke and local Docker-backed cluster protocol flow pass, but `k8s_cluster_protocol_e2e` has not been run against an actual deployed cluster endpoint. | Run `k8s_cluster_protocol_e2e` with `SHARDLINE_K8S_E2E_*` configured for the target deployment, then review its backend, readiness, sparse-transfer and metrics results. |
 | P1 | S3 multipart checksum deployment coverage | Composite checksums (CRC32, CRC32C, SHA-1 and SHA-256) and FULL_OBJECT checksums (CRC32, CRC32C and CRC64NVME) validate before publication. The native Botocore restart matrix passes all these algorithms with PostgreSQL metadata and MinIO object storage, including `ListParts`, `GetObjectAttributes`, and checksum-enabled reads. Production S3 providers still need equivalent deployment coverage. | Repeat the native client matrix against each supported production S3 provider and record provider-specific compatibility results. |
 
 ## Clarifications
@@ -53,7 +53,16 @@ deliberately changed.
   kind cluster. It checked split API/transfer traffic, authenticated Xorb upload
   and range download, then deleted one pod from each role and verified readiness
   and persisted data after recovery. This qualifies that smoke profile only; it
-  does not qualify the separate cluster protocol suite or live provider bridge.
+  does not qualify a full protocol run against a deployed cluster or the live
+  provider bridge.
+- On 2026-10-23, `cargo test --manifest-path e2e/Cargo.toml --test
+  k8s_cluster_protocol_e2e -- --ignored --nocapture` passed using its disposable
+  Docker PostgreSQL, MinIO and Redis services. The native Xet flow uploaded
+  original and sparse-mutated files, verified deduplication and storage metadata,
+  measured cold and warm transfer bytes, then confirmed reconstruction caching.
+  An initial pool timeout exposed the fixture's one-connection migration pool;
+  the fixture now uses the two connections required by the migration helper,
+  which fails fast if given a smaller pool.
 
 For the current supported route contract, use [Compatibility Status](COMPATIBILITY_STATUS.md),
 [Protocol Frontends](PROTOCOLS.md), [S3 Frontend](S3_FRONTEND.md), and
