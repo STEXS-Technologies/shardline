@@ -9,3 +9,13 @@ dist-*
 
 # Local audit evidence is never part of the container build context.
 audit-results-local
+benchmark-results-local
+reliability-soak-results-local
+
+# Agent scratch files, repository graph output, and transient comparison work
+# are local tooling artifacts and are not inputs to the image build.
+.codex
+.compare*
+graphify-out
+.graphifyignore
+AGENTS.md
