@@ -69,7 +69,7 @@ access-key and Bearer auth forms.
 | `PutObject` | streamed through the CDC ingestor; body ≤ `SHARDLINE_S3_MAX_PART_BYTES` (default 1 GiB); larger must use multipart |
 | `GetObject` (+ `Range`) | existing range path; `bytes=a-b`, `bytes=a-`, `bytes=-N`; 206 / 416 |
 | `HeadObject` | size + ETag |
-| `GetObjectAttributes` (partial) | `GET ?attributes` with `x-amz-object-attributes`; selected ETag and object size from one verified snapshot. `StorageClass` is omitted for STANDARD objects as S3 does. Newly completed multipart uploads report `ObjectParts.PartsCount`; checksum-negotiated CRC32 COMPOSITE uploads also report verified per-part sizes and checksums. Unnegotiated and legacy multipart objects report the count only. Legacy objects with unknown multipart counts return `NotImplemented` rather than guessing. |
+| `GetObjectAttributes` (partial) | `GET ?attributes` with `x-amz-object-attributes`; selected ETag and object size from one verified snapshot. `StorageClass` is omitted for STANDARD objects as S3 does. Newly completed multipart uploads report `ObjectParts.PartsCount`; checksum-negotiated CRC32 or CRC32C COMPOSITE uploads also report verified per-part sizes and checksums. Unnegotiated and legacy multipart objects report the count only. Legacy objects with unknown multipart counts return `NotImplemented` rather than guessing. |
 | `DeleteObject` | removes direct object **and** record (S3 semantics) |
 | `CreateMultipartUpload` | `POST /{key}?uploads` |
 | `UploadPart` | `PUT ?partNumber&uploadId` → part file |
@@ -93,7 +93,7 @@ access-key and Bearer auth forms.
 
 ### Planned (near-term follow-up)
 
-The remaining protocol work includes checksum modes beyond CRC32 COMPOSITE and
+The remaining protocol work includes checksum modes beyond CRC32/CRC32C COMPOSITE and
 the unsupported operations below. The current partial attributes response follows the field-selection shape of the
 [S3 GetObjectAttributes API](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html).
 Version selectors and unsupported encryption, payer and expected-owner options
@@ -109,23 +109,31 @@ parameter is not accepted and returns `501 NotImplemented`.
 | Object tagging / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
 
-`CreateMultipartUpload` supports negotiated `CRC32` with the default or explicit
-`COMPOSITE` type. `UploadPart` validates the required CRC32 payload checksum, and
+`CreateMultipartUpload` supports negotiated `CRC32` and `CRC32C` with the default
+or explicit `COMPOSITE` type. `UploadPart` validates the required negotiated
+payload checksum, and
 `CompleteMultipartUpload` verifies each echoed part checksum against the bytes
 before publication. The verified per-part sizes and checksums are retained with
 the completed object and returned by `GetObjectAttributes`; no database schema
-migration is required. Other multipart algorithms and `FULL_OBJECT` checksum
-mode return `501 NotImplemented`. Direct checksum headers on single `PutObject`
+migration is required. Legacy CRC32 multipart metadata remains readable. Other
+multipart algorithms and `FULL_OBJECT` checksum mode return `501 NotImplemented`.
+The in-progress `ListParts` response does not yet include checksum fields.
+Direct checksum headers on single `PutObject`
 are validated for that request but are not yet retained for later metadata reads.
+During a rolling deployment, wait until every S3 replica runs the upgraded
+version before clients negotiate CRC32C; older replicas do not recognize that mode.
+Existing CRC32 uploads and objects remain supported throughout the rollout.
 Existing objects have no durable part-count metadata; those counts remain unknown
 and are not inferred from CDC chunks or legacy records. Botocore 1.x real-client
-coverage exercises negotiated multipart CRC32, completion checksums, and the
-modeled part and object checksum attributes. A single-PUT object has no
+coverage exercises negotiated multipart CRC32 and its completion and attribute
+responses. The Rust HTTP integration suite covers CRC32C negotiation, checksum
+failure and retry, completion, attributes, restart reads, and byte-for-byte object
+reads. A single-PUT object has no
 `ObjectParts` response.
 
 For general-purpose S3 buckets, AWS only returns individual `ObjectParts.Part`
 entries when an additional checksum was applied to the object. Shardline follows
-that behavior: negotiated CRC32 COMPOSITE objects include checksummed parts;
+that behavior: negotiated CRC32/CRC32C COMPOSITE objects include checksummed parts;
 unnegotiated and legacy multipart objects return the verified total count only.
 
 ## Protocol deviations (documented)

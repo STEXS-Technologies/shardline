@@ -486,9 +486,24 @@ impl CompleteMultipartUploadResult {
     /// envelope.
     #[must_use]
     pub fn to_xml(&self) -> String {
-        let checksum = self.checksum_crc32.as_ref().map_or_else(String::new, |value| {
+        self.to_xml_with_checksum(
+            self.checksum_crc32
+                .as_deref()
+                .map(|value| ("ChecksumCRC32", value)),
+        )
+    }
+
+    /// Serializes a CRC32C composite checksum without changing this public
+    /// response type's field layout.
+    #[must_use]
+    pub fn to_crc32c_xml(&self, checksum_crc32c: &str) -> String {
+        self.to_xml_with_checksum(Some(("ChecksumCRC32C", checksum_crc32c)))
+    }
+
+    fn to_xml_with_checksum(&self, checksum: Option<(&str, &str)>) -> String {
+        let checksum = checksum.map_or_else(String::new, |(field, value)| {
             format!(
-                "  <ChecksumCRC32>{}</ChecksumCRC32>\n  <ChecksumType>COMPOSITE</ChecksumType>\n",
+                "  <{field}>{}</{field}>\n  <ChecksumType>COMPOSITE</ChecksumType>\n",
                 xml_escape(value)
             )
         });
@@ -556,6 +571,8 @@ enum CompleteXmlElement {
     ETag,
     /// A `ChecksumCRC32` element.
     ChecksumCRC32,
+    /// A `ChecksumCRC32C` element.
+    ChecksumCRC32C,
     /// The `Delete` root element of a `DeleteObjects` request.
     Delete,
     /// The `Object` element of a `DeleteObjects` request.
@@ -577,6 +594,7 @@ impl CompleteXmlElement {
             "PartNumber" => Self::PartNumber,
             "ETag" => Self::ETag,
             "ChecksumCRC32" => Self::ChecksumCRC32,
+            "ChecksumCRC32C" => Self::ChecksumCRC32C,
             "Delete" => Self::Delete,
             "Object" => Self::Object,
             "Key" => Self::Key,
@@ -684,6 +702,7 @@ pub struct CompleteParts {
     part_numbers: BTreeSet<u32>,
     etags: BTreeMap<u32, Option<String>>,
     checksums_crc32: BTreeMap<u32, Option<String>>,
+    checksums_crc32c: BTreeMap<u32, Option<String>>,
 }
 
 impl CompleteParts {
@@ -703,6 +722,14 @@ impl CompleteParts {
     #[must_use]
     pub fn checksum_crc32(&self, part_number: u32) -> Option<&str> {
         self.checksums_crc32
+            .get(&part_number)
+            .and_then(Option::as_deref)
+    }
+
+    /// Returns the echoed CRC32C checksum for a part, if supplied.
+    #[must_use]
+    pub fn checksum_crc32c(&self, part_number: u32) -> Option<&str> {
+        self.checksums_crc32c
             .get(&part_number)
             .and_then(Option::as_deref)
     }
@@ -746,6 +773,7 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
     let mut number = None;
     let mut etag = None;
     let mut checksum_crc32 = None;
+    let mut checksum_crc32c = None;
     let mut field: Option<(CompleteXmlElement, String)> = None;
     loop {
         match scanner.next_event()? {
@@ -762,15 +790,21 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
                 number = None;
                 etag = None;
                 checksum_crc32 = None;
+                checksum_crc32c = None;
             }
             XmlEvent::Open(
                 element @ (CompleteXmlElement::PartNumber
                 | CompleteXmlElement::ETag
-                | CompleteXmlElement::ChecksumCRC32),
+                | CompleteXmlElement::ChecksumCRC32
+                | CompleteXmlElement::ChecksumCRC32C),
             ) if in_part && field.is_none() => {
                 if (element == CompleteXmlElement::PartNumber && number.is_some())
                     || (element == CompleteXmlElement::ETag && etag.is_some())
                     || (element == CompleteXmlElement::ChecksumCRC32 && checksum_crc32.is_some())
+                    || (element == CompleteXmlElement::ChecksumCRC32C && checksum_crc32c.is_some())
+                    || ((element == CompleteXmlElement::ChecksumCRC32 && checksum_crc32c.is_some())
+                        || (element == CompleteXmlElement::ChecksumCRC32C
+                            && checksum_crc32.is_some()))
                 {
                     return Err(crate::S3Error::invalid_part());
                 }
@@ -786,7 +820,8 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
             XmlEvent::Close(
                 element @ (CompleteXmlElement::PartNumber
                 | CompleteXmlElement::ETag
-                | CompleteXmlElement::ChecksumCRC32),
+                | CompleteXmlElement::ChecksumCRC32
+                | CompleteXmlElement::ChecksumCRC32C),
             ) => {
                 let (opened, text) = field.take().ok_or_else(crate::S3Error::invalid_part)?;
                 if opened != element {
@@ -814,7 +849,11 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
                     {
                         return Err(crate::S3Error::invalid_part());
                     }
-                    checksum_crc32 = Some(value);
+                    if element == CompleteXmlElement::ChecksumCRC32 {
+                        checksum_crc32 = Some(value);
+                    } else {
+                        checksum_crc32c = Some(value);
+                    }
                 }
             }
             XmlEvent::Close(CompleteXmlElement::Part) if in_part && field.is_none() => {
@@ -825,6 +864,9 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
                 parts.part_numbers.insert(number);
                 parts.etags.insert(number, etag.take());
                 parts.checksums_crc32.insert(number, checksum_crc32.take());
+                parts
+                    .checksums_crc32c
+                    .insert(number, checksum_crc32c.take());
                 in_part = false;
             }
             XmlEvent::Close(CompleteXmlElement::CompleteMultipartUpload)
@@ -1325,6 +1367,31 @@ mod tests {
         assert_eq!(parts.part_numbers(), &BTreeSet::from([1, 2]));
         assert_eq!(parts.etag(1), Some("\"wrong\""));
         assert_eq!(parts.etag(2), Some("\"wrong-again\""));
+    }
+
+    #[test]
+    fn completion_parts_parse_crc32c_and_reject_mixed_algorithms() {
+        let body = "<Part><PartNumber>1</PartNumber><ETag>\"etag\"</ETag><ChecksumCRC32C>EjRWeA==</ChecksumCRC32C></Part>";
+        let parts = super::parse_complete_multipart_parts(body).unwrap();
+        assert_eq!(parts.checksum_crc32c(1), Some("EjRWeA=="));
+        assert_eq!(parts.checksum_crc32(1), None);
+
+        let mixed = "<Part><PartNumber>1</PartNumber><ChecksumCRC32>AAAAAA==</ChecksumCRC32><ChecksumCRC32C>AAAAAA==</ChecksumCRC32C></Part>";
+        assert!(super::parse_complete_multipart_parts(mixed).is_err());
+    }
+
+    #[test]
+    fn completion_result_serializes_crc32c_composite_checksum() {
+        let result = super::CompleteMultipartUploadResult {
+            bucket: "bucket".to_owned(),
+            key: "key".to_owned(),
+            etag: "etag".to_owned(),
+            checksum_crc32: None,
+        };
+        let xml = result.to_crc32c_xml("EjRWeA==-1");
+        assert!(xml.contains("<ChecksumCRC32C>EjRWeA==-1</ChecksumCRC32C>"));
+        assert!(xml.contains("<ChecksumType>COMPOSITE</ChecksumType>"));
+        assert!(!xml.contains("<ChecksumCRC32>"));
     }
     #[test]
     fn completion_etags_decode_once_and_reject_ambiguous_fields() {

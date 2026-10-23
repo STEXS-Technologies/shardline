@@ -108,8 +108,10 @@ pub(super) async fn get(
     {
         write!(
             xml,
-            "<Checksum><ChecksumCRC32>{}</ChecksumCRC32><ChecksumType>COMPOSITE</ChecksumType></Checksum>",
-            xml_escape(&manifest.checksum_crc32)
+            "<Checksum><{}>{}</{}><ChecksumType>COMPOSITE</ChecksumType></Checksum>",
+            manifest.algorithm.xml_field(),
+            xml_escape(&manifest.checksum_value),
+            manifest.algorithm.xml_field()
         )
         .map_err(|_format_error| S3Error::internal())?;
     }
@@ -123,6 +125,9 @@ pub(super) async fn get(
     if let Some(part_count) = part_count.filter(|count| *count > 0) {
         let max_parts = max_parts.unwrap_or(1000);
         let part_number_marker = part_number_marker.unwrap_or(0);
+        let checksum_field = checksum_manifest
+            .as_ref()
+            .map(|manifest| manifest.algorithm.xml_field());
         let page = checksum_manifest.as_ref().map(|manifest| {
             let mut parts = manifest
                 .parts
@@ -155,12 +160,17 @@ pub(super) async fn get(
         )
         .map_err(|_format_error| S3Error::internal())?;
         for part in page {
+            let Some(checksum_field) = checksum_field else {
+                return Err(S3Error::internal());
+            };
             write!(
                 xml,
-                "<Part><PartNumber>{}</PartNumber><Size>{}</Size><ChecksumCRC32>{}</ChecksumCRC32></Part>",
+                "<Part><PartNumber>{}</PartNumber><Size>{}</Size><{}>{}</{}></Part>",
                 part.part_number,
                 part.size_bytes,
-                xml_escape(&part.checksum_crc32)
+                checksum_field,
+                xml_escape(&part.checksum_value),
+                checksum_field
             )
             .map_err(|_format_error| S3Error::internal())?;
         }

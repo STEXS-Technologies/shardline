@@ -13,17 +13,64 @@ use crate::{ServerError, upload_ingest::RequestBodyReader};
 const MULTIPART_CONFIG_KEY: &str = "shardline-internal-s3-multipart-checksum-v1";
 pub(super) const MULTIPART_MANIFEST_KEY: &str = "shardline-internal-s3-checksum-v1";
 
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) enum MultipartChecksumAlgorithm {
+    #[serde(rename = "CRC32")]
+    Crc32,
+    #[serde(rename = "CRC32C")]
+    Crc32c,
+}
+
+impl MultipartChecksumAlgorithm {
+    pub(super) fn from_s3_name(name: &str) -> Option<Self> {
+        match name {
+            "CRC32" => Some(Self::Crc32),
+            "CRC32C" => Some(Self::Crc32c),
+            _ => None,
+        }
+    }
+
+    pub(super) const fn s3_name(self) -> &'static str {
+        match self {
+            Self::Crc32 => "CRC32",
+            Self::Crc32c => "CRC32C",
+        }
+    }
+
+    pub(super) const fn header(self) -> &'static str {
+        match self {
+            Self::Crc32 => "x-amz-checksum-crc32",
+            Self::Crc32c => "x-amz-checksum-crc32c",
+        }
+    }
+
+    pub(super) const fn xml_field(self) -> &'static str {
+        match self {
+            Self::Crc32 => "ChecksumCRC32",
+            Self::Crc32c => "ChecksumCRC32C",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct MultipartPartChecksum {
     pub(super) part_number: u32,
     pub(super) size_bytes: u64,
-    pub(super) checksum_crc32: String,
+    #[serde(alias = "checksum_crc32")]
+    pub(super) checksum_value: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct MultipartChecksumManifest {
-    pub(super) checksum_crc32: String,
+    #[serde(default = "default_multipart_checksum_algorithm")]
+    pub(super) algorithm: MultipartChecksumAlgorithm,
+    #[serde(alias = "checksum_crc32")]
+    pub(super) checksum_value: String,
     pub(super) parts: Vec<MultipartPartChecksum>,
+}
+
+const fn default_multipart_checksum_algorithm() -> MultipartChecksumAlgorithm {
+    MultipartChecksumAlgorithm::Crc32
 }
 
 pub(super) fn is_internal_metadata(name: &str) -> bool {
@@ -34,7 +81,7 @@ pub(super) fn is_internal_metadata(name: &str) -> bool {
 pub(super) fn negotiate_multipart(
     headers: &HeaderMap,
     user_metadata: &mut Vec<(String, String)>,
-) -> Result<bool, shardline_s3_adapter::S3Error> {
+) -> Result<Option<MultipartChecksumAlgorithm>, shardline_s3_adapter::S3Error> {
     let algorithm = singleton_header(headers, "x-amz-checksum-algorithm")?;
     let checksum_type = singleton_header(headers, "x-amz-checksum-type")?;
     let Some(algorithm) = algorithm else {
@@ -43,11 +90,11 @@ pub(super) fn negotiate_multipart(
                 "Checksum type requires a checksum algorithm",
             ));
         }
-        return Ok(false);
+        return Ok(None);
     };
-    if algorithm != "CRC32" {
+    let Some(algorithm) = MultipartChecksumAlgorithm::from_s3_name(algorithm) else {
         return Err(shardline_s3_adapter::S3Error::not_implemented());
-    }
+    };
     if checksum_type.is_some_and(|value| value != "COMPOSITE") {
         return Err(shardline_s3_adapter::S3Error::not_implemented());
     }
@@ -57,19 +104,28 @@ pub(super) fn negotiate_multipart(
     user_metadata.retain(|(name, _)| !name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY));
     user_metadata.push((
         MULTIPART_CONFIG_KEY.to_owned(),
-        "CRC32:COMPOSITE".to_owned(),
+        format!("{}:COMPOSITE", algorithm.s3_name()),
     ));
-    Ok(true)
+    Ok(Some(algorithm))
 }
 
-pub(super) fn has_multipart_negotiation(user_metadata: &[(String, String)]) -> bool {
-    user_metadata.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY) && value == "CRC32:COMPOSITE"
+pub(super) fn multipart_checksum_algorithm(
+    user_metadata: &[(String, String)],
+) -> Option<MultipartChecksumAlgorithm> {
+    user_metadata.iter().find_map(|(name, value)| {
+        if !name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY) {
+            return None;
+        }
+        let (algorithm, checksum_type) = value.split_once(':')?;
+        (checksum_type == "COMPOSITE")
+            .then(|| MultipartChecksumAlgorithm::from_s3_name(algorithm))
+            .flatten()
     })
 }
 
 pub(super) fn attach_multipart_manifest(
     user_metadata: &mut Vec<(String, String)>,
+    algorithm: MultipartChecksumAlgorithm,
     parts: Vec<MultipartPartChecksum>,
 ) -> Result<MultipartChecksumManifest, shardline_s3_adapter::S3Error> {
     if parts.is_empty() || parts.len() > 10_000 {
@@ -79,23 +135,24 @@ pub(super) fn attach_multipart_manifest(
     let mut checksum_bytes = Vec::with_capacity(parts.len().saturating_mul(4));
     for part in &parts {
         let decoded = STANDARD
-            .decode(&part.checksum_crc32)
+            .decode(&part.checksum_value)
             .map_err(|_| shardline_s3_adapter::S3Error::invalid_part())?;
         if part.part_number == 0
             || part.part_number > 10_000
             || part.part_number <= previous
             || decoded.len() != 4
-            || STANDARD.encode(&decoded) != part.checksum_crc32
+            || STANDARD.encode(&decoded) != part.checksum_value
         {
             return Err(shardline_s3_adapter::S3Error::invalid_part());
         }
         previous = part.part_number;
         checksum_bytes.extend_from_slice(&decoded);
     }
-    let mut digest = DigestState::new("x-amz-checksum-crc32");
+    let mut digest = DigestState::new(algorithm.header());
     digest.update(&checksum_bytes);
     let manifest = MultipartChecksumManifest {
-        checksum_crc32: format!("{}-{}", digest.encoded(), parts.len()),
+        algorithm,
+        checksum_value: format!("{}-{}", digest.encoded(), parts.len()),
         parts,
     };
     let value = serde_json::to_string(&manifest)
@@ -134,13 +191,13 @@ pub(super) fn read_multipart_manifest(
         let mut checksum_bytes = Vec::with_capacity(manifest.parts.len().saturating_mul(4));
         for part in &manifest.parts {
             let decoded = STANDARD
-                .decode(&part.checksum_crc32)
+                .decode(&part.checksum_value)
                 .map_err(|_| shardline_s3_adapter::S3Error::internal())?;
             if part.part_number == 0
                 || part.part_number > 10_000
                 || part.part_number <= previous
                 || decoded.len() != 4
-                || STANDARD.encode(&decoded) != part.checksum_crc32
+                || STANDARD.encode(&decoded) != part.checksum_value
             {
                 return Err(shardline_s3_adapter::S3Error::internal());
             }
@@ -155,9 +212,9 @@ pub(super) fn read_multipart_manifest(
         {
             return Err(shardline_s3_adapter::S3Error::internal());
         }
-        let mut digest = DigestState::new("x-amz-checksum-crc32");
+        let mut digest = DigestState::new(manifest.algorithm.header());
         digest.update(&checksum_bytes);
-        if manifest.checksum_crc32 != format!("{}-{}", digest.encoded(), manifest.parts.len()) {
+        if manifest.checksum_value != format!("{}-{}", digest.encoded(), manifest.parts.len()) {
             return Err(shardline_s3_adapter::S3Error::internal());
         }
     }
@@ -323,6 +380,7 @@ pub(super) fn verify_multipart_part_checksums(
     body: RequestBodyReader,
     part_sizes: Vec<u64>,
     expected: Vec<String>,
+    algorithm: MultipartChecksumAlgorithm,
 ) -> Result<RequestBodyReader, shardline_s3_adapter::S3Error> {
     if part_sizes.is_empty() || part_sizes.len() != expected.len() {
         return Err(shardline_s3_adapter::S3Error::invalid_part());
@@ -334,9 +392,10 @@ pub(super) fn verify_multipart_part_checksums(
             expected,
             0_usize,
             0_u64,
-            DigestState::new("x-amz-checksum-crc32"),
+            algorithm,
+            DigestState::new(algorithm.header()),
         ),
-        |(mut body, part_sizes, expected, mut index, mut consumed, mut digest)| async move {
+        |(mut body, part_sizes, expected, mut index, mut consumed, algorithm, mut digest)| async move {
             loop {
                 while index < part_sizes.len() && part_sizes[index] == 0 {
                     if digest.encoded() != expected[index] {
@@ -344,7 +403,7 @@ pub(super) fn verify_multipart_part_checksums(
                     }
                     index += 1;
                     consumed = 0;
-                    digest = DigestState::new("x-amz-checksum-crc32");
+                    digest = DigestState::new(algorithm.header());
                 }
                 match body.next_bytes().await? {
                     Some(bytes) => {
@@ -376,12 +435,14 @@ pub(super) fn verify_multipart_part_checksums(
                                 }
                                 index += 1;
                                 consumed = 0;
-                                digest = DigestState::new("x-amz-checksum-crc32");
+                                digest = DigestState::new(algorithm.header());
                             }
                         }
                         return Ok(Some((
                             bytes,
-                            (body, part_sizes, expected, index, consumed, digest),
+                            (
+                                body, part_sizes, expected, index, consumed, algorithm, digest,
+                            ),
                         )));
                     }
                     None => {
@@ -391,7 +452,7 @@ pub(super) fn verify_multipart_part_checksums(
                             }
                             index += 1;
                             consumed = 0;
-                            digest = DigestState::new("x-amz-checksum-crc32");
+                            digest = DigestState::new(algorithm.header());
                         }
                         if index != part_sizes.len() || consumed != 0 {
                             return Err(ServerError::RequestBodyChecksumMismatch);
@@ -431,8 +492,8 @@ pub(super) fn reject_unverified_headers(
 #[cfg(test)]
 mod tests {
     use super::{
-        DigestState, MultipartPartChecksum, PayloadChecksum, attach_multipart_manifest, parse,
-        read_multipart_manifest,
+        DigestState, MultipartChecksumAlgorithm, MultipartPartChecksum, PayloadChecksum,
+        attach_multipart_manifest, negotiate_multipart, parse, read_multipart_manifest,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -489,10 +550,11 @@ mod tests {
         let part_checksum = STANDARD.encode([1_u8, 2, 3, 4]);
         let manifest = attach_multipart_manifest(
             &mut metadata,
+            MultipartChecksumAlgorithm::Crc32,
             vec![MultipartPartChecksum {
                 part_number: 1,
                 size_bytes: 17,
-                checksum_crc32: part_checksum,
+                checksum_value: part_checksum,
             }],
         )
         .unwrap();
@@ -504,8 +566,61 @@ mod tests {
         let mut tampered = metadata;
         let (_, value) = tampered.first_mut().unwrap();
         let mut manifest: super::MultipartChecksumManifest = serde_json::from_str(value).unwrap();
-        manifest.checksum_crc32 = format!("{}-1", STANDARD.encode([0_u8, 0, 0, 0]));
+        manifest.checksum_value = format!("{}-1", STANDARD.encode([0_u8, 0, 0, 0]));
         *value = serde_json::to_string(&manifest).unwrap();
         assert!(read_multipart_manifest(&tampered, 1, 17).is_err());
+    }
+
+    #[test]
+    fn multipart_manifest_reads_legacy_crc32_metadata() {
+        let part = STANDARD.encode([1_u8, 2, 3, 4]);
+        let mut digest = DigestState::new("x-amz-checksum-crc32");
+        digest.update(&[1, 2, 3, 4]);
+        let legacy = format!(
+            r#"{{"checksum_crc32":"{}-1","parts":[{{"part_number":1,"size_bytes":17,"checksum_crc32":"{}"}}]}}"#,
+            digest.encoded(),
+            part
+        );
+        let metadata = vec![(super::MULTIPART_MANIFEST_KEY.to_owned(), legacy)];
+        let manifest = read_multipart_manifest(&metadata, 1, 17)
+            .unwrap()
+            .expect("legacy manifest should remain readable");
+        assert_eq!(manifest.algorithm, MultipartChecksumAlgorithm::Crc32);
+        assert_eq!(manifest.checksum_value, format!("{}-1", digest.encoded()));
+        assert_eq!(manifest.parts[0].checksum_value, part);
+    }
+
+    #[test]
+    fn multipart_crc32c_negotiates_and_persists_algorithm() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-amz-checksum-algorithm",
+            HeaderValue::from_static("CRC32C"),
+        );
+        let mut metadata = Vec::new();
+        assert_eq!(
+            negotiate_multipart(&headers, &mut metadata).unwrap(),
+            Some(MultipartChecksumAlgorithm::Crc32c)
+        );
+        assert_eq!(
+            super::multipart_checksum_algorithm(&metadata),
+            Some(MultipartChecksumAlgorithm::Crc32c)
+        );
+
+        let manifest = attach_multipart_manifest(
+            &mut metadata,
+            MultipartChecksumAlgorithm::Crc32c,
+            vec![MultipartPartChecksum {
+                part_number: 1,
+                size_bytes: 9,
+                checksum_value: STANDARD.encode([0x12_u8, 0x34, 0x56, 0x78]),
+            }],
+        )
+        .unwrap();
+        assert_eq!(manifest.algorithm, MultipartChecksumAlgorithm::Crc32c);
+        assert_eq!(
+            read_multipart_manifest(&metadata, 1, 9).unwrap(),
+            Some(manifest)
+        );
     }
 }

@@ -151,6 +151,115 @@ async fn exercise(database: Option<&str>) {
         xml.contains("<PartNumberMarker>0</PartNumberMarker>"),
         "{xml}"
     );
+
+    let created = client
+        .post(format!("{url}?uploads"))
+        .bearer_auth(&credential)
+        .header("x-amz-checksum-algorithm", "CRC32C")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_xml = created.text().await.unwrap();
+    assert!(created_xml.contains("<ChecksumAlgorithm>CRC32C</ChecksumAlgorithm>"));
+    let upload_id = xml_tag(&created_xml, "UploadId");
+    let crc32c_part = b"CRC32C multipart payload";
+    let mut digest = crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi);
+    digest.update(crc32c_part);
+    let [_, _, _, _, p0, p1, p2, p3] = digest.finalize().to_be_bytes();
+    let part_checksum =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [p0, p1, p2, p3]);
+    let wrong_part_checksum =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0_u8, 0, 0, 0]);
+    let rejected_part = client
+        .put(format!("{url}?partNumber=1&uploadId={upload_id}"))
+        .bearer_auth(&credential)
+        .header("x-amz-checksum-crc32c", &wrong_part_checksum)
+        .body(crc32c_part.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected_part.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        rejected_part
+            .text()
+            .await
+            .unwrap()
+            .contains("<Code>BadDigest</Code>")
+    );
+    let uploaded = client
+        .put(format!("{url}?partNumber=1&uploadId={upload_id}"))
+        .bearer_auth(&credential)
+        .header("x-amz-checksum-crc32c", &part_checksum)
+        .body(crc32c_part.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+    let part_etag = uploaded.headers()["etag"].to_str().unwrap().to_owned();
+    let rejected = client
+        .post(format!("{url}?uploadId={upload_id}"))
+        .bearer_auth(&credential)
+        .body(format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag><ChecksumCRC32C>{wrong_part_checksum}</ChecksumCRC32C></Part></CompleteMultipartUpload>"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        rejected
+            .text()
+            .await
+            .unwrap()
+            .contains("<Code>BadDigest</Code>")
+    );
+    assert_eq!(
+        client
+            .get(&url)
+            .bearer_auth(&read)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        b"multipart payload"
+    );
+    let completion = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag><ChecksumCRC32C>{part_checksum}</ChecksumCRC32C></Part></CompleteMultipartUpload>"
+    );
+    let completed = client
+        .post(format!("{url}?uploadId={upload_id}"))
+        .bearer_auth(&credential)
+        .body(completion)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::OK);
+    let completion_xml = completed.text().await.unwrap();
+    assert!(
+        completion_xml.contains("<ChecksumCRC32C>"),
+        "{completion_xml}"
+    );
+    assert!(completion_xml.contains("<ChecksumType>COMPOSITE</ChecksumType>"));
+    let response = client
+        .get(format!("{url}?attributes"))
+        .bearer_auth(&read)
+        .header("x-amz-object-attributes", "Checksum,ObjectParts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let xml = response.text().await.unwrap();
+    assert!(xml.contains("<ChecksumCRC32C>"), "{xml}");
+    assert!(xml.contains("<Part><PartNumber>1</PartNumber>"), "{xml}");
+    assert!(
+        xml.contains(&format!("<ChecksumCRC32C>{part_checksum}</ChecksumCRC32C>")),
+        "{xml}"
+    );
+
     let response = client
         .get(format!("{url}?attributes&versionId=unavailable"))
         .bearer_auth(&read)
@@ -177,7 +286,7 @@ async fn exercise(database: Option<&str>) {
     let response = client
         .get(format!("{url}?attributes"))
         .bearer_auth(&read)
-        .header("x-amz-object-attributes", "ObjectSize")
+        .header("x-amz-object-attributes", "ObjectSize,Checksum,ObjectParts")
         .send()
         .await
         .unwrap();
@@ -185,11 +294,25 @@ async fn exercise(database: Option<&str>) {
     let xml = response.text().await.unwrap();
     assert!(!xml.contains("<ETag>") && !xml.contains("<StorageClass>"));
     assert!(
-        xml.contains(&format!(
-            "<ObjectSize>{}</ObjectSize>",
-            b"multipart payload".len()
-        )),
+        xml.contains(&format!("<ObjectSize>{}</ObjectSize>", crc32c_part.len())),
         "{xml}"
+    );
+    assert!(
+        xml.contains(&format!("<ChecksumCRC32C>{part_checksum}</ChecksumCRC32C>")),
+        "{xml}"
+    );
+    assert_eq!(
+        client
+            .get(&url)
+            .bearer_auth(&read)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        crc32c_part
     );
     assert_eq!(
         client

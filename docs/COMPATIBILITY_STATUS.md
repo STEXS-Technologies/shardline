@@ -221,7 +221,7 @@ reachable record remain protected.
   branch/lightweight-tag creation and deletion
 - S3 frontend: object `PUT`, `GET` (with `Range`/`Content-Range`), `HEAD`, `DELETE`, and
   partial `GetObjectAttributes` (`ETag`, `ObjectSize`, multipart total-part count,
-  and CRC32 COMPOSITE checksums with verified per-part sizes/checksums when the
+  and CRC32/CRC32C COMPOSITE checksums with verified per-part sizes/checksums when the
   upload negotiated that checksum mode);
   multipart upload (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`,
   `AbortMultipartUpload`, `ListParts`, and `ListMultipartUploads`); `HeadBucket`/
