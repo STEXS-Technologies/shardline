@@ -11,6 +11,7 @@
 
 pub(super) mod aws_chunked;
 pub(super) mod bucket;
+mod checksum;
 pub(super) mod listing;
 pub(super) mod multipart;
 pub(super) mod object;

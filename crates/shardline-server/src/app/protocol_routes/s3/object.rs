@@ -8,6 +8,7 @@
 //! record + direct object (crash-safe ordering).
 
 mod attributes;
+use super::checksum;
 mod conditions;
 mod copy_part;
 
@@ -381,6 +382,7 @@ pub(crate) async fn s3_put_object(
             return Err(S3Error::not_implemented());
         }
         if headers.contains_key(COPY_SOURCE) {
+            checksum::reject_unverified_headers(&headers)?;
             return copy_part::upload_part_copy(
                 &state,
                 auth.capability(),
@@ -409,9 +411,15 @@ pub(crate) async fn s3_put_object(
         let copy_source = copy_source
             .to_str()
             .map_err(|_error| S3Error::invalid_argument("Invalid copy source header"))?;
+        checksum::reject_unverified_headers(&headers)?;
         return s3_copy_object(&state, auth.capability(), &context, copy_source, &headers).await;
     }
 
+    checksum::reject_unpersisted_negotiation(&headers)?;
+    let payload_checksum = checksum::parse(&headers)?;
+    let response_checksum = payload_checksum
+        .as_ref()
+        .map(|checksum| (checksum.header(), checksum.expected().to_owned()));
     let expected_md5 = parse_content_md5(&headers)?;
     // Bodies larger than SHARDLINE_S3_MAX_PART_BYTES must use multipart.
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
@@ -433,7 +441,7 @@ pub(crate) async fn s3_put_object(
     // encoding; decode the framing so the CDC ingestor stores the actual
     // payload (and size). The decoded size is enforced against the part
     // ceiling by the decoder.
-    let body = if aws_chunked::is_aws_chunked(&headers) {
+    let mut body = if aws_chunked::is_aws_chunked(&headers) {
         let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
         let decoded = aws_chunked::declared_decoded_content_length(&headers)?;
         if decoded > max_bytes_u64 {
@@ -451,6 +459,9 @@ pub(crate) async fn s3_put_object(
     } else {
         body
     };
+    if let Some(payload_checksum) = payload_checksum {
+        body = checksum::verify_body(body, payload_checksum);
+    }
 
     // Conditional requests (If-Match / If-None-Match) are evaluated against
     // the CURRENT object BEFORE the body is read — a fast-path rejection. The
@@ -486,6 +497,12 @@ pub(crate) async fn s3_put_object(
         ETAG,
         HeaderValue::from_str(&etag_header(&etag)).map_err(|_error| S3Error::internal())?,
     );
+    if let Some((header, value)) = response_checksum {
+        response.headers_mut().insert(
+            HeaderName::from_static(header),
+            HeaderValue::from_str(&value).map_err(|_error| S3Error::internal())?,
+        );
+    }
     Ok(response)
 }
 

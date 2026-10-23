@@ -26,6 +26,8 @@
 mod listing;
 pub(super) use listing::{s3_list_parts, s3_list_uploads};
 
+use super::checksum::{self, PayloadChecksum};
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
@@ -133,6 +135,7 @@ pub(super) async fn s3_create_multipart_upload(
     context: &S3ObjectContext<'_>,
     headers: &HeaderMap,
 ) -> Result<Response, S3Error> {
+    checksum::reject_unpersisted_negotiation(headers)?;
     // S3 user metadata is supplied at CreateMultipartUpload and applied to the
     // completed object.
     let user_metadata = object::capture_user_metadata(headers)?;
@@ -315,9 +318,22 @@ pub(super) async fn s3_upload_part(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    let payload_checksum = checksum::parse(headers)?;
     if durable_sessions_enabled(state) {
-        return durable_s3_upload_part(state, context, part_number, upload_id, headers, body).await;
+        return durable_s3_upload_part(
+            state,
+            context,
+            part_number,
+            upload_id,
+            headers,
+            body,
+            payload_checksum,
+        )
+        .await;
     }
+    let response_checksum = payload_checksum
+        .as_ref()
+        .map(|checksum| (checksum.header(), checksum.expected().to_owned()));
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
     let session_quota = state.config.s3_upload_session_max_bytes();
@@ -420,6 +436,10 @@ pub(super) async fn s3_upload_part(
             max_bytes_u64,
             Some(decoded),
         ));
+    }
+
+    if let Some(payload_checksum) = payload_checksum {
+        body = checksum::verify_body(body, payload_checksum);
     }
 
     let expected_md5 = parse_content_md5(headers)?;
@@ -541,6 +561,12 @@ pub(super) async fn s3_upload_part(
         ETAG,
         HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
     );
+    if let Some((header, value)) = response_checksum {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(header),
+            HeaderValue::from_str(&value).map_err(|_error| S3Error::internal())?,
+        );
+    }
     Ok(response)
 }
 
@@ -551,7 +577,11 @@ async fn durable_s3_upload_part(
     upload_id: &str,
     headers: &HeaderMap,
     body: Body,
+    payload_checksum: Option<PayloadChecksum>,
 ) -> Result<Response, S3Error> {
+    let response_checksum = payload_checksum
+        .as_ref()
+        .map(|checksum| (checksum.header(), checksum.expected().to_owned()));
     let session = state
         .backend
         .resumable_session_by_id(upload_id)
@@ -585,6 +615,10 @@ async fn durable_s3_upload_part(
             ceiling,
             Some(decoded),
         ));
+    }
+
+    if let Some(payload_checksum) = payload_checksum {
+        reader = checksum::verify_body(reader, payload_checksum);
     }
 
     let expected_md5 = parse_content_md5(headers)?;
@@ -675,6 +709,12 @@ async fn durable_s3_upload_part(
         ETAG,
         HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
     );
+    if let Some((header, value)) = response_checksum {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(header),
+            HeaderValue::from_str(&value).map_err(|_error| S3Error::internal())?,
+        );
+    }
     Ok(response)
 }
 
@@ -698,6 +738,7 @@ pub(super) async fn s3_complete_multipart_upload(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    checksum::reject_unverified_headers(headers)?;
     // Parse all supplied safeguards before advancing any session or writing data.
     read_conditional_headers(headers)
         .map_err(|_error| S3Error::invalid_argument("Invalid conditional entity-tag header"))?;

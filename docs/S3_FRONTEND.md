@@ -112,12 +112,15 @@ parameter is not accepted and returns `501 NotImplemented`.
 
 `GetObjectAttributes` reports the verified total part count for multipart objects
 completed after this change. It does not return individual `Part` entries or
-checksums: Shardline does not accept the additional checksum headers that cause
-general-purpose S3 to include those entries. Existing objects have no durable
-part-count metadata; those counts remain unknown and are not inferred from CDC
-chunks or legacy records. Botocore 1.x real-client coverage checks the modeled
-`ObjectParts.TotalPartsCount` field and verifies that a single-PUT object has no
-`ObjectParts` response.
+checksums: Shardline verifies a supplied `x-amz-checksum-*` payload checksum on
+`PutObject` and `UploadPart`, but does not durably retain the per-part checksum
+metadata needed to report it later. Checksum negotiation (`x-amz-checksum-type`
+and `x-amz-checksum-algorithm`) and checksum headers on copy/completion requests
+return `501 NotImplemented`; they are not silently treated as persisted
+checksums. Existing objects have no durable part-count metadata; those counts
+remain unknown and are not inferred from CDC chunks or legacy records. Botocore
+1.x real-client coverage checks the modeled `ObjectParts.TotalPartsCount` field
+and verifies that a single-PUT object has no `ObjectParts` response.
 
 ## Protocol deviations (documented)
 
@@ -162,6 +165,12 @@ Native Botocore pagination is tested with repeated keys, page sizes of 1, 3 and
   return `400 InvalidDigest`, and a payload mismatch returns `400 BadDigest`
   before publication or deletion. Upload checks hash the decoded payload,
   including AWS chunked uploads, with constant memory.
+- **S3 payload checksum headers** (`x-amz-checksum-crc32`, `crc32c`,
+  `crc64nvme`, `sha1`, and `sha256`) are optional and verified as the decoded
+  `PutObject` or `UploadPart` body streams. A mismatch returns `400 BadDigest`
+  before publication; a valid supplied checksum is echoed on success. These
+  values are not persisted for later attributes reporting. AWS-chunked signed
+  trailer checksums continue through the separate SigV4 trailer verifier.
 - **Multipart part identity** is the quoted MD5 of that part's bytes.
   Completion accepts that MD5 with or without the surrounding quotes and requires
   the identity returned by the successful UploadPart for every selected part,

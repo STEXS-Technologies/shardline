@@ -20,6 +20,10 @@ fn checksum(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(Md5::digest(bytes))
 }
 
+fn sha256_checksum(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(bytes))
+}
+
 fn upload_id(xml: &str) -> &str {
     xml.split_once("<UploadId>")
         .unwrap()
@@ -91,11 +95,41 @@ async fn assert_request_integrity(database_url: Option<&str>) {
         .put(&object)
         .bearer_auth(&token)
         .header("content-md5", checksum(b"original"))
+        .header("x-amz-checksum-sha256", sha256_checksum(b"original"))
         .body("original")
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amz-checksum-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        sha256_checksum(b"original")
+    );
+    let response = client
+        .put(&object)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-sha256", sha256_checksum(b"not-original"))
+        .body("must-not-land")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(response.text().await.unwrap().contains("BadDigest"));
+    let bytes = client
+        .get(&object)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"original");
     for (md5, code) in [(wrong, "BadDigest"), ("malformed", "InvalidDigest")] {
         let response = client
             .put(&object)
@@ -125,6 +159,7 @@ async fn assert_request_integrity(database_url: Option<&str>) {
             .put(&object)
             .bearer_auth(&token)
             .header("content-md5", digest)
+            .header("x-amz-checksum-sha256", sha256_checksum(b"original"))
             .header("content-encoding", "aws-chunked")
             .header("x-amz-decoded-content-length", "8")
             .body(framed)
@@ -152,6 +187,14 @@ async fn assert_request_integrity(database_url: Option<&str>) {
     let response = client
         .post(format!("{multipart}?uploads"))
         .bearer_auth(&token)
+        .header("x-amz-checksum-algorithm", "SHA256")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 501);
+    let response = client
+        .post(format!("{multipart}?uploads"))
+        .bearer_auth(&token)
         .send()
         .await
         .unwrap();
@@ -163,11 +206,21 @@ async fn assert_request_integrity(database_url: Option<&str>) {
         .put(&part_url)
         .bearer_auth(&token)
         .header("content-md5", checksum(b"original-part"))
+        .header("x-amz-checksum-sha256", sha256_checksum(b"original-part"))
         .body("original-part")
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amz-checksum-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        sha256_checksum(b"original-part")
+    );
     let original_etag = response
         .headers()
         .get("etag")
@@ -175,12 +228,23 @@ async fn assert_request_integrity(database_url: Option<&str>) {
         .to_str()
         .unwrap()
         .to_owned();
+    let response = client
+        .put(&part_url)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-sha256", sha256_checksum(b"original-part"))
+        .body("bad-part")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(response.text().await.unwrap().contains("BadDigest"));
     let framed =
         "d;chunk-signature=deadbeef\r\noriginal-part\r\n0;chunk-signature=deadbeef\r\n\r\n";
     let response = client
         .put(&part_url)
         .bearer_auth(&token)
         .header("content-md5", checksum(b"original-part"))
+        .header("x-amz-checksum-sha256", sha256_checksum(b"original-part"))
         .header("content-encoding", "aws-chunked")
         .header("x-amz-decoded-content-length", "13")
         .body(framed)

@@ -2264,6 +2264,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         ref other @ (ServerError::RequestBodyRead(_)
         | ServerError::RequestBodyTooLarge
         | ServerError::RequestBodyMd5Mismatch
+        | ServerError::RequestBodyChecksumMismatch
         | ServerError::RequestQueryTooLarge
         | ServerError::InvalidAdminQuery
         | ServerError::RequestBodyFrameOutOfBounds
