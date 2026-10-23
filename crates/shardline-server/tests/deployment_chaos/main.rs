@@ -59,6 +59,8 @@ mod maintenance_history;
 
 mod local_protocol_upgrade;
 
+mod git_receive_pack;
+
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------

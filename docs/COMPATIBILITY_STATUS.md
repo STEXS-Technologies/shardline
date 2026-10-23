@@ -74,8 +74,11 @@ strict Git fsck after managed restart. The PostgreSQL workflows terminate the
 observed publication session before its second ref write, verify both old heads
 and the default branch remain unchanged, then retry. All three backends also
 drop the client status after observing a successful server commit, verify both
-new heads and retry through the normal endpoint. Application process-kill and
-broader concurrent deployment qualification remain separate.
+new heads and retry through the normal endpoint. A PostgreSQL/MinIO deployment
+drill also kills the Shardline process while the second ref is paused inside the
+atomic transaction, verifies both refs remain at their old heads, then restarts,
+retries, clones and runs strict `git fsck`. Broader concurrent deployment
+qualification remains separate.
 Custom stores advertise atomic support
 only when they implement the batch contract. Receive-pack negotiates and
 validates push-options framing before publication. Shardline has no Git receive
