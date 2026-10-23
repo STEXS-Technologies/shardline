@@ -929,35 +929,6 @@ impl ServerBackend {
         }
     }
 
-    /// Resolves the authoritative size and BLAKE3 content hash for a protocol
-    /// object, for the S3 `HeadObject` response.
-    ///
-    /// The size prefers the direct object length and falls back to the record
-    /// ([`Self::object_length`]); the content hash always comes from the
-    /// authoritative `FileRecord` (empty when only a direct object exists).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError::NotFound`] when neither a direct object nor a
-    /// record exists.
-    pub(crate) async fn s3_object_metadata(
-        &self,
-        object_key: &ObjectKey,
-    ) -> Result<(u64, String), ServerError> {
-        let file_id = protocol_object_file_id(object_key);
-        // One record read: size and content hash come from the same record
-        // snapshot, so a concurrent overwrite can never yield a torn HEAD
-        // (size from the old version, hash from the new).
-        match self.protocol_file_record(&file_id).await {
-            Ok(record) => Ok((record.total_bytes, record.content_hash)),
-            Err(ServerError::NotFound) => {
-                let size = self.object_length(object_key).await?;
-                Ok((size, String::new()))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     pub(crate) async fn upsert_s3_object_with_multipart_count(
         &self,
         entry: &S3ObjectEntry,
@@ -1099,14 +1070,16 @@ impl ServerBackend {
         object_key: &str,
     ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, ServerError> {
         match self {
-            Self::Local(backend) => backend
-                .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
-                .await
-                .map_err(ServerError::from),
-            Self::Postgres(backend) => backend
-                .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
-                .await
-                .map_err(ServerError::from),
+            Self::Local(backend) => {
+                backend
+                    .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
+                    .await
+            }
         }
     }
 

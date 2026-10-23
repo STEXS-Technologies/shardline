@@ -729,6 +729,7 @@ fn run_boto3(endpoint: &str, token: &str, tmp: &TempDir) -> std::process::Output
         &script,
         r#"
 import base64
+import hashlib
 import io
 import os
 import struct
@@ -782,6 +783,90 @@ assert head["ContentLength"] == len(payload), head["ContentLength"]
 assert head["Metadata"].get("purpose") == "client-breadth", head["Metadata"]
 assert s3.get_object(Bucket=B, Key="meta.txt")["Body"].read() == payload
 
+# Single-PUT checksums remain available after publication through both S3
+# checksum read APIs.
+checksummed = b"native single put checksum"
+checksummed_value = base64.b64encode(hashlib.sha256(checksummed).digest()).decode()
+s3.put_object(
+    Bucket=B, Key="single-checksum.bin", Body=checksummed,
+    ChecksumAlgorithm="SHA256", ChecksumSHA256=checksummed_value
+)
+single_head = s3.head_object(Bucket=B, Key="single-checksum.bin", ChecksumMode="ENABLED")
+assert single_head["ChecksumSHA256"] == checksummed_value, single_head
+assert single_head["ChecksumType"] == "FULL_OBJECT", single_head
+single_attrs = s3.get_object_attributes(
+    Bucket=B, Key="single-checksum.bin", ObjectAttributes=["Checksum"]
+)
+assert single_attrs["Checksum"] == {
+    "ChecksumSHA256": checksummed_value,
+    "ChecksumType": "FULL_OBJECT",
+}, single_attrs
+single_get = s3.get_object(Bucket=B, Key="single-checksum.bin", ChecksumMode="ENABLED")
+assert single_get["ChecksumSHA256"] == checksummed_value, single_get
+assert single_get["Body"].read() == checksummed
+
+# SHA256 multipart COMPOSITE remains bound to the uploaded part and survives
+# ListParts, completion, and GetObjectAttributes.
+sha_part = b"native multipart sha256 checksum"
+sha_part_checksum = base64.b64encode(hashlib.sha256(sha_part).digest()).decode()
+sha_upload = s3.create_multipart_upload(
+    Bucket=B, Key="multipart-sha256.bin", ChecksumAlgorithm="SHA256", ChecksumType="COMPOSITE"
+)
+sha_upload_id = sha_upload["UploadId"]
+sha_part_result = s3.upload_part(
+    Bucket=B, Key="multipart-sha256.bin", UploadId=sha_upload_id,
+    PartNumber=1, Body=sha_part, ChecksumSHA256=sha_part_checksum
+)
+sha_list = s3.list_parts(Bucket=B, Key="multipart-sha256.bin", UploadId=sha_upload_id)
+assert sha_list["ChecksumAlgorithm"] == "SHA256", sha_list
+assert sha_list["Parts"][0]["ChecksumSHA256"] == sha_part_checksum, sha_list
+sha_complete = s3.complete_multipart_upload(
+    Bucket=B, Key="multipart-sha256.bin", UploadId=sha_upload_id,
+    MultipartUpload={"Parts": [{
+        "PartNumber": 1,
+        "ETag": sha_part_result["ETag"],
+        "ChecksumSHA256": sha_part_checksum,
+    }]},
+)
+assert "ChecksumSHA256" in sha_complete, sha_complete
+sha_attrs = s3.get_object_attributes(
+    Bucket=B, Key="multipart-sha256.bin", ObjectAttributes=["Checksum", "ObjectParts"]
+)
+assert sha_attrs["Checksum"]["ChecksumType"] == "COMPOSITE", sha_attrs
+assert sha_attrs["Checksum"]["ChecksumSHA256"].endswith("-1"), sha_attrs
+assert sha_attrs["ObjectParts"]["Parts"][0]["ChecksumSHA256"] == sha_part_checksum, sha_attrs
+sha_get = s3.get_object(Bucket=B, Key="multipart-sha256.bin", ChecksumMode="ENABLED")
+assert sha_get["ChecksumSHA256"] == sha_attrs["Checksum"]["ChecksumSHA256"], sha_get
+assert sha_get["Body"].read() == sha_part
+
+sha1_part = b"native multipart sha1 checksum"
+sha1_part_checksum = base64.b64encode(hashlib.sha1(sha1_part).digest()).decode()
+sha1_upload = s3.create_multipart_upload(
+    Bucket=B, Key="multipart-sha1.bin", ChecksumAlgorithm="SHA1", ChecksumType="COMPOSITE"
+)
+sha1_upload_id = sha1_upload["UploadId"]
+sha1_part_result = s3.upload_part(
+    Bucket=B, Key="multipart-sha1.bin", UploadId=sha1_upload_id,
+    PartNumber=1, Body=sha1_part, ChecksumSHA1=sha1_part_checksum
+)
+sha1_list = s3.list_parts(Bucket=B, Key="multipart-sha1.bin", UploadId=sha1_upload_id)
+assert sha1_list["ChecksumAlgorithm"] == "SHA1", sha1_list
+assert sha1_list["Parts"][0]["ChecksumSHA1"] == sha1_part_checksum, sha1_list
+s3.complete_multipart_upload(
+    Bucket=B, Key="multipart-sha1.bin", UploadId=sha1_upload_id,
+    MultipartUpload={"Parts": [{
+        "PartNumber": 1,
+        "ETag": sha1_part_result["ETag"],
+        "ChecksumSHA1": sha1_part_checksum,
+    }]},
+)
+sha1_attrs = s3.get_object_attributes(
+    Bucket=B, Key="multipart-sha1.bin", ObjectAttributes=["Checksum", "ObjectParts"]
+)
+assert sha1_attrs["Checksum"]["ChecksumType"] == "COMPOSITE", sha1_attrs
+assert sha1_attrs["Checksum"]["ChecksumSHA1"].endswith("-1"), sha1_attrs
+assert sha1_attrs["ObjectParts"]["Parts"][0]["ChecksumSHA1"] == sha1_part_checksum, sha1_attrs
+
 # Conditional CopyObject (CopySourceIfMatch) — exercises If-Match + CopyObject.
 etag = head["ETag"].strip('"')
 s3.copy_object(
@@ -822,7 +907,11 @@ assert "shardline-internal-s3-checksum-v1" not in s3.head_object(Bucket=B, Key="
 # DeleteObjects batch.
 s3.delete_objects(
     Bucket=B,
-    Delete={"Objects": [{"Key": "meta.txt"}, {"Key": "meta-copy.txt"}, {"Key": "big.bin"}]},
+    Delete={"Objects": [
+        {"Key": "meta.txt"}, {"Key": "meta-copy.txt"}, {"Key": "big.bin"},
+        {"Key": "single-checksum.bin"}, {"Key": "multipart-sha256.bin"},
+        {"Key": "multipart-sha1.bin"},
+    ]},
 )
 remaining = s3.list_objects_v2(Bucket=B)
 assert "Contents" not in remaining, remaining

@@ -198,6 +198,30 @@ async fn rolling_upgrade(postgres: Option<&str>) {
         "old reader of new write",
     )
     .await;
+    let checksummed_bytes = b"checksummed write during rolling upgrade";
+    let checksum = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        Sha256::digest(checksummed_bytes),
+    );
+    let checksummed_write = reqwest::Client::new()
+        .put(format!("{}/{BUCKET}/checksummed-write", upgraded.base))
+        .bearer_auth(&token)
+        .header("x-amz-checksum-sha256", checksum)
+        .body(checksummed_bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(checksummed_write.status().is_success());
+    // 1.12.1 does not know the checksum metadata key, but the storage record
+    // and object bytes remain readable through the old process.
+    assert_s3_bytes(
+        &previous.base,
+        &token,
+        "checksummed-write",
+        checksummed_bytes,
+        "old reader of checksummed write",
+    )
+    .await;
     drop(previous);
     // A rollout must tolerate an old replica restarting, without deleting
     // migration records, downgrading SQL, or discarding newly acknowledged data.
@@ -209,6 +233,14 @@ async fn rolling_upgrade(postgres: Option<&str>) {
         "new-writer",
         &bytes,
         "old replica restart",
+    )
+    .await;
+    assert_s3_bytes(
+        &restarted.base,
+        &token,
+        "checksummed-write",
+        checksummed_bytes,
+        "old restart reader of checksummed write",
     )
     .await;
 }

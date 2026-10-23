@@ -343,6 +343,38 @@ pub(super) fn md5_hasher_hex(hasher: &Arc<Mutex<Md5>>) -> String {
     format!("{digest:x}")
 }
 
+fn checksum_mode_enabled(headers: &HeaderMap) -> Result<bool, S3Error> {
+    let mut values = headers.get_all("x-amz-checksum-mode").iter();
+    match values.next() {
+        Some(value) if values.next().is_none() => {
+            if value.to_str().is_ok_and(|value| value == "ENABLED") {
+                Ok(true)
+            } else {
+                Err(S3Error::invalid_argument("Invalid checksum mode"))
+            }
+        }
+        Some(_) => Err(S3Error::invalid_argument("Repeated checksum mode")),
+        None => Ok(false),
+    }
+}
+
+fn insert_checksum_headers(
+    response: &mut Response,
+    checksum: Option<(&'static str, &str, &'static str)>,
+) -> Result<(), S3Error> {
+    if let Some((header, value, checksum_type)) = checksum {
+        response.headers_mut().insert(
+            HeaderName::from_static(header),
+            HeaderValue::from_str(value).map_err(|_error| S3Error::internal())?,
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("x-amz-checksum-type"),
+            HeaderValue::from_static(checksum_type),
+        );
+    }
+    Ok(())
+}
+
 /// `PUT /{bucket}/{*key}` — stream the body through the CDC ingestor.
 ///
 /// Overwrite semantics are **atomic upload-then-swap**: the new body is
@@ -480,7 +512,10 @@ pub(crate) async fn s3_put_object(
     // Capture S3 user metadata (x-amz-meta-*) and compute the ETag (hex MD5 of
     // the object bytes) while the body streams — standard S3 semantics that
     // checksum-verifying clients (s3cmd, the AWS SDKs) depend on.
-    let user_metadata = capture_user_metadata(&headers)?;
+    let mut user_metadata = capture_user_metadata(&headers)?;
+    if let Some((header, value)) = &response_checksum {
+        checksum::attach_object_checksum(&mut user_metadata, header, value)?;
+    }
     let hasher = Arc::new(Mutex::new(Md5::new()));
     let body = body.with_md5_tee_and_expected(hasher.clone(), expected_md5);
 
@@ -1093,6 +1128,7 @@ pub(crate) async fn s3_get_object(
     // bytes (F-70). Only when no row exists is the latest record snapshot used
     // as a fallback (there is then no row metadata to pair).
     let entry = s3_object_entry(&state, &context).await?;
+    let checksum_mode = checksum_mode_enabled(&headers)?;
     // Conditional requests (If-Match / If-None-Match) evaluate against the
     // stored S3 ETag (listing-index row) before any bytes are served.
     if let Some(response) = check_read_precondition(
@@ -1196,6 +1232,39 @@ pub(crate) async fn s3_get_object(
         HeaderValue::from_str(&last_modified_from_entry(entry.as_ref()))
             .map_err(|_error| S3Error::internal())?,
     );
+    if checksum_mode {
+        let metadata = entry
+            .as_ref()
+            .map_or(&[][..], |entry| entry.user_metadata.as_slice());
+        let manifest = checksum::read_multipart_manifest_for_object(metadata, total_length)?;
+        let object_checksum = checksum::read_object_checksum(metadata)?;
+        if manifest.is_some() && object_checksum.is_some() {
+            return Err(S3Error::internal());
+        }
+        let value = manifest
+            .map(|manifest| {
+                (
+                    manifest.algorithm.header(),
+                    manifest.checksum_value,
+                    manifest.checksum_type.s3_name(),
+                )
+            })
+            .or_else(|| {
+                object_checksum.map(|checksum| {
+                    (
+                        checksum.algorithm.header(),
+                        checksum.checksum_value,
+                        checksum.checksum_type.s3_name(),
+                    )
+                })
+            });
+        insert_checksum_headers(
+            &mut response,
+            value
+                .as_ref()
+                .map(|(header, value, checksum_type)| (*header, value.as_str(), *checksum_type)),
+        )?;
+    }
     // S3 serves the ETag (hex MD5) and user metadata on GetObject too.
     if let Some(entry) = entry {
         response.headers_mut().insert(
@@ -1237,31 +1306,29 @@ pub(crate) async fn s3_head_object(
     // swapped the row is simply not visible — the headers and the size are
     // never a mix of two overwrite states. Only when no row exists is the
     // authoritative record metadata used (with no row metadata to pair).
-    let entry = s3_object_entry(&state, &context).await?;
-    // Conditional requests evaluate against the stored S3 ETag before the
-    // headers are served.
+    let snapshot = match state
+        .backend
+        .s3_object_read_snapshot(&context.scope_namespace, &context.key, &context.object_key)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
+        Err(error) => return Err(error.into()),
+    };
+    let checksum_mode = checksum_mode_enabled(&headers)?;
+    // Conditional requests evaluate against the ETag from the same snapshot
+    // as metadata and checksum attributes.
     if let Some(response) = check_read_precondition(
-        entry.as_ref().map(|entry| entry.etag.as_str()),
-        entry.as_ref().map(|entry| entry.updated_at_unix_seconds),
+        snapshot.etag.as_deref(),
+        snapshot.updated_at_unix_seconds,
         &headers,
         &context.key,
     )? {
         return Ok(response);
     }
 
-    let size = match &entry {
-        Some(row) => row.size_bytes,
-        None => {
-            let (size, _content_hash) =
-                match state.backend.s3_object_metadata(&context.object_key).await {
-                    Ok(metadata) => metadata,
-                    Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
-                    Err(error) => return Err(S3Error::from(error)),
-                };
-            size
-        }
-    };
-    let last_modified = last_modified_from_entry(entry.as_ref());
+    let size = snapshot.total_bytes;
+    let last_modified = format_http_date(snapshot.updated_at_unix_seconds.unwrap_or(0));
 
     let mut response = StatusCode::OK.into_response();
     response
@@ -1277,13 +1344,42 @@ pub(crate) async fn s3_head_object(
     response
         .headers_mut()
         .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    if let Some(entry) = entry {
-        let etag = etag_header(&entry.etag);
+    if let Some(etag_value) = snapshot.etag.as_deref() {
+        let etag = etag_header(etag_value);
         response.headers_mut().insert(
             ETAG,
             HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
         );
-        insert_user_metadata(&mut response, &entry.user_metadata);
+        insert_user_metadata(&mut response, &snapshot.user_metadata);
+    }
+    if checksum_mode {
+        let checksum_value = match snapshot.multipart_part_count {
+            Some(count) if count > 0 => checksum::read_multipart_manifest(
+                &snapshot.user_metadata,
+                count,
+                snapshot.total_bytes,
+            )?
+            .map(|manifest| {
+                (
+                    manifest.algorithm.header(),
+                    manifest.checksum_value,
+                    manifest.checksum_type.s3_name(),
+                )
+            }),
+            _ => checksum::read_object_checksum(&snapshot.user_metadata)?.map(|checksum| {
+                (
+                    checksum.algorithm.header(),
+                    checksum.checksum_value,
+                    checksum.checksum_type.s3_name(),
+                )
+            }),
+        };
+        insert_checksum_headers(
+            &mut response,
+            checksum_value
+                .as_ref()
+                .map(|(header, value, checksum_type)| (*header, value.as_str(), *checksum_type)),
+        )?;
     }
     response.headers_mut().insert(
         LAST_MODIFIED,

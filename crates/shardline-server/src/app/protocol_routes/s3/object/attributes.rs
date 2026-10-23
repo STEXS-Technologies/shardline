@@ -37,7 +37,7 @@ pub(super) async fn get(
             "Part pagination headers require ObjectParts",
         ));
     }
-    if max_parts.is_some_and(|value| value > 1000) {
+    if max_parts.is_some_and(|part_limit| part_limit > 1000) {
         return Err(S3Error::invalid_argument("Invalid x-amz-max-parts"));
     }
     for unsupported in [
@@ -72,13 +72,19 @@ pub(super) async fn get(
     };
     let checksum_manifest = if selected.contains("Checksum") || selected.contains("ObjectParts") {
         match known_part_count {
-            Some(count) => checksum::read_multipart_manifest(
+            Some(count) if count > 0 => checksum::read_multipart_manifest(
                 &snapshot.user_metadata,
                 count,
                 snapshot.total_bytes,
             )?,
             None => None,
+            Some(_) => None,
         }
+    } else {
+        None
+    };
+    let object_checksum = if selected.contains("Checksum") && checksum_manifest.is_none() {
+        checksum::read_object_checksum(&snapshot.user_metadata)?
     } else {
         None
     };
@@ -108,10 +114,24 @@ pub(super) async fn get(
     {
         write!(
             xml,
-            "<Checksum><{}>{}</{}><ChecksumType>COMPOSITE</ChecksumType></Checksum>",
+            "<Checksum><{}>{}</{}><ChecksumType>{}</ChecksumType></Checksum>",
             manifest.algorithm.xml_field(),
             xml_escape(&manifest.checksum_value),
-            manifest.algorithm.xml_field()
+            manifest.algorithm.xml_field(),
+            manifest.checksum_type.s3_name(),
+        )
+        .map_err(|_format_error| S3Error::internal())?;
+    }
+    if selected.contains("Checksum")
+        && let Some(checksum) = &object_checksum
+    {
+        write!(
+            xml,
+            "<Checksum><{}>{}</{}><ChecksumType>{}</ChecksumType></Checksum>",
+            checksum.algorithm.xml_field(),
+            xml_escape(&checksum.checksum_value),
+            checksum.algorithm.xml_field(),
+            checksum.checksum_type.s3_name(),
         )
         .map_err(|_format_error| S3Error::internal())?;
     }
@@ -137,10 +157,7 @@ pub(super) async fn get(
             let is_truncated = parts.next().is_some();
             (page, is_truncated)
         });
-        let (page, is_truncated) = page.map_or_else(
-            || (Vec::new(), false),
-            |(parts, truncated)| (parts, truncated),
-        );
+        let (page, is_truncated) = page.unwrap_or_else(|| (Vec::new(), false));
         write!(
             xml,
             "<ObjectParts><IsTruncated>{is_truncated}</IsTruncated><MaxParts>{max_parts}</MaxParts>"

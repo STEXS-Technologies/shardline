@@ -19,6 +19,12 @@ pub(super) enum MultipartChecksumAlgorithm {
     Crc32,
     #[serde(rename = "CRC32C")]
     Crc32c,
+    #[serde(rename = "CRC64NVME")]
+    Crc64Nvme,
+    #[serde(rename = "SHA1")]
+    Sha1,
+    #[serde(rename = "SHA256")]
+    Sha256,
 }
 
 impl MultipartChecksumAlgorithm {
@@ -26,6 +32,9 @@ impl MultipartChecksumAlgorithm {
         match name {
             "CRC32" => Some(Self::Crc32),
             "CRC32C" => Some(Self::Crc32c),
+            "CRC64NVME" => Some(Self::Crc64Nvme),
+            "SHA1" => Some(Self::Sha1),
+            "SHA256" => Some(Self::Sha256),
             _ => None,
         }
     }
@@ -34,6 +43,9 @@ impl MultipartChecksumAlgorithm {
         match self {
             Self::Crc32 => "CRC32",
             Self::Crc32c => "CRC32C",
+            Self::Crc64Nvme => "CRC64NVME",
+            Self::Sha1 => "SHA1",
+            Self::Sha256 => "SHA256",
         }
     }
 
@@ -41,6 +53,9 @@ impl MultipartChecksumAlgorithm {
         match self {
             Self::Crc32 => "x-amz-checksum-crc32",
             Self::Crc32c => "x-amz-checksum-crc32c",
+            Self::Crc64Nvme => "x-amz-checksum-crc64nvme",
+            Self::Sha1 => "x-amz-checksum-sha1",
+            Self::Sha256 => "x-amz-checksum-sha256",
         }
     }
 
@@ -48,8 +63,47 @@ impl MultipartChecksumAlgorithm {
         match self {
             Self::Crc32 => "ChecksumCRC32",
             Self::Crc32c => "ChecksumCRC32C",
+            Self::Crc64Nvme => "ChecksumCRC64NVME",
+            Self::Sha1 => "ChecksumSHA1",
+            Self::Sha256 => "ChecksumSHA256",
         }
     }
+
+    pub(super) const fn encoded_len(self) -> usize {
+        match self {
+            Self::Crc32 | Self::Crc32c => 4,
+            Self::Crc64Nvme => 8,
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+        }
+    }
+
+    const fn supports_full_object(self) -> bool {
+        matches!(self, Self::Crc32 | Self::Crc32c | Self::Crc64Nvme)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) enum MultipartChecksumType {
+    #[serde(rename = "COMPOSITE")]
+    Composite,
+    #[serde(rename = "FULL_OBJECT")]
+    FullObject,
+}
+
+impl MultipartChecksumType {
+    pub(super) const fn s3_name(self) -> &'static str {
+        match self {
+            Self::Composite => "COMPOSITE",
+            Self::FullObject => "FULL_OBJECT",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) struct MultipartChecksumConfig {
+    pub(super) algorithm: MultipartChecksumAlgorithm,
+    pub(super) checksum_type: MultipartChecksumType,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
@@ -64,16 +118,116 @@ pub(super) struct MultipartPartChecksum {
 pub(super) struct MultipartChecksumManifest {
     #[serde(default = "default_multipart_checksum_algorithm")]
     pub(super) algorithm: MultipartChecksumAlgorithm,
+    #[serde(default = "default_multipart_checksum_type")]
+    pub(super) checksum_type: MultipartChecksumType,
     #[serde(alias = "checksum_crc32")]
     pub(super) checksum_value: String,
     pub(super) parts: Vec<MultipartPartChecksum>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct ObjectChecksum {
+    pub(super) algorithm: MultipartChecksumAlgorithm,
+    pub(super) checksum_type: MultipartChecksumType,
+    pub(super) checksum_value: String,
+}
+
+fn algorithm_from_header(header: &str) -> Option<MultipartChecksumAlgorithm> {
+    match header {
+        "x-amz-checksum-crc32" => Some(MultipartChecksumAlgorithm::Crc32),
+        "x-amz-checksum-crc32c" => Some(MultipartChecksumAlgorithm::Crc32c),
+        "x-amz-checksum-crc64nvme" => Some(MultipartChecksumAlgorithm::Crc64Nvme),
+        "x-amz-checksum-sha1" => Some(MultipartChecksumAlgorithm::Sha1),
+        "x-amz-checksum-sha256" => Some(MultipartChecksumAlgorithm::Sha256),
+        _ => None,
+    }
+}
+
+pub(super) fn attach_object_checksum(
+    user_metadata: &mut Vec<(String, String)>,
+    header: &str,
+    checksum_value: &str,
+) -> Result<ObjectChecksum, shardline_s3_adapter::S3Error> {
+    let algorithm =
+        algorithm_from_header(header).ok_or_else(shardline_s3_adapter::S3Error::not_implemented)?;
+    let decoded = STANDARD.decode(checksum_value).map_err(|_error| {
+        shardline_s3_adapter::S3Error::invalid_argument("Invalid S3 checksum header")
+    })?;
+    if decoded.len() != algorithm.encoded_len() || STANDARD.encode(&decoded) != checksum_value {
+        return Err(shardline_s3_adapter::S3Error::invalid_argument(
+            "Invalid S3 checksum header",
+        ));
+    }
+    let checksum = ObjectChecksum {
+        algorithm,
+        checksum_type: MultipartChecksumType::FullObject,
+        checksum_value: checksum_value.to_owned(),
+    };
+    let manifest = MultipartChecksumManifest {
+        algorithm,
+        checksum_type: MultipartChecksumType::FullObject,
+        checksum_value: checksum_value.to_owned(),
+        parts: Vec::new(),
+    };
+    let value = serde_json::to_string(&manifest)
+        .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
+    user_metadata.retain(|(name, _)| !name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY));
+    user_metadata.push((MULTIPART_MANIFEST_KEY.to_owned(), value));
+    Ok(checksum)
+}
+
+pub(super) fn read_object_checksum(
+    user_metadata: &[(String, String)],
+) -> Result<Option<ObjectChecksum>, shardline_s3_adapter::S3Error> {
+    let mut found = None;
+    for (name, value) in user_metadata {
+        if !name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY) {
+            continue;
+        }
+        if found.is_some() {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        }
+        found = Some(value);
+    }
+    let manifest: Option<MultipartChecksumManifest> = found
+        .map(|value| {
+            serde_json::from_str(value).map_err(|_error| shardline_s3_adapter::S3Error::internal())
+        })
+        .transpose()?;
+    let checksum = match manifest {
+        Some(manifest) if manifest.parts.is_empty() => Some(ObjectChecksum {
+            algorithm: manifest.algorithm,
+            checksum_type: manifest.checksum_type,
+            checksum_value: manifest.checksum_value,
+        }),
+        Some(manifest) if manifest.checksum_type == MultipartChecksumType::FullObject => {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        }
+        Some(_) | None => None,
+    };
+    if let Some(checksum) = &checksum {
+        let decoded = STANDARD
+            .decode(&checksum.checksum_value)
+            .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
+        if checksum.checksum_type != MultipartChecksumType::FullObject
+            || decoded.len() != checksum.algorithm.encoded_len()
+            || STANDARD.encode(decoded) != checksum.checksum_value
+        {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        }
+    }
+    Ok(checksum)
 }
 
 const fn default_multipart_checksum_algorithm() -> MultipartChecksumAlgorithm {
     MultipartChecksumAlgorithm::Crc32
 }
 
-pub(super) fn is_internal_metadata(name: &str) -> bool {
+const fn default_multipart_checksum_type() -> MultipartChecksumType {
+    MultipartChecksumType::Composite
+}
+
+pub(super) const fn is_internal_metadata(name: &str) -> bool {
     name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY)
         || name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY)
 }
@@ -95,7 +249,22 @@ pub(super) fn negotiate_multipart(
     let Some(algorithm) = MultipartChecksumAlgorithm::from_s3_name(algorithm) else {
         return Err(shardline_s3_adapter::S3Error::not_implemented());
     };
-    if checksum_type.is_some_and(|value| value != "COMPOSITE") {
+    let checksum_type = match checksum_type {
+        Some("COMPOSITE") => MultipartChecksumType::Composite,
+        Some("FULL_OBJECT") => MultipartChecksumType::FullObject,
+        None if algorithm == MultipartChecksumAlgorithm::Crc64Nvme => {
+            MultipartChecksumType::FullObject
+        }
+        None => MultipartChecksumType::Composite,
+        Some(_) => return Err(shardline_s3_adapter::S3Error::not_implemented()),
+    };
+    // Multipart FULL_OBJECT requires a digest over the assembled object, not
+    // the part checksum-of-checksums used by the current completion path.
+    // Reject it until completion can verify that digest before publication.
+    if checksum_type == MultipartChecksumType::FullObject
+        || (algorithm == MultipartChecksumAlgorithm::Crc64Nvme
+            && checksum_type == MultipartChecksumType::Composite)
+    {
         return Err(shardline_s3_adapter::S3Error::not_implemented());
     }
     if headers.contains_key("x-amz-sdk-checksum-algorithm") {
@@ -104,7 +273,7 @@ pub(super) fn negotiate_multipart(
     user_metadata.retain(|(name, _)| !is_internal_metadata(name));
     user_metadata.push((
         MULTIPART_CONFIG_KEY.to_owned(),
-        format!("{}:COMPOSITE", algorithm.s3_name()),
+        format!("{}:{}", algorithm.s3_name(), checksum_type.s3_name()),
     ));
     Ok(Some(algorithm))
 }
@@ -112,14 +281,27 @@ pub(super) fn negotiate_multipart(
 pub(super) fn multipart_checksum_algorithm(
     user_metadata: &[(String, String)],
 ) -> Option<MultipartChecksumAlgorithm> {
+    multipart_checksum_config(user_metadata).map(|config| config.algorithm)
+}
+
+pub(super) fn multipart_checksum_config(
+    user_metadata: &[(String, String)],
+) -> Option<MultipartChecksumConfig> {
     user_metadata.iter().find_map(|(name, value)| {
         if !name.eq_ignore_ascii_case(MULTIPART_CONFIG_KEY) {
             return None;
         }
         let (algorithm, checksum_type) = value.split_once(':')?;
-        (checksum_type == "COMPOSITE")
-            .then(|| MultipartChecksumAlgorithm::from_s3_name(algorithm))
-            .flatten()
+        let algorithm = MultipartChecksumAlgorithm::from_s3_name(algorithm)?;
+        let checksum_type = match checksum_type {
+            "COMPOSITE" => MultipartChecksumType::Composite,
+            "FULL_OBJECT" if algorithm.supports_full_object() => MultipartChecksumType::FullObject,
+            _ => return None,
+        };
+        Some(MultipartChecksumConfig {
+            algorithm,
+            checksum_type,
+        })
     })
 }
 
@@ -173,7 +355,7 @@ pub(super) fn part_checksum_from_metadata(
         let decoded = STANDARD
             .decode(checksum_value)
             .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
-        if decoded.len() != 4 || STANDARD.encode(decoded) != checksum_value {
+        if decoded.len() != algorithm.encoded_len() || STANDARD.encode(decoded) != checksum_value {
             return Err(shardline_s3_adapter::S3Error::internal());
         }
         found = Some(checksum_value.to_owned());
@@ -215,21 +397,24 @@ pub(super) async fn checksum_reader(
 pub(super) fn attach_multipart_manifest(
     user_metadata: &mut Vec<(String, String)>,
     algorithm: MultipartChecksumAlgorithm,
+    checksum_type: MultipartChecksumType,
+    full_object_checksum: Option<&str>,
     parts: Vec<MultipartPartChecksum>,
 ) -> Result<MultipartChecksumManifest, shardline_s3_adapter::S3Error> {
     if parts.is_empty() || parts.len() > 10_000 {
         return Err(shardline_s3_adapter::S3Error::invalid_part());
     }
     let mut previous = 0;
-    let mut checksum_bytes = Vec::with_capacity(parts.len().saturating_mul(4));
+    let mut checksum_bytes =
+        Vec::with_capacity(parts.len().saturating_mul(algorithm.encoded_len()));
     for part in &parts {
         let decoded = STANDARD
             .decode(&part.checksum_value)
-            .map_err(|_| shardline_s3_adapter::S3Error::invalid_part())?;
+            .map_err(|_error| shardline_s3_adapter::S3Error::invalid_part())?;
         if part.part_number == 0
             || part.part_number > 10_000
             || part.part_number <= previous
-            || decoded.len() != 4
+            || decoded.len() != algorithm.encoded_len()
             || STANDARD.encode(&decoded) != part.checksum_value
         {
             return Err(shardline_s3_adapter::S3Error::invalid_part());
@@ -237,11 +422,30 @@ pub(super) fn attach_multipart_manifest(
         previous = part.part_number;
         checksum_bytes.extend_from_slice(&decoded);
     }
-    let mut digest = DigestState::new(algorithm.header());
-    digest.update(&checksum_bytes);
+    let checksum_value = match checksum_type {
+        MultipartChecksumType::Composite => {
+            let mut digest = DigestState::new(algorithm.header());
+            digest.update(&checksum_bytes);
+            format!("{}-{}", digest.encoded(), parts.len())
+        }
+        MultipartChecksumType::FullObject => {
+            if !algorithm.supports_full_object() {
+                return Err(shardline_s3_adapter::S3Error::not_implemented());
+            }
+            let value = full_object_checksum.ok_or_else(shardline_s3_adapter::S3Error::internal)?;
+            let decoded = STANDARD
+                .decode(value)
+                .map_err(|_error| shardline_s3_adapter::S3Error::invalid_part())?;
+            if decoded.len() != algorithm.encoded_len() || STANDARD.encode(decoded) != value {
+                return Err(shardline_s3_adapter::S3Error::invalid_part());
+            }
+            value.to_owned()
+        }
+    };
     let manifest = MultipartChecksumManifest {
         algorithm,
-        checksum_value: format!("{}-{}", digest.encoded(), parts.len()),
+        checksum_type,
+        checksum_value,
         parts,
     };
     let value = serde_json::to_string(&manifest)
@@ -274,15 +478,20 @@ pub(super) fn read_multipart_manifest(
     if let Some(manifest) = &manifest {
         let mut total_size = 0_u64;
         let mut previous = 0_u32;
-        let mut checksum_bytes = Vec::with_capacity(manifest.parts.len().saturating_mul(4));
+        let mut checksum_bytes = Vec::with_capacity(
+            manifest
+                .parts
+                .len()
+                .saturating_mul(manifest.algorithm.encoded_len()),
+        );
         for part in &manifest.parts {
             let decoded = STANDARD
                 .decode(&part.checksum_value)
-                .map_err(|_| shardline_s3_adapter::S3Error::internal())?;
+                .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
             if part.part_number == 0
                 || part.part_number > 10_000
                 || part.part_number <= previous
-                || decoded.len() != 4
+                || decoded.len() != manifest.algorithm.encoded_len()
                 || STANDARD.encode(&decoded) != part.checksum_value
             {
                 return Err(shardline_s3_adapter::S3Error::internal());
@@ -298,19 +507,59 @@ pub(super) fn read_multipart_manifest(
         {
             return Err(shardline_s3_adapter::S3Error::internal());
         }
-        let mut digest = DigestState::new(manifest.algorithm.header());
-        digest.update(&checksum_bytes);
-        if manifest.checksum_value != format!("{}-{}", digest.encoded(), manifest.parts.len()) {
+        let checksum_matches = match manifest.checksum_type {
+            MultipartChecksumType::Composite => {
+                let mut digest = DigestState::new(manifest.algorithm.header());
+                digest.update(&checksum_bytes);
+                manifest.checksum_value == format!("{}-{}", digest.encoded(), manifest.parts.len())
+            }
+            MultipartChecksumType::FullObject => {
+                manifest.algorithm.supports_full_object()
+                    && STANDARD
+                        .decode(&manifest.checksum_value)
+                        .is_ok_and(|decoded| {
+                            decoded.len() == manifest.algorithm.encoded_len()
+                                && STANDARD.encode(decoded) == manifest.checksum_value
+                        })
+            }
+        };
+        if !checksum_matches {
             return Err(shardline_s3_adapter::S3Error::internal());
         }
     }
     Ok(manifest)
 }
 
-fn singleton_header<'a>(
-    headers: &'a HeaderMap,
+pub(super) fn read_multipart_manifest_for_object(
+    user_metadata: &[(String, String)],
+    expected_size: u64,
+) -> Result<Option<MultipartChecksumManifest>, shardline_s3_adapter::S3Error> {
+    let mut found = None;
+    for (name, value) in user_metadata {
+        if name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY) && found.replace(value).is_some() {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        }
+    }
+    let Some(value) = found else {
+        return Ok(None);
+    };
+    let manifest: MultipartChecksumManifest =
+        serde_json::from_str(value).map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
+    if manifest.parts.is_empty() {
+        if manifest.checksum_type != MultipartChecksumType::FullObject {
+            return Err(shardline_s3_adapter::S3Error::internal());
+        }
+        return Ok(None);
+    }
+    let count = u32::try_from(manifest.parts.len())
+        .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
+    read_multipart_manifest(user_metadata, count, expected_size)
+}
+
+fn singleton_header<'header>(
+    headers: &'header HeaderMap,
     name: &'static str,
-) -> Result<Option<&'a str>, shardline_s3_adapter::S3Error> {
+) -> Result<Option<&'header str>, shardline_s3_adapter::S3Error> {
     let mut values = headers.get_all(name).iter();
     let Some(value) = values.next() else {
         return Ok(None);
@@ -320,10 +569,9 @@ fn singleton_header<'a>(
             "Repeated checksum negotiation header",
         ));
     }
-    value
-        .to_str()
-        .map(Some)
-        .map_err(|_| shardline_s3_adapter::S3Error::invalid_argument("Invalid checksum header"))
+    value.to_str().map(Some).map_err(|_error| {
+        shardline_s3_adapter::S3Error::invalid_argument("Invalid checksum header")
+    })
 }
 
 const CHECKSUM_HEADERS: [&str; 5] = [
@@ -482,74 +730,106 @@ pub(super) fn verify_multipart_part_checksums(
             DigestState::new(algorithm.header()),
         ),
         |(mut body, part_sizes, expected, mut index, mut consumed, algorithm, mut digest)| async move {
-            loop {
-                while index < part_sizes.len() && part_sizes[index] == 0 {
-                    if digest.encoded() != expected[index] {
-                        return Err(ServerError::RequestBodyChecksumMismatch);
-                    }
-                    index += 1;
-                    consumed = 0;
-                    digest = DigestState::new(algorithm.header());
-                }
-                match body.next_bytes().await? {
-                    Some(bytes) => {
-                        let mut offset = 0_usize;
-                        while offset < bytes.len() {
-                            if index >= part_sizes.len() {
+            advance_empty_multipart_checksums(
+                &part_sizes,
+                &expected,
+                &mut index,
+                &mut consumed,
+                algorithm,
+                &mut digest,
+            )?;
+            match body.next_bytes().await? {
+                Some(bytes) => {
+                    let mut offset = 0_usize;
+                    while offset < bytes.len() {
+                        let part_size = part_sizes
+                            .get(index)
+                            .copied()
+                            .ok_or(ServerError::RequestBodyChecksumMismatch)?;
+                        let expected_checksum = expected
+                            .get(index)
+                            .ok_or(ServerError::RequestBodyChecksumMismatch)?;
+                        let remaining = part_size
+                            .checked_sub(consumed)
+                            .ok_or(ServerError::RequestBodyChecksumMismatch)?;
+                        let available = bytes.len().saturating_sub(offset);
+                        let take = usize::try_from(remaining)
+                            .unwrap_or(usize::MAX)
+                            .min(available);
+                        let end = offset.saturating_add(take);
+                        digest.update(
+                            bytes
+                                .get(offset..end)
+                                .ok_or(ServerError::RequestBodyChecksumMismatch)?,
+                        );
+                        offset = end;
+                        consumed = consumed
+                            .checked_add(u64::try_from(take)?)
+                            .ok_or(ServerError::RequestBodyChecksumMismatch)?;
+                        if consumed == part_size {
+                            if digest.encoded() != *expected_checksum {
                                 return Err(ServerError::RequestBodyChecksumMismatch);
                             }
-                            let remaining = part_sizes[index]
-                                .checked_sub(consumed)
-                                .ok_or(ServerError::RequestBodyChecksumMismatch)?;
-                            let available = bytes.len().saturating_sub(offset);
-                            let take = usize::try_from(remaining)
-                                .unwrap_or(usize::MAX)
-                                .min(available);
-                            let end = offset.saturating_add(take);
-                            digest.update(
-                                bytes
-                                    .get(offset..end)
-                                    .ok_or(ServerError::RequestBodyChecksumMismatch)?,
-                            );
-                            offset = end;
-                            consumed = consumed
-                                .checked_add(u64::try_from(take)?)
-                                .ok_or(ServerError::RequestBodyChecksumMismatch)?;
-                            if consumed == part_sizes[index] {
-                                if digest.encoded() != expected[index] {
-                                    return Err(ServerError::RequestBodyChecksumMismatch);
-                                }
-                                index += 1;
-                                consumed = 0;
-                                digest = DigestState::new(algorithm.header());
-                            }
-                        }
-                        return Ok(Some((
-                            bytes,
-                            (
-                                body, part_sizes, expected, index, consumed, algorithm, digest,
-                            ),
-                        )));
-                    }
-                    None => {
-                        while index < part_sizes.len() && part_sizes[index] == 0 {
-                            if digest.encoded() != expected[index] {
-                                return Err(ServerError::RequestBodyChecksumMismatch);
-                            }
-                            index += 1;
+                            index = index.checked_add(1).ok_or(ServerError::Overflow)?;
                             consumed = 0;
                             digest = DigestState::new(algorithm.header());
+                            advance_empty_multipart_checksums(
+                                &part_sizes,
+                                &expected,
+                                &mut index,
+                                &mut consumed,
+                                algorithm,
+                                &mut digest,
+                            )?;
                         }
-                        if index != part_sizes.len() || consumed != 0 {
-                            return Err(ServerError::RequestBodyChecksumMismatch);
-                        }
-                        return Ok(None);
                     }
+                    Ok(Some((
+                        bytes,
+                        (
+                            body, part_sizes, expected, index, consumed, algorithm, digest,
+                        ),
+                    )))
+                }
+                None => {
+                    advance_empty_multipart_checksums(
+                        &part_sizes,
+                        &expected,
+                        &mut index,
+                        &mut consumed,
+                        algorithm,
+                        &mut digest,
+                    )?;
+                    if index != part_sizes.len() || consumed != 0 {
+                        return Err(ServerError::RequestBodyChecksumMismatch);
+                    }
+                    Ok(None)
                 }
             }
         },
     );
     Ok(RequestBodyReader::from_stream(body_stream))
+}
+
+fn advance_empty_multipart_checksums(
+    part_sizes: &[u64],
+    expected: &[String],
+    index: &mut usize,
+    consumed: &mut u64,
+    algorithm: MultipartChecksumAlgorithm,
+    digest: &mut DigestState,
+) -> Result<(), ServerError> {
+    while part_sizes.get(*index).copied() == Some(0) {
+        if expected
+            .get(*index)
+            .is_none_or(|expected_checksum| digest.encoded() != *expected_checksum)
+        {
+            return Err(ServerError::RequestBodyChecksumMismatch);
+        }
+        *index = index.checked_add(1).ok_or(ServerError::Overflow)?;
+        *consumed = 0;
+        *digest = DigestState::new(algorithm.header());
+    }
+    Ok(())
 }
 
 pub(super) fn reject_unpersisted_negotiation(
@@ -578,9 +858,9 @@ pub(super) fn reject_unverified_headers(
 #[cfg(test)]
 mod tests {
     use super::{
-        DigestState, MultipartChecksumAlgorithm, MultipartPartChecksum, PayloadChecksum,
-        attach_multipart_manifest, multipart_checksum_algorithm, negotiate_multipart, parse,
-        part_checksum_from_metadata, read_multipart_manifest,
+        DigestState, MultipartChecksumAlgorithm, MultipartChecksumType, MultipartPartChecksum,
+        PayloadChecksum, attach_multipart_manifest, multipart_checksum_algorithm,
+        negotiate_multipart, parse, part_checksum_from_metadata, read_multipart_manifest,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -680,6 +960,8 @@ mod tests {
         let manifest = attach_multipart_manifest(
             &mut metadata,
             MultipartChecksumAlgorithm::Crc32,
+            MultipartChecksumType::Composite,
+            None,
             vec![MultipartPartChecksum {
                 part_number: 1,
                 size_bytes: 17,
@@ -739,6 +1021,8 @@ mod tests {
         let manifest = attach_multipart_manifest(
             &mut metadata,
             MultipartChecksumAlgorithm::Crc32c,
+            MultipartChecksumType::Composite,
+            None,
             vec![MultipartPartChecksum {
                 part_number: 1,
                 size_bytes: 9,

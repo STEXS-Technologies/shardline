@@ -78,20 +78,18 @@ fn io_to_s3(error: std::io::Error) -> S3Error {
     S3Error::from(ServerError::Io(error))
 }
 
-fn requested_part_checksum<'a>(
-    requested: &'a CompleteParts,
+fn requested_part_checksum(
+    requested: &CompleteParts,
     part_number: u32,
     algorithm: MultipartChecksumAlgorithm,
-) -> Option<&'a str> {
-    match algorithm {
-        MultipartChecksumAlgorithm::Crc32 => requested.checksum_crc32(part_number),
-        MultipartChecksumAlgorithm::Crc32c => requested.checksum_crc32c(part_number),
-    }
+) -> Option<&str> {
+    requested.checksum(part_number, algorithm.s3_name())
 }
 
 fn requested_part_has_checksum(requested: &CompleteParts, part_number: u32) -> bool {
-    requested.checksum_crc32(part_number).is_some()
-        || requested.checksum_crc32c(part_number).is_some()
+    ["CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"]
+        .into_iter()
+        .any(|algorithm| requested.checksum(part_number, algorithm).is_some())
 }
 
 /// The `413 EntityTooLarge` envelope for an oversized part body.
@@ -166,6 +164,7 @@ pub(super) async fn s3_create_multipart_upload(
     let mut user_metadata = object::capture_user_metadata(headers)?;
     user_metadata.retain(|(name, _)| !checksum::is_internal_metadata(name));
     let checksum_algorithm = checksum::negotiate_multipart(headers, &mut user_metadata)?;
+    let checksum_config = checksum::multipart_checksum_config(&user_metadata);
     if durable_sessions_enabled(state) {
         let upload_id = new_upload_id();
         let initiated_at = state.backend.postgres_now().await?;
@@ -209,7 +208,7 @@ pub(super) async fn s3_create_multipart_upload(
             key: context.key.clone(),
             upload_id,
             checksum_algorithm: checksum_algorithm.map(|algorithm| algorithm.s3_name().to_owned()),
-            checksum_type: checksum_algorithm.map(|_algorithm| "COMPOSITE".to_owned()),
+            checksum_type: checksum_config.map(|config| config.checksum_type.s3_name().to_owned()),
         }
         .to_xml();
         return Ok((
@@ -235,7 +234,7 @@ pub(super) async fn s3_create_multipart_upload(
         key: context.key.clone(),
         upload_id,
         checksum_algorithm: checksum_algorithm.map(|algorithm| algorithm.s3_name().to_owned()),
-        checksum_type: checksum_algorithm.map(|_algorithm| "COMPOSITE".to_owned()),
+        checksum_type: checksum_config.map(|config| config.checksum_type.s3_name().to_owned()),
     }
     .to_xml();
     Ok((
@@ -956,6 +955,8 @@ pub(super) async fn s3_complete_multipart_upload(
         Some(checksum::attach_multipart_manifest(
             &mut user_metadata,
             algorithm,
+            checksum::MultipartChecksumType::Composite,
+            None,
             requested_checksums
                 .iter()
                 .map(
@@ -1008,13 +1009,14 @@ pub(super) async fn s3_complete_multipart_upload(
             .filter(|manifest| manifest.algorithm == MultipartChecksumAlgorithm::Crc32)
             .map(|manifest| manifest.checksum_value.clone()),
     };
-    let xml = checksum_manifest
-        .as_ref()
-        .filter(|manifest| manifest.algorithm == MultipartChecksumAlgorithm::Crc32c)
-        .map_or_else(
-            || completion_result.to_xml(),
-            |manifest| completion_result.to_crc32c_xml(&manifest.checksum_value),
-        );
+    let xml = match checksum_manifest.as_ref() {
+        Some(manifest) => completion_result.to_negotiated_checksum_xml(
+            manifest.algorithm.xml_field(),
+            &manifest.checksum_value,
+            manifest.checksum_type.s3_name(),
+        )?,
+        None => completion_result.to_xml(),
+    };
     Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
@@ -1178,6 +1180,8 @@ async fn durable_s3_complete_multipart_upload(
             Some(checksum::attach_multipart_manifest(
                 &mut attributes.user_metadata,
                 algorithm,
+                checksum::MultipartChecksumType::Composite,
+                None,
                 requested_checksums
                     .iter()
                     .map(|(part_number, checksum_value, size_bytes)| {
@@ -1281,13 +1285,14 @@ async fn durable_s3_complete_multipart_upload(
                 .filter(|manifest| manifest.algorithm == MultipartChecksumAlgorithm::Crc32)
                 .map(|manifest| manifest.checksum_value.clone()),
         };
-        let xml = checksum_manifest
-            .as_ref()
-            .filter(|manifest| manifest.algorithm == MultipartChecksumAlgorithm::Crc32c)
-            .map_or_else(
-                || completion_result.to_xml(),
-                |manifest| completion_result.to_crc32c_xml(&manifest.checksum_value),
-            );
+        let xml = match checksum_manifest.as_ref() {
+            Some(manifest) => completion_result.to_negotiated_checksum_xml(
+                manifest.algorithm.xml_field(),
+                &manifest.checksum_value,
+                manifest.checksum_type.s3_name(),
+            )?,
+            None => completion_result.to_xml(),
+        };
         Ok((
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],

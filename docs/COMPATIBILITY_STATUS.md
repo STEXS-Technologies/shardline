@@ -219,11 +219,11 @@ reachable record remain protected.
   preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search,
   webhooks, Git Smart HTTP clone/fetch/push, SDK live-reference listing, and SDK
   branch/lightweight-tag creation and deletion
-- S3 frontend: object `PUT`, `GET` (with `Range`/`Content-Range`), `HEAD`, `DELETE`, and
+- S3 frontend: object `PUT`, `GET` (with `Range`/`Content-Range` and checksum mode), checksum-enabled `HEAD`, `DELETE`, and
   partial `GetObjectAttributes` (`ETag`, `ObjectSize`, multipart total-part count,
-  and CRC32/CRC32C COMPOSITE checksums with verified per-part sizes/checksums when the
+  and persisted single-PUT or CRC32/CRC32C/SHA-1/SHA-256 COMPOSITE checksums with verified per-part sizes/checksums when the
   upload negotiated that checksum mode); active `ListParts` returns the negotiated
-  checksum algorithm and per-part CRC values, deriving missing values for older
+  checksum algorithm and per-part checksum values, deriving missing values for older
   in-progress sessions from integrity-checked part bytes;
   multipart upload (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`,
   `AbortMultipartUpload`, `ListParts`, and `ListMultipartUploads`); `HeadBucket`/

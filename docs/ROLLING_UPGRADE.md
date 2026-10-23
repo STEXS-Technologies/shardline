@@ -52,6 +52,14 @@ those requests, hold them until every replica is upgraded. A 1.12.1 replica can
 still read and write the tested object data, but it does not understand the new
 lock or identity records.
 
+S3 checksum writes need the same routing care. The checksum record is stored in
+the S3 object's private metadata. A 1.12.1 replica can read the object bytes,
+but it does not know that metadata key is private and can return it as ordinary
+`x-amz-meta-*` metadata. During a mixed-version rollout, either keep each
+checksummed object's reads and writes on upgraded replicas or wait until all
+replicas are upgraded before enabling checksum writes. This does not alter the
+object bytes, but it can change the metadata returned by an old replica.
+
 Restarting an old binary does not require dropping the additive tables or
 restoring an old backup. Keep those tables: they contain persistent identities
 and locks for upgraded replicas. Do not run downgrade SQL blindly or restore an

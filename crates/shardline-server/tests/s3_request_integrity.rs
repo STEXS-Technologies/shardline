@@ -110,6 +110,43 @@ async fn assert_request_integrity(database_url: Option<&str>) {
             .unwrap(),
         sha256_checksum(b"original")
     );
+    let attributes = client
+        .get(format!("{object}?attributes"))
+        .bearer_auth(&token)
+        .header("x-amz-object-attributes", "Checksum")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(attributes.status(), 200);
+    let attributes = attributes.text().await.unwrap();
+    assert!(attributes.contains("<ChecksumSHA256>"), "{attributes}");
+    assert!(attributes.contains("<ChecksumType>FULL_OBJECT</ChecksumType>"));
+    let head = client
+        .head(&object)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200);
+    assert_eq!(
+        head.headers()["x-amz-checksum-sha256"],
+        sha256_checksum(b"original")
+    );
+    assert_eq!(head.headers()["x-amz-checksum-type"], "FULL_OBJECT");
+    let get = client
+        .get(&object)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(
+        get.headers()["x-amz-checksum-sha256"],
+        sha256_checksum(b"original")
+    );
+    assert_eq!(get.bytes().await.unwrap().as_ref(), b"original");
     let response = client
         .put(&object)
         .bearer_auth(&token)
@@ -191,7 +228,100 @@ async fn assert_request_integrity(database_url: Option<&str>) {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 501);
+    assert_eq!(response.status(), 200);
+    let create_xml = response.text().await.unwrap();
+    assert!(create_xml.contains("<ChecksumAlgorithm>SHA256</ChecksumAlgorithm>"));
+    assert!(create_xml.contains("<ChecksumType>COMPOSITE</ChecksumType>"));
+    let sha_upload = upload_id(&create_xml).to_owned();
+    let sha_part = b"sha256 multipart payload";
+    let sha_part_checksum = sha256_checksum(sha_part);
+    let rejected_sha_part = client
+        .put(format!("{multipart}?uploadId={sha_upload}&partNumber=1"))
+        .bearer_auth(&token)
+        .header(
+            "x-amz-checksum-sha256",
+            sha256_checksum(b"wrong sha256 part"),
+        )
+        .body(sha_part.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected_sha_part.status(), 400);
+    assert!(
+        rejected_sha_part
+            .text()
+            .await
+            .unwrap()
+            .contains("BadDigest")
+    );
+    let sha_part_response = client
+        .put(format!("{multipart}?uploadId={sha_upload}&partNumber=1"))
+        .bearer_auth(&token)
+        .header("x-amz-checksum-sha256", &sha_part_checksum)
+        .body(sha_part.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sha_part_response.status(), 200);
+    let sha_etag = sha_part_response.headers()["etag"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let sha_completion = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{sha_etag}</ETag><ChecksumSHA256>{sha_part_checksum}</ChecksumSHA256></Part></CompleteMultipartUpload>"
+    );
+    let completed = client
+        .post(format!("{multipart}?uploadId={sha_upload}"))
+        .bearer_auth(&token)
+        .body(sha_completion)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), 200);
+    let completed_xml = completed.text().await.unwrap();
+    assert!(
+        completed_xml.contains("<ChecksumSHA256>"),
+        "{completed_xml}"
+    );
+    assert!(completed_xml.contains("<ChecksumType>COMPOSITE</ChecksumType>"));
+    let attributes = client
+        .get(format!("{multipart}?attributes"))
+        .bearer_auth(&token)
+        .header("x-amz-object-attributes", "Checksum,ObjectParts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(attributes.status(), 200);
+    let attributes = attributes.text().await.unwrap();
+    assert!(attributes.contains("<ChecksumSHA256>"), "{attributes}");
+    let head = client
+        .head(&multipart)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200);
+    assert!(head.headers().contains_key("x-amz-checksum-sha256"));
+    assert_eq!(head.headers()["x-amz-checksum-type"], "COMPOSITE");
+    for (algorithm, checksum_type) in [
+        ("CRC32", "FULL_OBJECT"),
+        ("CRC32C", "FULL_OBJECT"),
+        ("CRC64NVME", "FULL_OBJECT"),
+        ("CRC64NVME", "COMPOSITE"),
+        ("SHA1", "FULL_OBJECT"),
+        ("SHA256", "FULL_OBJECT"),
+    ] {
+        let rejected = client
+            .post(format!("{multipart}?uploads"))
+            .bearer_auth(&token)
+            .header("x-amz-checksum-algorithm", algorithm)
+            .header("x-amz-checksum-type", checksum_type)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), 501, "{algorithm} {checksum_type}");
+    }
     let response = client
         .post(format!("{multipart}?uploads"))
         .bearer_auth(&token)

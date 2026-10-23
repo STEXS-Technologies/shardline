@@ -65,6 +65,44 @@ async fn exercise(database: Option<&str>) {
         assert!(!xml.contains("<StorageClass>"));
         assert!(!xml.contains("<Checksum>") && !xml.contains("<ObjectParts>"));
     }
+    let checksummed_url = format!("{}/{}.locks/checksummed-single", server.base, owner);
+    let checksummed_body = b"persist single put checksum";
+    let single_checksum = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        Sha256::digest(checksummed_body),
+    );
+    let put = client
+        .put(&checksummed_url)
+        .bearer_auth(&credential)
+        .header("x-amz-checksum-sha256", &single_checksum)
+        .body(checksummed_body.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let attributes = client
+        .get(format!("{checksummed_url}?attributes"))
+        .bearer_auth(&read)
+        .header("x-amz-object-attributes", "Checksum")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(attributes.status(), StatusCode::OK);
+    let attributes = attributes.text().await.unwrap();
+    assert!(attributes.contains(&format!(
+        "<ChecksumSHA256>{single_checksum}</ChecksumSHA256>"
+    )));
+    assert!(attributes.contains("<ChecksumType>FULL_OBJECT</ChecksumType>"));
+    let head = client
+        .head(&checksummed_url)
+        .bearer_auth(&read)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()["x-amz-checksum-sha256"], single_checksum);
+    assert_eq!(head.headers()["x-amz-checksum-type"], "FULL_OBJECT");
     read_conditions(&client, &url, &read).await;
     for attributes in [
         None,
@@ -202,6 +240,27 @@ async fn exercise(database: Option<&str>) {
     server.stop().await;
     let server = start(root.path(), ServerFrontend::S3, true, database).await;
     let url = format!("{}/{}.locks/object", server.base, owner);
+    let checksummed_url = format!("{}/{}.locks/checksummed-single", server.base, owner);
+    let attributes = client
+        .get(format!("{checksummed_url}?attributes"))
+        .bearer_auth(&read)
+        .header("x-amz-object-attributes", "Checksum")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(attributes.status(), StatusCode::OK);
+    assert!(attributes.text().await.unwrap().contains(&format!(
+        "<ChecksumSHA256>{single_checksum}</ChecksumSHA256>"
+    )));
+    let head = client
+        .head(&checksummed_url)
+        .bearer_auth(&read)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()["x-amz-checksum-sha256"], single_checksum);
     // Model an older writer that updates an active part without the new
     // checksum metadata; ListParts must verify and derive the missing value.
     if database.is_none() {
