@@ -54,9 +54,11 @@ Current route families:
   `GET /v2/{repository}/referrers/{digest}`, and `GET /v2/token`
 - HuggingFace Hub API: `/api/whoami-v2`, `/api/repos/create`, `/api/{type}/{ns}/{repo}`,
   `/api/{type}/{ns}/{repo}/commit/{rev}`, `/objects/batch`, `/lfs/objects/{oid}`
-- S3: `GET /` (ListBuckets), `/{bucket}` bucket stubs (`?location=`, `?list-type=2`,
-  `?delete=`), and `/{bucket}/{*key}` object routes (`PUT`/`GET`/`HEAD`/`DELETE`,
-  `?uploads` and `?uploadId` multipart sub-resources, `x-amz-copy-source`)
+- S3: `GET /` (the caller's ListBuckets result), bare `GET /{bucket}`
+  (ListObjects v1), `?list-type=2`, bucket probes (`?location=`), batch delete
+  (`?delete=`), and `/{bucket}/{*key}` object routes (`PUT`/`GET`/`HEAD`/`DELETE`,
+  `?uploads` and `?uploadId` multipart sub-resources, `x-amz-copy-source`). An
+  explicit `?list-type=1` is unsupported; see [S3 compatibility and scope](S3_FRONTEND.md).
 
 ## Client Entry Points
 
@@ -199,10 +201,13 @@ mc cp ./model.pt shardline/ac.assets/model.pt
 mc ls shardline/ac.assets/
 ```
 
-The S3 `access_key` is the Shardline bearer token scoped to `{owner}.{name}`; the
-`secret_key` is ignored (the SigV4 signature is not verified). Any S3-speaking client
-works the same way — `mc`, the AWS CLI/SDKs, pyarrow, DuckDB, Polars, and others —
-with the token in the access-key slot.
+In the legacy credential mode, the S3 `access_key` is a Shardline bearer token
+scoped to `{owner}.{name}` and the `secret_key` is ignored; the SigV4 signature
+is not verified. This works with the documented clients when configured for
+that credential mode. Operators can instead configure signing identities to
+verify SigV4 and presigned requests. Neither mode expands the operations Shardline
+implements; see [S3 compatibility and scope](S3_FRONTEND.md) before choosing a client.
+Use TLS in production.
 
 ## CAS-Based Interface Protocols
 
