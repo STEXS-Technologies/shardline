@@ -161,6 +161,10 @@ repositories therefore incur more backend reads even for a small result page.
 Run `bash scripts/verify-protocol-conformance.sh` to check native Git LFS locking
 and transfers plus the pinned OCI Distribution v1.1.1 upstream suite. Set
 `DATABASE_URL` to a disposable PostgreSQL database to include replica lock races.
+Before the PostgreSQL phase, initialize that database with
+`shardline db migrate up --database-url "$DATABASE_URL"`. Set `TEST_S3_BUCKET`,
+`TEST_S3_ENDPOINT`, `TEST_S3_ACCESS_KEY`, and `TEST_S3_SECRET_KEY` to a disposable
+MinIO bucket to include the PostgreSQL/object-store phase.
 The upstream suite has mutually exclusive setup and cross-mount cases, so a
 successful run includes explicitly skipped alternative cases.
 The separate pre-populated-repository run exercises the environment-supplied tag

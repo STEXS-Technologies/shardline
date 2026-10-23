@@ -2,6 +2,7 @@
 use super::*;
 
 mod connection_loss;
+mod interrupted_fetch;
 mod lost_ack;
 
 async fn git(directory: &Path, arguments: &[&str]) -> std::process::Output {
@@ -221,6 +222,167 @@ async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) 
         format!("{head}\trefs/heads/peer\n")
     );
     success(&reopened, &["fsck", "--strict"]).await;
+
+    // Exercise merge-shaped history over the real Smart HTTP path after the
+    // server restart. A depth-two clone must receive both merge parents, and
+    // deepening must restore their shared ancestor without duplicating it.
+    success(&reopened, &["switch", "-c", "shallow-side", first_head]).await;
+    std::fs::write(reopened.join("shallow-side.txt"), b"side branch payload\n").unwrap();
+    success(&reopened, &["add", "shallow-side.txt"]).await;
+    success(
+        &reopened,
+        &[
+            "-c",
+            "user.name=Atomic Test",
+            "-c",
+            "user.email=atomic@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "Shallow side",
+        ],
+    )
+    .await;
+    success(
+        &reopened,
+        &["push", "origin", "HEAD:refs/heads/shallow-side"],
+    )
+    .await;
+    success(&reopened, &["switch", "main"]).await;
+    success(
+        &reopened,
+        &["merge", "--no-ff", "--no-edit", "shallow-side"],
+    )
+    .await;
+    success(&reopened, &["push", "origin", "HEAD:main"]).await;
+
+    let shallow_path = work.path().join("shallow-merge");
+    let shallow_dir = shallow_path.to_str().unwrap();
+    let repository_url = format!("{}/models/{repository}", server.base);
+    success(
+        work.path(),
+        &[
+            "clone",
+            "--depth=2",
+            "--single-branch",
+            "--branch",
+            "main",
+            &repository_url,
+            shallow_dir,
+        ],
+    )
+    .await;
+    let shallow_head = success(&shallow_path, &["rev-list", "--parents", "-n", "1", "HEAD"])
+        .await
+        .stdout;
+    assert_eq!(
+        std::str::from_utf8(&shallow_head)
+            .unwrap()
+            .split_whitespace()
+            .count(),
+        3,
+        "shallow merge clone must retain both parent identities"
+    );
+    assert_eq!(
+        success(&shallow_path, &["rev-list", "--count", "HEAD"])
+            .await
+            .stdout,
+        b"3\n"
+    );
+    success(&shallow_path, &["fsck", "--strict"]).await;
+    interrupted_fetch::fail_once_then_retry(&shallow_path, &server.base, &repository).await;
+    assert_eq!(
+        success(&shallow_path, &["rev-list", "--count", "HEAD"])
+            .await
+            .stdout,
+        b"4\n"
+    );
+    assert_eq!(
+        success(
+            &shallow_path,
+            &["rev-parse", &format!("{first_head}^{{commit}}")]
+        )
+        .await
+        .stdout,
+        format!("{first_head}\n").as_bytes()
+    );
+    success(&shallow_path, &["fsck", "--strict"]).await;
+    success(&shallow_path, &["fetch", "--unshallow", "origin", "main"]).await;
+    assert_eq!(
+        success(&shallow_path, &["rev-parse", "--is-shallow-repository"])
+            .await
+            .stdout,
+        b"false\n"
+    );
+    assert!(
+        git(
+            &shallow_path,
+            &["merge-base", "--is-ancestor", first_head, "HEAD"]
+        )
+        .await
+        .status
+        .success()
+    );
+    success(&shallow_path, &["fsck", "--full", "--strict"]).await;
+    assert_eq!(
+        success(&shallow_path, &["rev-list", "--parents", "HEAD"])
+            .await
+            .stdout,
+        success(&reopened, &["rev-list", "--parents", "HEAD"])
+            .await
+            .stdout,
+        "unshallowing must restore the same complete commit graph"
+    );
+
+    let filtered_path = work.path().join("filtered-merge");
+    let filtered_dir = filtered_path.to_str().unwrap();
+    success(
+        work.path(),
+        &[
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            "--single-branch",
+            "--branch",
+            "main",
+            &repository_url,
+            filtered_dir,
+        ],
+    )
+    .await;
+    assert_eq!(
+        success(
+            &filtered_path,
+            &["config", "--get", "remote.origin.promisor"]
+        )
+        .await
+        .stdout,
+        b"true\n"
+    );
+    let missing_blobs = success(
+        &filtered_path,
+        &["rev-list", "--objects", "--all", "--missing=print"],
+    )
+    .await
+    .stdout;
+    assert!(
+        String::from_utf8_lossy(&missing_blobs)
+            .lines()
+            .any(|line| line.starts_with('?')),
+        "blob:none clone should defer at least one blob"
+    );
+    success(&filtered_path, &["checkout", "--detach", "main"]).await;
+    assert_eq!(
+        std::fs::read(filtered_path.join("payload.txt")).unwrap(),
+        b"second durable atomic payload\n"
+    );
+    assert_eq!(
+        std::fs::read(filtered_path.join("shallow-side.txt")).unwrap(),
+        b"side branch payload\n"
+    );
+    success(&filtered_path, &["fsck", "--full", "--strict"]).await;
+
     success(
         &reopened,
         &["push", "--atomic", "origin", ":peer", ":refs/tags/atomic"],

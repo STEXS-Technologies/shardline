@@ -19,8 +19,6 @@ deliberately changed.
 
 | Priority | Surface | Remaining qualification | Required proof |
 | --- | --- | --- | --- |
-| P1 | Git shallow/filtered fetch | Native tests cover the documented depth, date, exclusion and object-filter flows, but broader shallow-history merge, backend and failure qualification remains open. | Cross-backend clone/fetch/merge tests, interrupted transfer and retry, history identity, and `git fsck` after restart. |
-| P1 | PostgreSQL and remote S3 protocol run | The local conformance run does not establish PostgreSQL/MinIO behavior. This workspace has no `DATABASE_URL` or `TEST_S3_*` configuration. | Run `scripts/verify-protocol-conformance.sh` with disposable PostgreSQL and S3-compatible storage; retain the execution result outside source control. |
 | P2 | Live provider bridge | Live GitHub/Gitea provider tests require external credentials and repositories and are not part of the ordinary local run. | Execute the explicitly selected live tests with isolated test repositories and verify identity, token refresh, webhook and cleanup behavior. |
 | P2 | Deployment clients | Kubernetes/kind and other deployment-specific E2E targets need their dedicated fixtures; a local protocol pass does not qualify those environments. | Run the documented deployment suites and review their actual results, including all prerequisite and skip reporting. |
 
@@ -38,10 +36,19 @@ deliberately changed.
   the upstream suite deliberately skips four mutually exclusive setup cases.
   Those are reported as skipped, not counted as passing coverage. See
   [Protocol Frontends](PROTOCOLS.md) for the suite and skip conditions.
-- A local run on 2026-10-23 passed the protocol-conformance script's selected
-  local checks, including 75 of 79 OCI specs (4 setup alternatives skipped),
-  31 selected protocol-completion tests, Git CLI and Smart HTTP tests, and
-  signed MinIO client tests. PostgreSQL and remote-S3 phases were not run.
+- On 2026-10-23, `bash scripts/verify-protocol-conformance.sh` passed against a
+  disposable, migrated PostgreSQL database and MinIO bucket. It passed the Git
+  CLI and Smart HTTP suites, 75 of 79 OCI specs (4 setup alternatives skipped),
+  all selected PostgreSQL protocol-completion tests, and the configured
+  PostgreSQL/MinIO tests for atomic Git after restart, signed streaming, OCI
+  reclamation/referrers, multipart resume, completion/abort races, and large
+  copy ranges. The durable Git test includes shallow merge history, an
+  interrupted upload-pack response with native Git retry, deepening/unshallowing,
+  filtered blob retrieval, and strict `fsck` after restart across local,
+  PostgreSQL, and PostgreSQL/MinIO backends. The final durable Git test was
+  rerun separately against all three backends after adding the filtered-clone
+  checks. External provider credentials and deployment-specific clients were
+  not part of this run.
 
 For the current supported route contract, use [Compatibility Status](COMPATIBILITY_STATUS.md),
 [Protocol Frontends](PROTOCOLS.md), [S3 Frontend](S3_FRONTEND.md), and
