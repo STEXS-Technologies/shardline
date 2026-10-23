@@ -1665,6 +1665,23 @@ async fn s3_get_bucket_versioning_reports_never_enabled_configuration() {
         .await
         .unwrap();
     assert_eq!(list.status(), StatusCode::NOT_IMPLEMENTED);
+
+    for query in ["location&versioning", "list-type=2&versioning"] {
+        let response = s3_router(build_test_state().await.0)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{BUCKET}?{query}"))
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED, "{query}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -119,19 +119,13 @@ pub(crate) async fn s3_get_bucket(
     if matches!(resources.as_slice(), [S3SubResource::Uploads]) {
         return super::multipart::s3_list_uploads(&state, auth.capability(), &bucket, &query).await;
     }
-    if resources
-        .iter()
-        .any(|resource| matches!(resource, S3SubResource::Location))
-    {
+    if resources.as_slice() == [S3SubResource::Location] {
         return Ok(get_bucket_location_response());
     }
     if resources.as_slice() == [S3SubResource::Versioning] {
         return Ok(get_bucket_versioning_response());
     }
-    if resources
-        .iter()
-        .any(|resource| matches!(resource, S3SubResource::ListObjects))
-    {
+    if resources.as_slice() == [S3SubResource::ListObjects] {
         return listing::s3_list_objects_v2(auth, State(state), Path(bucket), uri, headers).await;
     }
     if resources.is_empty() {
