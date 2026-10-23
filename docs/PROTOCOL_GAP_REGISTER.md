@@ -82,6 +82,10 @@ deliberately changed.
   they confirm old same-key PUTs clear tags, so protection depends on the
   documented rollout routing rule. Production load-balancer rules remain
   unqualified.
+- Native Botocore `GetObjectAttributes` coverage now walks a two-page
+  `ObjectParts` response using `MaxParts` and `PartNumberMarker`, checking the
+  returned markers, truncation flags, part sizes and checksums. This exercises
+  the SDK serialization and response parsing in addition to route-level tests.
 
 For the current supported route contract, use [Compatibility Status](COMPATIBILITY_STATUS.md),
 [Protocol Frontends](PROTOCOLS.md), [S3 Frontend](S3_FRONTEND.md), and

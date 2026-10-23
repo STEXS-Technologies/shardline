@@ -269,6 +269,27 @@ multipart_attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key='s
 assert multipart_attributes['ObjectParts']['TotalPartsCount'] == 1, multipart_attributes
 assert multipart_attributes['Checksum']['ChecksumType'] == 'COMPOSITE', multipart_attributes
 assert multipart_attributes['ObjectParts']['Parts'] == [{'PartNumber': 1, 'Size': len(b'multipart attribute part'), 'ChecksumCRC32': part['ChecksumCRC32']}], multipart_attributes
+
+# Verify SDK request/response pagination for committed multipart attributes.
+page_key = 'session/attribute-pages.bin'
+page_upload = c.create_multipart_upload(Bucket='aws-resume.locks', Key=page_key, ChecksumAlgorithm='CRC32')
+page_parts = []
+page_payloads = (b'a' * (5 * 1024 * 1024), b'second attribute part')
+for number, payload in enumerate(page_payloads, start=1):
+    checksum = checksum_for('CRC32', payload)
+    result = c.upload_part(Bucket='aws-resume.locks', Key=page_key, UploadId=page_upload['UploadId'], PartNumber=number, Body=payload, ChecksumCRC32=checksum)
+    page_parts.append({'PartNumber': number, 'ETag': result['ETag'], 'ChecksumCRC32': checksum})
+c.complete_multipart_upload(Bucket='aws-resume.locks', Key=page_key, UploadId=page_upload['UploadId'], MultipartUpload={'Parts': page_parts})
+first_page = c.get_object_attributes(Bucket='aws-resume.locks', Key=page_key, ObjectAttributes=['ObjectParts'], MaxParts=1)
+first_object_parts = first_page['ObjectParts']
+assert first_object_parts['MaxParts'] == 1 and first_object_parts['PartNumberMarker'] == 0, first_object_parts
+assert first_object_parts['IsTruncated'] and first_object_parts['NextPartNumberMarker'] == 1, first_object_parts
+assert first_object_parts['Parts'] == [{'PartNumber': 1, 'Size': len(page_payloads[0]), 'ChecksumCRC32': page_parts[0]['ChecksumCRC32']}], first_object_parts
+second_page = c.get_object_attributes(Bucket='aws-resume.locks', Key=page_key, ObjectAttributes=['ObjectParts'], MaxParts=1, PartNumberMarker=first_object_parts['NextPartNumberMarker'])
+second_object_parts = second_page['ObjectParts']
+assert second_object_parts['MaxParts'] == 1 and second_object_parts['PartNumberMarker'] == 1, second_object_parts
+assert not second_object_parts['IsTruncated'] and 'NextPartNumberMarker' not in second_object_parts, second_object_parts
+assert second_object_parts['Parts'] == [{'PartNumber': 2, 'Size': len(page_payloads[1]), 'ChecksumCRC32': page_parts[1]['ChecksumCRC32']}], second_object_parts
 for algorithm in ('CRC32', 'CRC32C', 'CRC64NVME'):
     field = checksum_field(algorithm)
     key = 'session/full-object-' + algorithm.lower() + '.bin'
