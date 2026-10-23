@@ -1272,6 +1272,91 @@ async fn s3_put_and_copy_object_preserve_tagging_directive_semantics() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_unsupported_storage_acl_and_encryption_options_fail_closed() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let key = "options/model.bin";
+
+    let mut standard = put_request(format!("/{BUCKET}/{key}"), b"standard class".to_vec());
+    standard
+        .headers_mut()
+        .insert("x-amz-storage-class", "STANDARD".parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(standard).await.unwrap().status(),
+        StatusCode::OK,
+        "the default S3 storage class is supported"
+    );
+
+    for (name, value) in [
+        ("x-amz-storage-class", "GLACIER"),
+        ("x-amz-acl", "public-read"),
+        ("x-amz-server-side-encryption", "AES256"),
+    ] {
+        let mut request = put_request(format!("/{BUCKET}/{key}"), b"must not replace".to_vec());
+        let header_name = axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap();
+        request
+            .headers_mut()
+            .insert(header_name, value.parse().unwrap());
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "unsupported option {name} must not be silently accepted"
+        );
+    }
+
+    let encrypted_read = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(encrypted_read.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let unsupported_multipart = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/{key}?uploads"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header("x-amz-server-side-encryption", "AES256")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unsupported_multipart.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let object = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(body_bytes(object).await, b"standard class");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_delete_interruption_cannot_resurrect_legacy_direct_bytes() {
     let (state, _tmp) = build_test_state().await;
     let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();

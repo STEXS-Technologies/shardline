@@ -402,6 +402,7 @@ pub(crate) async fn s3_put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_write_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?partNumber=N&uploadId=U` dispatches to UploadPart; other sub-resources
@@ -1181,6 +1182,7 @@ pub(crate) async fn s3_get_object(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_read_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
@@ -1386,6 +1388,7 @@ pub(crate) async fn s3_head_object(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_read_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
@@ -1493,6 +1496,7 @@ pub(crate) async fn s3_delete_object(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_write_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?uploadId` dispatches to AbortMultipartUpload; other sub-resources are
@@ -1629,6 +1633,7 @@ pub(crate) async fn s3_post_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_write_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?uploads` → CreateMultipartUpload, `?uploadId` → CompleteMultipartUpload;

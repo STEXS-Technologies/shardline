@@ -52,6 +52,48 @@ pub(super) fn capture_headers(
     Ok(())
 }
 
+/// Rejects S3 object options whose behavior Shardline does not persist or
+/// enforce. Silently accepting these options would tell clients that a policy
+/// was applied when it was not.
+pub(super) fn reject_unsupported_read_headers(headers: &HeaderMap) -> Result<(), S3Error> {
+    for name in headers.keys().map(HeaderName::as_str) {
+        if name.starts_with("x-amz-server-side-encryption")
+            || name.starts_with("x-amz-copy-source-server-side-encryption")
+            || name == "x-amz-expected-bucket-owner"
+            || name == "x-amz-request-payer"
+        {
+            return Err(S3Error::not_implemented());
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn reject_unsupported_write_headers(headers: &HeaderMap) -> Result<(), S3Error> {
+    reject_unsupported_read_headers(headers)?;
+    for name in headers.keys().map(HeaderName::as_str) {
+        if name == "x-amz-acl"
+            || name.starts_with("x-amz-grant-")
+            || name.starts_with("x-amz-object-lock-")
+            || name == "x-amz-bypass-governance-retention"
+        {
+            return Err(S3Error::not_implemented());
+        }
+    }
+    let mut storage_classes = headers.get_all("x-amz-storage-class").iter();
+    if let Some(storage_class) = storage_classes.next() {
+        if storage_classes.next().is_some() {
+            return Err(S3Error::invalid_argument("Repeated x-amz-storage-class"));
+        }
+        let storage_class = storage_class
+            .to_str()
+            .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-storage-class"))?;
+        if !storage_class.eq_ignore_ascii_case("STANDARD") {
+            return Err(S3Error::not_implemented());
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn attach_form_field(
     headers: &mut HeaderMap,
     name: &str,
