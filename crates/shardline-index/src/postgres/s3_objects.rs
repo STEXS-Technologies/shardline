@@ -5,6 +5,7 @@ use super::{
     PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
     load_postgres_latest_evidence_heads, u64_to_i64,
 };
+use crate::s3_objects::s3_multipart_count_proof;
 use crate::{S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, s3_prefix_successor};
 use shardline_reliability::{
     OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
@@ -31,6 +32,241 @@ fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetada
         user_metadata,
         updated_at_unix_seconds: row.try_get("updated_at_unix_seconds")?,
     })
+}
+
+fn multipart_count_from_row(
+    row: &PgRow,
+    entry: &S3ObjectEntry,
+) -> Result<Option<u32>, PostgresMetadataStoreError> {
+    let count: Option<i32> = row.try_get("multipart_part_count")?;
+    let Some(count) = count.and_then(|count| u32::try_from(count).ok()) else {
+        return Ok(None);
+    };
+    let file_id: Option<String> = row.try_get("multipart_file_id")?;
+    let content_hash: Option<String> = row.try_get("multipart_content_hash")?;
+    let updated_at: Option<i64> = row.try_get("multipart_updated_at")?;
+    let proof: Option<String> = row.try_get("multipart_count_proof")?;
+    if file_id.as_deref() != Some(&entry.file_id)
+        || content_hash.as_deref() != Some(&entry.content_hash)
+        || updated_at != Some(entry.updated_at_unix_seconds)
+    {
+        return Ok(None);
+    }
+    let expected = s3_multipart_count_proof(
+        &entry.scope_namespace,
+        &entry.object_key,
+        &entry.file_id,
+        &entry.content_hash,
+        count,
+        entry.updated_at_unix_seconds,
+    )?;
+    Ok((proof.as_deref() == Some(expected.as_str())).then_some(count))
+}
+
+async fn upsert_s3_object_with_optional_count(
+    store: &PostgresIndexStore,
+    entry: &S3ObjectEntry,
+    part_count: Option<u32>,
+) -> Result<(), PostgresMetadataStoreError> {
+    let user_metadata_json = user_metadata_to_json(&entry.user_metadata)?;
+    let mut transaction = store.pool.begin().await?;
+    lock_s3_object(&mut transaction, &entry.scope_namespace, &entry.object_key).await?;
+    let before = current_s3_object_on_connection(
+        &mut transaction,
+        &entry.scope_namespace,
+        &entry.object_key,
+    )
+    .await?;
+    query(
+        "INSERT INTO shardline_s3_objects (
+            scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+            user_metadata, updated_at_unix_seconds
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (scope_namespace, object_key)
+         DO UPDATE SET
+            file_id = EXCLUDED.file_id,
+            size_bytes = EXCLUDED.size_bytes,
+            content_hash = EXCLUDED.content_hash,
+            etag = EXCLUDED.etag,
+            user_metadata = EXCLUDED.user_metadata,
+            updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds
+         WHERE (shardline_s3_objects.file_id,
+                shardline_s3_objects.size_bytes,
+                shardline_s3_objects.content_hash,
+                shardline_s3_objects.etag,
+                shardline_s3_objects.user_metadata,
+                shardline_s3_objects.updated_at_unix_seconds)
+               IS DISTINCT FROM
+               (EXCLUDED.file_id,
+                EXCLUDED.size_bytes,
+                EXCLUDED.content_hash,
+                EXCLUDED.etag,
+                EXCLUDED.user_metadata,
+                EXCLUDED.updated_at_unix_seconds)",
+    )
+    .bind(&entry.scope_namespace)
+    .bind(&entry.object_key)
+    .bind(&entry.file_id)
+    .bind(u64_to_i64(entry.size_bytes)?)
+    .bind(&entry.content_hash)
+    .bind(&entry.etag)
+    .bind(user_metadata_json)
+    .bind(entry.updated_at_unix_seconds)
+    .execute(&mut *transaction)
+    .await?;
+    persist_multipart_count(&mut transaction, entry, part_count).await?;
+    record_s3_object_transition(&mut transaction, before.as_ref(), Some(entry)).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn compare_and_swap_s3_object_with_optional_count(
+    store: &PostgresIndexStore,
+    expected: Option<&S3ObjectEntry>,
+    replacement: &S3ObjectEntry,
+    part_count: Option<u32>,
+) -> Result<bool, PostgresMetadataStoreError> {
+    let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
+    let mut transaction = store.pool.begin().await?;
+    lock_s3_object(
+        &mut transaction,
+        &replacement.scope_namespace,
+        &replacement.object_key,
+    )
+    .await?;
+    if expected == Some(replacement) {
+        let matches: bool = query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM shardline_s3_objects
+                 WHERE scope_namespace = $1 AND object_key = $2
+                   AND file_id = $3 AND size_bytes = $4 AND content_hash = $5
+                   AND etag = $6 AND user_metadata = $7
+                   AND updated_at_unix_seconds = $8
+                 FOR UPDATE
+             )",
+        )
+        .bind(&replacement.scope_namespace)
+        .bind(&replacement.object_key)
+        .bind(&replacement.file_id)
+        .bind(u64_to_i64(replacement.size_bytes)?)
+        .bind(&replacement.content_hash)
+        .bind(&replacement.etag)
+        .bind(&replacement_metadata)
+        .bind(replacement.updated_at_unix_seconds)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if matches {
+            persist_multipart_count(&mut transaction, replacement, part_count).await?;
+            record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
+        }
+        transaction.commit().await?;
+        return Ok(matches);
+    }
+    let result = if let Some(expected) = expected {
+        let expected_metadata = user_metadata_to_json(&expected.user_metadata)?;
+        query(
+            "UPDATE shardline_s3_objects
+             SET file_id = $3, size_bytes = $4, content_hash = $5, etag = $6,
+                 user_metadata = $7, updated_at_unix_seconds = $8
+             WHERE scope_namespace = $1 AND object_key = $2
+               AND file_id = $9 AND size_bytes = $10 AND content_hash = $11
+               AND etag = $12 AND user_metadata = $13
+               AND updated_at_unix_seconds = $14",
+        )
+        .bind(&replacement.scope_namespace)
+        .bind(&replacement.object_key)
+        .bind(&replacement.file_id)
+        .bind(u64_to_i64(replacement.size_bytes)?)
+        .bind(&replacement.content_hash)
+        .bind(&replacement.etag)
+        .bind(replacement_metadata)
+        .bind(replacement.updated_at_unix_seconds)
+        .bind(&expected.file_id)
+        .bind(u64_to_i64(expected.size_bytes)?)
+        .bind(&expected.content_hash)
+        .bind(&expected.etag)
+        .bind(expected_metadata)
+        .bind(expected.updated_at_unix_seconds)
+        .execute(&mut *transaction)
+        .await?
+    } else {
+        query(
+            "INSERT INTO shardline_s3_objects (
+                scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                user_metadata, updated_at_unix_seconds
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (scope_namespace, object_key) DO NOTHING",
+        )
+        .bind(&replacement.scope_namespace)
+        .bind(&replacement.object_key)
+        .bind(&replacement.file_id)
+        .bind(u64_to_i64(replacement.size_bytes)?)
+        .bind(&replacement.content_hash)
+        .bind(&replacement.etag)
+        .bind(replacement_metadata)
+        .bind(replacement.updated_at_unix_seconds)
+        .execute(&mut *transaction)
+        .await?
+    };
+    let changed = result.rows_affected() == 1;
+    if changed {
+        persist_multipart_count(&mut transaction, replacement, part_count).await?;
+        record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
+    }
+    transaction.commit().await?;
+    Ok(changed)
+}
+
+pub(super) async fn persist_multipart_count(
+    connection: &mut PgConnection,
+    entry: &S3ObjectEntry,
+    part_count: Option<u32>,
+) -> Result<(), PostgresMetadataStoreError> {
+    if let Some(part_count) = part_count {
+        let proof = s3_multipart_count_proof(
+            &entry.scope_namespace,
+            &entry.object_key,
+            &entry.file_id,
+            &entry.content_hash,
+            part_count,
+            entry.updated_at_unix_seconds,
+        )?;
+        query(
+            "INSERT INTO shardline_s3_multipart_counts
+                (scope_namespace, object_key, file_id, content_hash, part_count,
+                 updated_at_unix_seconds, proof)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (scope_namespace, object_key)
+             DO UPDATE SET file_id = EXCLUDED.file_id,
+                           content_hash = EXCLUDED.content_hash,
+                           part_count = EXCLUDED.part_count,
+                           updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds,
+                           proof = EXCLUDED.proof",
+        )
+        .bind(&entry.scope_namespace)
+        .bind(&entry.object_key)
+        .bind(&entry.file_id)
+        .bind(&entry.content_hash)
+        .bind(
+            i32::try_from(part_count)
+                .map_err(|error| PostgresMetadataStoreError::Unsupported(error.to_string()))?,
+        )
+        .bind(entry.updated_at_unix_seconds)
+        .bind(proof)
+        .execute(&mut *connection)
+        .await?;
+    } else {
+        query(
+            "DELETE FROM shardline_s3_multipart_counts
+             WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&entry.scope_namespace)
+        .bind(&entry.object_key)
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Serializes S3 user metadata as JSON text for the index row.
@@ -239,17 +475,24 @@ pub(super) async fn remove_s3_object_on_connection(
     scope_namespace: &str,
     object_key: &str,
 ) -> Result<Option<S3ObjectEntry>, PostgresMetadataStoreError> {
-    let row = query(
+    let before = current_s3_object_on_connection(connection, scope_namespace, object_key).await?;
+    let deleted = query(
         "DELETE FROM shardline_s3_objects
-         WHERE scope_namespace = $1 AND object_key = $2
-         RETURNING scope_namespace, object_key, file_id, size_bytes, content_hash,
-                   etag, user_metadata, updated_at_unix_seconds",
+         WHERE scope_namespace = $1 AND object_key = $2",
     )
     .bind(scope_namespace)
     .bind(object_key)
-    .fetch_optional(&mut *connection)
+    .execute(&mut *connection)
     .await?;
-    row.as_ref().map(s3_object_entry_from_row).transpose()
+    query(
+        "DELETE FROM shardline_s3_multipart_counts
+         WHERE scope_namespace = $1 AND object_key = $2",
+    )
+    .bind(scope_namespace)
+    .bind(object_key)
+    .execute(&mut *connection)
+    .await?;
+    Ok((deleted.rows_affected() > 0).then_some(before).flatten())
 }
 
 pub(super) async fn record_s3_object_transition(
@@ -286,56 +529,87 @@ impl S3ObjectIndexStore for PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), Self::Error> {
-        let user_metadata_json = user_metadata_to_json(&entry.user_metadata)?;
-        let mut transaction = self.pool.begin().await?;
-        lock_s3_object(&mut transaction, &entry.scope_namespace, &entry.object_key).await?;
-        let before = current_s3_object_on_connection(
-            &mut transaction,
-            &entry.scope_namespace,
-            &entry.object_key,
-        )
-        .await?;
-        query(
-            "INSERT INTO shardline_s3_objects (
-                scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
-                user_metadata, updated_at_unix_seconds
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT (scope_namespace, object_key)
-             DO UPDATE SET
-                file_id = EXCLUDED.file_id,
-                size_bytes = EXCLUDED.size_bytes,
-                content_hash = EXCLUDED.content_hash,
-                etag = EXCLUDED.etag,
-                user_metadata = EXCLUDED.user_metadata,
-                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds
-             WHERE (shardline_s3_objects.file_id,
-                    shardline_s3_objects.size_bytes,
-                    shardline_s3_objects.content_hash,
-                    shardline_s3_objects.etag,
-                    shardline_s3_objects.user_metadata,
-                    shardline_s3_objects.updated_at_unix_seconds)
-                   IS DISTINCT FROM
-                   (EXCLUDED.file_id,
-                    EXCLUDED.size_bytes,
-                    EXCLUDED.content_hash,
-                    EXCLUDED.etag,
-                    EXCLUDED.user_metadata,
-                    EXCLUDED.updated_at_unix_seconds)",
+        upsert_s3_object_with_optional_count(self, entry, None).await
+    }
+
+    async fn upsert_s3_object_with_multipart_count(
+        &self,
+        entry: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<(), Self::Error> {
+        upsert_s3_object_with_optional_count(self, entry, Some(part_count)).await
+    }
+
+    async fn s3_multipart_part_count(
+        &self,
+        entry: &S3ObjectEntry,
+    ) -> Result<Option<u32>, Self::Error> {
+        let row = query(
+            "SELECT part_count, proof FROM shardline_s3_multipart_counts
+             WHERE scope_namespace=$1 AND object_key=$2 AND file_id=$3
+               AND content_hash=$4 AND updated_at_unix_seconds=$5",
         )
         .bind(&entry.scope_namespace)
         .bind(&entry.object_key)
         .bind(&entry.file_id)
-        .bind(u64_to_i64(entry.size_bytes)?)
         .bind(&entry.content_hash)
-        .bind(&entry.etag)
-        .bind(user_metadata_json)
         .bind(entry.updated_at_unix_seconds)
-        .execute(&mut *transaction)
+        .fetch_optional(&self.pool)
         .await?;
-        record_s3_object_transition(&mut transaction, before.as_ref(), Some(entry)).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let count: i32 = row.try_get("part_count")?;
+        let Ok(count) = u32::try_from(count) else {
+            return Ok(None);
+        };
+        let proof: String = row.try_get("proof")?;
+        let expected = s3_multipart_count_proof(
+            &entry.scope_namespace,
+            &entry.object_key,
+            &entry.file_id,
+            &entry.content_hash,
+            count,
+            entry.updated_at_unix_seconds,
+        )?;
+        Ok((proof == expected).then_some(count))
+    }
+
+    async fn scan_s3_object_exact_with_multipart_count(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        let row = query(
+            "SELECT o.scope_namespace, o.object_key, o.file_id, o.size_bytes,
+                    o.content_hash, o.etag, o.user_metadata, o.updated_at_unix_seconds,
+                    c.file_id AS multipart_file_id,
+                    c.content_hash AS multipart_content_hash,
+                    c.part_count AS multipart_part_count,
+                    c.updated_at_unix_seconds AS multipart_updated_at,
+                    c.proof AS multipart_count_proof
+             FROM shardline_s3_objects AS o
+             LEFT JOIN shardline_s3_multipart_counts AS c USING (scope_namespace, object_key)
+             WHERE o.scope_namespace=$1 AND o.object_key=$2 LIMIT 1",
+        )
+        .bind(scope_namespace)
+        .bind(object_key)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let result = row
+            .as_ref()
+            .map(|row| {
+                let entry = s3_object_entry_from_row(row)?;
+                let count = multipart_count_from_row(row, &entry)?;
+                Ok::<_, PostgresMetadataStoreError>((entry, count))
+            })
+            .transpose()?;
+        if let Some((entry, _)) = result.as_ref() {
+            verify_s3_object_evidence(&mut transaction, scope_namespace, object_key, entry).await?;
+        }
         transaction.commit().await?;
-        Ok(())
+        Ok(result)
     }
 
     async fn compare_and_swap_s3_object(
@@ -343,97 +617,22 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
     ) -> Result<bool, Self::Error> {
-        let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
-        let mut transaction = self.pool.begin().await?;
-        lock_s3_object(
-            &mut transaction,
-            &replacement.scope_namespace,
-            &replacement.object_key,
+        compare_and_swap_s3_object_with_optional_count(self, expected, replacement, None).await
+    }
+
+    async fn compare_and_swap_s3_object_with_multipart_count(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<bool, Self::Error> {
+        compare_and_swap_s3_object_with_optional_count(
+            self,
+            expected,
+            replacement,
+            Some(part_count),
         )
-        .await?;
-        if expected == Some(replacement) {
-            // Keep the row lock until the evidence commits, including against
-            // writers outside the adapter's advisory-lock protocol. Avoid a
-            // new tuple version only when every value, including time, matches.
-            let matches: bool = query_scalar(
-                "SELECT EXISTS (
-                     SELECT 1 FROM shardline_s3_objects
-                     WHERE scope_namespace = $1 AND object_key = $2
-                       AND file_id = $3 AND size_bytes = $4 AND content_hash = $5
-                       AND etag = $6 AND user_metadata = $7
-                       AND updated_at_unix_seconds = $8
-                     FOR UPDATE
-                 )",
-            )
-            .bind(&replacement.scope_namespace)
-            .bind(&replacement.object_key)
-            .bind(&replacement.file_id)
-            .bind(u64_to_i64(replacement.size_bytes)?)
-            .bind(&replacement.content_hash)
-            .bind(&replacement.etag)
-            .bind(&replacement_metadata)
-            .bind(replacement.updated_at_unix_seconds)
-            .fetch_one(&mut *transaction)
-            .await?;
-            if matches {
-                record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
-            }
-            transaction.commit().await?;
-            return Ok(matches);
-        }
-        let result = if let Some(expected) = expected {
-            let expected_metadata = user_metadata_to_json(&expected.user_metadata)?;
-            query(
-                "UPDATE shardline_s3_objects
-                 SET file_id = $3, size_bytes = $4, content_hash = $5, etag = $6,
-                     user_metadata = $7, updated_at_unix_seconds = $8
-                 WHERE scope_namespace = $1 AND object_key = $2
-                   AND file_id = $9 AND size_bytes = $10 AND content_hash = $11
-                   AND etag = $12 AND user_metadata = $13
-                   AND updated_at_unix_seconds = $14",
-            )
-            .bind(&replacement.scope_namespace)
-            .bind(&replacement.object_key)
-            .bind(&replacement.file_id)
-            .bind(u64_to_i64(replacement.size_bytes)?)
-            .bind(&replacement.content_hash)
-            .bind(&replacement.etag)
-            .bind(replacement_metadata)
-            .bind(replacement.updated_at_unix_seconds)
-            .bind(&expected.file_id)
-            .bind(u64_to_i64(expected.size_bytes)?)
-            .bind(&expected.content_hash)
-            .bind(&expected.etag)
-            .bind(expected_metadata)
-            .bind(expected.updated_at_unix_seconds)
-            .execute(&mut *transaction)
-            .await?
-        } else {
-            query(
-                "INSERT INTO shardline_s3_objects (
-                    scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
-                    user_metadata, updated_at_unix_seconds
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (scope_namespace, object_key) DO NOTHING",
-            )
-            .bind(&replacement.scope_namespace)
-            .bind(&replacement.object_key)
-            .bind(&replacement.file_id)
-            .bind(u64_to_i64(replacement.size_bytes)?)
-            .bind(&replacement.content_hash)
-            .bind(&replacement.etag)
-            .bind(replacement_metadata)
-            .bind(replacement.updated_at_unix_seconds)
-            .execute(&mut *transaction)
-            .await?
-        };
-        let changed = result.rows_affected() == 1;
-        if changed {
-            record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
-        }
-        transaction.commit().await?;
-        Ok(changed)
+        .await
     }
 
     async fn delete_s3_object(
@@ -558,9 +757,7 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         let row = query(
             "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
                     user_metadata, updated_at_unix_seconds
-             FROM shardline_s3_objects
-             WHERE scope_namespace = $1 AND object_key = $2
-             LIMIT 1",
+             FROM shardline_s3_objects WHERE scope_namespace = $1 AND object_key = $2 LIMIT 1",
         )
         .bind(scope_namespace)
         .bind(object_key)

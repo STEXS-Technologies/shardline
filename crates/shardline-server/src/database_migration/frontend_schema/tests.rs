@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::test_support::postgres_fixture::PostgresFixture;
+use shardline_index::{S3ObjectEntry, S3ObjectIndexStore};
 
 async fn move_frontend_history_to_prerelease_ledger(pool: &PgPool) {
     for migration in FRONTEND_MIGRATIONS {
@@ -34,9 +35,9 @@ async fn adoption_preserves_original_history_and_durable_frontend_rows() {
     .execute(pool)
     .await
     .unwrap();
-    let before: Vec<(String,String,String)> = sqlx::query_as("SELECT version,checksum,applied_at::text FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000') ORDER BY version")
+    let before: Vec<(String,String,String)> = sqlx::query_as("SELECT version,checksum,applied_at::text FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000','20261023000000') ORDER BY version")
         .fetch_all(pool).await.unwrap();
-    assert_eq!(before.len(), 2);
+    assert_eq!(before.len(), 3);
     let report =
         super::super::run_database_migration(&super::super::DatabaseMigrationOptions::new(
             fixture.config.index_postgres_url().unwrap().to_owned(),
@@ -45,14 +46,14 @@ async fn adoption_preserves_original_history_and_durable_frontend_rows() {
         .await
         .unwrap();
     assert_eq!(report.pending_count, 0);
-    assert_eq!(report.applied_count, 2);
-    assert_eq!(report.applied_total_count, 37);
+    assert_eq!(report.applied_count, 3);
+    assert_eq!(report.applied_total_count, 38);
     install(pool).await.unwrap();
     check(pool).await.unwrap();
     let after: Vec<(String,String,String)> = sqlx::query_as("SELECT version,checksum,applied_at::text FROM shardline_frontend_schema_v1 ORDER BY version")
         .fetch_all(pool).await.unwrap();
     assert_eq!(after, before);
-    let legacy: i64 = query_scalar("SELECT count(*) FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000')").fetch_one(pool).await.unwrap();
+    let legacy: i64 = query_scalar("SELECT count(*) FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000','20261023000000')").fetch_one(pool).await.unwrap();
     assert_eq!(legacy, 0);
     let identity: String = query_scalar("SELECT file_id FROM shardline_xet_file_identities")
         .fetch_one(pool)
@@ -81,8 +82,8 @@ async fn mismatched_prerelease_checksum_rolls_back_without_losing_history() {
     .await
     .unwrap();
     assert!(install(pool).await.is_err());
-    let count: i64 = query_scalar("SELECT count(*) FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000')").fetch_one(pool).await.unwrap();
-    assert_eq!(count, 2);
+    let count: i64 = query_scalar("SELECT count(*) FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000','20261023000000')").fetch_one(pool).await.unwrap();
+    assert_eq!(count, 3);
     let registry: bool = query_scalar("SELECT to_regclass(format('%I.shardline_frontend_schema_v1',current_schema())) IS NOT NULL").fetch_one(pool).await.unwrap();
     assert!(!registry);
     fixture.finish().await;
@@ -244,4 +245,50 @@ async fn row_security_on_grant_sources_blocks_privilege_widening_atomically() {
         );
         fixture.finish().await;
     }
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn legacy_object_update_invalidates_multipart_count_sidecar() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    install(pool).await.unwrap();
+
+    let entry = S3ObjectEntry {
+        scope_namespace: "legacy-writer".to_owned(),
+        object_key: "same-bytes.bin".to_owned(),
+        file_id: "legacy-file-id".to_owned(),
+        size_bytes: 12,
+        content_hash: "ab".repeat(32),
+        etag: "ab".repeat(32),
+        user_metadata: Vec::new(),
+        updated_at_unix_seconds: 77,
+    };
+    fixture
+        .index()
+        .upsert_s3_object_with_multipart_count(&entry, 2)
+        .await
+        .unwrap();
+
+    // A released writer updates only the authoritative object row. Keep the
+    // value identical to cover a same-content upload with another part shape.
+    query(
+        "UPDATE shardline_s3_objects SET file_id=file_id
+         WHERE scope_namespace=$1 AND object_key=$2",
+    )
+    .bind(&entry.scope_namespace)
+    .bind(&entry.object_key)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let (stored, count) = fixture
+        .index()
+        .scan_s3_object_exact_with_multipart_count(&entry.scope_namespace, &entry.object_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, entry);
+    assert_eq!(count, None);
+    fixture.finish().await;
 }

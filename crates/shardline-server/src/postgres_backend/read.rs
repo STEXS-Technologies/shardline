@@ -557,24 +557,25 @@ impl super::PostgresBackend {
         self.read_record(file_id, None, None).await
     }
 
-    /// Upserts one S3 object listing-index row.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index write fails.
-    pub(crate) async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), ServerError> {
-        self.index_store.upsert_s3_object(entry).await?;
+    pub(crate) async fn upsert_s3_object_with_multipart_count(
+        &self,
+        entry: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<(), ServerError> {
+        self.index_store
+            .upsert_s3_object_with_multipart_count(entry, part_count)
+            .await?;
         Ok(())
     }
 
-    /// Atomically replaces an S3 object row if its current value matches.
-    pub(crate) async fn compare_and_swap_s3_object(
+    pub(crate) async fn compare_and_swap_s3_object_with_multipart_count(
         &self,
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
+        part_count: u32,
     ) -> Result<bool, ServerError> {
         self.index_store
-            .compare_and_swap_s3_object(expected, replacement)
+            .compare_and_swap_s3_object_with_multipart_count(expected, replacement, part_count)
             .await
             .map_err(ServerError::from)
     }
@@ -639,6 +640,17 @@ impl super::PostgresBackend {
     ) -> Result<Option<S3ObjectEntry>, ServerError> {
         self.index_store
             .scan_s3_object_exact(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn scan_s3_object_exact_with_multipart_count(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, ServerError> {
+        self.index_store
+            .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
             .await
             .map_err(ServerError::from)
     }

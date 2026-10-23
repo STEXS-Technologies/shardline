@@ -5,6 +5,21 @@ fn fixture() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     super::super::helpers::ensure_local_schema_migrations_table(&connection).unwrap();
     connection
+        .execute_batch(
+            "CREATE TABLE shardline_s3_objects (
+                scope_namespace TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                content_hash TEXT NOT NULL,
+                updated_at_unix_seconds INTEGER NOT NULL,
+                etag TEXT NOT NULL,
+                user_metadata TEXT NOT NULL,
+                PRIMARY KEY (scope_namespace, object_key)
+            );",
+        )
+        .unwrap();
+    connection
 }
 
 #[test]
@@ -45,7 +60,7 @@ fn adoption_preserves_prerelease_history_and_durable_rows() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(timestamps, 2);
+    assert_eq!(timestamps, 3);
     let lock: String = connection
         .query_row("SELECT id FROM shardline_lfs_locks", [], |r| r.get(0))
         .unwrap();
@@ -66,6 +81,40 @@ fn adoption_preserves_prerelease_history_and_durable_rows() {
         )
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn s3_multipart_migration_preserves_legacy_object_rows_without_guessing_parts() {
+    let mut connection = fixture();
+    connection
+        .execute(
+            "INSERT INTO shardline_s3_objects
+             (scope_namespace,object_key,file_id,size_bytes,content_hash,
+              updated_at_unix_seconds,etag,user_metadata)
+             VALUES ('scope','legacy.bin','file-id',12,'content-hash',42,'etag','[]')",
+            [],
+        )
+        .unwrap();
+
+    install(&mut connection).unwrap();
+
+    let legacy: (String, i64, String) = connection
+        .query_row(
+            "SELECT file_id,size_bytes,etag FROM shardline_s3_objects
+             WHERE scope_namespace='scope' AND object_key='legacy.bin'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(legacy, ("file-id".to_owned(), 12, "etag".to_owned()));
+    let sidecars: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM shardline_s3_multipart_counts",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sidecars, 0);
 }
 
 #[test]
@@ -120,7 +169,7 @@ fn incompatible_prerelease_table_preserves_all_original_history() {
     let count: i64 = connection.query_row(
         &format!("SELECT count(*) FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE} WHERE applied_at_unix_seconds=17"), [], |r| r.get(0)
     ).unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     let registry: i64 = connection
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE name='shardline_frontend_schema_v1'",

@@ -237,7 +237,7 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 34] = [
 
 // Additive frontend state has separate installation history so released servers
 // can continue validating the unchanged core ledger during a rolling upgrade.
-pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 2] = [
+pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 3] = [
     LocalSqliteMigration {
         version: "20261021000000",
         name: "xet_file_identities",
@@ -249,5 +249,11 @@ pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 2] = [
         name: "lfs_locks",
         up_sql: include_str!("../../migrations/20261022000000_lfs_locks.up.sql"),
         down_sql: include_str!("../../migrations/20261022000000_lfs_locks.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20261023000000",
+        name: "s3_multipart_counts",
+        up_sql: include_str!("../../migrations/20261023000000_s3_multipart_counts.up.sql"),
+        down_sql: include_str!("../../migrations/20261023000000_s3_multipart_counts.down.sql"),
     },
 ];

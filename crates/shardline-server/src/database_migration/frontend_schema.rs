@@ -104,6 +104,13 @@ pub(super) async fn install(pool: &PgPool) -> Result<u64, DatabaseMigrationError
         &["SELECT", "INSERT", "DELETE"],
     )
     .await?;
+    mirror_grants(
+        &mut transaction,
+        "shardline_s3_objects",
+        "shardline_s3_multipart_counts",
+        &["SELECT", "INSERT", "UPDATE", "DELETE"],
+    )
+    .await?;
     transaction.commit().await?;
     Ok(installed_count)
 }
@@ -255,6 +262,41 @@ async fn check_on_connection(connection: &mut PgConnection) -> Result<(), Databa
         ],
     )
     .await?;
+    verify_table(
+        connection,
+        "shardline_s3_multipart_counts",
+        &[
+            ("scope_namespace", "text"),
+            ("object_key", "text"),
+            ("file_id", "text"),
+            ("content_hash", "text"),
+            ("part_count", "integer"),
+            ("updated_at_unix_seconds", "bigint"),
+            ("proof", "text"),
+        ],
+        &[
+            "CHECK (part_count >= 0)",
+            "PRIMARY KEY (scope_namespace, object_key)",
+        ],
+    )
+    .await?;
+    let invalidation_trigger_exists: bool = query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_trigger trigger_row
+            JOIN pg_class source_table ON source_table.oid=trigger_row.tgrelid
+            JOIN pg_proc trigger_function ON trigger_function.oid=trigger_row.tgfoid
+            WHERE trigger_row.tgname='shardline_s3_multipart_counts_invalidate'
+              AND NOT trigger_row.tgisinternal
+              AND trigger_row.tgenabled <> 'D'
+              AND source_table.oid=to_regclass(format('%I.shardline_s3_objects', current_schema()))
+              AND trigger_function.proname='shardline_invalidate_s3_multipart_count'
+        )",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if !invalidation_trigger_exists {
+        return Err(incompatible("S3 multipart count invalidation trigger"));
+    }
     let index_valid: bool = query_scalar("SELECT COALESCE((SELECT index.indisvalid AND index.indisready
         AND NOT index.indisunique AND index.indnkeyatts=2 AND index.indnatts=2
         AND index.indpred IS NULL AND index.indexprs IS NULL

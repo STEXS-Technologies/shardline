@@ -476,6 +476,7 @@ pub(crate) async fn s3_put_object(
         body,
         user_metadata,
         hasher,
+        0,
         Some(&headers),
     )
     .await?;
@@ -586,6 +587,7 @@ async fn s3_copy_object(
         body,
         user_metadata,
         hasher,
+        0,
         Some(headers),
     )
     .await?;
@@ -852,6 +854,7 @@ pub(super) async fn s3_upload_object_body(
     body: RequestBodyReader,
     user_metadata: Vec<(String, String)>,
     hasher: Arc<Mutex<Md5>>,
+    multipart_part_count: u32,
     precondition: Option<&HeaderMap>,
 ) -> Result<(crate::model::UploadFileResponse, String), S3Error> {
     // Serialize concurrent overwrites of the same key; the swap below (index
@@ -968,24 +971,29 @@ pub(super) async fn s3_upload_object_body(
         };
         state
             .backend
-            .publish_s3_object_locked(
+            .publish_s3_object_locked_with_multipart_count(
                 resource_guard.as_mut().ok_or_else(S3Error::internal)?,
                 prepared,
                 &replacement,
                 &condition,
                 None,
+                Some(multipart_part_count),
             )
             .await?
     } else if conditional_headers.is_some() {
         state
             .backend
-            .compare_and_swap_s3_object(
+            .compare_and_swap_s3_object_with_multipart_count(
                 expected_entry.as_ref().and_then(Option::as_ref),
                 &replacement,
+                multipart_part_count,
             )
             .await?
     } else {
-        state.backend.upsert_s3_object(&replacement).await?;
+        state
+            .backend
+            .upsert_s3_object_with_multipart_count(&replacement, multipart_part_count)
+            .await?;
         true
     };
     if !swapped {
@@ -1404,6 +1412,7 @@ mod conditional_tests {
             record_content_hash: None,
             user_metadata: Vec::new(),
             etag: None,
+            multipart_part_count: None,
             updated_at_unix_seconds: None,
         };
         let mut headers = HeaderMap::new();

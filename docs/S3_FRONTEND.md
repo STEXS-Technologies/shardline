@@ -69,7 +69,7 @@ access-key and Bearer auth forms.
 | `PutObject` | streamed through the CDC ingestor; body ≤ `SHARDLINE_S3_MAX_PART_BYTES` (default 1 GiB); larger must use multipart |
 | `GetObject` (+ `Range`) | existing range path; `bytes=a-b`, `bytes=a-`, `bytes=-N`; 206 / 416 |
 | `HeadObject` | size + ETag |
-| `GetObjectAttributes` (partial) | `GET ?attributes` with `x-amz-object-attributes`; selected ETag, object size and `STANDARD` storage class from one verified snapshot. Unavailable S3 checksums are omitted. `ObjectParts` remains unimplemented; no part boundaries are inferred from legacy metadata. |
+| `GetObjectAttributes` (partial) | `GET ?attributes` with `x-amz-object-attributes`; selected ETag and object size from one verified snapshot. `StorageClass` is omitted for STANDARD objects as S3 does. Newly completed multipart uploads report `ObjectParts.PartsCount`; individual part entries and unavailable checksums are omitted. Legacy objects with unknown multipart counts return `NotImplemented` rather than guessing. |
 | `DeleteObject` | removes direct object **and** record (S3 semantics) |
 | `CreateMultipartUpload` | `POST /{key}?uploads` |
 | `UploadPart` | `PUT ?partNumber&uploadId` → part file |
@@ -93,9 +93,8 @@ access-key and Bearer auth forms.
 
 ### Planned (near-term follow-up)
 
-The remaining protocol work includes permanent multipart part/checksum
-metadata and the unsupported operations below. The current partial attributes
-response follows the field-selection shape of the
+The remaining protocol work includes per-part size/checksum reporting and the
+unsupported operations below. The current partial attributes response follows the field-selection shape of the
 [S3 GetObjectAttributes API](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html).
 Version selectors and unsupported encryption, payer and expected-owner options
 fail explicitly instead of silently returning attributes for a different request.
@@ -111,10 +110,10 @@ parameter is not accepted and returns `501 NotImplemented`.
 | Object tagging / restore / select / torrent / legal-hold / retention / ACL | pending implementation and qualification |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
 
-`GetObjectAttributes` currently supports object-level ETag, size and storage
-class. `ObjectParts`, per-part checksums and durable multipart part metadata for
-completed objects are not implemented; Shardline does not infer them from CDC
-chunks or legacy records.
+`GetObjectAttributes` reports verified part counts for multipart objects
+completed after this change. Individual part entries and per-part checksums are
+not stored. Existing objects have no durable part-count metadata; those counts
+remain unknown and are not inferred from CDC chunks or legacy records.
 
 ## Protocol deviations (documented)
 

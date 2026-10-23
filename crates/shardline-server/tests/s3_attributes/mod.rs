@@ -61,7 +61,8 @@ async fn exercise(database: Option<&str>) {
             xml.contains(&format!("<ObjectSize>{}</ObjectSize>", body.len())),
             "{xml}"
         );
-        assert!(xml.contains("<StorageClass>STANDARD</StorageClass>"));
+        // S3 omits StorageClass for STANDARD objects.
+        assert!(!xml.contains("<StorageClass>"));
         assert!(!xml.contains("<Checksum>") && !xml.contains("<ObjectParts>"));
     }
     read_conditions(&client, &url, &read).await;
@@ -96,7 +97,60 @@ async fn exercise(database: Option<&str>) {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    // A current-version single-PUT record has a known zero multipart-part
+    // count, represented by omitting ObjectParts as S3 does for single-part
+    // objects.
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.text().await.unwrap().contains("<ObjectParts>"));
+
+    // A newly completed multipart upload persists its part count alongside
+    // (but separately from) the authoritative object record.
+    let created = client
+        .post(format!("{url}?uploads"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_xml = created.text().await.unwrap();
+    let upload_id = xml_tag(&created_xml, "UploadId");
+    let part_body = b"multipart payload";
+    let uploaded = client
+        .put(format!("{url}?partNumber=1&uploadId={upload_id}"))
+        .bearer_auth(&credential)
+        .body(part_body.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+    let part_etag = uploaded.headers()["etag"].to_str().unwrap().to_owned();
+    let completion = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let completed = client
+        .post(format!("{url}?uploadId={upload_id}"))
+        .bearer_auth(&credential)
+        .body(completion)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::OK);
+    let response = client
+        .get(format!("{url}?attributes"))
+        .bearer_auth(&read)
+        .header("x-amz-object-attributes", "ObjectParts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let xml = response.text().await.unwrap();
+    assert!(xml.contains("<PartsCount>1</PartsCount>"), "{xml}");
+    assert!(xml.contains("<IsTruncated>false</IsTruncated>"), "{xml}");
+    assert!(xml.contains("<MaxParts>1000</MaxParts>"), "{xml}");
+    assert!(
+        xml.contains("<PartNumberMarker>0</PartNumberMarker>"),
+        "{xml}"
+    );
     let response = client
         .get(format!("{url}?attributes&versionId=unavailable"))
         .bearer_auth(&read)
@@ -130,7 +184,13 @@ async fn exercise(database: Option<&str>) {
     assert_eq!(response.status(), StatusCode::OK);
     let xml = response.text().await.unwrap();
     assert!(!xml.contains("<ETag>") && !xml.contains("<StorageClass>"));
-    assert!(xml.contains("<ObjectSize>31</ObjectSize>"), "{xml}");
+    assert!(
+        xml.contains(&format!(
+            "<ObjectSize>{}</ObjectSize>",
+            b"multipart payload".len()
+        )),
+        "{xml}"
+    );
     assert_eq!(
         client
             .delete(&url)
@@ -278,4 +338,12 @@ async fn read_conditions(client: &Client, url: &str, credential: &str) {
             .as_ref(),
         b"replacement is a different size"
     );
+}
+
+fn xml_tag(xml: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open).unwrap() + open.len();
+    let end = xml.find(&close).unwrap();
+    xml[start..end].to_owned()
 }

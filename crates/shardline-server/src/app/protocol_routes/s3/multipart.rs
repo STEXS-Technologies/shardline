@@ -818,6 +818,7 @@ pub(super) async fn s3_complete_multipart_upload(
         parts_reader,
         user_metadata,
         hasher,
+        u32::try_from(session.parts.len()).map_err(|_error| S3Error::internal())?,
         Some(headers),
     )
     .await?;
@@ -999,6 +1000,7 @@ async fn durable_s3_complete_multipart_upload(
             true,
         );
         let etag = object::md5_hasher_hex(&hasher);
+        let part_count = u32::try_from(parts.len()).map_err(|_error| S3Error::internal())?;
         let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
             .map_err(|_error| S3Error::internal())?;
         let entry = S3ObjectEntry {
@@ -1013,12 +1015,13 @@ async fn durable_s3_complete_multipart_upload(
         };
         let published = state
             .backend
-            .publish_s3_object_locked(
+            .publish_s3_object_locked_with_multipart_count(
                 &mut resource_guard,
                 &prepared,
                 &entry,
                 &condition,
                 Some(&session.completion_fence()),
+                Some(part_count),
             )
             .await?;
         if !published {

@@ -7,6 +7,28 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use super::{LOCAL_SCHEMA_MIGRATIONS_TABLE, LocalIndexStoreError, migration::FRONTEND_MIGRATIONS};
 
 const HISTORY: &str = "shardline_frontend_schema_v1";
+const S3_MULTIPART_INVALIDATION_TRIGGERS: &str = "
+CREATE TRIGGER IF NOT EXISTS shardline_s3_multipart_counts_after_insert
+AFTER INSERT ON shardline_s3_objects
+BEGIN
+    DELETE FROM shardline_s3_multipart_counts
+    WHERE scope_namespace=NEW.scope_namespace AND object_key=NEW.object_key;
+END;
+CREATE TRIGGER IF NOT EXISTS shardline_s3_multipart_counts_after_update
+AFTER UPDATE ON shardline_s3_objects
+BEGIN
+    DELETE FROM shardline_s3_multipart_counts
+    WHERE scope_namespace=OLD.scope_namespace AND object_key=OLD.object_key;
+    DELETE FROM shardline_s3_multipart_counts
+    WHERE scope_namespace=NEW.scope_namespace AND object_key=NEW.object_key;
+END;
+CREATE TRIGGER IF NOT EXISTS shardline_s3_multipart_counts_after_delete
+AFTER DELETE ON shardline_s3_objects
+BEGIN
+    DELETE FROM shardline_s3_multipart_counts
+    WHERE scope_namespace=OLD.scope_namespace AND object_key=OLD.object_key;
+END;
+";
 
 fn incompatible(name: &str) -> LocalIndexStoreError {
     LocalIndexStoreError::FrontendSchemaIncompatible(name.to_owned())
@@ -74,6 +96,7 @@ pub(super) fn install(connection: &mut Connection) -> Result<(), LocalIndexStore
             )?;
         }
     }
+    transaction.execute_batch(S3_MULTIPART_INVALIDATION_TRIGGERS)?;
     check(&transaction)?;
     transaction.commit()?;
     Ok(())
@@ -126,6 +149,25 @@ pub(super) fn check(connection: &Connection) -> Result<(), LocalIndexStoreError>
             .optional()?;
         if actual.as_ref() != Some(&sql) {
             return Err(incompatible(&name));
+        }
+    }
+    for name in [
+        "shardline_s3_multipart_counts_after_insert",
+        "shardline_s3_multipart_counts_after_update",
+        "shardline_s3_multipart_counts_after_delete",
+    ] {
+        let sql: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if sql
+            .as_deref()
+            .is_none_or(|sql| !sql.contains("shardline_s3_multipart_counts"))
+        {
+            return Err(incompatible(name));
         }
     }
     Ok(())

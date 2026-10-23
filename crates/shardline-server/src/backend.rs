@@ -100,6 +100,8 @@ pub(crate) struct S3ObjectReadSnapshot {
     pub user_metadata: Vec<(String, String)>,
     /// Validator paired with the same row/version, absent for legacy fallback.
     pub etag: Option<String>,
+    /// Multipart part count when verified sidecar metadata is available.
+    pub multipart_part_count: Option<u32>,
     /// Last-Modified paired with the same row/version.
     pub updated_at_unix_seconds: Option<i64>,
 }
@@ -469,8 +471,7 @@ impl ServerBackend {
         Ok(PreparedS3Object { record, response })
     }
 
-    /// Atomically makes a prepared S3 object visible through its lock-owning
-    /// Postgres connection.
+    #[cfg(test)]
     pub(crate) async fn publish_s3_object_locked(
         &self,
         guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
@@ -478,6 +479,26 @@ impl ServerBackend {
         entry: &S3ObjectEntry,
         condition: &S3PublishCondition,
         completion_fence: Option<&ResumableCompletionFence>,
+    ) -> Result<bool, ServerError> {
+        self.publish_s3_object_locked_with_multipart_count(
+            guard,
+            prepared,
+            entry,
+            condition,
+            completion_fence,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_s3_object_locked_with_multipart_count(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        prepared: &PreparedS3Object,
+        entry: &S3ObjectEntry,
+        condition: &S3PublishCondition,
+        completion_fence: Option<&ResumableCompletionFence>,
+        multipart_part_count: Option<u32>,
     ) -> Result<bool, ServerError> {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
@@ -492,6 +513,7 @@ impl ServerBackend {
                 entry,
                 condition,
                 completion_fence,
+                multipart_part_count,
             )
             .await?;
         Ok(published)
@@ -914,33 +936,48 @@ impl ServerBackend {
         }
     }
 
-    /// Upserts one S3 object listing-index row.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index write fails.
-    pub(crate) async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), ServerError> {
-        match self {
-            Self::Local(backend) => backend.upsert_s3_object(entry).await,
-            Self::Postgres(backend) => backend.upsert_s3_object(entry).await,
-        }
-    }
-
-    /// Atomically replaces an S3 object row if its current value matches.
-    pub(crate) async fn compare_and_swap_s3_object(
+    pub(crate) async fn upsert_s3_object_with_multipart_count(
         &self,
-        expected: Option<&S3ObjectEntry>,
-        replacement: &S3ObjectEntry,
-    ) -> Result<bool, ServerError> {
+        entry: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<(), ServerError> {
         match self {
             Self::Local(backend) => {
                 backend
-                    .compare_and_swap_s3_object(expected, replacement)
+                    .upsert_s3_object_with_multipart_count(entry, part_count)
                     .await
             }
             Self::Postgres(backend) => {
                 backend
-                    .compare_and_swap_s3_object(expected, replacement)
+                    .upsert_s3_object_with_multipart_count(entry, part_count)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn compare_and_swap_s3_object_with_multipart_count(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .compare_and_swap_s3_object_with_multipart_count(
+                        expected,
+                        replacement,
+                        part_count,
+                    )
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .compare_and_swap_s3_object_with_multipart_count(
+                        expected,
+                        replacement,
+                        part_count,
+                    )
                     .await
             }
         }
@@ -1031,6 +1068,23 @@ impl ServerBackend {
                     .scan_s3_object_exact(scope_namespace, object_key)
                     .await
             }
+        }
+    }
+
+    async fn scan_s3_object_exact_with_multipart_count(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, ServerError> {
+        match self {
+            Self::Local(backend) => backend
+                .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
+                .await
+                .map_err(ServerError::from),
+            Self::Postgres(backend) => backend
+                .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
+                .await
+                .map_err(ServerError::from),
         }
     }
 
@@ -1688,12 +1742,16 @@ impl ServerBackend {
         key: &str,
         object_key: &ObjectKey,
     ) -> Result<S3ObjectReadSnapshot, ServerError> {
-        if let Some(entry) = self.scan_s3_object_exact(scope_namespace, key).await? {
+        if let Some((entry, multipart_part_count)) = self
+            .scan_s3_object_exact_with_multipart_count(scope_namespace, key)
+            .await?
+        {
             return Ok(S3ObjectReadSnapshot {
                 total_bytes: entry.size_bytes,
                 record_content_hash: Some(entry.content_hash),
                 user_metadata: entry.user_metadata,
                 etag: Some(entry.etag),
+                multipart_part_count,
                 updated_at_unix_seconds: Some(entry.updated_at_unix_seconds),
             });
         }
@@ -1710,6 +1768,7 @@ impl ServerBackend {
                 record_content_hash: None,
                 user_metadata: Vec::new(),
                 etag: None,
+                multipart_part_count: None,
                 updated_at_unix_seconds: None,
             }),
             Err(ServerError::NotFound) => {
@@ -1720,6 +1779,7 @@ impl ServerBackend {
                     record_content_hash: Some(record.content_hash),
                     user_metadata: Vec::new(),
                     etag: None,
+                    multipart_part_count: None,
                     updated_at_unix_seconds: None,
                 })
             }

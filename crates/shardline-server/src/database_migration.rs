@@ -546,7 +546,7 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 35] = [
 
 // These tables extend frontend capabilities without changing the released
 // storage schema. Their installation history must not prevent old restarts.
-const FRONTEND_MIGRATIONS: [DatabaseMigration; 2] = [
+const FRONTEND_MIGRATIONS: [DatabaseMigration; 3] = [
     DatabaseMigration {
         version: "20261021000000",
         name: "xet_file_identities",
@@ -558,6 +558,12 @@ const FRONTEND_MIGRATIONS: [DatabaseMigration; 2] = [
         name: "lfs_locks",
         up_sql: include_str!("../migrations/20261022000000_lfs_locks.up.sql"),
         down_sql: include_str!("../migrations/20261022000000_lfs_locks.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023000000",
+        name: "s3_multipart_counts",
+        up_sql: include_str!("../migrations/20261023000000_s3_multipart_counts.up.sql"),
+        down_sql: include_str!("../migrations/20261023000000_s3_multipart_counts.down.sql"),
     },
 ];
 
@@ -2908,7 +2914,7 @@ mod tests {
     #[test]
     fn bundled_migrations_have_expected_count() {
         assert_eq!(bundled_database_migrations().len(), 35);
-        assert_eq!(super::FRONTEND_MIGRATIONS.len(), 2);
+        assert_eq!(super::FRONTEND_MIGRATIONS.len(), 3);
     }
 
     #[test]

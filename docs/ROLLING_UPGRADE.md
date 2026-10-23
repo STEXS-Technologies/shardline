@@ -19,10 +19,13 @@ runtime a longer grace period so the server's deadline runs before SIGKILL.
 
 ## Protocol frontend upgrade from 1.12.1
 
-The unreleased frontend changes add durable Xet file identities and LFS locks.
-An owner-run command installs these additive tables in a separate frontend
-schema registry. The released core migration ledger remains compatible with
-1.12.1; unknown core migrations still cause startup to fail.
+The unreleased frontend changes add durable Xet file identities, LFS locks,
+and S3 multipart part counts. An owner-run command installs these additive
+tables in a separate frontend schema registry. The released core migration
+ledger remains compatible with 1.12.1; unknown core migrations still cause
+startup to fail. Existing object records are not rewritten. Part counts are
+known only for multipart objects completed by the new version; legacy records
+and rows changed by an older binary report the count as unknown.
 
 Back up metadata and object storage together. Pause destructive maintenance
 during rollout. With the upgraded binary, run `shardline db migrate up` as the
@@ -38,13 +41,16 @@ Then replace processes one at a time, draining each process and checking readine
 
 Real 1.12.1/new-binary drills cover live S3-frontend writes during installation,
 cross-version reads, new-version writes, and restarting 1.12.1 against the
-upgraded metadata. These checks pass with SQLite and PostgreSQL. They establish
-this storage path's rolling compatibility, not every protocol's mixed-version
-behavior. During the mixed-version period, route requests that use the new LFS
-lock or native Xet identity behavior only to upgraded replicas. If the load
-balancer cannot route those requests, hold them until every replica is upgraded.
-A 1.12.1 replica can still read and write the tested object data, but it does not
-understand the new lock or identity records.
+upgraded metadata. These checks pass with SQLite and PostgreSQL. Database
+triggers invalidate derived multipart-count rows when an older binary changes
+the authoritative S3 object row; this preserves object access and prevents a
+stale part count from being reported. They establish this storage path's tested
+rolling compatibility, not every protocol's mixed-version behavior. During the
+mixed-version period, route requests that use the new LFS lock or native Xet
+identity behavior only to upgraded replicas. If the load balancer cannot route
+those requests, hold them until every replica is upgraded. A 1.12.1 replica can
+still read and write the tested object data, but it does not understand the new
+lock or identity records.
 
 Restarting an old binary does not require dropping the additive tables or
 restoring an old backup. Keep those tables: they contain persistent identities

@@ -278,6 +278,28 @@ impl super::PostgresRecordStore {
         condition: &S3PublishCondition,
         completion_fence: Option<&ResumableCompletionFence>,
     ) -> Result<bool, PostgresMetadataStoreError> {
+        self.publish_s3_object_on_connection_with_multipart_count(
+            connection,
+            record,
+            entry,
+            condition,
+            completion_fence,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::publish_s3_object_on_connection`], with optional S3
+    /// multipart metadata committed in the same transaction.
+    pub async fn publish_s3_object_on_connection_with_multipart_count(
+        &self,
+        connection: &mut PgConnection,
+        record: &FileRecord,
+        entry: &S3ObjectEntry,
+        condition: &S3PublishCondition,
+        completion_fence: Option<&ResumableCompletionFence>,
+        multipart_part_count: Option<u32>,
+    ) -> Result<bool, PostgresMetadataStoreError> {
         if entry.file_id != record.file_id
             || entry.content_hash != record.content_hash
             || entry.size_bytes != record.total_bytes
@@ -392,6 +414,8 @@ impl super::PostgresRecordStore {
             transaction.rollback().await?;
             return Ok(false);
         }
+        super::s3_objects::persist_multipart_count(&mut transaction, entry, multipart_part_count)
+            .await?;
         super::s3_objects::record_s3_object_transition(
             &mut transaction,
             previous_s3_entry.as_ref(),

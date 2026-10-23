@@ -215,6 +215,7 @@ impl super::PostgresBackend {
         entry: &S3ObjectEntry,
         condition: &S3PublishCondition,
         completion_fence: Option<&ResumableCompletionFence>,
+        multipart_part_count: Option<u32>,
     ) -> Result<bool, ServerError> {
         let mut transaction = connection
             .begin()
@@ -222,12 +223,13 @@ impl super::PostgresBackend {
             .map_err(PostgresMetadataStoreError::from)?;
         let published = self
             .record_store
-            .publish_s3_object_on_connection(
+            .publish_s3_object_on_connection_with_multipart_count(
                 &mut transaction,
                 record,
                 entry,
                 condition,
                 completion_fence,
+                multipart_part_count,
             )
             .await?;
         if published {

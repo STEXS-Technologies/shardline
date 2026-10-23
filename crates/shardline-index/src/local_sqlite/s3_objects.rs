@@ -4,6 +4,7 @@ use rusqlite::{OptionalExtension, Transaction, params_from_iter};
 use std::fmt::Write as _;
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
+use crate::s3_objects::s3_multipart_count_proof;
 use crate::{S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, s3_prefix_successor};
 use shardline_reliability::{
     OperationKind, S3ObjectLifecycleEvent, SnapshotEvidence, verify_and_append_snapshot_transition,
@@ -33,6 +34,78 @@ fn s3_object_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<S3Objec
     })
 }
 
+fn multipart_count_from_row(row: &rusqlite::Row<'_>, entry: &S3ObjectEntry) -> Option<u32> {
+    let part_count: Option<i64> = row.get("multipart_part_count").ok()?;
+    let count = u32::try_from(part_count?).ok()?;
+    let file_id: Option<String> = row.get("multipart_file_id").ok()?;
+    let content_hash: Option<String> = row.get("multipart_content_hash").ok()?;
+    let updated_at: Option<i64> = row.get("multipart_updated_at").ok()?;
+    let proof: Option<String> = row.get("multipart_count_proof").ok()?;
+    if file_id.as_deref() != Some(&entry.file_id)
+        || content_hash.as_deref() != Some(&entry.content_hash)
+        || updated_at != Some(entry.updated_at_unix_seconds)
+    {
+        return None;
+    }
+    s3_multipart_count_proof(
+        &entry.scope_namespace,
+        &entry.object_key,
+        &entry.file_id,
+        &entry.content_hash,
+        count,
+        entry.updated_at_unix_seconds,
+    )
+    .ok()
+    .filter(|expected| proof.as_ref() == Some(expected))
+    .map(|_| count)
+}
+
+fn persist_multipart_count_sql(
+    transaction: &Transaction<'_>,
+    entry: &S3ObjectEntry,
+    part_count: Option<u32>,
+) -> Result<(), LocalIndexStoreError> {
+    if let Some(part_count) = part_count {
+        let proof = s3_multipart_count_proof(
+            &entry.scope_namespace,
+            &entry.object_key,
+            &entry.file_id,
+            &entry.content_hash,
+            part_count,
+            entry.updated_at_unix_seconds,
+        )
+        .map_err(LocalIndexStoreError::Reliability)?;
+        transaction.execute(
+            "INSERT INTO shardline_s3_multipart_counts
+                (scope_namespace, object_key, file_id, content_hash, part_count,
+                 updated_at_unix_seconds, proof)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (scope_namespace, object_key)
+             DO UPDATE SET file_id = excluded.file_id,
+                           content_hash = excluded.content_hash,
+                           part_count = excluded.part_count,
+                           updated_at_unix_seconds = excluded.updated_at_unix_seconds,
+                           proof = excluded.proof",
+            rusqlite::params![
+                entry.scope_namespace,
+                entry.object_key,
+                entry.file_id,
+                entry.content_hash,
+                i64::from(part_count),
+                entry.updated_at_unix_seconds,
+                proof,
+            ],
+        )?;
+    } else {
+        transaction.execute(
+            "DELETE FROM shardline_s3_multipart_counts
+             WHERE scope_namespace = ?1 AND object_key = ?2",
+            rusqlite::params![entry.scope_namespace, entry.object_key],
+        )?;
+    }
+    Ok(())
+}
+
 /// Serializes S3 user metadata as JSON text for the index row.
 fn user_metadata_to_json(
     user_metadata: &[(String, String)],
@@ -44,6 +117,7 @@ fn user_metadata_to_json(
 fn upsert_s3_object_sql(
     transaction: &Transaction<'_>,
     entry: &S3ObjectEntry,
+    part_count: Option<u32>,
 ) -> Result<(), LocalIndexStoreError> {
     let before = current_s3_object_sql(transaction, &entry.scope_namespace, &entry.object_key)?;
     transaction.execute(
@@ -77,6 +151,7 @@ fn upsert_s3_object_sql(
             entry.updated_at_unix_seconds,
         ],
     )?;
+    persist_multipart_count_sql(transaction, entry, part_count)?;
     record_s3_object_transition(transaction, before.as_ref(), Some(entry))?;
     Ok(())
 }
@@ -85,6 +160,7 @@ fn compare_and_swap_s3_object_sql(
     transaction: &Transaction<'_>,
     expected: Option<&S3ObjectEntry>,
     replacement: &S3ObjectEntry,
+    part_count: Option<u32>,
 ) -> Result<bool, LocalIndexStoreError> {
     if expected == Some(replacement) {
         // The caller holds an IMMEDIATE transaction, so the comparison and
@@ -97,6 +173,7 @@ fn compare_and_swap_s3_object_sql(
         if current.as_ref() != expected {
             return Ok(false);
         }
+        persist_multipart_count_sql(transaction, replacement, part_count)?;
         record_s3_object_transition(transaction, expected, Some(replacement))?;
         return Ok(true);
     }
@@ -148,6 +225,7 @@ fn compare_and_swap_s3_object_sql(
         )?
     };
     if changed == 1 {
+        persist_multipart_count_sql(transaction, replacement, part_count)?;
         let before = expected;
         record_s3_object_transition(transaction, before, Some(replacement))?;
     }
@@ -165,6 +243,11 @@ fn delete_s3_object_sql(
         rusqlite::params![scope_namespace, object_key],
     )?;
     if changed > 0 {
+        transaction.execute(
+            "DELETE FROM shardline_s3_multipart_counts
+             WHERE scope_namespace = ?1 AND object_key = ?2",
+            rusqlite::params![scope_namespace, object_key],
+        )?;
         record_s3_object_transition(transaction, before.as_ref(), None)?;
     }
     Ok(changed > 0)
@@ -178,8 +261,7 @@ fn current_s3_object_sql(
     let mut statement = connection.prepare(
         "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
                 user_metadata, updated_at_unix_seconds
-         FROM shardline_s3_objects
-         WHERE scope_namespace = ?1 AND object_key = ?2 LIMIT 1",
+         FROM shardline_s3_objects WHERE scope_namespace = ?1 AND object_key = ?2 LIMIT 1",
     )?;
     Ok(statement
         .query_row(
@@ -306,9 +388,7 @@ fn scan_s3_object_exact_sql(
     let mut statement = connection.prepare(
         "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
                 user_metadata, updated_at_unix_seconds
-         FROM shardline_s3_objects
-         WHERE scope_namespace = ?1 AND object_key = ?2
-         LIMIT 1",
+         FROM shardline_s3_objects WHERE scope_namespace = ?1 AND object_key = ?2 LIMIT 1",
     )?;
     let rows = statement.query_map(
         rusqlite::params![scope_namespace, object_key],
@@ -317,29 +397,140 @@ fn scan_s3_object_exact_sql(
     Ok(collect_rows(rows)?.pop())
 }
 
+fn read_multipart_count_sql(
+    connection: &rusqlite::Connection,
+    entry: &S3ObjectEntry,
+) -> Result<Option<u32>, LocalIndexStoreError> {
+    let metadata: Option<(String, String, i64, i64, String)> = connection
+        .query_row(
+            "SELECT file_id, content_hash, part_count, updated_at_unix_seconds, proof
+             FROM shardline_s3_multipart_counts
+             WHERE scope_namespace=?1 AND object_key=?2",
+            rusqlite::params![entry.scope_namespace, entry.object_key],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((file_id, content_hash, count, updated_at, proof)) = metadata else {
+        return Ok(None);
+    };
+    let Ok(count) = u32::try_from(count) else {
+        return Ok(None);
+    };
+    if file_id != entry.file_id
+        || content_hash != entry.content_hash
+        || updated_at != entry.updated_at_unix_seconds
+    {
+        return Ok(None);
+    }
+    let expected = s3_multipart_count_proof(
+        &entry.scope_namespace,
+        &entry.object_key,
+        &entry.file_id,
+        &entry.content_hash,
+        count,
+        updated_at,
+    )
+    .map_err(LocalIndexStoreError::Reliability)?;
+    Ok((expected == proof).then_some(count))
+}
+
 #[async_trait::async_trait]
 impl S3ObjectIndexStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
 
     async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), Self::Error> {
+        self.upsert_s3_object_with_optional_count(entry, None).await
+    }
+
+    async fn upsert_s3_object_with_multipart_count(
+        &self,
+        entry: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<(), Self::Error> {
+        self.upsert_s3_object_with_optional_count(entry, Some(part_count))
+            .await
+    }
+
+    async fn s3_multipart_part_count(
+        &self,
+        entry: &S3ObjectEntry,
+    ) -> Result<Option<u32>, Self::Error> {
         let store = self.clone();
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            read_multipart_count_sql(&connection, &entry)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn scan_s3_object_exact_with_multipart_count(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, Self::Error> {
+        let store = self.clone();
+        let scope_namespace = scope_namespace.to_owned();
+        let object_key = object_key.to_owned();
+        tokio::task::spawn_blocking(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
-                // BEGIN IMMEDIATE prevents two unconditional upserts from both
-                // reading the old evidence chain and then racing while upgrading
-                // to a writer transaction. SQLite otherwise returns SQLITE_BUSY
-                // for the losing deferred-to-write upgrade.
-                let transaction = connection
-                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                upsert_s3_object_sql(&transaction, &entry)?;
+                let transaction = connection.transaction()?;
+                let row = transaction
+                    .query_row(
+                        "SELECT o.scope_namespace, o.object_key, o.file_id, o.size_bytes,
+                                o.content_hash, o.etag, o.user_metadata,
+                                o.updated_at_unix_seconds,
+                                c.file_id AS multipart_file_id,
+                                c.content_hash AS multipart_content_hash,
+                                c.part_count AS multipart_part_count,
+                                c.updated_at_unix_seconds AS multipart_updated_at,
+                                c.proof AS multipart_count_proof
+                         FROM shardline_s3_objects AS o
+                         LEFT JOIN shardline_s3_multipart_counts AS c
+                           USING (scope_namespace, object_key)
+                         WHERE o.scope_namespace=?1 AND o.object_key=?2 LIMIT 1",
+                        rusqlite::params![scope_namespace, object_key],
+                        |row| {
+                            let entry = s3_object_entry_from_row(row)?;
+                            let count = multipart_count_from_row(row, &entry);
+                            Ok((entry, count))
+                        },
+                    )
+                    .optional()?;
+                if let Some((entry, _)) = row.as_ref() {
+                    helpers::verify_s3_object_evidence(
+                        &transaction,
+                        &scope_namespace,
+                        &object_key,
+                        Some(entry),
+                    )?;
+                }
                 transaction.commit()?;
-                Ok(())
+                Ok(row)
             })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn compare_and_swap_s3_object_with_multipart_count(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<bool, LocalIndexStoreError> {
+        self.compare_and_swap_s3_object_with_optional_count(expected, replacement, Some(part_count))
+            .await
     }
 
     async fn compare_and_swap_s3_object(
@@ -347,22 +538,8 @@ impl S3ObjectIndexStore for LocalIndexStore {
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
     ) -> Result<bool, Self::Error> {
-        let store = self.clone();
-        let expected = expected.cloned();
-        let replacement = replacement.clone();
-        tokio::task::spawn_blocking(move || {
-            helpers::retry_sqlite_busy(|| {
-                let mut connection = store.open_connection()?;
-                let transaction = connection
-                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                let changed =
-                    compare_and_swap_s3_object_sql(&transaction, expected.as_ref(), &replacement)?;
-                transaction.commit()?;
-                Ok(changed)
-            })
-        })
-        .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+        self.compare_and_swap_s3_object_with_optional_count(expected, replacement, None)
+            .await
     }
 
     async fn delete_s3_object(
@@ -466,6 +643,61 @@ impl S3ObjectIndexStore for LocalIndexStore {
                 }
                 transaction.commit()?;
                 Ok(value)
+            })
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+}
+
+impl LocalIndexStore {
+    async fn upsert_s3_object_with_optional_count(
+        &self,
+        entry: &S3ObjectEntry,
+        part_count: Option<u32>,
+    ) -> Result<(), LocalIndexStoreError> {
+        let store = self.clone();
+        let entry = entry.clone();
+        tokio::task::spawn_blocking(move || {
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                // BEGIN IMMEDIATE prevents two unconditional upserts from both
+                // reading the old evidence chain and then racing while upgrading
+                // to a writer transaction. SQLite otherwise returns SQLITE_BUSY
+                // for the losing deferred-to-write upgrade.
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                upsert_s3_object_sql(&transaction, &entry, part_count)?;
+                transaction.commit()?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn compare_and_swap_s3_object_with_optional_count(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+        part_count: Option<u32>,
+    ) -> Result<bool, LocalIndexStoreError> {
+        let store = self.clone();
+        let expected = expected.cloned();
+        let replacement = replacement.clone();
+        tokio::task::spawn_blocking(move || {
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let changed = compare_and_swap_s3_object_sql(
+                    &transaction,
+                    expected.as_ref(),
+                    &replacement,
+                    part_count,
+                )?;
+                transaction.commit()?;
+                Ok(changed)
             })
         })
         .await
@@ -618,6 +850,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded[0], overwrite);
+    }
+
+    #[tokio::test]
+    async fn legacy_object_update_invalidates_multipart_count_sidecar() {
+        let store = make_store();
+        let multipart = entry("legacy-writer", "same-bytes.bin", &file_id(7), 12, 77);
+        store
+            .upsert_s3_object_with_multipart_count(&multipart, 2)
+            .await
+            .unwrap();
+
+        // Simulate an older binary, which updates only the authoritative
+        // object row and knows nothing about the new sidecar. The no-op field
+        // assignment matters: identical content can be uploaded through a
+        // different protocol with a different multipart shape.
+        let connection = store.open_connection().expect("open test connection");
+        connection
+            .execute(
+                "UPDATE shardline_s3_objects SET file_id=file_id
+                 WHERE scope_namespace=?1 AND object_key=?2",
+                rusqlite::params![multipart.scope_namespace, multipart.object_key],
+            )
+            .expect("simulate legacy object-row update");
+
+        let stored = store
+            .scan_s3_object_exact("legacy-writer", "same-bytes.bin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.s3_multipart_part_count(&stored).await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -806,7 +1068,7 @@ mod tests {
                 1,
                 1,
             );
-            upsert_s3_object_sql(&transaction, &value).unwrap();
+            upsert_s3_object_sql(&transaction, &value, None).unwrap();
             last_operation = helpers::s3_object_snapshot(
                 &value.scope_namespace,
                 &value.object_key,
