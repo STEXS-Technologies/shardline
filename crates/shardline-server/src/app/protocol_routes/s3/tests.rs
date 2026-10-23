@@ -1664,7 +1664,9 @@ async fn s3_get_bucket_versioning_reports_never_enabled_configuration() {
         )
         .await
         .unwrap();
-    assert_eq!(list.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(list.status(), StatusCode::OK);
+    let list = String::from_utf8(body_bytes(list).await).unwrap();
+    assert!(list.contains("<ListVersionsResult"), "{list}");
 
     for query in ["location&versioning", "list-type=2&versioning"] {
         let response = s3_router(build_test_state().await.0)
@@ -1682,6 +1684,70 @@ async fn s3_get_bucket_versioning_reports_never_enabled_configuration() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED, "{query}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_object_versions_pages_null_versions_and_encodes_keys() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    put_object(&app, "versions/a+one.txt", b"a").await;
+    put_object(&app, "versions/b.txt", b"b").await;
+    let auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/{BUCKET}?versions&prefix=versions%2F&max-keys=1&encoding-type=url"
+                ))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = String::from_utf8(body_bytes(first).await).unwrap();
+    assert!(
+        first.contains("<EncodingType>url</EncodingType>"),
+        "{first}"
+    );
+    assert!(
+        first.contains("<Key>versions%2Fa%2Bone.txt</Key>"),
+        "{first}"
+    );
+    assert!(first.contains("<VersionId>null</VersionId>"), "{first}");
+    assert!(first.contains("<IsLatest>true</IsLatest>"), "{first}");
+    assert!(
+        first.contains("<NextKeyMarker>versions%2Fa%2Bone.txt</NextKeyMarker>"),
+        "{first}"
+    );
+    assert!(
+        first.contains("<NextVersionIdMarker>null</NextVersionIdMarker>"),
+        "{first}"
+    );
+    assert!(first.contains("<IsTruncated>true</IsTruncated>"), "{first}");
+
+    let second = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/{BUCKET}?versions&prefix=versions%2F&max-keys=1&key-marker=versions%2Fa%2Bone.txt&version-id-marker=null"
+                ))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = String::from_utf8(body_bytes(second).await).unwrap();
+    assert!(second.contains("<Key>versions/b.txt</Key>"), "{second}");
+    assert!(
+        second.contains("<IsTruncated>false</IsTruncated>"),
+        "{second}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

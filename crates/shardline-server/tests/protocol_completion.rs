@@ -215,13 +215,22 @@ versioning = c.get_bucket_versioning(Bucket='aws-resume.locks')
 assert 'Status' not in versioning, versioning
 for operation in (
     lambda: c.put_bucket_versioning(Bucket='aws-resume.locks', VersioningConfiguration={'Status': 'Enabled'}),
-    lambda: c.list_object_versions(Bucket='aws-resume.locks'),
 ):
     try:
         operation()
         raise AssertionError('unsupported version history operation was accepted')
     except ClientError as error:
         assert error.response['ResponseMetadata']['HTTPStatusCode'] == 501, error.response
+for key, body in (('versions/a.txt', b'a'), ('versions/b.txt', b'b')):
+    c.put_object(Bucket='aws-resume.locks', Key=key, Body=body)
+version_page = c.list_object_versions(Bucket='aws-resume.locks', Prefix='versions/', MaxKeys=1)
+assert version_page['Versions'][0]['Key'] == 'versions/a.txt', version_page
+assert version_page['Versions'][0]['VersionId'] == 'null' and version_page['Versions'][0]['IsLatest'], version_page
+assert version_page['IsTruncated'] and version_page['NextKeyMarker'] == 'versions/a.txt', version_page
+assert version_page['NextVersionIdMarker'] == 'null', version_page
+next_version_page = c.list_object_versions(Bucket='aws-resume.locks', Prefix='versions/', MaxKeys=1, KeyMarker=version_page['NextKeyMarker'], VersionIdMarker=version_page['NextVersionIdMarker'])
+assert next_version_page['Versions'][0]['Key'] == 'versions/b.txt', next_version_page
+assert not next_version_page['IsTruncated'], next_version_page
 created = []
 try:
     for index in range(41):

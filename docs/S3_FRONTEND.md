@@ -93,7 +93,7 @@ operation supports them.
 | Read date conditions | GetObject, HeadObject and supported GetObjectAttributes honor `If-Modified-Since` (`304`) and `If-Unmodified-Since` (`412`) using the same committed timestamp as their other metadata. `If-Match` takes precedence over `If-Unmodified-Since`; `If-None-Match` takes precedence over `If-Modified-Since`. Invalid/repeated dates and dates on legacy records without a known modification time are ignored. |
 | Conditional ranges | GetObject honors one matching strong `If-Range` ETag; stale, weak, malformed, repeated or date validators return the entire representation (`200`). Date validators are conservatively ignored because the route does not have a strong date validator. |
 | `ListBuckets` | service-level `GET /`; lists the caller's single `{owner}.{name}` bucket |
-| `GetBucketVersioning` | `GET /{bucket}?versioning` returns the empty configuration because Shardline has never enabled versioning; `PutBucketVersioning` and `ListObjectVersions` remain unsupported, so no historical versions or delete markers are created |
+| `GetBucketVersioning` / `ListObjectVersions` | `GetBucketVersioning` returns the empty configuration because Shardline has never enabled versioning. `ListObjectVersions` reports one current `null` version per live object and supports key pagination; enabling/suspending versioning, historical versions and delete markers are unsupported |
 
 ### Planned (near-term follow-up)
 
@@ -109,7 +109,7 @@ parameter is not accepted and returns `501 NotImplemented`.
 | Operation | Reconsider when |
 |---|---|
 | Restore / select / torrent / legal-hold / retention / ACL | not implemented |
-| Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
+| Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / replication / website, `DeleteBucket` | not yet implemented |
 
 Bucket and object requests fail with `501 NotImplemented` when they include
 unsupported ACL, encryption, expected-owner or requester-payer options. Object

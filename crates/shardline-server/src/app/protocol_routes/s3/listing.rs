@@ -12,7 +12,8 @@ use axum::{
 };
 use shardline_s3_adapter::{
     ListBucketResult, ListBucketResultV1, ListPage, S3Error, encode_continuation_token, group_page,
-    parse_list_objects_v1_params, parse_list_objects_v2_params,
+    parse_list_objects_url_encoding, parse_list_objects_v1_params, parse_list_objects_v2_params,
+    xml_escape,
 };
 
 use super::{S3Repository, parse_s3_query, s3_xml_content_type};
@@ -128,6 +129,162 @@ pub(crate) async fn s3_list_objects_v1(
         result.to_xml_with_url_encoding(url_encoding),
     )
         .into_response())
+}
+
+/// `GET /{bucket}?versions` for Shardline's unversioned S3 buckets.
+///
+/// Every live object has the single S3 `null` version. The same indexed scan
+/// and keyset pagination as ordinary listing are used; no object history or
+/// delete markers are inferred.
+#[tracing::instrument(skip(auth, state, _headers), fields(bucket))]
+pub(crate) async fn s3_list_object_versions(
+    auth: S3Repository,
+    State(state): State<Arc<AppState>>,
+    Path(bucket): Path<String>,
+    uri: Uri,
+    _headers: HeaderMap,
+) -> Result<Response, S3Error> {
+    let query = parse_s3_query(&uri)?;
+    let url_encoding = parse_list_objects_url_encoding(&query)?;
+    let params = parse_list_objects_v1_params(&query)?;
+    let key_marker = optional_query_value(&query, "key-marker")?;
+    let version_id_marker = optional_query_value(&query, "version-id-marker")?;
+    if version_id_marker.is_some() && key_marker.is_none() {
+        return Err(S3Error::invalid_argument(
+            "version-id-marker requires key-marker",
+        ));
+    }
+    if version_id_marker
+        .as_deref()
+        .is_some_and(|marker| marker != "null")
+    {
+        return Err(S3Error::invalid_argument(
+            "Only the null version exists in this unversioned bucket",
+        ));
+    }
+    if query
+        .iter()
+        .any(|(name, value)| name == "fetch-owner" && value.eq_ignore_ascii_case("true"))
+    {
+        return Err(S3Error::not_implemented());
+    }
+    if _headers.contains_key("x-amz-optional-object-attributes") {
+        return Err(S3Error::not_implemented());
+    }
+
+    let scope_namespace = scope_namespace(auth.capability().namespace());
+    let page = logical_listing_page(
+        &state,
+        &scope_namespace,
+        &params.prefix,
+        params.delimiter.map(shardline_s3_adapter::Delimiter::get),
+        key_marker.as_deref(),
+        params.max_keys,
+    )
+    .await?;
+    let next_key_marker = page.next_cursor.as_deref().filter(|_| page.is_truncated);
+    let next_version_id_marker = next_key_marker.filter(|cursor| {
+        !page
+            .common_prefixes
+            .iter()
+            .any(|common_prefix| common_prefix == *cursor)
+    });
+
+    let encode = |value: &str| listing_wire_value(value, url_encoding);
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+    );
+    push_xml_element(&mut xml, "Name", &bucket);
+    push_xml_element(&mut xml, "Prefix", &encode(&params.prefix));
+    push_xml_element(
+        &mut xml,
+        "KeyMarker",
+        &encode(key_marker.as_deref().unwrap_or_default()),
+    );
+    if let Some(marker) = &version_id_marker {
+        push_xml_element(&mut xml, "VersionIdMarker", marker);
+    }
+    if let Some(next_marker) = next_key_marker {
+        push_xml_element(&mut xml, "NextKeyMarker", &encode(next_marker));
+        if next_version_id_marker.is_some() {
+            push_xml_element(&mut xml, "NextVersionIdMarker", "null");
+        }
+    }
+    push_xml_element(&mut xml, "MaxKeys", &params.max_keys.to_string());
+    push_xml_element(&mut xml, "IsTruncated", &page.is_truncated.to_string());
+    if url_encoding {
+        push_xml_element(&mut xml, "EncodingType", "url");
+    }
+    if let Some(delimiter) = params.delimiter {
+        push_xml_element(&mut xml, "Delimiter", &encode(&delimiter.get().to_string()));
+    }
+    for common_prefix in page.common_prefixes {
+        xml.push_str("<CommonPrefixes>");
+        push_xml_element(&mut xml, "Prefix", &encode(&common_prefix));
+        xml.push_str("</CommonPrefixes>");
+    }
+    for content in page.contents {
+        xml.push_str("<Version>");
+        push_xml_element(&mut xml, "Key", &encode(&content.key));
+        push_xml_element(&mut xml, "VersionId", "null");
+        push_xml_element(&mut xml, "IsLatest", "true");
+        push_xml_element(&mut xml, "LastModified", &content.last_modified_iso8601);
+        push_xml_element(
+            &mut xml,
+            "ETag",
+            &shardline_s3_adapter::etag_header(&content.etag),
+        );
+        push_xml_element(&mut xml, "Size", &content.size_bytes.to_string());
+        push_xml_element(&mut xml, "StorageClass", "STANDARD");
+        xml.push_str("</Version>");
+    }
+    xml.push_str("</ListVersionsResult>");
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+        xml,
+    )
+        .into_response())
+}
+
+fn optional_query_value(query: &[(String, String)], name: &str) -> Result<Option<String>, S3Error> {
+    let mut values = query.iter().filter(|(candidate, _)| candidate == name);
+    let value = values.next().map(|(_, value)| value.clone());
+    if values.next().is_some() {
+        return Err(S3Error::invalid_argument("Repeated listing parameter"));
+    }
+    Ok(value)
+}
+
+fn listing_wire_value(value: &str, url_encoding: bool) -> String {
+    if !url_encoding {
+        return value.to_owned();
+    }
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push(hex_digit(byte >> 4));
+                encoded.push(hex_digit(byte & 15));
+            }
+        }
+    }
+    encoded
+}
+
+fn hex_digit(nibble: u8) -> char {
+    char::from_digit(u32::from(nibble), 16)
+        .unwrap_or('0')
+        .to_ascii_uppercase()
+}
+
+fn push_xml_element(xml: &mut String, name: &str, value: &str) {
+    use std::fmt::Write as _;
+    let _ = write!(xml, "<{name}>{}</{name}>", xml_escape(value));
 }
 
 /// Builds one page over Contents and CommonPrefixes rather than over child keys.

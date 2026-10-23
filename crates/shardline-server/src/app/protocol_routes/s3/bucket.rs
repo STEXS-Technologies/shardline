@@ -125,6 +125,14 @@ pub(crate) async fn s3_get_bucket(
     if resources.as_slice() == [S3SubResource::Versioning] {
         return Ok(get_bucket_versioning_response());
     }
+    if resources.as_slice() == [S3SubResource::Other]
+        && query
+            .iter()
+            .any(|(name, value)| name == "versions" && value.is_empty())
+    {
+        return listing::s3_list_object_versions(auth, State(state), Path(bucket), uri, headers)
+            .await;
+    }
     if resources.as_slice() == [S3SubResource::ListObjects] {
         return listing::s3_list_objects_v2(auth, State(state), Path(bucket), uri, headers).await;
     }
