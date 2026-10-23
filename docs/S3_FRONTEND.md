@@ -110,11 +110,12 @@ parameter is not accepted and returns `501 NotImplemented`.
 | Restore / select / torrent / legal-hold / retention / ACL | not implemented |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / replication / website, `DeleteBucket`, `ListObjectVersions` | not yet implemented |
 
-Object requests fail with `501 NotImplemented` when they include unsupported
-ACL, encryption, expected-owner or requester-payer options. Object writes accept
-`x-amz-storage-class: STANDARD`, which is the default storage class; other
-classes are rejected. Browser `PostObject` form fields for ACL, storage class
-and encryption remain unsupported and are rejected rather than ignored.
+Bucket and object requests fail with `501 NotImplemented` when they include
+unsupported ACL, encryption, expected-owner or requester-payer options. Object
+writes accept `x-amz-storage-class: STANDARD`, which is the default storage
+class; other classes are rejected. Browser `PostObject` form fields for ACL,
+storage class and encryption remain unsupported and are rejected rather than
+ignored.
 
 `PostObject` currently supports the signed path-style form described above. A
 valid HTTP(S) `success_action_redirect` (or deprecated `redirect`) receives a

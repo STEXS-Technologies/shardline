@@ -23,8 +23,8 @@ use shardline_s3_adapter::{
 };
 
 use super::{
-    S3Repository, acquire_object_upload_lock_for_root, listing, object, parse_s3_query,
-    post_object::S3PostObjectForm, s3_xml_content_type,
+    S3Repository, acquire_object_upload_lock_for_root, listing, object, object_headers,
+    parse_s3_query, post_object::S3PostObjectForm, s3_xml_content_type,
 };
 use crate::{
     app::AppState,
@@ -38,11 +38,12 @@ use crate::{
 /// from its repository scope, via [`encode_bucket`]), so the response lists
 /// that single bucket. A capability without a repository (permissive mode, or
 /// no credentials) is `403 AccessDenied`.
-#[tracing::instrument(skip(auth, _headers), fields(bucket))]
+#[tracing::instrument(skip(auth, headers), fields(bucket))]
 pub(crate) async fn s3_list_buckets(
     auth: S3Repository,
-    _headers: HeaderMap,
+    headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_read_headers(&headers)?;
     let repository = auth
         .capability()
         .repository()
@@ -63,13 +64,14 @@ pub(crate) async fn s3_list_buckets(
 /// `PUT /{bucket}` — `CreateBucket` stub: a no-op `200` once the bucket
 /// decodes and binds to the capability (done by the [`S3Repository`]
 /// extractor).
-#[tracing::instrument(skip(_auth, _headers), fields(bucket))]
+#[tracing::instrument(skip(_auth, headers), fields(bucket))]
 pub(crate) async fn s3_create_bucket(
     _auth: S3Repository,
     Path(_bucket): Path<String>,
     uri: Uri,
-    _headers: HeaderMap,
+    headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_write_headers(&headers)?;
     let query = parse_s3_query(&uri)?;
     if !classify(&query).is_empty() {
         return Err(S3Error::not_implemented());
@@ -81,12 +83,13 @@ pub(crate) async fn s3_create_bucket(
 /// decodes and binds to the capability (the [`S3Repository`] extractor already
 /// rejected undecodable buckets with `404 NoSuchBucket` and mismatches with
 /// `403 AccessDenied`).
-#[tracing::instrument(skip(_auth, _headers), fields(bucket))]
+#[tracing::instrument(skip(_auth, headers), fields(bucket))]
 pub(crate) async fn s3_head_bucket(
     _auth: S3Repository,
     Path(_bucket): Path<String>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_read_headers(&headers)?;
     Ok(StatusCode::OK.into_response())
 }
 
@@ -107,6 +110,7 @@ pub(crate) async fn s3_get_bucket(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_read_headers(&headers)?;
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
     if matches!(resources.as_slice(), [S3SubResource::Uploads]) {
@@ -179,6 +183,7 @@ pub(crate) async fn s3_post_bucket(
     post_form: Option<Extension<S3PostObjectForm>>,
     body: Body,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_write_headers(&headers)?;
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
     if resources.is_empty() {

@@ -1537,6 +1537,42 @@ async fn s3_head_bucket_rejects_mismatched_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_bucket_rejects_unsupported_owner_and_requester_payer_options() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
+
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/{BUCKET}"))
+                .header(header::AUTHORIZATION, &auth)
+                .header("x-amz-expected-bucket-owner", "123456789012")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/{BUCKET}?list-type=2"))
+                .header(header::AUTHORIZATION, auth)
+                .header("x-amz-request-payer", "requester")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_list_objects_v1_returns_501_not_implemented_xml() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
