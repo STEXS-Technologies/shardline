@@ -109,20 +109,53 @@ for algorithm, checksum in [('crc32', Crc32Checksum), ('sha1', Sha1Checksum), ('
 #[tokio::test]
 #[ignore = "requires BOTOCORE_PYTHON pointing to a native botocore SDK installation"]
 async fn native_botocore_session_credentials_and_presigned_put() {
-    exercise_botocore_session_credentials(None).await;
+    exercise_botocore_session_credentials(None, None).await;
 }
 
 #[tokio::test]
 #[ignore = "requires native BOTOCORE_PYTHON and disposable PostgreSQL DATABASE_URL"]
 async fn native_botocore_session_credentials_on_postgres() {
     let database = std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
-    exercise_botocore_session_credentials(Some(&database)).await;
+    exercise_botocore_session_credentials(Some(&database), None).await;
 }
 
-async fn exercise_botocore_session_credentials(database: Option<&str>) {
+#[tokio::test]
+#[ignore = "requires native BOTOCORE_PYTHON, disposable PostgreSQL DATABASE_URL and TEST_S3_* MinIO storage"]
+async fn native_botocore_full_object_checksum_survives_postgres_minio_restart() {
+    let database = std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let prefix = format!(
+        "protocol-full-checksum-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap()
+    );
+    let storage = S3ObjectStoreConfig::new(
+        std::env::var("TEST_S3_BUCKET").expect("TEST_S3_BUCKET must be configured"),
+        "us-east-1".to_owned(),
+    )
+    .with_endpoint(Some(
+        std::env::var("TEST_S3_ENDPOINT").expect("TEST_S3_ENDPOINT must be configured"),
+    ))
+    .with_allow_http(true)
+    .with_credentials(
+        Some(shardline_protocol::SecretString::new(
+            std::env::var("TEST_S3_ACCESS_KEY").expect("TEST_S3_ACCESS_KEY must be configured"),
+        )),
+        Some(shardline_protocol::SecretString::new(
+            std::env::var("TEST_S3_SECRET_KEY").expect("TEST_S3_SECRET_KEY must be configured"),
+        )),
+        None,
+    )
+    .with_key_prefix(Some(&prefix));
+    exercise_botocore_session_credentials(Some(&database), Some(storage)).await;
+}
+
+async fn exercise_botocore_session_credentials(
+    database: Option<&str>,
+    storage: Option<S3ObjectStoreConfig>,
+) {
     let root = tempfile::tempdir().unwrap();
     let credential = token("writer", "aws-resume", TokenScope::Write);
-    let signing = signing_identity(credential)
+    let signing = signing_identity(credential.clone())
         .with_session_token(shardline_protocol::SecretString::new(
             "fixture-session-token".to_owned(),
         ))
@@ -132,11 +165,12 @@ async fn exercise_botocore_session_credentials(database: Option<&str>) {
         ServerFrontend::S3,
         true,
         database,
-        None,
+        storage.clone(),
         Some(signing),
     )
     .await;
     let python = std::env::var("BOTOCORE_PYTHON").expect("BOTOCORE_PYTHON must be configured");
+    let restart_python = python.clone();
     let endpoint = server.base.clone();
     // Execute the native SDK signer and HTTP client. Python is only the
     // external client under test; Rust owns server setup and assertions.
@@ -289,6 +323,61 @@ print(json.dumps({'put': c.generate_presigned_url('put_object', Params=params, E
         response.bytes().await.unwrap().as_ref(),
         b"presigned session bytes"
     );
+
+    // Restart the process against the same index and object store, then use
+    // Botocore again to prove the checksum proof and bytes survived process
+    // replacement. In the PostgreSQL variant, the metadata also crossed a
+    // database connection/process boundary.
+    server.stop().await;
+    let restarted_signing = signing_identity(credential)
+        .with_session_token(shardline_protocol::SecretString::new(
+            "fixture-session-token".to_owned(),
+        ))
+        .unwrap();
+    let restarted = start_configured(
+        root.path(),
+        ServerFrontend::S3,
+        true,
+        database,
+        storage,
+        Some(restarted_signing),
+    )
+    .await;
+    let restart_endpoint = restarted.base.clone();
+    let restart_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(restart_python)
+            .arg("-c")
+            .arg(
+                r#"
+import base64, sys
+import botocore.session
+from botocore.config import Config
+c = botocore.session.get_session().create_client('s3', endpoint_url=sys.argv[1],
+    region_name='us-east-1', aws_access_key_id='SIGNINGKEY',
+    aws_secret_access_key='legacy-token-bridge', aws_session_token='fixture-session-token',
+    config=Config(signature_version='s3v4', retries={'max_attempts': 0}))
+payload = b'native botocore FULL_OBJECT CRC64NVME'
+attributes = c.get_object_attributes(Bucket='aws-resume.locks', Key='session/full-object.bin', ObjectAttributes=['Checksum', 'ObjectParts'])
+assert attributes['Checksum']['ChecksumType'] == 'FULL_OBJECT', attributes
+assert attributes['Checksum']['ChecksumCRC64NVME'], attributes
+assert attributes['ObjectParts']['TotalPartsCount'] == 1, attributes
+response = c.get_object(Bucket='aws-resume.locks', Key='session/full-object.bin', ChecksumMode='ENABLED')
+assert response['Body'].read() == payload, response
+assert response['ChecksumCRC64NVME'] == attributes['Checksum']['ChecksumCRC64NVME'], response
+"#,
+            )
+            .arg(&restart_endpoint)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        restart_output.status.success(),
+        "native botocore checksum reads after restart failed: {}",
+        String::from_utf8_lossy(&restart_output.stderr)
+    );
+    restarted.stop().await;
 }
 
 fn signing_identity(bound_token: String) -> shardline_server::S3SigningIdentity {
