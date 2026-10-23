@@ -15,6 +15,8 @@ use std::{
 pub enum S3ProxyFault {
     /// Forward a successful PUT, then close the client connection before its response.
     DropAcceptedPut,
+    /// Forward a successful DELETE, then close the client connection before its response.
+    DropAcceptedDelete,
     /// Forward a successful PUT, then pause before returning its original response.
     DelaySuccessfulPutResponse(Duration),
     /// Return one retryable `503 Service Unavailable` without contacting the provider.
@@ -147,6 +149,7 @@ fn proxy_one_s3_request(
     let request = read_http_request(&mut client)?;
     let is_put = request.starts_with(b"PUT ");
     let is_get = request.starts_with(b"GET ");
+    let is_delete = request.starts_with(b"DELETE ");
     if is_put
         && matches!(fault, S3ProxyFault::ServiceUnavailableOnce)
         && mark_injected(armed, injected)
@@ -171,6 +174,14 @@ fn proxy_one_s3_request(
     if is_put
         && accepted
         && matches!(fault, S3ProxyFault::DropAcceptedPut)
+        && mark_injected(armed, injected)
+    {
+        client.shutdown(Shutdown::Both)?;
+        return Ok(());
+    }
+    if is_delete
+        && accepted
+        && matches!(fault, S3ProxyFault::DropAcceptedDelete)
         && mark_injected(armed, injected)
     {
         client.shutdown(Shutdown::Both)?;

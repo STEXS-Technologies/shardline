@@ -61,6 +61,8 @@ mod local_protocol_upgrade;
 
 mod git_receive_pack;
 
+mod oci_lost_delete_ack;
+
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------

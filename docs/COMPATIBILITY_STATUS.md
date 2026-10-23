@@ -186,7 +186,12 @@ reachable record remain protected.
   deletion, then after both acknowledged deletions but before metadata commit;
   it terminates the sleeping database sessions, then
   verifies recovery and restart with a fresh local directory. This covers that
-  crash boundaries; lost delete acknowledgements remain a separate requirement.
+  crash boundaries. A separate MinIO fault drill lets the provider complete a
+  delete but drops its response: GC reports failure, retains the tombstone and
+  exact-key delete fence, blocks republishing, and does not replay the uncertain
+  delete. The S3 API provides no proof that would permit safe in-place recovery
+  for this case; follow the isolated-restore procedure in
+  [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md#unprovable-remote-deletes).
   An additional crash phase observes a replacement HTTP upload waiting on the
   PostgreSQL GC barrier, kills the owner, and verifies that publication succeeds
   and a later GC preserves the exact replacement bytes.
