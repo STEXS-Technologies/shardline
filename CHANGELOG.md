@@ -18,8 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   the existing evidence-bound object metadata and verifying request checksums.
 - Support the truthful empty `GetBucketVersioning` response for buckets where
   Shardline has never enabled versioning, and `ListObjectVersions` as one current
-  `null` version per live object with stable owner IDs; enabling version
-  history remains unsupported.
+  `null` version per live object with stable owner IDs. `ListObjectsV2` also
+  returns owner IDs when requested; enabling version history remains unsupported.
 - Support durable Git LFS locks shared across replicas, including owner checks,
   pagination and the Hub's LFS routes.
 - Support OCI 1.1 referrer discovery with artifact filtering and pagination,

@@ -178,9 +178,12 @@ pub struct Contents {
 }
 
 impl Contents {
-    fn to_xml(&self) -> String {
+    fn to_xml(&self, owner_id: Option<&str>) -> String {
+        let owner = owner_id
+            .map(|id| format!("    <Owner><ID>{}</ID></Owner>\n", xml_escape(id)))
+            .unwrap_or_default();
         format!(
-            "  <Contents>\n    <Key>{}</Key>\n    <Size>{}</Size>\n    <ETag>{}</ETag>\n    <LastModified>{}</LastModified>\n  </Contents>\n",
+            "  <Contents>\n    <Key>{}</Key>\n    <Size>{}</Size>\n    <ETag>{}</ETag>\n    <LastModified>{}</LastModified>\n{owner}  </Contents>\n",
             xml_escape(&self.key),
             self.size_bytes,
             etag_header(&self.etag),
@@ -201,6 +204,8 @@ pub struct ListObjectsV2ResponseContext<'request> {
     pub delimiter: Option<&'request str>,
     /// Raw requested start-after key.
     pub start_after: Option<&'request str>,
+    /// Opaque owner ID to include in each object row when requested.
+    pub owner_id: Option<&'request str>,
 }
 
 fn listing_wire_value(value: &str, url_encoding: bool) -> String {
@@ -265,13 +270,11 @@ impl ListBucketResult {
     /// encoding. Opaque continuation tokens retain their original values.
     #[must_use]
     pub fn to_xml_with_context(&self, context: ListObjectsV2ResponseContext<'_>) -> String {
-        let mut xml = if context.url_encoding {
-            let mut result = self.clone();
+        let mut result = self.clone();
+        if context.url_encoding {
             encode_listing_rows(&mut result.contents, &mut result.common_prefixes);
-            result.to_xml()
-        } else {
-            self.to_xml()
-        };
+        }
+        let mut xml = result.to_xml_with_owner(context.owner_id);
         let mut fields = format!(
             "  <Prefix>{}</Prefix>\n",
             xml_escape(&listing_wire_value(context.prefix, context.url_encoding))
@@ -303,10 +306,14 @@ impl ListBucketResult {
     /// Serializes the result to the S3 `ListBucketResult` XML envelope.
     #[must_use]
     pub fn to_xml(&self) -> String {
+        self.to_xml_with_owner(None)
+    }
+
+    fn to_xml_with_owner(&self, owner_id: Option<&str>) -> String {
         let contents = self
             .contents
             .iter()
-            .map(Contents::to_xml)
+            .map(|content| content.to_xml(owner_id))
             .collect::<String>();
         let common_prefixes = self
             .common_prefixes
@@ -387,7 +394,7 @@ impl ListBucketResultV1 {
         let contents = self
             .contents
             .iter()
-            .map(Contents::to_xml)
+            .map(|content| content.to_xml(None))
             .collect::<String>();
         let common_prefixes = self
             .common_prefixes
@@ -1247,6 +1254,32 @@ mod tests {
              \x20 <IsTruncated>true</IsTruncated>\n\
              \x20 <NextContinuationToken>token-42</NextContinuationToken>\n\
              </ListBucketResult>\n"
+        );
+    }
+
+    #[test]
+    fn list_objects_v2_fetch_owner_is_xml_escaped() {
+        let result = ListBucketResult {
+            contents: vec![Contents {
+                key: "a.txt".to_owned(),
+                size_bytes: 1,
+                etag: "ab12".to_owned(),
+                last_modified_iso8601: "2026-08-13T09:51:00Z".to_owned(),
+            }],
+            common_prefixes: Vec::new(),
+            is_truncated: false,
+            next_continuation_token: None,
+        };
+        let xml = result.to_xml_with_context(ListObjectsV2ResponseContext {
+            url_encoding: false,
+            prefix: "",
+            delimiter: None,
+            start_after: None,
+            owner_id: Some("tenant<&"),
+        });
+        assert!(
+            xml.contains("<Owner><ID>tenant&lt;&amp;</ID></Owner>"),
+            "{xml}"
         );
     }
 

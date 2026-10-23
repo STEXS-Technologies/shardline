@@ -772,6 +772,8 @@ s3.create_bucket(Bucket=B)
 # Version listing returns the required owner structure without claiming that
 # Shardline has historical versions or delete markers.
 s3.put_object(Bucket=B, Key="owner-check.txt", Body=b"owner")
+listed = s3.list_objects_v2(Bucket=B, Prefix="owner-check", FetchOwner=True)
+assert listed["Contents"][0]["Owner"]["ID"], listed
 versions = s3.list_object_versions(Bucket=B, Prefix="owner-check")
 assert len(versions.get("Versions", [])) == 1, versions
 assert versions["Versions"][0]["VersionId"] == "null", versions

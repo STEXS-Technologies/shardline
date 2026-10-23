@@ -83,7 +83,7 @@ operation supports them.
 | `HeadBucket` | stub (S3A / object_store connect-probe) |
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
-| `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
+| `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; `fetch-owner=true` returns the stable repository-scoped owner ID; zero object-store reads — the index rows carry size/ETag/mtime |
 | `ListObjects` v1 | bare `GET /{bucket}`; `prefix`/`delimiter`/`max-keys`/`marker`; emits `NextMarker` when truncated |
 | `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, standard object HTTP metadata (`Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Expires`, and `x-amz-website-redirect-location`), `x-amz-meta-*`, `x-amz-tagging`, explicit `x-amz-storage-class: STANDARD`, `x-ignore-*`, success status/redirect fields, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums. Other storage classes, ACLs and encryption options are rejected. |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |

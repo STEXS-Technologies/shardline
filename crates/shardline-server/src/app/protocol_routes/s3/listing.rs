@@ -37,6 +37,9 @@ pub(crate) async fn s3_list_objects_v2(
     let query = parse_s3_query(&uri)?;
     let url_encoding = shardline_s3_adapter::parse_list_objects_url_encoding(&query)?;
     let params = parse_list_objects_v2_params(&query)?;
+    let fetch_owner = query
+        .iter()
+        .any(|(name, value)| name == "fetch-owner" && value.eq_ignore_ascii_case("true"));
     let scope_namespace = scope_namespace(auth.capability().namespace());
 
     let page = logical_listing_page(
@@ -72,6 +75,7 @@ pub(crate) async fn s3_list_objects_v2(
                 .map(|delimiter| delimiter.get().to_string())
                 .as_deref(),
             start_after: params.start_after.as_deref(),
+            owner_id: fetch_owner.then_some(scope_namespace.as_str()),
         }),
     )
         .into_response())
