@@ -4536,6 +4536,7 @@ dependencies = [
  "axum",
  "blake3",
  "criterion",
+ "futures-util",
  "serde",
  "sha2 0.10.9",
  "shardline-index",

@@ -10,6 +10,7 @@ readme = "README.md"
 description = "Xet xorb and shard adapter for the Shardline server ecosystem."
 
 [dependencies]
+futures-util.workspace = true
 tempfile.workspace = true
 axum.workspace = true
 blake3.workspace = true

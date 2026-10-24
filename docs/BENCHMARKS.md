@@ -773,6 +773,34 @@ the external 18/60 MB/s report, sustained concurrency qualification, or evidence
 of multi-host scaling. They establish successful large native transfers under
 this configuration, rather than resolution of the overall throughput issue.
 
+An October 25 comparison isolates bounded native member writes against
+`4ddf37fb`, using the same 512 MiB fixture, client versions, PostgreSQL/MinIO,
+four-CPU server limit and 1 GiB memory limit described above. Three accepted
+runs per binary comprise an A/B/B/A sequence and a B/A pair. A compiler monitor
+rejected later samples when another project resumed compilation; those samples
+are excluded. This remains a shared-host measurement with warm backend caches.
+
+| Upload metric | Sequential baseline | Bounded member writes |
+| --- | ---: | ---: |
+| Median throughput | 46.63 MiB/s | 67.15 MiB/s |
+| Server peak RSS range | 127.2–153.3 MiB | 127.9–151.3 MiB |
+| Median server CPU | 4.14 seconds | 4.28 seconds |
+| S3 requests | 8,636 each | 8,636 each |
+| Median process-accounted writes | 1.612 GB | 1.612 GB |
+
+The candidate overlaps at most four S3 member writes, retaining at most 256 KiB
+of decoded pending members or one larger member alone. Local member writes stay
+serial. Source validation and all member writes finish before container
+publication. The experiment preserves standalone chunk copies and does not
+reduce retained storage, API request charges or measured disk writes.
+
+All six native downloads matched the source size and SHA-256. Download throughput
+varied from 242–716 MiB/s for the baseline and 349–670 MiB/s for the candidate;
+these short runs do not establish a download improvement. The candidate also
+passes twelve stock-client SIGKILL/retry scenarios across local and
+PostgreSQL/MinIO storage, plus seven actual v1.12.1 upgrade/rollback tests.
+These checks do not close the wider throughput, concurrency or recovery matrix.
+
 #### PostgreSQL publication
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at

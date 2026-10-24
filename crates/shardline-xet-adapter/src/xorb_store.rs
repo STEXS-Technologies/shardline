@@ -3,8 +3,6 @@ use std::{
     fs::File,
     io::{BufReader, Cursor},
     path::Path,
-    sync::Arc,
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
@@ -31,12 +29,10 @@ use crate::{
     xorb::{MAX_XORB_UNPACKED_BYTES, declared_footerless_unpacked_length},
 };
 
-use super::{
-    ValidatedXorb, map_xorb_visit_error, try_for_each_serialized_xorb_chunk_async_trusted,
-    validate_serialized_xorb,
-};
+use super::{ValidatedXorb, validate_serialized_xorb};
 
 mod blocking;
+mod chunk_writes;
 mod encoding;
 mod member_read;
 mod normalization;
@@ -230,56 +226,7 @@ pub async fn store_xorb_bytes_with_resources<R: Send + 'static>(
         canonicalize_uploaded_xorb(expected_hash_value, uploaded_bytes)?;
     let canonical_length = u64::try_from(canonical_bytes.len())?;
     let mut cursor = Cursor::new(canonical_bytes.as_ref());
-    let unpacked_length = Arc::new(AtomicU64::new(0));
-    let stored_bytes = Arc::new(AtomicU64::new(0));
-
-    try_for_each_serialized_xorb_chunk_async_trusted(&mut cursor, &validated, {
-        let unpacked_length = Arc::clone(&unpacked_length);
-        let stored_bytes = Arc::clone(&stored_bytes);
-        move |decoded_chunk| {
-            let unpacked_length = Arc::clone(&unpacked_length);
-            let stored_bytes = Arc::clone(&stored_bytes);
-            async move {
-                let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
-                let chunk_length = u64::try_from(decoded_chunk.data().len())?;
-                // Bound the unpacked total WHILE storing, not only after the
-                // whole xorb has been decompressed and written. The declared
-                // total was already capped during canonicalize/validate before
-                // any decompression; this running check is defense-in-depth so
-                // a future path that skips validation cannot amplify storage.
-                let unpacked_so_far = unpacked_length.fetch_add(chunk_length, Ordering::Relaxed);
-                let unpacked_total = unpacked_so_far
-                    .checked_add(chunk_length)
-                    .ok_or(XetAdapterError::Overflow)?;
-                if unpacked_total > MAX_XORB_UNPACKED_BYTES {
-                    return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
-                }
-                let chunk_integrity =
-                    ObjectIntegrity::new(chunk_hash(decoded_chunk.data()), chunk_length);
-                let chunk_key = chunk_object_key_local(&chunk_hash_hex)?;
-                let outcome = AsyncObjectStore::put_if_absent(
-                    object_store,
-                    &chunk_key,
-                    ObjectBody::from_slice(decoded_chunk.data()),
-                    &chunk_integrity,
-                )
-                .await?;
-                if matches!(outcome, PutOutcome::Inserted) {
-                    stored_bytes.fetch_add(chunk_length, Ordering::Relaxed);
-                }
-                Ok::<(), XetAdapterError>(())
-            }
-        }
-    })
-    .await
-    .map_err(map_xorb_visit_error)?;
-
-    let unpacked_length = unpacked_length.load(Ordering::Relaxed);
-    let mut stored_bytes = stored_bytes.load(Ordering::Relaxed);
-
-    if unpacked_length != validated.unpacked_length() {
-        return Err(XetAdapterError::InvalidSerializedXorb);
-    }
+    let mut stored_bytes = chunk_writes::store(object_store, &mut cursor, &validated).await?;
 
     let serialized_key = xorb_object_key(expected_hash)?;
     let serialized_integrity =
@@ -309,8 +256,9 @@ pub async fn store_xorb_bytes_with_resources<R: Send + 'static>(
 }
 
 /// Stores a canonical serialized xorb directly from a seekable file. The
-/// decoder keeps only one decompressed chunk in memory. Footerless inputs use
-/// a verified temporary file, preserving bounded memory at standard Xorb sizes.
+/// Member writes retain at most 256 KiB of decoded chunks, or one larger member
+/// alone. Footerless inputs use a verified temporary file, preserving bounded
+/// memory at standard Xorb sizes.
 ///
 /// # Errors
 ///
@@ -350,46 +298,7 @@ async fn store_xorb_file_with_resources<R: Send + 'static>(
     let mut file = File::open(path).map_err(XetAdapterError::Io)?;
     let canonical_length = file.metadata().map_err(XetAdapterError::Io)?.len();
     let validated = validate_serialized_xorb(&mut file, expected_hash_value)?;
-    let unpacked_length = Arc::new(AtomicU64::new(0));
-    let stored_bytes = Arc::new(AtomicU64::new(0));
-    try_for_each_serialized_xorb_chunk_async_trusted(&mut file, &validated, {
-        let unpacked_length = Arc::clone(&unpacked_length);
-        let stored_bytes = Arc::clone(&stored_bytes);
-        move |decoded_chunk| {
-            let unpacked_length = Arc::clone(&unpacked_length);
-            let stored_bytes = Arc::clone(&stored_bytes);
-            async move {
-                let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
-                let chunk_length = u64::try_from(decoded_chunk.data().len())?;
-                let total = unpacked_length
-                    .fetch_add(chunk_length, Ordering::Relaxed)
-                    .checked_add(chunk_length)
-                    .ok_or(XetAdapterError::Overflow)?;
-                if total > MAX_XORB_UNPACKED_BYTES {
-                    return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
-                }
-                let integrity =
-                    ObjectIntegrity::new(chunk_hash(decoded_chunk.data()), chunk_length);
-                let key = chunk_object_key_local(&chunk_hash_hex)?;
-                let outcome = AsyncObjectStore::put_if_absent(
-                    object_store,
-                    &key,
-                    ObjectBody::from_slice(decoded_chunk.data()),
-                    &integrity,
-                )
-                .await?;
-                if matches!(outcome, PutOutcome::Inserted) {
-                    stored_bytes.fetch_add(chunk_length, Ordering::Relaxed);
-                }
-                Ok::<(), XetAdapterError>(())
-            }
-        }
-    })
-    .await
-    .map_err(map_xorb_visit_error)?;
-    if unpacked_length.load(Ordering::Relaxed) != validated.unpacked_length() {
-        return Err(XetAdapterError::InvalidSerializedXorb);
-    }
+    let stored_bytes = chunk_writes::store(object_store, &mut file, &validated).await?;
     let key = xorb_object_key(expected_hash)?;
     let integrity = ObjectIntegrity::new(chunk_hash_file(path)?, canonical_length);
     tracing::debug!(xorb_hash = expected_hash, "persisting verified Xorb");
@@ -401,7 +310,7 @@ async fn store_xorb_file_with_resources<R: Send + 'static>(
         encoding::resolve_conflict(&store, &key_for_store, &validated, result)
     })
     .await?;
-    let mut stored = stored_bytes.load(Ordering::Relaxed);
+    let mut stored = stored_bytes;
     if matches!(outcome, PutOutcome::Inserted) {
         stored = stored
             .checked_add(canonical_length)
