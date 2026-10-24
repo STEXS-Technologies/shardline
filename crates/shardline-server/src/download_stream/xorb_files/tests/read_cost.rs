@@ -15,12 +15,14 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
+mod cancellation;
 mod replacements;
 
 enum Change {
     Replace(Bytes),
     Remove,
     Deny,
+    Stall(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>),
 }
 
 #[derive(Default)]
@@ -38,16 +40,26 @@ async fn request(
     uri: Uri,
     headers: HeaderMap,
 ) -> Response {
+    let change = {
+        let mut state = provider.lock().unwrap();
+        state.requests.push((method.clone(), uri.path().to_owned()));
+        if state
+            .change
+            .as_ref()
+            .is_some_and(|(at, _)| *at == state.requests.len())
+        {
+            state.change.take().map(|(_, change)| change)
+        } else {
+            None
+        }
+    };
+    if let Some(Change::Stall(entered, resume)) = &change {
+        entered.notify_one();
+        resume.notified().await;
+    }
     let mut provider = provider.lock().unwrap();
-    provider
-        .requests
-        .push((method.clone(), uri.path().to_owned()));
-    if provider
-        .change
-        .as_ref()
-        .is_some_and(|(at, _)| *at == provider.requests.len())
-    {
-        match provider.change.take().unwrap().1 {
+    if let Some(change) = change {
+        match change {
             Change::Replace(bytes) => {
                 provider.objects.insert(uri.path().to_owned(), bytes);
             }
@@ -60,6 +72,7 @@ async fn request(
                     .body(Body::empty())
                     .unwrap();
             }
+            Change::Stall(..) => {}
         }
     }
     let Some(bytes) = provider.objects.get(uri.path()) else {
