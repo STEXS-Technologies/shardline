@@ -89,10 +89,11 @@ impl DockerLocalStack {
     /// Returns `true` when the Docker CLI is available to the test process.
     #[must_use]
     pub fn docker_available() -> bool {
-        Command::new("docker")
-            .arg("version")
-            .output()
-            .is_ok_and(|output| output.status.success())
+        crate::native_client_output(
+            Command::new("docker").arg("version"),
+            Duration::from_secs(10),
+        )
+        .is_ok_and(|output| output.status.success())
     }
 
     /// Creates a builder for a disposable local service stack.
@@ -348,17 +349,28 @@ impl DockerLocalStackBuilder {
 
     /// Starts the configured stack.
     ///
-    /// Returns `Ok(None)` when Docker is unavailable so tests can skip cleanly.
+    /// Returns `Ok(None)` when Docker is unavailable in optional local tests.
+    /// Required native qualification never skips unavailable infrastructure.
     ///
     /// # Errors
     ///
     /// Returns an [`IoError`] when container startup, readiness checks, or
     /// MinIO bucket creation fails.
+    ///
+    /// # Panics
+    /// Panics when `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1` and Docker or the
+    /// requested services are unavailable. Diagnostics omit driver output.
     pub fn start(self) -> Result<Option<DockerLocalStack>, IoError> {
-        if !DockerLocalStack::docker_available() {
+        if !crate::require_native_client("Docker daemon", DockerLocalStack::docker_available()) {
             return Ok(None);
         }
+        let result = self.start_available();
+        let _ready =
+            crate::require_native_client("disposable Docker service fixture", result.is_ok());
+        result.map(Some)
+    }
 
+    fn start_available(self) -> Result<DockerLocalStack, IoError> {
         let run_id = unique_run_id();
         let mut stack = DockerLocalStack {
             postgres: None,
@@ -387,7 +399,7 @@ impl DockerLocalStackBuilder {
             track_container_for_process_cleanup(&service.container_name);
         }
 
-        Ok(Some(stack))
+        Ok(stack)
     }
 }
 

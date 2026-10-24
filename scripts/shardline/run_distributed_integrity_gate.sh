@@ -11,6 +11,7 @@ docker info >/dev/null
 # These logs are checked for exact test and skip counts below. CI may force ANSI
 # colors globally, which would split the numbers from the surrounding text.
 export CARGO_TERM_COLOR=never
+export SHARDLINE_REQUIRE_NATIVE_CLIENTS=1
 umask 077
 output=${1:-distributed-integrity-results}
 mkdir -p "$output"

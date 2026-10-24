@@ -10,9 +10,9 @@
 //! models real deployment incidents (DB outage, object-store outage, cache
 //! outage, network partition), not process crashes.
 //!
-//! Runtime-SKIP convention (fault_drills.rs drill3): when the chaos stack is
-//! not available the test prints a loud banner and returns — never
-//! `#[ignore]`, which is compile-time static.
+//! Optional local runs can report unavailable prerequisites and return.
+//! With `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1`, missing deployment prerequisites
+//! fail qualification instead of counting an unexecuted drill as a pass.
 //!
 //! Each drill owns an isolated Compose project and dynamically allocated host
 //! ports. Run this suite with nextest so every drill gets its own OS process;
@@ -49,6 +49,8 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 
+#[cfg(unix)]
+mod prerequisite_tests;
 mod readonly_maintenance_deployment;
 
 mod tracker_replacement;
@@ -251,10 +253,11 @@ fn resolve_docker_arg(arg: &str) -> String {
 async fn docker_run(args: &[&str]) -> std::process::Output {
     let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("docker")
-            .args(&args)
-            .output()
-            .unwrap()
+        shardline_test_support::native_client_output(
+            std::process::Command::new("docker").args(&args),
+            Duration::from_secs(120),
+        )
+        .unwrap()
     })
     .await
     .unwrap()
@@ -263,10 +266,11 @@ async fn docker_run(args: &[&str]) -> std::process::Output {
 async fn docker_run_owned(args: Vec<String>) -> std::process::Output {
     let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("docker")
-            .args(args)
-            .output()
-            .unwrap()
+        shardline_test_support::native_client_output(
+            std::process::Command::new("docker").args(args),
+            Duration::from_secs(120),
+        )
+        .unwrap()
     })
     .await
     .unwrap()
@@ -492,8 +496,8 @@ impl Drop for ChaosStack {
 }
 
 fn cleanup_compose_project(compose_file: &Path, project: &str) {
-    let _ = std::process::Command::new("docker")
-        .args([
+    let _ = shardline_test_support::native_client_output(
+        std::process::Command::new("docker").args([
             "compose",
             "-f",
             compose_file.to_str().unwrap_or(COMPOSE_FILE),
@@ -502,8 +506,9 @@ fn cleanup_compose_project(compose_file: &Path, project: &str) {
             "down",
             "--volumes",
             "--remove-orphans",
-        ])
-        .output();
+        ]),
+        Duration::from_secs(120),
+    );
 }
 
 /// Returns the resolved chaos-stack endpoints, or `None` (after printing a
@@ -516,7 +521,7 @@ async fn chaos_stack_available(drill: &str) -> Option<ChaosStack> {
     if !ps.status.success() {
         eprintln!(
             "SKIPPED: {drill} — shardline-chaos stack not available; run `cargo make chaos-deployment` (docker: {})",
-            String::from_utf8_lossy(&ps.stderr).trim()
+            ps.status
         );
         return None;
     }
@@ -530,7 +535,7 @@ async fn chaos_stack_available(drill: &str) -> Option<ChaosStack> {
     if !inspect.status.success() {
         eprintln!(
             "SKIPPED: {drill} — shardline-chaos stack not available; run `cargo make chaos-deployment` (docker: inspect {CONTAINER_POSTGRES} {CONTAINER_MINIO} {CONTAINER_REDIS}: {})",
-            String::from_utf8_lossy(&inspect.stderr).trim()
+            inspect.status
         );
         return None;
     }
@@ -617,7 +622,7 @@ async fn ensure_chaos_stack_ready(drill: &str, stack: &ChaosStack) -> bool {
             if !start.status.success() {
                 eprintln!(
                     "SKIPPED: {drill} — shardline-chaos stack not available; run `cargo make chaos-deployment` (could not start {name}: {})",
-                    String::from_utf8_lossy(&start.stderr).trim()
+                    start.status
                 );
                 return false;
             }
@@ -657,11 +662,24 @@ async fn ensure_chaos_stack_ready(drill: &str, stack: &ChaosStack) -> bool {
 /// Resolves the chaos stack and self-heals it; `None` (loud SKIP) only when
 /// docker or the chaos containers are genuinely absent.
 async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
+    let stack = try_boot_chaos_stack(drill).await;
+    assert!(
+        stack.is_some() || !shardline_test_support::native_clients_required(),
+        "{drill}: required deployment-chaos infrastructure is unavailable"
+    );
+    stack
+}
+
+async fn try_boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
+    if !shardline_test_support::DockerLocalStack::docker_available() {
+        eprintln!("SKIPPED: {drill} — Docker is unavailable");
+        return None;
+    }
     let docker = docker_run(&["version"]).await;
     if !docker.status.success() {
         eprintln!(
             "SKIPPED: {drill} — Docker is unavailable: {}",
-            String::from_utf8_lossy(&docker.stderr).trim()
+            docker.status
         );
         return None;
     }
@@ -700,31 +718,39 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
     drop(postgres_listener);
     drop(minio_listener);
     let started = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("docker")
-            .args([
-                "compose",
-                "-f",
-                compose_file_for_command.to_str().unwrap_or(COMPOSE_FILE),
-                "-p",
-                &project_for_command,
-                "up",
-                "-d",
-                "--quiet-pull",
-            ])
-            .env("SHARDLINE_CHAOS_PG_PORT", postgres_port.to_string())
-            .env("SHARDLINE_CHAOS_MINIO_PORT", minio_port.to_string())
-            .env("SHARDLINE_CHAOS_MINIO_CONSOLE_PORT", "0")
-            .env("SHARDLINE_CHAOS_REDIS_PORT", "0")
-            .output()
-            .unwrap()
+        shardline_test_support::native_client_output(
+            std::process::Command::new("docker")
+                .args([
+                    "compose",
+                    "-f",
+                    compose_file_for_command.to_str().unwrap_or(COMPOSE_FILE),
+                    "-p",
+                    &project_for_command,
+                    "up",
+                    "-d",
+                    "--quiet-pull",
+                ])
+                .env("SHARDLINE_CHAOS_PG_PORT", postgres_port.to_string())
+                .env("SHARDLINE_CHAOS_MINIO_PORT", minio_port.to_string())
+                .env("SHARDLINE_CHAOS_MINIO_CONSOLE_PORT", "0")
+                .env("SHARDLINE_CHAOS_REDIS_PORT", "0"),
+            Duration::from_secs(120),
+        )
     })
-    .await
-    .ok()?;
+    .await;
+    let started = match started {
+        Ok(Ok(output)) => output,
+        _ => {
+            cleanup_compose_project(&compose_file, &project);
+            eprintln!("SKIPPED: {drill} — isolated chaos startup command failed");
+            return None;
+        }
+    };
     if !started.status.success() {
         cleanup_compose_project(&compose_file, &project);
         eprintln!(
             "SKIPPED: {drill} — isolated chaos stack failed to start: {}",
-            String::from_utf8_lossy(&started.stderr).trim()
+            started.status
         );
         return None;
     }
@@ -923,6 +949,15 @@ async fn wait_s3_object_count_grows(
 // ---------------------------------------------------------------------------
 
 fn resolve_shardline_binary() -> Option<PathBuf> {
+    let binary = try_resolve_shardline_binary();
+    assert!(
+        binary.is_some() || !shardline_test_support::native_clients_required(),
+        "required deployment-chaos candidate binary is unavailable"
+    );
+    binary
+}
+
+fn try_resolve_shardline_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_shardline") {
         return Some(PathBuf::from(path));
     }
@@ -964,6 +999,10 @@ fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
         );
     }
     if path.is_none() {
+        assert!(
+            !shardline_test_support::native_clients_required(),
+            "{drill}: required SHARDLINE_N_MINUS_ONE_BINARY is not configured"
+        );
         eprintln!(
             "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to the adjacent released shardline binary"
         );
@@ -976,6 +1015,10 @@ fn resolve_faketime_library(drill: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_file());
     if path.is_none() {
+        assert!(
+            !shardline_test_support::native_clients_required(),
+            "{drill}: required SHARDLINE_FAKETIME_LIBRARY is unavailable"
+        );
         eprintln!("SKIPPED: {drill} — set SHARDLINE_FAKETIME_LIBRARY to libfaketime.so.1");
     }
     path
@@ -3222,6 +3265,10 @@ async fn drill_deploy_postgres_kill_mid_oci_blob_upload() {
     let full_content = deterministic_bytes(1024, 1515 ^ lfs_run_nonce());
     let digest = sha256_hex(&full_content);
     let Some(session_id) = oci_init_upload(&base, &token).await else {
+        assert!(
+            !shardline_test_support::native_clients_required(),
+            "{drill}: required OCI upload initialization failed"
+        );
         eprintln!(
             "chaos({drill}): SKIPPED — OCI blob-upload init failed (index adapter not configured for this deployment profile)"
         );

@@ -178,6 +178,14 @@ behavior. Other E2E targets still need an individual skip audit. Review actual
 execution logs before treating a specific revision as qualified; workflow changes
 alone are not a passing CI result.
 
+The same required-mode policy applies to shared disposable Docker fixtures and
+deployment-chaos infrastructure, candidate/predecessor binaries and clock-fault
+prerequisites. Missing services or failed startup fail qualification even when
+an optional caller would otherwise discard the fixture error. Docker availability
+probes have a 10-second deadline; deployment commands and cleanup have bounded
+execution. The distributed-integrity runner and mixed-version CI step enable
+required mode explicitly. Other prerequisite paths still need individual review.
+
 The default contributor library run leaves eighteen explicitly ignored tests:
 
 | Checks | Where they run explicitly |

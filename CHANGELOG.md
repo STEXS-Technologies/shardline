@@ -88,6 +88,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Fail required deployment qualification when Docker services, binaries or clock
+  fixtures are missing; bound Docker probes and deployment subprocesses instead
+  of accepting skipped drills as successful execution.
 - Remove a PostgreSQL round trip from native Xorb member-index lookups while
   retaining repeatable-read snapshots and complete bounded membership checks.
 - Keep the Xet hash-writing helper's digest consistent with accepted bytes

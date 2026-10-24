@@ -193,6 +193,7 @@ jobs:
 
       - name: Exercise real mixed-version rollout and rollback
         env:
+          SHARDLINE_REQUIRE_NATIVE_CLIENTS: "1"
           SHARDLINE_N_MINUS_ONE_BINARY: ${{ runner.temp }}/shardline-n-minus-one-target/debug/shardline
         run: |
           set -o pipefail
