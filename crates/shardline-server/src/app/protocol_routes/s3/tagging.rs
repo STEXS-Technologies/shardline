@@ -166,4 +166,16 @@ mod tests {
         }
         assert!(parse(b"<Tagging>").is_err());
     }
+
+    #[test]
+    fn tagging_rejects_duplicate_attributes_even_after_many_namespaces() {
+        assert!(parse(br#"<Tagging xmlns="one" xmlns="two"><TagSet/></Tagging>"#).is_err());
+        let mut document = String::from("<Tagging");
+        for index in 0..4096 {
+            use std::fmt::Write as _;
+            write!(document, " xmlns:p{index}=\"urn:tagging:{index}\"").unwrap();
+        }
+        document.push_str(" xmlns:p4095=\"urn:duplicate\"><TagSet/></Tagging>");
+        assert!(parse(document.as_bytes()).is_err());
+    }
 }

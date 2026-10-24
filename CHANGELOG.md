@@ -257,6 +257,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Security
 
+- Upgrade the S3 backend and XML parser to remove RUSTSEC-2026-0194 and
+  RUSTSEC-2026-0195 advisory exceptions, including client-supplied tagging XML.
 - Update TLS certificate verification and bundled trust roots to patched releases
   for RUSTSEC-2026-0381, RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
 

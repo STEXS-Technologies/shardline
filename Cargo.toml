@@ -49,7 +49,7 @@ http = "1.4"
 jsonwebtoken = "9"
 libc = "0.2.177"
 libfuzzer-sys = "0.4"
-object_store = { version = "0.14.0", default-features = false }
+object_store = { version = "0.14.2", default-features = false }
 parquet = { version = "57.3.0", default-features = false, features = [
     "arrow",
     "snap",
@@ -106,7 +106,7 @@ xet-runtime = "=1.5.2"
 prometheus = { version = "0.14", default-features = false }
 tower = "0.5"
 tower-http = { version = "0.6", default-features = false }
-quick-xml = { version = "0.40.1", features = ["serialize"] }
+quick-xml = { version = "0.41.0", features = ["serialize"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 zeroize = "1.8"

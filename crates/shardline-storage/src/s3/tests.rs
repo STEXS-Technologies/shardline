@@ -1438,16 +1438,24 @@ mod minio_tests {
     use shardline_protocol::{ByteRange, SecretString};
 
     fn ensure_minio() -> Option<DockerLocalStack> {
-        if !DockerLocalStack::docker_available() {
+        if !shardline_test_support::require_native_client(
+            "Docker for MinIO storage tests",
+            DockerLocalStack::docker_available(),
+        ) {
             return None;
         }
         // Start a fresh stack per test call so each nextest process owns its
         // own OS-level infrastructure and has no shared test state.
-        DockerLocalStack::builder()
+        let stack = DockerLocalStack::builder()
             .with_minio()
             .start()
             .ok()
-            .flatten()
+            .flatten();
+        assert!(
+            stack.is_some() || !shardline_test_support::native_clients_required(),
+            "required disposable MinIO storage fixture failed"
+        );
+        stack
     }
 
     fn build_s3_store(stack: &DockerLocalStack, key_prefix: Option<&str>) -> S3ObjectStore {
