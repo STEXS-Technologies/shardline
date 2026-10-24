@@ -28,6 +28,7 @@ use crate::{
     object_store::run_before_local_object_read_hook,
 };
 
+mod authenticated_range;
 pub(crate) mod checkpoint_reader;
 mod collect;
 mod xorb_files;

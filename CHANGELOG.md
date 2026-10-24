@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
+- Authenticate selected chunks for small ranges in large S3-backed Xorbs,
+  avoiding complete-container transfer while retaining full-download verification
+  and legacy-format fallback.
 - Add optional shared repository-creation limits and creator denials, managed
   through `admin repository-policy` in the existing metadata database.
   Creation checks and publication are atomic across replicas; defaults preserve

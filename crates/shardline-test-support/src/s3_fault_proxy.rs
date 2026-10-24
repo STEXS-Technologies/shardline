@@ -33,6 +33,7 @@ pub struct S3FaultProxy {
     armed: Arc<AtomicBool>,
     injected: Arc<AtomicBool>,
     get_requests: Arc<AtomicUsize>,
+    get_response_bytes: Arc<AtomicUsize>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -77,6 +78,8 @@ impl S3FaultProxy {
         let injected = Arc::new(AtomicBool::new(false));
         let get_requests = Arc::new(AtomicUsize::new(0));
         let worker_get_requests = Arc::clone(&get_requests);
+        let get_response_bytes = Arc::new(AtomicUsize::new(0));
+        let worker_get_response_bytes = Arc::clone(&get_response_bytes);
         let worker_armed = Arc::clone(&armed);
         let worker_injected = Arc::clone(&injected);
         let (stop, stopped) = mpsc::channel();
@@ -94,6 +97,7 @@ impl S3FaultProxy {
                             &worker_armed,
                             &worker_injected,
                             &worker_get_requests,
+                            &worker_get_response_bytes,
                         )
                         .ok();
                     }
@@ -109,6 +113,7 @@ impl S3FaultProxy {
             armed,
             injected,
             get_requests,
+            get_response_bytes,
             stop: Some(stop),
             thread: Some(thread),
         })
@@ -136,6 +141,13 @@ impl S3FaultProxy {
     pub fn get_requests(&self) -> usize {
         self.get_requests.load(Ordering::Acquire)
     }
+
+    /// Successful upstream GET response-body bytes, before any injected mutation.
+    /// Excludes headers and failed requests; this is fixture traffic, not billing.
+    #[must_use]
+    pub fn get_response_bytes(&self) -> usize {
+        self.get_response_bytes.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for S3FaultProxy {
@@ -156,6 +168,7 @@ fn proxy_one_s3_request(
     armed: &AtomicBool,
     injected: &AtomicBool,
     get_requests: &AtomicUsize,
+    get_response_bytes: &AtomicUsize,
 ) -> std::io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(10)))?;
     let request = read_http_request(&mut client)?;
@@ -185,6 +198,14 @@ fn proxy_one_s3_request(
         || response.starts_with(b"HTTP/1.1 201 ")
         || response.starts_with(b"HTTP/1.1 206 ")
         || response.starts_with(b"HTTP/1.1 204 ");
+    if is_get && accepted {
+        let header_end = response_header_end(&response)?;
+        let length = response
+            .len()
+            .checked_sub(header_end)
+            .ok_or_else(invalid_response_offset)?;
+        get_response_bytes.fetch_add(length, Ordering::AcqRel);
+    }
 
     if is_put
         && accepted

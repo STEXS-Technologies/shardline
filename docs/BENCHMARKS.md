@@ -998,13 +998,39 @@ counters. These are provider-reported transfer counts, not cloud billing figures
 Measure small random reads separately from full downloads when estimating cost;
 fewer requests do not necessarily mean fewer backend bytes.
 
-This is a remaining optimization opportunity: the offset-zero fixture transferred
+In that historical fixture, the offset-zero request transferred
 about 8,178 backend bytes per logical byte returned. It is not a measured average
-for random reads. Reducing this amplification must preserve the current complete
-selected-container verification, including rejection of corruption outside the
-requested range, truncation, incorrect ranges and concurrent replacement. Fetching an unchecked byte range
-instead of validating the container would weaken the current guarantee. No
-reduction in range-read transfer bytes is claimed by this branch.
+for random reads.
+
+The current candidate authenticates small explicit ranges in large S3-backed
+containers using their existing member commitments. It checks the footer against
+the independently trusted Xorb root, then decodes and verifies each selected
+member's hash and length before returning its bytes. Packed offsets alone are
+never trusted. Full downloads continue to validate the complete container;
+legacy footers and standalone chunks retain the existing read path.
+
+A range proof establishes the requested bytes, not the health of unrequested
+payloads. Corruption outside those members remains detectable by full downloads
+and FSCK. Selected corruption fails before the first response bytes, or terminates
+an already-started stream if encountered in a later member. This distinction is
+intentional: an authenticated range read is not a complete-container scrub.
+Admission bounds footer parsing, selected-member reads and decoding, including
+slow readers and cancellation. Measure the extra footer/member GETs as well as
+transferred bytes; lower transfer amplification alone does not prove lower bills.
+
+An owned MinIO qualification uses one incompressible 4 MiB container with 64 KiB
+members. Each tested 4 KiB read (prefix, middle and tail) fetched 68,744 provider
+body bytes in three GETs, compared with 4,198,008 bytes in one complete-container
+GET: 98.4% less backend transfer. These are real proxy-observed response-body
+counts; the test also checks exact returned bytes and rejects selected corruption.
+Full downloads still use one GET. This fixture is smaller than the historical
+36 MiB benchmark above and does not establish a latency, RSS or cloud-bill result.
+Run the mandatory Docker-backed check with:
+
+```bash
+cargo test --locked -p shardline-server --features docker --lib \
+  authenticated_ranges_on_real_minio -- --ignored --nocapture
+```
 
 An October 17 experiment compared the unchanged 32 MiB raw packing cap with
 a temporary 4 MiB cap, using one incompressible 36 MiB file, PostgreSQL and real
