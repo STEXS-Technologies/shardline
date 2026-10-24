@@ -984,9 +984,12 @@ async fn drill_extreme_4_postgres_kill_mid_transaction() {
             .send()
             .await
     });
-    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(512 * 1024, 46))))
-        .await
-        .unwrap();
+    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
+        36 * 1024 * 1024,
+        46,
+    ))))
+    .await
+    .unwrap();
 
     let root = harness.root.clone();
     wait_until(Duration::from_secs(5), "chunk evidence (PG)", || {
@@ -1046,7 +1049,8 @@ async fn drill_extreme_5_repeated_kill_cycles() {
         // payloads and the aborted overwrite would dedup 100% against the
         // previous cycle (no new chunk evidence). Use distinct odd seeds.
         let payload = deterministic_bytes(256 * 1024 + 17 * i as usize, 101 + 2 * i);
-        let overwrite = deterministic_bytes(512 * 1024, 201 + 2 * i);
+        // Flush a complete direct-packing batch before withholding EOF.
+        let overwrite = deterministic_bytes(36 * 1024 * 1024, 201 + 2 * i);
         // Dropping the HTTP serve task is not an OS process kill: already
         // running blocking object-store writes can finish after a checkpoint.
         // Independently derive the finite chunk budget from the same CDC
@@ -1253,8 +1257,10 @@ async fn drill_extreme_6_concurrency_chaos_bounded() {
                     .await
             });
             tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
-                512 * 1024,
-                300 + r as u64,
+                36 * 1024 * 1024,
+                // The generator normalizes seed | 1; use distinct odd seeds
+                // so later rounds cannot reuse an earlier aborted container.
+                301 + 2 * r as u64,
             ))))
             .await
             .unwrap();
@@ -1431,9 +1437,12 @@ async fn drill_extreme_8_multiversion_overwrite_kills() {
             .send()
             .await
     });
-    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(512 * 1024, 25))))
-        .await
-        .unwrap();
+    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
+        36 * 1024 * 1024,
+        25,
+    ))))
+    .await
+    .unwrap();
     let root = harness.root.clone();
     wait_until(Duration::from_secs(5), "v2 chunk evidence", || {
         count_chunk_files(&root) > chunks_before

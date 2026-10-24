@@ -475,8 +475,8 @@ async fn ensure_dev_postgres_migrated(url: &str) {
 // DRILL 1 — KILL-MID-UPLOAD
 // ===========================================================================
 
-/// V1: overwrite-in-flight. Seed k=v1, start a 16MiB slow overwrite, kill the
-/// server the instant a new chunk hits disk, restart, and require v1 intact.
+/// V1: overwrite-in-flight. Exceed the 32 MiB packing batch while withholding
+/// EOF, interrupt after storage evidence, restart, and require v1 intact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill1_v1_overwrite_inflight_kill_preserves_v1() {
     let mut harness = DrillHarness::new(3600);
@@ -501,9 +501,12 @@ async fn drill1_v1_overwrite_inflight_kill_preserves_v1() {
             .send()
             .await
     });
-    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(512 * 1024, 42))))
-        .await
-        .unwrap();
+    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
+        36 * 1024 * 1024,
+        42,
+    ))))
+    .await
+    .unwrap();
 
     let root = harness.root.clone();
     wait_until(
@@ -552,9 +555,12 @@ async fn drill1_v2_fresh_put_kill_leaves_no_torn_object() {
             .send()
             .await
     });
-    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(512 * 1024, 43))))
-        .await
-        .unwrap();
+    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
+        36 * 1024 * 1024,
+        43,
+    ))))
+    .await
+    .unwrap();
 
     let root = harness.root.clone();
     wait_until(
@@ -725,7 +731,9 @@ async fn drill2_gc_abort_mid_mark_recovery_and_fixed_point() {
 
     // Seed reachable object A (never deleted).
     let key = "reachable-a";
-    let payload = deterministic_bytes(512 * 1024, 7);
+    // Retain multiple physical containers under the 32 MiB direct-packing
+    // layout, rather than relying on one physical object per CDC chunk.
+    let payload = deterministic_bytes(36 * 1024 * 1024, 7);
     let put = harness.s3_put_bytes(key, payload.clone()).await;
     assert_eq!(put.status().as_u16(), 200, "seed reachable object");
     let reachable_chunk_count = count_chunk_files(&harness.root);
