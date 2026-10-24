@@ -761,7 +761,7 @@ mod tests {
                 .is_err()
         );
         assert!(signer.verify_at(&format!("hf_{hub}"), 99).is_err());
-        let mut tampered = hub.clone();
+        let mut tampered = hub;
         let last = tampered.pop().unwrap();
         tampered.push(if last == '0' { '1' } else { '0' });
         assert!(signer.verify_at(&tampered, 99).is_err());
