@@ -87,9 +87,12 @@ requiring a Content-Length header. The E2E gate explicitly includes the disposab
 PostgreSQL/MinIO case. A separate Unix subprocess test kills local Hub and
 standalone LFS servers with SIGKILL during an unfinished request, verifies a full
 retry after restart, then kills the restarted server after acknowledgment and
-verifies the bytes after another restart. This covers wire-upload interruption;
-remote process termination, specific internal persistence boundaries and split-role
-cancellation remain separate qualification items.
+verifies the bytes after another restart. PostgreSQL/MinIO also passes this
+process-kill sequence, retries through a fresh server root, and serves acknowledged
+bytes from a separate live replica after the uploader is killed. These processes
+share one host and the same durable backends. This covers wire-upload interruption;
+specific internal persistence boundaries and split-role cancellation remain separate
+qualification items.
 
 The E2E workflow pins these Hub/Xet client combinations. This is the required
 test matrix, not a claim that the current branch has passed release CI.
