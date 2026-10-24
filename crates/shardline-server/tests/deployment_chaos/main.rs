@@ -926,6 +926,18 @@ fn resolve_shardline_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_shardline") {
         return Some(PathBuf::from(path));
     }
+    // Nextest does not set CARGO_BIN_EXE_* for another workspace package.
+    // Prefer the binary beside this test's profile, including custom target
+    // directories and target triples, rather than an unrelated stale build.
+    let sibling = std::env::current_exe().ok().and_then(|executable| {
+        executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|profile| profile.join(format!("shardline{}", std::env::consts::EXE_SUFFIX)))
+    });
+    if let Some(binary) = sibling.filter(|binary| binary.is_file()) {
+        return Some(binary);
+    }
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)?;

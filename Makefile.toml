@@ -77,7 +77,9 @@ dependencies = ["build-reliability-runtime-fixture"]
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "cargo"
-args = ["nextest", "run", "--locked", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
+# Nextest unions multiple -E expressions. Select all integration binaries once,
+# including Xet format contracts, without rerunning library tests in this gate.
+args = ["nextest", "run", "--locked", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "-E", "kind(test)", "${@}"]
 
 [tasks.test-reliability-contracts]
 description = "Verify historical evidence, native profiles and durable task recovery without external services"
