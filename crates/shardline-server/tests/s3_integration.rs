@@ -818,20 +818,30 @@ async fn test_s3_streaming_content_addressed_via_backend() {
     .unwrap();
     assert_eq!(outcome, PutOutcome::Inserted);
 
-    // The protocol object is a metadata reference; S3 stores its shared chunk,
+    // The protocol object is a metadata reference; S3 stores its packed xorb,
     // not another whole-object copy under the protocol digest key.
     let store = s3_store().await;
     assert!(!store.contains(&canonical_key).unwrap());
     let chunk_hash = shardline_server_core::chunk_hash(content);
     let chunk_hash_hex = shardline_index::xet_hash_hex_string(chunk_hash);
     let chunk_key = shardline_server_core::chunk_object_key(&chunk_hash_hex).unwrap();
-    assert!(store.contains(&chunk_key).unwrap());
-    let meta = store.metadata(&chunk_key).unwrap().unwrap();
-    // The shared chunk is stored as a packed xorb container (LZ4-compressed
-    // payload plus container header) under XorbCdcV1, not as raw content
-    // bytes, so the object length is the packed single-chunk length (46 for
-    // this 40-byte content), not the raw content length.
-    assert_eq!(meta.length(), 46);
+    assert!(!store.contains(&chunk_key).unwrap());
+    let ServerBackend::Local(local) = &backend else {
+        panic!("fixture must use SQLite metadata and S3 objects");
+    };
+    let file_id = shardline_server_core::protocol_support::protocol_object_file_id(&canonical_key);
+    let reconstruction = local
+        .reconstruction(&file_id, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(reconstruction.fetch_info.len(), 1);
+    let xorb_hash = reconstruction.fetch_info.keys().next().unwrap();
+    let xorb_key = shardline_xet_adapter::xorb_object_key(xorb_hash).unwrap();
+    assert!(store.contains(&xorb_key).unwrap());
+    assert!(store.metadata(&xorb_key).unwrap().unwrap().length() > 0);
+    let downloaded = local.download_file(&file_id, None, None).await.unwrap();
+    assert_eq!(downloaded, content);
+    assert_eq!(hex::encode(Sha256::digest(&downloaded)), digest_hex);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

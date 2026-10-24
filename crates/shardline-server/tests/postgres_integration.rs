@@ -1864,6 +1864,25 @@ async fn test_concurrent_upload_and_delete() {
 // Database migration edge cases (integration-level with Docker Postgres)
 // ===========================================================================
 
+// These additive capabilities intentionally live outside the core migration
+// ledger and survive a core rollback for predecessor-reader compatibility.
+const FRONTEND_CAPABILITY_VERSIONS: [&str; 7] = [
+    "20261021000000",
+    "20261022000000",
+    "20261023000000",
+    "20261023010000",
+    "20261023020000",
+    "20261023030000",
+    "20261023040000",
+];
+
+const fn total_schema_entries() -> usize {
+    bundled_database_migrations()
+        .len()
+        .checked_add(FRONTEND_CAPABILITY_VERSIONS.len())
+        .expect("schema entry count fits usize")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_migration_status_pending_zero() {
     let _url = ensure_pg().await;
@@ -1872,11 +1891,16 @@ async fn test_migration_status_pending_zero() {
     let opts = DatabaseMigrationOptions::new(url, DatabaseMigrationCommand::Status);
     let report = run_database_migration(&opts).await.unwrap();
     assert_eq!(report.pending_count, 0, "all migrations should be applied");
-    assert_eq!(
-        report.applied_total_count,
-        bundled_database_migrations().len() as u64
-    );
-    assert_eq!(report.migrations.len(), bundled_database_migrations().len());
+    assert_eq!(report.applied_total_count, total_schema_entries() as u64);
+    assert_eq!(report.migrations.len(), total_schema_entries());
+    for version in FRONTEND_CAPABILITY_VERSIONS {
+        assert!(
+            report
+                .migrations
+                .iter()
+                .any(|entry| entry.version == version && entry.applied)
+        );
+    }
     // Every migration should be marked applied
     assert!(report.migrations.iter().all(|m| m.applied));
 }
@@ -1922,7 +1946,7 @@ async fn test_migration_partial_apply_and_revert() {
     assert_eq!(partial_report.applied_count, 2);
     assert_eq!(
         partial_report.pending_count,
-        bundled_database_migrations().len() as u64 - 2
+        total_schema_entries() as u64 - 2
     );
 
     // 2. Revert one migration
@@ -1934,7 +1958,7 @@ async fn test_migration_partial_apply_and_revert() {
     assert_eq!(revert_report.reverted_count, 1);
     assert_eq!(
         revert_report.pending_count,
-        bundled_database_migrations().len() as u64 - 1
+        total_schema_entries() as u64 - 1
     );
 
     // 3. Re-apply the same migration (idempotent)
@@ -2087,8 +2111,20 @@ async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
     assert_eq!(rollback.reverted_count, post_v1_migration_count as u64);
     assert_eq!(
         rollback.applied_total_count,
-        V1_0_0_MIGRATION_VERSIONS.len() as u64
+        (V1_0_0_MIGRATION_VERSIONS.len() + FRONTEND_CAPABILITY_VERSIONS.len()) as u64
     );
+    let retained_capabilities: Vec<String> =
+        sqlx::query_scalar("SELECT version FROM shardline_frontend_schema_v1 ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retained_capabilities, FRONTEND_CAPABILITY_VERSIONS);
+    let retained_core: Vec<String> =
+        sqlx::query_scalar("SELECT version FROM shardline_schema_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retained_core, V1_0_0_MIGRATION_VERSIONS);
 
     let rollback_read: (String, String) = sqlx::query_as(
         "SELECT repo_id, default_branch FROM shardline_hub_repos WHERE repo_id = 'compatibility/model'",

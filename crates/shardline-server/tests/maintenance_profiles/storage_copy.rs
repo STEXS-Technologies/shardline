@@ -54,6 +54,22 @@ fn legacy_interrupted_copy_archive_is_read_without_rewriting_or_replay() {
 }
 
 #[test]
+fn released_completed_copy_history_is_read_without_replay() {
+    verify_copy_history(
+        CopyProfile::ReleasedCompleted,
+        CopyInterruption::KillAcceptedPut,
+    );
+}
+
+#[test]
+fn released_interrupted_copy_history_is_read_without_replay() {
+    verify_copy_history(
+        CopyProfile::ReleasedInterrupted,
+        CopyInterruption::KillAcceptedPut,
+    );
+}
+
+#[test]
 fn local_to_s3_sigterm_after_accepted_put_preserves_unresolved_history() {
     verify_copy_history(
         CopyProfile::LocalSource,
@@ -109,6 +125,8 @@ enum CopyProfile {
     UnsafeHistory,
     LegacyCompleted,
     LegacyInterrupted,
+    ReleasedCompleted,
+    ReleasedInterrupted,
 }
 
 fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
@@ -119,13 +137,23 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         profile,
         CopyProfile::LegacyCompleted | CopyProfile::LegacyInterrupted
     );
-    let completed = matches!(profile, CopyProfile::LegacyCompleted);
+    let released = matches!(
+        profile,
+        CopyProfile::ReleasedCompleted | CopyProfile::ReleasedInterrupted
+    );
+    let completed = matches!(
+        profile,
+        CopyProfile::LegacyCompleted | CopyProfile::ReleasedCompleted
+    );
     let unrelated_database = matches!(profile, CopyProfile::ConfiguredDatabaseS3Source);
     let binary = std::env::var_os("CARGO_BIN_EXE_shardline")
         .expect("set CARGO_BIN_EXE_shardline to the current optimized binary");
     let producer = if legacy {
         std::env::var_os("SHARDLINE_ARCHIVE_PREDECESSOR_BINARY")
             .expect("set SHARDLINE_ARCHIVE_PREDECESSOR_BINARY to the pre-project-history binary")
+    } else if released {
+        std::env::var_os("SHARDLINE_N_MINUS_ONE_BINARY")
+            .expect("set SHARDLINE_N_MINUS_ONE_BINARY to the adjacent released binary")
     } else {
         binary.clone()
     };
