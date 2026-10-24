@@ -209,6 +209,15 @@ impl OidcProvider {
             .build()
             .map_err(|e| OidcProviderError::HttpClient(e.to_string()))?;
 
+        Self::from_client(client, issuer, audience, jwks_host_allowlist).await
+    }
+
+    async fn from_client(
+        client: Client,
+        issuer: &str,
+        audience: Option<String>,
+        jwks_host_allowlist: &[String],
+    ) -> Result<Self, OidcProviderError> {
         let discovery_url = format!("{issuer}/.well-known/openid-configuration");
         let discovery_response = client
             .get(&discovery_url)
@@ -662,6 +671,92 @@ fn jwks_host_is_allowed(jwks_uri: &str, issuer: &str, jwks_host_allowlist: &[Str
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(feature = "docker")]
+    #[test]
+    fn oidc_https_discovery_and_jwks_validate_trust() {
+        use shardline_test_support::{HttpsDocumentFixture, native_client_output};
+        let key = test_rsa_jwk("tls-test-key");
+        let jwks = json!({"keys":[{"kid":key.kid,"kty":"RSA","n":key.n,"e":key.e}]}).to_string();
+        let fixture = HttpsDocumentFixture::start(&[
+            (
+                "/.well-known/openid-configuration",
+                r#"{"issuer":"{{ORIGIN}}","jwks_uri":"{{ORIGIN}}/jwks"}"#,
+            ),
+            ("/jwks", &jwks),
+        ])
+        .expect("owned HTTPS discovery fixture");
+        let unrelated = HttpsDocumentFixture::start(&[]).expect("independent test CA");
+        for (ca, reject) in [
+            (fixture.ca_cert_path(), false),
+            (unrelated.ca_cert_path(), true),
+        ] {
+            let output = native_client_output(
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "oidc_provider::tests::oidc_https_child",
+                        "--ignored",
+                    ])
+                    .env("SSL_CERT_FILE", ca)
+                    .env("SHARDLINE_OIDC_TLS_ISSUER", fixture.origin())
+                    .env("SHARDLINE_OIDC_TLS_REJECT", reject.to_string()),
+                Duration::from_secs(30),
+            )
+            .expect("bounded OIDC child process");
+            let child_diagnostic = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.status.success(),
+                "OIDC HTTPS qualification failed (reject={reject}, discovery={}, jwks={})",
+                child_diagnostic.contains("DiscoveryFetch"),
+                child_diagnostic.contains("JwksFetch")
+            );
+        }
+    }
+
+    #[cfg(feature = "docker")]
+    #[tokio::test]
+    #[ignore = "invoked by HTTPS parent with isolated process trust"]
+    async fn oidc_https_child() {
+        let issuer = std::env::var("SHARDLINE_OIDC_TLS_ISSUER").expect("fixture issuer");
+        let certificate = reqwest::Certificate::from_pem(
+            &std::fs::read(std::env::var("SSL_CERT_FILE").expect("fixture trust path"))
+                .expect("fixture CA"),
+        )
+        .expect("test CA certificate");
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .add_root_certificate(certificate)
+            .build()
+            .expect("verified fixture HTTP client");
+        let result = OidcProvider::from_client(client, &issuer, None, &[]).await;
+        if std::env::var("SHARDLINE_OIDC_TLS_REJECT").expect("trust expectation") == "true" {
+            assert!(
+                matches!(result, Err(OidcProviderError::DiscoveryFetch(_))),
+                "untrusted discovery must fail before parsing keys"
+            );
+        } else {
+            let provider = result.expect("trusted HTTPS discovery and JWKS");
+            let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
+            header.kid = Some("tls-test-key".to_owned());
+            let claims =
+                json!({"iss":issuer,"sub":"tls-user","exp":9999999999_u64,"iat":1000000000_u64});
+            let signing_key = jsonwebtoken::EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes())
+                .expect("fixture signing key");
+            let token = jsonwebtoken::encode(&header, &claims, &signing_key)
+                .expect("signed fixture identity");
+            let verified = provider
+                .verify_token(&token)
+                .expect("verify identity using HTTPS-fetched JWKS");
+            assert_eq!(verified.subject(), "tls-user");
+            assert_eq!(verified.issuer(), issuer);
+        }
+    }
 
     async fn auth_document_response(
         body: &[u8],

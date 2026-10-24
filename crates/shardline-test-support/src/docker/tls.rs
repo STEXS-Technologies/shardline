@@ -1,5 +1,98 @@
 //! Disposable certificates shared by TLS service fixtures, never production keys.
 use super::*;
+use std::{process::Stdio, time::Instant};
+
+/// Owned HTTPS document server for authentication integration tests.
+/// Certificates and listeners are disposable; dropping the fixture stops its server.
+pub struct HttpsDocumentFixture {
+    material: TlsMaterial,
+    child: std::process::Child,
+    origin: String,
+}
+
+impl HttpsDocumentFixture {
+    /// Serves bounded static test documents. `{{ORIGIN}}` expands to this server.
+    ///
+    /// # Errors
+    /// Returns an error if certificate generation or listener startup fails.
+    pub fn start(documents: &[(&str, &str)]) -> Result<Self, IoError> {
+        let material = TlsMaterial::generate(false)?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let origin = format!("https://{address}");
+        let document_root = material.directory.path().join("documents");
+        fs::create_dir(&document_root)?;
+        for (path, body) in documents {
+            let relative = Path::new(path.trim_start_matches('/'));
+            if relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(IoError::other("invalid HTTPS fixture document path"));
+            }
+            let target = document_root.join(relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(target, body.replace("{{ORIGIN}}", &origin))?;
+        }
+        drop(listener);
+        let child = Command::new("openssl")
+            .args([
+                "s_server",
+                "-quiet",
+                "-WWW",
+                "-accept",
+                &address.to_string(),
+            ])
+            .arg("-cert")
+            .arg(material.directory.path().join("server-cert.pem"))
+            .arg("-key")
+            .arg(material.directory.path().join("server-key.pem"))
+            .current_dir(document_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut fixture = Self {
+            material,
+            child,
+            origin,
+        };
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if fixture.child.try_wait()?.is_some() {
+                return Err(IoError::other(
+                    "HTTPS document fixture exited before readiness",
+                ));
+            }
+            if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                return Ok(fixture);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(IoError::other(
+            "HTTPS document fixture startup deadline exceeded",
+        ))
+    }
+
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    #[must_use]
+    pub fn ca_cert_path(&self) -> PathBuf {
+        self.material.directory.path().join("ca-cert.pem")
+    }
+}
+
+impl Drop for HttpsDocumentFixture {
+    fn drop(&mut self) {
+        self.child.kill().ok();
+        self.child.wait().ok();
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct TlsMaterial {

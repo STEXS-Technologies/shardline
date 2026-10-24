@@ -43,6 +43,9 @@ mod native_clients;
 mod postgres_fixture;
 mod s3_fault_proxy;
 
+#[cfg(feature = "docker")]
+pub use docker::HttpsDocumentFixture;
+
 pub use client_process::{native_client_output, native_client_output_with_input};
 #[cfg(feature = "docker")]
 pub use fixtures::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};

@@ -43,6 +43,7 @@ static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 mod minio_probe;
 mod tls;
+pub use tls::HttpsDocumentFixture;
 use tls::TlsMaterial;
 
 /// Containerized service stack for self-contained end-to-end tests.
