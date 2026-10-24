@@ -4,6 +4,8 @@ use super::{XetXorbChunk, XetXorbDescriptor};
 use crate::{FileChunkRecord, FileRecord, LocalRecordStore, StorageRepresentation};
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
+mod postgres_indexed;
+
 fn descriptor() -> XetXorbDescriptor {
     XetXorbDescriptor {
         hash: "a".repeat(64),

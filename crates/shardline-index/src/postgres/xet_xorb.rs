@@ -59,9 +59,11 @@ impl PostgresRecordStore {
         &self,
         hash: &str,
     ) -> Result<Option<XetXorbDescriptor>, PostgresMetadataStoreError> {
-        let mut transaction = self.pool.begin().await?;
-        query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *transaction)
+        // Establish the snapshot in BEGIN itself, avoiding a separate SET
+        // round trip while keeping descriptor and member reads consistent.
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .await?;
         let row = query("SELECT CASE WHEN octet_length(descriptor::text)<=4194304 THEN descriptor END FROM shardline_xet_xorbs WHERE xorb_hash=$1")
             .bind(hash).fetch_optional(&mut *transaction).await?;

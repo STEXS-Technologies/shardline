@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Remove a PostgreSQL round trip from native Xorb member-index lookups while
+  retaining repeatable-read snapshots and complete bounded membership checks.
 - Keep the Xet hash-writing helper's digest consistent with accepted bytes
   after short writes, interrupted writes and errors.
 - Initialize the dedicated S3 multipart-completion client only when needed,

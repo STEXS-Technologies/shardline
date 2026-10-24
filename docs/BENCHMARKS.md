@@ -502,6 +502,16 @@ eight concurrent 36 MiB uploads, identical overwrites, GC and fsck. It retained
 including eight reads using released v1.12.0 after maintenance. This is a
 single-host compatibility/correctness check, not a cluster scaling result.
 
+Native missing-copy resolution also checks the derived descriptor and its
+complete ordered member index. For an existing PostgreSQL descriptor, this
+lookup now uses four statements instead of five: transaction setup establishes
+repeatable-read isolation directly, followed by the two reads and commit.
+This removes one database round trip per lookup without changing the returned
+payload or adding a cache. It does not reduce source-object integrity checks
+or establish an end-to-end throughput improvement. Qualification includes
+8,192 members, final-member corruption, excess rows and concurrent atomic
+descriptor/member updates.
+
 #### Small metadata reads
 
 Small-object reads used for OCI media types and legacy metadata now obtain
