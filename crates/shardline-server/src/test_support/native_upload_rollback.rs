@@ -13,6 +13,7 @@ pub(crate) struct Case {
     pub(crate) intent: UploadIntent,
     pub(crate) state: UploadIntentState,
     events: serde_json::Value,
+    object_present: bool,
 }
 
 pub(crate) async fn seed<S: UploadIntentStore>(index: &S, objects: &ServerObjectStore) -> Vec<Case>
@@ -78,6 +79,7 @@ where
                 intent: xorb_intent,
                 state,
                 events,
+                object_present: present,
             });
             let (body, _file_hash) = single_file_shard(&[(payload.as_bytes(), &hash)]);
             let body_hash = blake3::hash(&body).to_hex().to_string();
@@ -141,6 +143,7 @@ where
                     intent,
                     state,
                     events,
+                    object_present: present,
                 });
             }
         }
@@ -175,6 +178,50 @@ where
             )
             .unwrap(),
             case.events
+        );
+    }
+}
+
+/// v1.12.1 understands these identities and may legally settle physical writes.
+/// Preserve the exact original evidence prefix and require a valid resulting
+/// chain, rather than treating every recovery transition as a format violation.
+pub(crate) async fn assert_recovered<S: UploadIntentStore>(index: &S, cases: &[Case], logs: &str)
+where
+    S::Error: std::fmt::Debug,
+{
+    for case in cases {
+        assert!(
+            logs.contains(case.intent.intent_id()),
+            "released recovery must visit the intent"
+        );
+        let expected = if !case.object_present && case.intent.intent_id().starts_with("xorb-v2-") {
+            UploadIntentState::Failed
+        } else if case.object_present && case.state == UploadIntentState::MetadataCommitted {
+            UploadIntentState::Visible
+        } else {
+            case.state
+        };
+        let recovered = index
+            .intent_by_id(case.intent.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state(), expected, "{}", case.intent.intent_id());
+        let events = index
+            .reliability_events(case.intent.intent_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_lifecycle_chain_ends_at(&events, expected).unwrap();
+        let original = case.events.as_array().unwrap();
+        let actual = serde_json::to_value(events).unwrap();
+        let actual = actual.as_array().unwrap();
+        assert_eq!(actual.get(..original.len()).unwrap(), original.as_slice());
+        assert_eq!(
+            actual.len(),
+            original
+                .len()
+                .checked_add(usize::from(expected != case.state))
+                .unwrap()
         );
     }
 }

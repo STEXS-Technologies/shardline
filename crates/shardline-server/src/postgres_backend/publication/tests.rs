@@ -505,14 +505,29 @@ async fn scoped_file_recovery_distinguishes_colliding_legacy_labels() {
 }
 
 #[tokio::test]
-async fn released_server_preserves_unfinished_scoped_file_evidence() {
-    use sha2::Digest;
-    use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
-    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+async fn historical_server_preserves_unfinished_scoped_file_evidence() {
+    let Ok(binary) = std::env::var("SHARDLINE_LEGACY_RECOVERY_BINARY") else {
+        eprintln!(
+            "SKIPPED: historical file rollback requires SHARDLINE_LEGACY_RECOVERY_BINARY (v1.11.3)"
+        );
+        return;
+    };
+    verify_released_file_recovery(binary, true).await;
+}
+
+#[tokio::test]
+async fn released_server_recovers_scoped_file_checkpoints_without_inventing_completion() {
     let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
         eprintln!("SKIPPED: rollback fixture requires SHARDLINE_N_MINUS_ONE_BINARY");
         return;
     };
+    verify_released_file_recovery(binary, false).await;
+}
+
+async fn verify_released_file_recovery(binary: String, historical: bool) {
+    use sha2::Digest;
+    use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
     let Some(fixture) = PostgresFixture::new().await else {
         eprintln!("SKIPPED: rollback fixture requires DATABASE_URL");
         return;
@@ -628,26 +643,31 @@ async fn released_server_preserves_unfinished_scoped_file_evidence() {
             .unwrap()
             .unwrap()
             .state();
-        let after = serde_json::to_value(
-            fixture
-                .index()
-                .reliability_events(intent.intent_id())
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let events = fixture
+            .index()
+            .reliability_events(intent.intent_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_lifecycle_chain_ends_at(&events, state).unwrap();
+        let after = serde_json::to_value(events).unwrap();
+        if historical
+            || !matches!(
+                checkpoint,
+                UploadIntentState::Stored | UploadIntentState::MetadataCommitted
+            )
+        {
+            assert_eq!(state, *checkpoint);
+        } else {
+            assert!(state == *checkpoint || state == UploadIntentState::Visible);
+        }
+        let original = before.as_array().unwrap();
         assert_eq!(
-            state,
-            *checkpoint,
-            "released recovery changed {}: {logs}",
-            intent.intent_id()
+            after.as_array().unwrap().get(..original.len()).unwrap(),
+            original.as_slice()
         );
-        assert_eq!(
-            after,
-            *before,
-            "released recovery changed {} history",
-            intent.intent_id()
-        );
+        if state == *checkpoint {
+            assert_eq!(after, *before);
+        }
     }
     assert_eq!(
         fixture
@@ -657,7 +677,11 @@ async fn released_server_preserves_unfinished_scoped_file_evidence() {
             .unwrap()
             .unwrap()
             .state(),
-        UploadIntentState::Visible
+        if historical {
+            UploadIntentState::Visible
+        } else {
+            UploadIntentState::Created
+        }
     );
     assert_eq!(
         fixture
@@ -666,7 +690,7 @@ async fn released_server_preserves_unfinished_scoped_file_evidence() {
             .await
             .unwrap()
             .len(),
-        5
+        if historical { 5 } else { 1 }
     );
     fixture
         .postgres()

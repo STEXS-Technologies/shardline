@@ -132,11 +132,26 @@ async fn same_native_shard_publishes_independently_in_default_and_repository_sco
 }
 
 #[tokio::test]
-async fn released_server_preserves_every_new_native_checkpoint() {
+async fn historical_server_preserves_every_new_native_checkpoint() {
+    let Ok(binary) = std::env::var("SHARDLINE_LEGACY_RECOVERY_BINARY") else {
+        eprintln!(
+            "SKIPPED: historical native rollback requires SHARDLINE_LEGACY_RECOVERY_BINARY (v1.11.3)"
+        );
+        return;
+    };
+    verify_released_native_recovery(binary, true).await;
+}
+
+#[tokio::test]
+async fn released_server_recovers_native_checkpoints_and_allows_identical_retry() {
     let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
         eprintln!("SKIPPED: native rollback requires SHARDLINE_N_MINUS_ONE_BINARY");
         return;
     };
+    verify_released_native_recovery(binary, false).await;
+}
+
+async fn verify_released_native_recovery(binary: String, historical: bool) {
     let root = tempfile::tempdir().unwrap();
     let backend = LocalBackend::new(
         root.path().to_path_buf(),
@@ -160,14 +175,28 @@ async fn released_server_preserves_every_new_native_checkpoint() {
     let logs =
         crate::test_support::released_startup::run(binary.into(), root.path().to_path_buf(), None)
             .await;
-    crate::test_support::native_upload_rollback::assert_preserved(
-        &backend.index_store,
-        &cases,
-        &logs,
-    )
-    .await;
+    if historical {
+        crate::test_support::native_upload_rollback::assert_preserved(
+            &backend.index_store,
+            &cases,
+            &logs,
+        )
+        .await;
+    } else {
+        crate::test_support::native_upload_rollback::assert_recovered(
+            &backend.index_store,
+            &cases,
+            &logs,
+        )
+        .await;
+        for ordinal in 0..4 {
+            let payload = format!("native rollback request false {ordinal}");
+            let (xorb, hash) = single_chunk_xorb(payload.as_bytes());
+            backend.upload_xorb(&hash, xorb).await.unwrap();
+        }
+    }
     for case in &cases {
-        if case.state == UploadIntentState::Created {
+        if historical && case.state == UploadIntentState::Created {
             assert!(
                 backend
                     .index_store
