@@ -1195,6 +1195,25 @@ async fn hub_frontend_builds_router_with_xet_frontend() {
 
 // ── build_webhook_delivery_client — redirects disabled (F-58) ──────────
 
+#[tokio::test]
+async fn webhook_delivery_client_rejects_private_dns_before_connecting() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let client = build_webhook_delivery_client().expect("webhook client");
+    let result = client
+        .post(format!("http://localhost:{port}/private"))
+        .body("must not reach a private destination")
+        .send()
+        .await;
+    assert!(result.is_err(), "connector must reject private DNS results");
+    let accepted = listener.accept();
+    assert!(
+        matches!(accepted, Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "private listener must receive no connection"
+    );
+}
+
 /// The webhook delivery client must NOT follow redirects: an attacker-
 /// controlled webhook URL could answer 301/302/307/308 with a `Location`
 /// pointing at a private/loopback/metadata address that was never validated.

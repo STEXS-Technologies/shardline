@@ -1208,6 +1208,11 @@ fn endpoint_body_limit(
 /// non-success status and the delivery fails instead of being followed.
 fn build_webhook_delivery_client() -> Option<reqwest::Client> {
     match reqwest::Client::builder()
+        .dns_resolver(Arc::new(
+            shardline_hub_api::routes::webhooks::PublicWebhookDnsResolver,
+        ))
+        // A proxy could resolve the destination itself, bypassing our resolver.
+        .no_proxy()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
