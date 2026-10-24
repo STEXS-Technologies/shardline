@@ -594,6 +594,34 @@ on local and PostgreSQL/MinIO storage, and a stock Hub 2.2.0 / hf_xet 1.7.0
 1 GiB native upload/download with complete SHA-256 verification. These are
 compatibility checks, not additional paired performance measurements.
 
+The next follow-up removes a redundant container HEAD from GC of packed generic
+records. The full validation GET supplies the existence result, including a
+missing source; only that GC pass reuses the observation across latest/history
+records. Corrupt or unreadable sources still stop collection. The legacy public
+member-visitor API retains its existing return type and behavior.
+
+Against `8f5d60bc`, the same preloaded 128-container PostgreSQL/MinIO scan used
+414 S3 attempts before and 286 after (30.9% fewer): container HEADs fell from
+128 to zero, while all 128 successful container GETs and the 134,435,501 traced
+response bytes remained unchanged. Both runs reconciled MinIO traces with
+server counters and passed 384 post-GC byte comparisons.
+
+Four separate twenty-iteration contention runs, in before/after and after/before
+order, measured per-run median mixed throughput of 259.93–261.19 MiB/s before
+and 267.71–281.49 MiB/s after: improvements of 3.0% and 7.8% in the two pairs.
+Median GC elapsed time fell from approximately 0.718 to 0.666–0.668 seconds;
+GC CPU fell from 0.330–0.340 to 0.310–0.320 seconds, with peak process RSS
+remaining approximately 31 MiB. All four reconciled their traces and passed
+another 1,536 post-GC byte comparisons. Five actual v1.12.1 upgrade/rollback
+tests also pass; native local and PostgreSQL/MinIO cases now run candidate GC
+before verifying old and new content with the released binary.
+
+These shared-host results support this specific request reduction and an
+encouraging contention improvement. They do not establish production scaling,
+a general p99 improvement, or a new paired throughput qualification against
+released v1.12.1. Full source verification and existing ownership/deletion
+barriers remain mandatory.
+
 #### Native Hugging Face/Xet transfers
 
 An October 24, 2026 measurement used production binary `d61d7342`,

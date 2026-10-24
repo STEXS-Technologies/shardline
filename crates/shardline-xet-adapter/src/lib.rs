@@ -107,7 +107,8 @@ pub use xorb_store::{
     canonical_uploaded_xorb_file_length, canonical_uploaded_xorb_length, normalize_serialized_xorb,
     store_owned_xorb_file, store_uploaded_xorb, store_uploaded_xorb_file,
     store_uploaded_xorb_with_metrics, store_xorb_bytes_with_resources,
-    visit_stored_xorb_chunk_hashes, xorb_chunks_cache_hash_from_key_if_present,
-    xorb_hash_from_object_key_if_present, xorb_object_key,
+    visit_stored_xorb_chunk_hashes, visit_stored_xorb_chunk_hashes_if_present,
+    xorb_chunks_cache_hash_from_key_if_present, xorb_hash_from_object_key_if_present,
+    xorb_object_key,
 };
 pub use xorb_visit::map_xorb_visit_error;

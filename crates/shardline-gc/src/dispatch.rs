@@ -1,8 +1,9 @@
 use shardline_server_core::ServerObjectStore;
 use shardline_storage::ObjectKey;
 use shardline_xet_adapter::{
-    XetAdapterError, shard_hash_from_object_key_if_present, visit_stored_xorb_chunk_hashes,
-    xorb_hash_from_object_key_if_present, xorb_object_key,
+    XetAdapterError, shard_hash_from_object_key_if_present,
+    visit_stored_xorb_chunk_hashes_if_present, xorb_hash_from_object_key_if_present,
+    xorb_object_key,
 };
 
 use crate::{GcError, ServerFrontend};
@@ -87,7 +88,7 @@ pub(super) fn visit_protocol_object_member_chunks<Visitor>(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
     mut visitor: Visitor,
-) -> Result<(), GcError>
+) -> Result<bool, GcError>
 where
     Visitor: FnMut(String) -> Result<(), GcError>,
 {
@@ -96,16 +97,19 @@ where
             ServerFrontend::Xet => {
                 if xorb_hash_from_object_key_if_present(object_key)?.is_some() {
                     let mut result = Ok(());
-                    visit_stored_xorb_chunk_hashes(object_store, object_key, |chunk_hash_hex| {
-                        match visitor(chunk_hash_hex) {
+                    let present = visit_stored_xorb_chunk_hashes_if_present(
+                        object_store,
+                        object_key,
+                        |chunk_hash_hex| match visitor(chunk_hash_hex) {
                             Ok(()) => Ok(()),
                             Err(e) => {
                                 result = Err(e);
                                 Err(XetAdapterError::NotFound)
                             }
-                        }
-                    })?;
-                    return result;
+                        },
+                    )?;
+                    result?;
+                    return Ok(present);
                 }
             }
             // S3 chunks are record-protected, so GC/fsck need no behavior change.
@@ -117,7 +121,7 @@ where
         }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -306,7 +310,7 @@ mod tests {
     #[test]
     fn visit_protocol_object_member_chunks_without_xet_returns_ok() {
         // When the frontend list doesn't include Xet, the function should
-        // return Ok(()) without calling the visitor.
+        // return Ok(false) without calling the visitor.
         let object_store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("some/key").unwrap();
         let mut visited = false;
@@ -328,7 +332,7 @@ mod tests {
 
     #[test]
     fn visit_protocol_object_member_chunks_with_non_xorb_key_returns_ok() {
-        // When the key is not an xorb, the function should return Ok(())
+        // When the key is not an xorb, the function should return Ok(false)
         // without calling the visitor.
         let object_store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("some/key").unwrap();

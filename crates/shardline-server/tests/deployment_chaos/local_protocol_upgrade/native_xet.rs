@@ -314,6 +314,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     verify_identities(root.path(), postgres, &repacked, &original).await;
     verify_identity_download(&candidate.base, &token, &repacked).await;
     drop(candidate);
+    gc_before_rollback(&current, root.path(), postgres, storage_env).await;
     let mut rollback =
         LocalServer::spawn_with_storage(&old, root.path(), postgres, "xet", storage_env);
     rollback.ready().await;
@@ -331,4 +332,40 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     verify(&restart.base, &token, &repacked).await;
     verify_identities(root.path(), postgres, &repacked, &original).await;
     verify_identity_download(&restart.base, &token, &repacked).await;
+}
+
+async fn gc_before_rollback(
+    binary: &Path,
+    root: &Path,
+    postgres: Option<&str>,
+    storage_env: &[(&str, String)],
+) {
+    let config = NamedTempFile::new().unwrap();
+    let mut command = Command::new(binary);
+    command
+        .env_clear()
+        .arg("--config")
+        .arg(config.path())
+        .args(["gc", "--mark", "--sweep", "--retention-seconds", "0"])
+        .env("SHARDLINE_ROOT_DIR", root)
+        .env("TMPDIR", std::env::temp_dir())
+        .env("SHARDLINE_OBJECT_STORAGE_ADAPTER", "local")
+        .env("SHARDLINE_SERVER_FRONTENDS", "xet");
+    if let Some(url) = postgres {
+        command.env("SHARDLINE_INDEX_POSTGRES_URL", url);
+    }
+    for (name, value) in storage_env {
+        command.env(name, value);
+    }
+    let output = tokio::task::spawn_blocking(move || {
+        shardline_test_support::native_client_output(&mut command, Duration::from_secs(90))
+    })
+    .await
+    .expect("pre-rollback GC worker")
+    .expect("pre-rollback GC process");
+    assert!(
+        output.status.success(),
+        "candidate GC must succeed before actual predecessor reads: {}",
+        output.status
+    );
 }

@@ -34,7 +34,7 @@ pub(super) struct ReachabilityAccumulator {
     pub(super) referenced_object_keys: HashSet<String>,
     live_dedupe_chunk_hashes: HashSet<String>,
     missing_optional_object_keys: HashSet<String>,
-    inspected_protocol_objects: HashSet<String>,
+    inspected_protocol_objects: HashMap<String, bool>,
     pub(super) scanned_records: u64,
 }
 
@@ -163,28 +163,34 @@ fn collect_record_object_references<Locator>(
                     .insert(chunk.hash.clone());
 
                 for object_key in optional_chunk_container_keys(frontends, &chunk.hash)? {
+                    if record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
+                        && shardline_xet_adapter::xorb_hash_from_object_key_if_present(&object_key)?
+                            .is_some()
+                    {
+                        // Full validation already observes the source's presence.
+                        // Retain its exact result, including missing sources, rather
+                        // than sending a separate metadata request first.
+                        if collect_live_chunk_references_from_protocol_object(
+                            object_store,
+                            frontends,
+                            &object_key,
+                            reachability,
+                        )? {
+                            reachability
+                                .referenced_object_keys
+                                .insert(object_key.as_str().to_owned());
+                        } else {
+                            reachability
+                                .missing_optional_object_keys
+                                .insert(object_key.as_str().to_owned());
+                        }
+                        continue;
+                    }
                     mark_optional_object_reference(
                         object_store,
                         &object_key,
                         &mut reachability.referenced_object_keys,
                         &mut reachability.missing_optional_object_keys,
-                    )?;
-                }
-
-                // For XorbCdcV1 records, also resolve the xorb container
-                // to its constituent chunk hashes so that the individual
-                // chunks inside the xorb are protected from GC even if
-                // the xorb container itself is missing or corrupted.
-                if record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
-                    && let Some(object_key) = optional_chunk_container_keys(frontends, &chunk.hash)?
-                        .into_iter()
-                        .next()
-                {
-                    collect_live_chunk_references_from_protocol_object(
-                        object_store,
-                        frontends,
-                        &object_key,
-                        reachability,
                     )?;
                 }
             }
@@ -229,26 +235,32 @@ fn collect_live_chunk_references_from_protocol_object(
     frontends: &[ServerFrontend],
     object_key: &ObjectKey,
     reachability: &mut ReachabilityAccumulator,
-) -> Result<(), GcError> {
+) -> Result<bool, GcError> {
     let object_key_string = object_key.as_str().to_owned();
-    if reachability
+    if let Some(present) = reachability
         .inspected_protocol_objects
-        .contains(&object_key_string)
+        .get(&object_key_string)
     {
-        return Ok(());
+        return Ok(*present);
     }
+
+    let present = visit_protocol_object_member_chunks(
+        frontends,
+        object_store,
+        object_key,
+        |chunk_hash_hex| {
+            let chunk_object_key = chunk_object_key(&chunk_hash_hex)?;
+            reachability
+                .referenced_object_keys
+                .insert(chunk_object_key.as_str().to_owned());
+            reachability.live_dedupe_chunk_hashes.insert(chunk_hash_hex);
+            Ok::<(), GcError>(())
+        },
+    )?;
     reachability
         .inspected_protocol_objects
-        .insert(object_key_string);
-
-    visit_protocol_object_member_chunks(frontends, object_store, object_key, |chunk_hash_hex| {
-        let chunk_object_key = chunk_object_key(&chunk_hash_hex)?;
-        reachability
-            .referenced_object_keys
-            .insert(chunk_object_key.as_str().to_owned());
-        reachability.live_dedupe_chunk_hashes.insert(chunk_hash_hex);
-        Ok::<(), GcError>(())
-    })
+        .insert(object_key_string, present);
+    Ok(present)
 }
 
 pub(super) fn scan_orphan_objects(
@@ -514,6 +526,9 @@ where
         max_embedded_temp_nanos,
     })
 }
+
+#[cfg(test)]
+mod verified_presence_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

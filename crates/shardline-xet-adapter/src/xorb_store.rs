@@ -109,13 +109,33 @@ pub fn xorb_hash_from_object_key_if_present(
 pub fn visit_stored_xorb_chunk_hashes<Visitor>(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
-    mut visitor: Visitor,
+    visitor: Visitor,
 ) -> Result<(), XetAdapterError>
 where
     Visitor: FnMut(String) -> Result<(), XetAdapterError>,
 {
+    visit_stored_xorb_chunk_hashes_if_present(object_store, object_key, visitor).map(|_| ())
+}
+
+/// Visits members only after fully validating their stored container.
+///
+/// Returns `true` when the source was present, validated and visited successfully;
+/// returns `false` for a missing source or a key outside the Xorb namespace.
+/// Callers can reuse this observation instead of probing the same source first.
+///
+/// # Errors
+///
+/// Returns an error when the source cannot be read or validated, or a visitor fails.
+pub fn visit_stored_xorb_chunk_hashes_if_present<Visitor>(
+    object_store: &ServerObjectStore,
+    object_key: &ObjectKey,
+    mut visitor: Visitor,
+) -> Result<bool, XetAdapterError>
+where
+    Visitor: FnMut(String) -> Result<(), XetAdapterError>,
+{
     let Some(xorb_hash_hex) = xorb_hash_from_object_key_if_present(object_key)? else {
-        return Ok(());
+        return Ok(false);
     };
 
     // Persisted member sidecars are derived data without an authenticated leaf
@@ -124,7 +144,7 @@ where
     let Some((cursor, _length)) =
         object_store.materialize_bounded_object_if_present(object_key, 0)?
     else {
-        return Ok(());
+        return Ok(false);
     };
     // Bound scratch-read buffering independently of container size. Validation
     // still reads and authenticates every payload and footer from this snapshot.
@@ -138,7 +158,7 @@ where
         visitor(xet_hash_hex_string(chunk.hash()))?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Extracts a Xorb hash from a legacy member-cache sidecar key.
