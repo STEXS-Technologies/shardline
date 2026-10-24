@@ -151,7 +151,8 @@ async fn native_corpus(remote: Option<&RemoteStorage>) -> Result<()> {
             );
     }
     let server = RunningServer(tokio::spawn(shardline_server::serve_with_listener(
-        config, listener,
+        config.clone(),
+        listener,
     )));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -221,17 +222,7 @@ async fn native_corpus(remote: Option<&RemoteStorage>) -> Result<()> {
     }
     let packed_members = fsck_native_members::publish(&client, &base).await?;
     drop(server);
-    if remote.is_none() {
-        let backend = LocalBackend::new(
-            root.path().to_owned(),
-            base,
-            NonZeroUsize::new(1024).ok_or("chunk size")?,
-        )
-        .await?;
-        for (file, expected) in files {
-            assert_eq!(backend.download_file(&file, None, None).await?, expected);
-        }
-    }
+    verify_native_files(&config, &files).await?;
     let report = scan_configured(root.path(), remote)?;
     assert_status(&report, 0);
     assert!(String::from_utf8_lossy(&report.stdout).contains("issue_count: 0"));
@@ -264,6 +255,26 @@ async fn native_corpus(remote: Option<&RemoteStorage>) -> Result<()> {
             .await?;
     }
     fsck_native_members::qualify(root.path(), remote, &packed_members)?;
+    verify_native_files(&config, &files).await?;
+    Ok(())
+}
+
+async fn verify_native_files(
+    config: &shardline_server::ServerConfig,
+    files: &[(String, Vec<u8>)],
+) -> Result<()> {
+    let backend = shardline_server::ServerBackend::from_config(config).await?;
+    for (file, expected) in files {
+        let downloaded = match &backend {
+            shardline_server::ServerBackend::Local(backend) => {
+                backend.download_file(file, None, None).await?
+            }
+            shardline_server::ServerBackend::Postgres(backend) => {
+                backend.download_file(file, None, None).await?
+            }
+        };
+        assert_eq!(&downloaded, expected);
+    }
     Ok(())
 }
 

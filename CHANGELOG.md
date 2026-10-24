@@ -168,6 +168,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   content and shard uploads that reference missing Xorbs.
 - Recognize recoverable indexed native Xorb members during FSCK while retaining
   failures for missing lookup metadata, missing sources and corrupt containers.
+- Qualify native member-index repair against process SIGKILL with PostgreSQL
+  and S3 storage, checking batch rollback, fresh-process retry and intact file reads.
 - Recover native chunk reads from fully verified indexed Xorbs when the
   standalone chunk copy is missing, retaining existing standalone reads.
 - Observe queued cancellation after native shard verification before invoking

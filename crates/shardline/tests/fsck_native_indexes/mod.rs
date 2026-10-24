@@ -3,6 +3,8 @@ use super::*;
 
 mod cancellation;
 mod concurrency;
+#[cfg(unix)]
+mod process;
 
 pub(super) async fn qualify(
     root: &Path,
@@ -117,6 +119,8 @@ pub(super) async fn qualify(
         .ok_or("second verified descriptor missing")?;
     concurrency::qualify(root, remote, &pool, &descriptor, &other).await?;
     cancellation::qualify(root, remote, &pool, &descriptor, &other).await?;
+    #[cfg(unix)]
+    process::qualify(root, remote, &pool, &descriptor, &other).await?;
     overwrite_remote_member(remote, member, content)?;
     expect_scan(root, remote, 0, "restored standalone copy")?;
     pool.close().await;
