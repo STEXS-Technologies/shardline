@@ -129,6 +129,10 @@ Docker, Python 3.11+ with `boto3`, the MinIO `mc` client, and a host CA certific
 It creates its own PostgreSQL and MinIO containers, limits each Shardline replica
 to one CPU and 1 GiB, and removes its containers afterward. Output must be outside
 the checkout. The default workload is larger: 128 objects and three repetitions.
+For before/after comparisons, pass `--binary-source-revision <revision>` for each
+executable. Metadata records that supplied revision separately from
+`harness_commit` and always records the executable's SHA-256; the checkout's
+commit alone does not identify a previously built or released binary.
 
 The three fixtures separate unique incompressible content, four identical copies
 of each incompressible object, and distinct compressible objects. Each file is

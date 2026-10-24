@@ -150,6 +150,7 @@ def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("output", type=Path, help="new directory outside the checkout")
+    parser.add_argument("--binary-source-revision", help="source revision of the supplied executable, when known; recorded separately from the harness checkout")
     parser.add_argument("--replicas", type=int, nargs="+", default=[1, 2, 4, 8])
     parser.add_argument("--datasets", nargs="+", choices=["unique", "repeated", "compressible"],
                         default=["unique", "repeated", "compressible"])
@@ -181,7 +182,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     with args.binary.open("rb") as binary:
         binary_hash = hashlib.file_digest(binary, "sha256").hexdigest()
-    metadata = {"commit": command("git", "rev-parse", "HEAD"), "started": utc_now(),
+    metadata = {"harness_commit": command("git", "rev-parse", "HEAD"),
+                "binary_source_revision": args.binary_source_revision, "started": utc_now(),
                 "binary_sha256": binary_hash, "binary_version": command(str(args.binary), "--version"),
                 "host": platform.platform(), "logical_cpus": os.cpu_count(),
                 "load_average_at_start": os.getloadavg(),
