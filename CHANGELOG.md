@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Keep the Xet hash-writing helper's digest consistent with accepted bytes
+  after short writes, interrupted writes and errors.
 - Initialize the dedicated S3 multipart-completion client only when needed,
   avoiding an unused HTTP pool and TLS-root loading during reads and GC.
   Store clones share initialization; conditional publication remains unchanged.
