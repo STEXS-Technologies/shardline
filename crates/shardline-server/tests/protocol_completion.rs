@@ -22,6 +22,7 @@ const INDEX: &str = "application/vnd.oci.image.index.v1+json";
 mod copy_parts;
 mod git_atomic;
 mod lfs_errors;
+mod lfs_upload_safety;
 mod multipart_listing;
 mod native_lfs_locks;
 mod oci_conformance;
