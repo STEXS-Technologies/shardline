@@ -716,6 +716,26 @@ byte comparisons. All 515 storage tests and six actual v1.12.1 upgrade/rollback
 cases pass, together with strict storage Clippy. This is a startup CPU reduction;
 it does not reduce S3 request charges or establish physical disk savings.
 
+A follow-up comparison at `f02ba074` controlled maintenance work: exactly one
+overlapping GC per phase, twenty phases per run, against the released v1.12.1
+binary. The continuous-GC fixture instead waits 0.5 seconds after each completion,
+so faster scans can change the number of GCs performed during a comparison.
+
+| Run order | Binary | Median MiB/s | Median phase PUT p99 (ms) |
+| --- | --- | ---: | ---: |
+| 1 | v1.12.1 | 238.58 | 387.84 |
+| 2 | f02ba074 | 242.16 | 376.72 |
+| 3 | f02ba074 | 258.93 | 358.23 |
+| 4 | v1.12.1 | 256.60 | 359.07 |
+
+These controlled runs do not establish a throughput regression: paired throughput
+changes are +1.5% and +0.9%, with comparable tail latency. GC CPU remains higher,
+at 0.23–0.24 seconds versus 0.18 seconds. All four reconcile MinIO traces and
+pass 384 post-GC byte comparisons each. Separate 20 ms lock sampling observes
+steady exclusive barrier spans around 260–300 ms for the candidate and 260–280 ms
+for v1.12.1; this does not justify changing the barrier's safety contract.
+The shared-host fixture still does not qualify production scaling or other workloads.
+
 #### Native Hugging Face/Xet transfers
 
 An October 24, 2026 measurement used production binary `d61d7342`,
