@@ -1,6 +1,8 @@
 //! Disposable certificates shared by TLS service fixtures, never production keys.
 use super::*;
 use std::{process::Stdio, time::Instant};
+mod webhook;
+pub use webhook::HttpsWebhookFixture;
 
 /// Owned HTTPS document server for authentication integration tests.
 /// Certificates and listeners are disposable; dropping the fixture stops its server.
@@ -101,6 +103,10 @@ pub(super) struct TlsMaterial {
 
 impl TlsMaterial {
     pub(super) fn generate(with_client: bool) -> Result<Self, IoError> {
+        Self::generate_for_server(with_client, "localhost")
+    }
+
+    fn generate_for_server(with_client: bool, server_name: &str) -> Result<Self, IoError> {
         let directory = tempfile::tempdir()?;
         let ca_key = directory.path().join("ca-key.pem");
         let ca_cert = directory.path().join("ca-cert.pem");
@@ -128,9 +134,9 @@ impl TlsMaterial {
                 .arg(&ca_cert),
             "generate fixture TLS certificate authority",
         )?;
-        identity(directory.path(), "server", &ca_key, &ca_cert)?;
+        identity(directory.path(), "server", &ca_key, &ca_cert, server_name)?;
         if with_client {
-            identity(directory.path(), "client", &ca_key, &ca_cert)?;
+            identity(directory.path(), "client", &ca_key, &ca_cert, "localhost")?;
         }
         #[cfg(unix)]
         {
@@ -154,7 +160,13 @@ impl TlsMaterial {
     }
 }
 
-fn identity(directory: &Path, name: &str, ca_key: &Path, ca_cert: &Path) -> Result<(), IoError> {
+fn identity(
+    directory: &Path,
+    name: &str,
+    ca_key: &Path,
+    ca_cert: &Path,
+    server_name: &str,
+) -> Result<(), IoError> {
     let key = directory.join(format!("{name}-key.pem"));
     let request = directory.join(format!("{name}.csr"));
     let certificate = directory.join(format!("{name}-cert.pem"));
@@ -167,7 +179,7 @@ fn identity(directory: &Path, name: &str, ca_key: &Path, ca_cert: &Path) -> Resu
     fs::write(
         &extensions,
         format!(
-            "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage={usage}\n"
+            "subjectAltName=DNS:{server_name},IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage={usage}\n"
         ),
     )?;
     run_command_checked(

@@ -500,6 +500,7 @@ pub(crate) async fn webhook_delete(
 
 #[cfg(test)]
 mod tests {
+    mod tls;
     use super::*;
     use crate::routes::test_repo;
     use std::net::IpAddr;
