@@ -2,6 +2,9 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[cfg(unix)]
+mod process;
+
 fn boundary_body(chunk: bytes::Bytes, extra: bool) -> reqwest::Body {
     let frames = (0..64).map(move |_| Ok::<_, std::io::Error>(chunk.clone()));
     let tail = extra.then(|| Ok(bytes::Bytes::from_static(b"x")));

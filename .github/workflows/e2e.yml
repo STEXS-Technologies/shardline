@@ -290,7 +290,7 @@ jobs:
         run: >-
           cargo nextest run --locked -p shardline-server --features docker
           --test protocol_completion --run-ignored all
-          -E 'test(stock_git_lfs_locks_across) | test(lfs_upload_safety)'
+          -E '(test(stock_git_lfs_locks_across) | test(lfs_upload_safety)) & !test(lfs_process_child)'
 
       - name: Run DuckDB against Postgres + MinIO deployment shape
         run: >-

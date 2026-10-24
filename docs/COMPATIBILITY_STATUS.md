@@ -84,8 +84,12 @@ a mismatching retry cannot replace valid bytes. Reopening the backend preserves
 the bytes and repository isolation. Streamed basic uploads accept exactly 64 MiB
 and reject one byte more, including retries against an existing object, without
 requiring a Content-Length header. The E2E gate explicitly includes the disposable
-PostgreSQL/MinIO case. These checks do not qualify process termination or split-role
-cancellation.
+PostgreSQL/MinIO case. A separate Unix subprocess test kills local Hub and
+standalone LFS servers with SIGKILL during an unfinished request, verifies a full
+retry after restart, then kills the restarted server after acknowledgment and
+verifies the bytes after another restart. This covers wire-upload interruption;
+remote process termination, specific internal persistence boundaries and split-role
+cancellation remain separate qualification items.
 
 The E2E workflow pins these Hub/Xet client combinations. This is the required
 test matrix, not a claim that the current branch has passed release CI.
