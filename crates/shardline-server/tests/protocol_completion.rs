@@ -19,6 +19,8 @@ use std::{num::NonZeroUsize, path::Path};
 const KEY: &[u8] = b"protocol-completion-signing-key-32!";
 const INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
+#[cfg(feature = "docker")]
+mod botocore_backend;
 mod copy_parts;
 mod git_atomic;
 mod lfs_errors;
@@ -123,7 +125,7 @@ async fn native_botocore_session_credentials_on_postgres() {
 
 #[tokio::test]
 #[ignore = "requires native BOTOCORE_PYTHON, disposable PostgreSQL DATABASE_URL and TEST_S3_* MinIO storage"]
-async fn native_botocore_full_object_checksum_survives_postgres_minio_restart() {
+async fn native_botocore_full_object_checksum_on_postgres_and_minio_survives_restart() {
     let database = std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
     let prefix = format!(
         "protocol-full-checksum-{}-{}",
