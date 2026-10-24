@@ -57,6 +57,10 @@ fn git(args: &[&str]) -> std::process::Output {
             .env("GIT_HTTP_LOW_SPEED_TIME", "10")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Git Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Git Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
             .env("GIT_TRACE_PACKET", "1")
             .env("GIT_AUTHOR_DATE", "2030-01-01T00:00:00+00:00")
             .env("GIT_COMMITTER_DATE", "2030-01-01T00:00:00+00:00"),

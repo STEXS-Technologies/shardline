@@ -333,8 +333,10 @@ args = ["deny", "check"]
 [tasks.deny-e2e]
 description = "Check the separate E2E dependency graph against the repository security policy"
 workspace = false
-command = "bash"
-args = ["-c", "cargo deny --manifest-path e2e/Cargo.toml check --config \"$PWD/deny.toml\""]
+command = "cargo"
+# Both supported cargo-deny CLI layouts discover the repository policy above
+# the E2E manifest; --config moved between command levels in newer releases.
+args = ["deny", "--manifest-path", "e2e/Cargo.toml", "check"]
 
 [tasks.check-dependency-exceptions]
 description = "Fail CI when a dependency-security exception lacks ownership or has expired"
