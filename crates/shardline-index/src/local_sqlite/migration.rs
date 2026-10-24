@@ -237,7 +237,7 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 34] = [
 
 // Additive frontend state has separate installation history so released servers
 // can continue validating the unchanged core ledger during a rolling upgrade.
-pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 3] = [
+pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 7] = [
     LocalSqliteMigration {
         version: "20261021000000",
         name: "xet_file_identities",
@@ -255,5 +255,29 @@ pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 3] = [
         name: "s3_multipart_counts",
         up_sql: include_str!("../../migrations/20261023000000_s3_multipart_counts.up.sql"),
         down_sql: include_str!("../../migrations/20261023000000_s3_multipart_counts.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20261023010000",
+        name: "record_membership",
+        up_sql: include_str!("../../migrations/20261023010000_record_membership.up.sql"),
+        down_sql: include_str!("../../migrations/20261023010000_record_membership.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20261023020000",
+        name: "xet_xorb_descriptors",
+        up_sql: include_str!("../../migrations/20261023020000_xet_xorb_descriptors.up.sql"),
+        down_sql: include_str!("../../migrations/20261023020000_xet_xorb_descriptors.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20261023030000",
+        name: "hub_object_locations",
+        up_sql: include_str!("../../migrations/20261023030000_hub_object_locations.up.sql"),
+        down_sql: include_str!("../../migrations/20261023030000_hub_object_locations.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20261023040000",
+        name: "xet_file_aliases",
+        up_sql: include_str!("../../migrations/20261023040000_xet_file_aliases.up.sql"),
+        down_sql: include_str!("../../migrations/20261023040000_xet_file_aliases.down.sql"),
     },
 ];

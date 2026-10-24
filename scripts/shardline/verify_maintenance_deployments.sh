@@ -27,6 +27,6 @@ if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/test.log"; then
     exit 1
 fi
 # Require every selected drill: a renamed test must not silently shrink coverage.
-rg 'Starting 12 tests across 1 binary' "$fixture/test.log"
-rg 'Summary.*12 tests run: 12 passed' "$fixture/test.log"
+rg 'Starting 16 tests across 1 binary' "$fixture/test.log"
+rg 'Summary.*16 tests run: 16 passed' "$fixture/test.log"
 echo 'PASS: startup, restricted commands, concurrent ownership, replacement, remote-delete faults and rolling rollback'

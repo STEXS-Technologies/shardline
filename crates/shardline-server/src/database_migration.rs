@@ -551,7 +551,7 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 35] = [
 
 // These tables extend frontend capabilities without changing the released
 // storage schema. Their installation history must not prevent old restarts.
-const FRONTEND_MIGRATIONS: [DatabaseMigration; 3] = [
+const FRONTEND_MIGRATIONS: [DatabaseMigration; 7] = [
     DatabaseMigration {
         version: "20261021000000",
         name: "xet_file_identities",
@@ -569,6 +569,30 @@ const FRONTEND_MIGRATIONS: [DatabaseMigration; 3] = [
         name: "s3_multipart_counts",
         up_sql: include_str!("../migrations/20261023000000_s3_multipart_counts.up.sql"),
         down_sql: include_str!("../migrations/20261023000000_s3_multipart_counts.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023010000",
+        name: "record_membership",
+        up_sql: include_str!("../migrations/20261023010000_record_membership.up.sql"),
+        down_sql: include_str!("../migrations/20261023010000_record_membership.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023020000",
+        name: "xet_xorb_descriptors",
+        up_sql: include_str!("../migrations/20261023020000_xet_xorb_descriptors.up.sql"),
+        down_sql: include_str!("../migrations/20261023020000_xet_xorb_descriptors.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023030000",
+        name: "hub_object_locations",
+        up_sql: include_str!("../migrations/20261023030000_hub_object_locations.up.sql"),
+        down_sql: include_str!("../migrations/20261023030000_hub_object_locations.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023040000",
+        name: "xet_file_aliases",
+        up_sql: include_str!("../migrations/20261023040000_xet_file_aliases.up.sql"),
+        down_sql: include_str!("../migrations/20261023040000_xet_file_aliases.down.sql"),
     },
 ];
 
@@ -2940,7 +2964,7 @@ mod tests {
     #[test]
     fn bundled_migrations_have_expected_count() {
         assert_eq!(bundled_database_migrations().len(), 35);
-        assert_eq!(super::FRONTEND_MIGRATIONS.len(), 3);
+        assert_eq!(super::FRONTEND_MIGRATIONS.len(), 7);
     }
 
     #[test]
@@ -3430,7 +3454,7 @@ mod tests {
         assert_eq!(resumed.pending_count, 0);
         assert_eq!(
             resumed.applied_total_count,
-            bundled_database_migrations().len() as u64
+            (bundled_database_migrations().len() + super::FRONTEND_MIGRATIONS.len()) as u64
         );
         assert!(resumed.migrations.iter().all(|migration| migration.applied));
         run_test_migration_command(&test_url, DatabaseMigrationCommand::Verify)
@@ -3858,7 +3882,8 @@ mod tests {
         assert_eq!(fresh.applied_total_count, 0);
         assert_eq!(
             fresh.pending_count,
-            u64::try_from(bundled_database_migrations().len()).unwrap()
+            u64::try_from(bundled_database_migrations().len() + super::FRONTEND_MIGRATIONS.len())
+                .unwrap()
         );
         assert!(
             fresh
@@ -3919,7 +3944,10 @@ mod tests {
             assert_eq!(report.reverted_count, 0);
             assert_eq!(
                 report.applied_total_count,
-                u64::try_from(bundled_database_migrations().len()).unwrap()
+                u64::try_from(
+                    bundled_database_migrations().len() + super::FRONTEND_MIGRATIONS.len()
+                )
+                .unwrap()
             );
         }
         held.rollback().await.unwrap();

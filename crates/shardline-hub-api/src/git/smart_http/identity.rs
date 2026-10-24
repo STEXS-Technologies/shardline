@@ -13,12 +13,15 @@ use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use super::{
     super::pack::{GitObject, ObjectType, generate_pack},
     pack_parse::parse_pack_data_with_budget,
-    projection::{GitProjection, archive_key, project_history_with_roots, read_object_bounded},
+    projection::{
+        GitProjection, archive_key, project_history_with_roots, read_identity_archive_key,
+        read_object_bounded,
+    },
 };
 use crate::{error::HubApiError, routes::HubState};
 
 const MAX_IDENTITY_BYTES: usize = 20 * 1024 * 1024;
-pub(super) static IDENTITY_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+pub(crate) static IDENTITY_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 fn failure(error: impl std::fmt::Display) -> HubApiError {
     HubApiError::CasError(error.to_string())
@@ -45,13 +48,13 @@ fn embedded_revision(object: &GitObject, repo_id: &str) -> Result<String, HubApi
     Ok(revision.to_owned())
 }
 
-fn read_identity(
+pub(super) fn read_identity(
     state: &HubState,
     repo_id: &str,
     lookup: &str,
     auth: &AuthorizedRepository,
 ) -> Result<Option<GitObject>, HubApiError> {
-    let key = archive_key(repo_id, &format!("identities-v1/{lookup}"), auth)?;
+    let key = read_identity_archive_key(state, repo_id, lookup, auth)?;
     let Some(bytes) = read_object_bounded(state, &key, MAX_IDENTITY_BYTES)? else {
         return Ok(None);
     };
@@ -100,7 +103,7 @@ pub(crate) async fn public_commit_id(
     .map_err(failure)?
 }
 
-fn public_commit_id_sync(
+pub(super) fn public_commit_id_sync(
     state: &HubState,
     repo_id: &str,
     revision: &str,
@@ -167,7 +170,15 @@ pub(super) fn retain_identity(
         state
             .object_store
             .put_if_absent(&key, ObjectBody::from_slice(&bytes), &integrity)
-            .map_err(failure)?;
+            .map_err(|error| {
+                crate::routes::object_io::storage_failure("Git commit identity write", &error)
+            })?;
+        crate::object_locations::remember(
+            state,
+            auth,
+            shardline_index::hub::HubObjectKind::GitArchive,
+            &format!("identities-v1/{lookup}"),
+        )?;
         let stored = read_identity(state, repo_id, lookup, auth)?
             .ok_or_else(|| failure("identity archive publication missing"))?;
         if stored.data != object.data {
@@ -246,6 +257,57 @@ pub(crate) fn resolve_commit_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scoped(owner: &str, revision: Option<&str>) -> AuthorizedRepository {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+        use shardline_server_core::{AuthProvider, LocalHmacProvider};
+        let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, owner, "repo", revision).unwrap();
+        let claims =
+            TokenClaims::new("local", "subject", TokenScope::Read, scope, u64::MAX).unwrap();
+        AuthorizedRepository::verify_and_authorize(
+            &provider,
+            &provider.mint_token(&claims).unwrap(),
+            TokenScope::Read,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn internal_identity_lookup_crosses_storage_scope_without_granting_revision_access() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        let internal = stored_revision(&state);
+        let broad = scoped("alice", None);
+        let public = public_commit_id_sync(&state, "alice/repo", &internal, &broad).unwrap();
+        let feature = scoped("alice", Some("feature"));
+        assert_eq!(
+            public_commit_id_sync(&state, "alice/repo", &internal, &feature).unwrap(),
+            public
+        );
+        assert_eq!(
+            resolve_commit_id(&state, "alice/repo", &public, &feature).unwrap(),
+            Some(internal.clone())
+        );
+        crate::revision_access::authorize_read(&state, "alice/repo", &public, &internal, &feature)
+            .await
+            .unwrap();
+        assert!(matches!(
+            crate::revision_access::authorize_read(
+                &state,
+                "alice/repo",
+                &public,
+                &internal,
+                &scoped("alice", Some("main"))
+            )
+            .await,
+            Err(HubApiError::Forbidden)
+        ));
+        assert!(matches!(
+            read_identity(&state, "alice/repo", &public, &scoped("bob", None)),
+            Err(HubApiError::Forbidden)
+        ));
+    }
 
     fn stored_revision(state: &HubState) -> String {
         state

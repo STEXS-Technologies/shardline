@@ -46,7 +46,27 @@ async fn drill_deploy_git_receive_pack_process_kill_rolls_back_atomic_refs() {
 
     let nonce = lfs_run_nonce();
     let repository = format!("process-kill/git-{nonce}");
-    let token = mint_token("process-kill", &format!("git-{nonce}"), TokenScope::Write);
+    // This drill intentionally publishes two branches atomically. A main-only
+    // token must be rejected before publication and cannot reach the crash cut.
+    let scope = RepositoryScope::new(
+        RepositoryProvider::Generic,
+        "process-kill",
+        &format!("git-{nonce}"),
+        None,
+    )
+    .unwrap();
+    let claims = TokenClaims::new(
+        "shardline",
+        "git-atomic-crash-drill",
+        TokenScope::Write,
+        scope,
+        u64::MAX,
+    )
+    .unwrap();
+    let token = LocalHmacProvider::new(TEST_SIGNING_KEY)
+        .unwrap()
+        .mint_token(&claims)
+        .unwrap();
     let server_root = TempDir::new().unwrap();
     let mut server = DeploymentServer::spawn(
         &binary,

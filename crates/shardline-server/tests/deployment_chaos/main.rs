@@ -61,6 +61,8 @@ mod local_protocol_upgrade;
 
 mod git_receive_pack;
 
+mod reconstruction_cache;
+
 mod oci_lost_delete_ack;
 
 // ---------------------------------------------------------------------------
@@ -941,9 +943,14 @@ fn resolve_shardline_binary() -> Option<PathBuf> {
 }
 
 fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("SHARDLINE_N_MINUS_ONE_BINARY")
-        .map(PathBuf::from)
-        .filter(|path| path.is_file());
+    let path = std::env::var_os("SHARDLINE_N_MINUS_ONE_BINARY").map(PathBuf::from);
+    if let Some(path) = &path {
+        assert!(
+            path.is_file(),
+            "{drill}: configured SHARDLINE_N_MINUS_ONE_BINARY is not a file: {}",
+            path.display()
+        );
+    }
     if path.is_none() {
         eprintln!(
             "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to the adjacent released shardline binary"
@@ -1752,7 +1759,7 @@ async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
     let resp = client
         .post(&xorb_url)
         .header("Authorization", format!("Bearer {write_token}"))
-        .body(xorb_bytes)
+        .body(xorb_bytes.clone())
         .send()
         .await
         .unwrap();
@@ -1782,11 +1789,16 @@ async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
         .unwrap();
     assert_eq!(warm.status().as_u16(), 200, "warm reconstruction");
     let warm_bytes = warm.bytes().await.unwrap();
+    let warm_plan =
+        reconstruction_cache::verified_plan(&client, &warm_bytes, &base, &xorb_bytes).await;
     eprintln!(
         "chaos({drill}): warm reconstruction cached, {} bytes",
         warm_bytes.len()
     );
 
+    // Cross a signing-clock second so raw JSON equality cannot accidentally
+    // hide the expiring-URL regression when this drill completes quickly.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     guard.stop(CONTAINER_REDIS).await;
 
     // Redis is down: the reconstruction must fall through to the
@@ -1805,10 +1817,11 @@ async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
                 "reconstruction must still succeed after redis kill (fallback), got {status}"
             );
             let body = resp.bytes().await.unwrap();
+            let fallback =
+                reconstruction_cache::verified_plan(&client, &body, &base, &xorb_bytes).await;
             assert_eq!(
-                body.as_ref(),
-                warm_bytes.as_ref(),
-                "reconstruction byte-exact after redis kill"
+                fallback, warm_plan,
+                "reconstruction plan remains identical after redis kill"
             );
             eprintln!(
                 "chaos({drill}): reconstruction byte-exact after redis kill (fallback works)"
@@ -2153,10 +2166,9 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     let Some(previous_binary) = resolve_n_minus_one_binary(drill) else {
         return;
     };
-    // N-1 owns the database while the old deployment is serving. The new
-    // migration must not be applied until the old nodes are drained: the
-    // explicit schema compatibility check correctly rejects an N-1 binary
-    // that encounters an unknown N migration.
+    // N-1 owns the initial schema. Core migrations require the explicit drain
+    // boundary below; owner-installed additive frontend state can be installed
+    // under the existing write barrier while compatible old writers remain live.
     migrate_chaos_postgres_with_binary(&previous_binary, &stack.pg_url).await;
 
     // Seed the shared object with N-1 before starting the rollout. This
@@ -2227,10 +2239,28 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     // A format-preserving dependency upgrade needs no domain migration window.
     // Test overlap before optional owner setup, then upgraded history and rollback.
     let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
-    let incremental = shardline_server::check_database_schema_compatibility(&pool)
-        .await
-        .is_ok();
+    let compatibility = shardline_server::check_database_schema_compatibility(&pool).await;
     pool.close().await;
+    let incremental = match compatibility {
+        Ok(()) => true,
+        // The compatibility checker verifies the core ledger before frontend
+        // state. This specific error therefore distinguishes additive owner
+        // setup from an unknown, pending or corrupt core migration history.
+        Err(shardline_server::DatabaseMigrationError::FrontendSchemaIncompatible(_)) => {
+            migrate_chaos_postgres_with_binary(&current_binary, &stack.pg_url).await;
+            let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
+            shardline_server::check_database_schema_compatibility(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+            true
+        }
+        Err(shardline_server::DatabaseMigrationError::PendingMigrations { .. }) => false,
+        Err(error) => panic!(
+            "core migration history must verify before testing rollout (error kind: {:?})",
+            std::mem::discriminant(&error)
+        ),
+    };
     if incremental {
         drop(node_a);
         node_a = DeploymentServer::spawn_at(

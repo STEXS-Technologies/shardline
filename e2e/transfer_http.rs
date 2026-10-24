@@ -1,6 +1,12 @@
 mod native_client_policy;
 mod support;
+mod transfer_batch;
+mod transfer_dedup_lifecycle;
+mod transfer_delta;
+mod transfer_delta_upload;
+mod transfer_file_head;
 mod transfer_http_requirements;
+mod transfer_xorb_ranges;
 
 use std::{
     env,
@@ -145,6 +151,14 @@ async fn protocol_xorb_and_shard_routes_register_reconstruction() {
         return;
     };
     assert!(reconstruction.status().is_success());
+    assert_eq!(
+        reconstruction
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("private, no-store"),
+        "successful reconstruction responses contain short-lived bearer capabilities"
+    );
     let reconstruction = reconstruction.json::<FileReconstructionResponse>().await;
     assert!(reconstruction.is_ok());
     let Ok(reconstruction) = reconstruction else {
@@ -166,7 +180,7 @@ async fn protocol_xorb_and_shard_routes_register_reconstruction() {
             .fetch_info
             .get(&first_hash)
             .and_then(|entries| entries.first())
-            .map(|entry| entry.url.clone()),
+            .and_then(|entry| entry.url.split_once('?').map(|(url, _)| url.to_owned())),
         Some(format!("{base_url}/transfer/xorb/default/{first_hash}"))
     );
     assert_eq!(
@@ -177,6 +191,18 @@ async fn protocol_xorb_and_shard_routes_register_reconstruction() {
             .map(|entry| entry.url_range.end),
         Some(11)
     );
+
+    transfer_batch::qualify(&base_url, &read_token, &file_hash).await;
+    transfer_file_head::qualify(&base_url, &read_token, &file_hash, 8).await;
+    transfer_delta::qualify(
+        &base_url,
+        &read_token,
+        &write_token,
+        &file_hash,
+        &second_hash,
+        storage.path(),
+    )
+    .await;
 
     server.abort();
 }
@@ -1826,7 +1852,19 @@ async fn authenticated_chunk_route_requires_file_version_context() {
         server.abort();
         return;
     };
-    assert_eq!(chunk_body, shard_body);
+    // Dedup replies are expiring keyed lookup shards, not retained upload
+    // metadata. Validate their upstream format rather than byte identity.
+    let mut chunk_reader = std::io::Cursor::new(&chunk_body);
+    let parsed = xet_core_structures::metadata_shard::shard_format::MDBShardInfo::load_from_reader(
+        &mut chunk_reader,
+    );
+    assert!(parsed.is_ok());
+    let Ok(parsed) = parsed else {
+        server.abort();
+        return;
+    };
+    assert_eq!(parsed.num_file_entries(), 0);
+    assert!(parsed.chunk_hmac_key().is_some());
 
     let alias_chunk = Client::new()
         .get(format!("{base_url}/v1/chunks/default/{xorb_hash}"))
@@ -1845,7 +1883,13 @@ async fn authenticated_chunk_route_requires_file_version_context() {
         server.abort();
         return;
     };
-    assert_eq!(alias_chunk_body, chunk_body);
+    let mut alias_reader = std::io::Cursor::new(&alias_chunk_body);
+    assert!(
+        xet_core_structures::metadata_shard::shard_format::MDBShardInfo::load_from_reader(
+            &mut alias_reader
+        )
+        .is_ok()
+    );
 
     let scoped_miss = Client::new()
         .get(format!("{base_url}/v1/chunks/default/{xorb_hash}"))
@@ -1974,19 +2018,166 @@ async fn reconstruction_transfer_urls_work_and_stay_repository_scoped() {
         return;
     };
     assert!(fetch_entry.url.contains("/transfer/xorb/default/"));
+    let legacy_url = fetch_entry.url.split('?').next().map(ToOwned::to_owned);
+    assert!(legacy_url.is_some());
+    let Some(legacy_url) = legacy_url else {
+        server.abort();
+        return;
+    };
+
+    let cross_repository_reconstruction = Client::new()
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .bearer_auth(&right_read)
+        .send()
+        .await;
+    assert!(cross_repository_reconstruction.is_ok());
+    let Ok(cross_repository_reconstruction) = cross_repository_reconstruction else {
+        server.abort();
+        return;
+    };
+    assert_eq!(
+        cross_repository_reconstruction.status(),
+        StatusCode::NOT_FOUND
+    );
 
     let range_header = format!(
         "bytes={}-{}",
         fetch_entry.url_range.start, fetch_entry.url_range.end
     );
-    let left_xorb = Client::new()
+    assert!(fetch_entry.url.contains("xorb_read_capability="));
+    let capability = fetch_entry
+        .url
+        .split_once("xorb_read_capability=")
+        .map(|(_prefix, token)| token.to_owned());
+    assert!(capability.is_some());
+    let Some(capability) = capability else {
+        server.abort();
+        return;
+    };
+
+    let self_authorized_xorb = Client::new()
         .get(&fetch_entry.url)
+        .header(RANGE, &range_header)
+        .send()
+        .await;
+    assert!(self_authorized_xorb.is_ok());
+    let Ok(self_authorized_xorb) = self_authorized_xorb else {
+        server.abort();
+        return;
+    };
+    assert_eq!(
+        self_authorized_xorb.status(),
+        StatusCode::PARTIAL_CONTENT,
+        "reconstruction URL should authorize its exact range without a bearer header"
+    );
+
+    let widened_range = format!(
+        "bytes={}-{}",
+        fetch_entry.url_range.start,
+        fetch_entry.url_range.end.saturating_add(1)
+    );
+    let widened = Client::new()
+        .get(&fetch_entry.url)
+        .header(RANGE, widened_range)
+        .send()
+        .await;
+    assert!(widened.is_ok());
+    let Ok(widened) = widened else {
+        server.abort();
+        return;
+    };
+    assert_eq!(widened.status(), StatusCode::NOT_FOUND);
+
+    let wrong_xorb_url = format!(
+        "{base_url}/transfer/xorb/default/{}?xorb_read_capability={capability}",
+        "c".repeat(64)
+    );
+    let wrong_xorb = Client::new()
+        .get(wrong_xorb_url)
+        .header(RANGE, &range_header)
+        .send()
+        .await;
+    assert!(wrong_xorb.is_ok());
+    let Ok(wrong_xorb) = wrong_xorb else {
+        server.abort();
+        return;
+    };
+    assert_eq!(wrong_xorb.status(), StatusCode::NOT_FOUND);
+
+    let capability_as_bearer = Client::new()
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .bearer_auth(&capability)
+        .send()
+        .await;
+    assert!(capability_as_bearer.is_ok());
+    let Ok(capability_as_bearer) = capability_as_bearer else {
+        server.abort();
+        return;
+    };
+    assert_eq!(capability_as_bearer.status(), StatusCode::UNAUTHORIZED);
+
+    let v2_reconstruction = Client::new()
+        .get(format!("{base_url}/v2/reconstructions/{file_hash}"))
+        .bearer_auth(&left_read)
+        .send()
+        .await;
+    assert!(v2_reconstruction.is_ok());
+    let Ok(v2_reconstruction) = v2_reconstruction else {
+        server.abort();
+        return;
+    };
+    let v2_json = v2_reconstruction.json::<serde_json::Value>().await;
+    assert!(v2_json.is_ok());
+    let Ok(v2_json) = v2_json else {
+        server.abort();
+        return;
+    };
+    assert!(
+        v2_json["xorbs"][&xorb_hash][0]["url"]
+            .as_str()
+            .is_some_and(|url| url.contains("xorb_read_capability="))
+    );
+
+    for batch_response in [
+        Client::new()
+            .get(format!("{base_url}/v1/reconstructions?file_id={file_hash}"))
+            .bearer_auth(&left_read)
+            .send()
+            .await,
+        Client::new()
+            .post(format!("{base_url}/v1/reconstructions"))
+            .bearer_auth(&left_read)
+            .json(&serde_json::json!([{"prefix": "default", "hash": file_hash}]))
+            .send()
+            .await,
+    ] {
+        assert!(batch_response.is_ok());
+        let Ok(batch_response) = batch_response else {
+            server.abort();
+            return;
+        };
+        assert!(batch_response.status().is_success());
+        let batch_json = batch_response.json::<serde_json::Value>().await;
+        assert!(batch_json.is_ok());
+        let Ok(batch_json) = batch_json else {
+            server.abort();
+            return;
+        };
+        assert!(
+            batch_json["fetch_info"][&xorb_hash][0]["url"]
+                .as_str()
+                .is_some_and(|url| url.contains("xorb_read_capability="))
+        );
+    }
+
+    let left_xorb = Client::new()
+        .get(&legacy_url)
         .bearer_auth(&left_read)
         .header(RANGE, &range_header)
         .send()
         .await;
     let right_xorb = Client::new()
-        .get(&fetch_entry.url)
+        .get(&legacy_url)
         .bearer_auth(&right_read)
         .header(RANGE, &range_header)
         .send()

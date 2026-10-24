@@ -3,6 +3,35 @@ use super::*;
 
 mod reclamation;
 
+#[cfg(feature = "docker")]
+pub(super) async fn qualify_remote_reclamation(
+    database: &str,
+    storage: S3ObjectStoreConfig,
+    environment: &[(&str, String)],
+) {
+    let pool = sqlx::PgPool::connect(database).await.unwrap();
+    let schema = format!(
+        "oci_owned_reclamation_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap()
+    );
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let isolated = connection_options(
+        database,
+        &format!("-csearch_path={schema} -capplication_name={schema}"),
+    );
+    reclamation::exercise_with_environment(Some(&isolated), Some(storage), environment).await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL DATABASE_URL and disposable TEST_S3_* storage"]
 async fn minio_oci_referrers_survive_replica_replacement() {

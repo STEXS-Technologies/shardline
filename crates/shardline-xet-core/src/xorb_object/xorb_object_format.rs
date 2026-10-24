@@ -780,29 +780,59 @@ pub fn reconstruct_xorb_with_footer(
     raw_data: &[u8],
 ) -> Result<(XorbObject, MerkleHash), CoreError> {
     let mut reader = Cursor::new(raw_data);
-    let estimated_chunks = raw_data
-        .len()
+    reconstruct_xorb_with_footer_from_reader(writer, &mut reader, raw_data.len() as u64)
+}
+
+/// Normalizes a seekable Xorb stream without buffering the serialized container.
+/// Decompression is bounded to one declared chunk and 64 MiB in aggregate.
+/// The caller must bound the serialized input length and chunk-table size.
+pub fn reconstruct_xorb_with_footer_from_reader(
+    writer: &mut impl Write,
+    reader: &mut (impl Read + Seek),
+    raw_length: u64,
+) -> Result<(XorbObject, MerkleHash), CoreError> {
+    reader.seek(SeekFrom::Start(0))?;
+    let estimated_chunks = usize::try_from(raw_length)
+        .unwrap_or(usize::MAX)
         .checked_div(TARGET_CHUNK_SIZE.load(Ordering::Relaxed) as usize)
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(8192);
     let mut chunk_hash_and_size: Vec<(MerkleHash, u64)> =
         Vec::with_capacity(estimated_chunks.max(16));
     let mut info = XorbObjectInfoV1::default();
     let mut total_decompressed_bytes: u64 = 0;
 
-    while (reader.position() as usize) < raw_data.len() {
-        let chunk_header = match deserialize_chunk_header(&mut reader) {
+    while reader.stream_position()? < raw_length {
+        let chunk_header = match deserialize_chunk_header(reader) {
             Ok(header) => header,
             Err(CoreError::ChunkHeaderParse) => break,
             Err(e) => return Err(e),
         };
 
         let compressed_len = chunk_header.get_compressed_length() as usize;
+        if reader
+            .stream_position()?
+            .checked_add(compressed_len as u64)
+            .is_none_or(|end| end > raw_length)
+        {
+            return Err(CoreError::MalformedData(
+                "chunk exceeds bounded serialized input".to_owned(),
+            ));
+        }
         let mut compressed_buf = vec![0u8; compressed_len];
         reader
             .read_exact(&mut compressed_buf)
             .map_err(|e| CoreError::MalformedData(format!("Failed to read chunk data: {e}")))?;
 
         let declared_uncompressed_len = u64::from(chunk_header.get_uncompressed_length());
+        if total_decompressed_bytes
+            .checked_add(declared_uncompressed_len)
+            .is_none_or(|total| total > MAX_DECOMPRESSED_OUTPUT_BYTES)
+        {
+            return Err(CoreError::MalformedData(
+                "decompressed output exceeds normalization limit".to_owned(),
+            ));
+        }
         let uncompressed_data = {
             // Bound per-chunk decompression to the header's declared
             // uncompressed length DURING decompression (not after), so a crafted

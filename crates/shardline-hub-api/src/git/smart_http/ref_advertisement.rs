@@ -111,6 +111,41 @@ pub(super) async fn collect_refs(
         .map_err(|error| HubApiError::CasError(error.to_string()))?
 }
 
+pub(super) fn filter_refs(
+    state: &HubState,
+    repo_id: &str,
+    auth: &shardline_server_core::AuthorizedRepository,
+    refs: &mut Vec<GitRef>,
+) -> Result<(), HubApiError> {
+    if let Some(visible) = crate::revision_access::visible_refs(state, repo_id, auth)? {
+        // HEAD is an alias for the repository default, not for the caller's branch.
+        // HubRepo.default_branch is a legacy commit identity, not a ref name.
+        // collect_refs_sync synthesizes HEAD from the live main ref.
+        let default = state
+            .store
+            .resolve_revision(repo_id, "main")
+            .map_err(|e| HubApiError::CasError(e.to_string()))?;
+        refs.retain(|reference| {
+            if reference.name == "HEAD" {
+                visible.contains("main") && default.as_deref() == Some(reference.sha1.as_str())
+            } else {
+                visible.contains(shardline_index::hub::canonical_ref_name(&reference.name))
+            }
+        });
+        // An immutable credential has no named-ref rights. A detached HEAD
+        // exposes only its selected snapshot so stock Git can fetch that ID.
+        if refs.is_empty()
+            && let Some(snapshot) = crate::revision_access::snapshot_commit(state, repo_id, auth)?
+        {
+            refs.push(GitRef {
+                name: "HEAD".to_owned(),
+                sha1: snapshot,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn collect_refs_sync(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
     let store_refs = state
         .store
@@ -203,6 +238,7 @@ pub async fn info_refs(
         GitSmartHttpService::ReceivePack => authorize_write_with_context(&state, &headers)?,
         GitSmartHttpService::UploadPack => authorize_read_with_context(&state, &headers)?,
     };
+    let repo = super::repository::canonical_name(&state, auth_ctx.as_ref(), &ns, &repo).await?;
     require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
@@ -213,10 +249,14 @@ pub async fn info_refs(
         )?,
         None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
     };
-    let projection =
-        super::projection::project_history_async(state.clone(), repo_id.clone(), capability)
-            .await?;
+    let projection = super::projection::project_history_async(
+        state.clone(),
+        repo_id.clone(),
+        capability.clone(),
+    )
+    .await?;
     let mut refs = collect_refs(&state, &repo_id).await?;
+    filter_refs(&state, &repo_id, &capability, &mut refs)?;
     for git_ref in &mut refs {
         if let Some(sha) = projection.identities.get(&git_ref.sha1) {
             git_ref.sha1 = sha.clone();
@@ -230,7 +270,12 @@ pub async fn info_refs(
     // Protocol v2 advertises capabilities without listing refs, but it must
     // still apply the same repository visibility and history checks as the
     // legacy advertisement before returning a successful response.
-    if super::upload_pack::v2::is_requested(&headers)? {
+    // Stock Git's v2 partial-clone path can recursively fetch an unknown
+    // server-shallow tip before reading its pack. Negotiate legacy framing
+    // for snapshot views; unrestricted history retains protocol v2.
+    if super::upload_pack::v2::is_requested(&headers)?
+        && crate::revision_access::snapshot_commit(&state, &repo_id, &capability)?.is_none()
+    {
         if service != GitSmartHttpService::UploadPack {
             return Err(HubApiError::BadRequest(
                 "Git protocol v2 receive-pack is not supported".to_owned(),
@@ -297,6 +342,13 @@ pub async fn info_refs(
             .ok();
             &line_buf
         })?);
+    }
+    if service == GitSmartHttpService::UploadPack
+        && let Some(snapshot) =
+            crate::revision_access::snapshot_commit(&state, &repo_id, &capability)?
+    {
+        let public = projection.identities.get(&snapshot).unwrap_or(&snapshot);
+        body.push_str(&pktline::encode_line(&format!("shallow {public}\n"))?);
     }
     body.push_str(FLUSH);
 

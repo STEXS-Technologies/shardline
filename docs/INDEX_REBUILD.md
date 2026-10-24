@@ -58,6 +58,22 @@ The rebuild pass:
 - scans retained-shard objects through the configured object-store adapter
 - rebuilds the dedupe-shard mapping index from retained-shard contents
 - removes stale dedupe-shard mappings that no longer correspond to retained shards
+- restores native Xorb member locations for all retained file versions on SQLite
+  and PostgreSQL, including Xorbs used only by historical versions
+
+Native member recovery reads and verifies each referenced Xorb before installing
+its derived locations. It repairs missing or incorrect member rows without
+rewriting healthy rows. Missing or corrupt source content stops recovery with an
+error; the command never invents locations from damaged index entries. Remote
+Xorbs use temporary disk space for bounded-memory verification. Plan for these
+additional object reads during a rebuild. This does not remove standalone chunk
+copies or change the upload storage layout.
+
+Generic chunk records use unkeyed BLAKE3 identities; native Xet members use keyed
+data hashes. Equal payload bytes do not make those identities interchangeable.
+Native-member recovery does not repair missing generic standalone chunks or
+prove cross-protocol deduplication. Run FSCK after rebuilding to detect missing
+content. Rebuild does not remove decoded copies or change predecessor reads.
 
 Retained-shard scanning uses the bounded in-memory shard parser and object-store
 inventory visitor.

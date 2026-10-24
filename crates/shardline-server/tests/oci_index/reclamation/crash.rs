@@ -57,6 +57,7 @@ async fn minio_gc_reclamation_worker() {
 }
 
 pub(super) async fn interrupt_after_physical_delete(
+    environment: &[(&str, String)],
     database: &str,
     storage: &S3ObjectStoreConfig,
     root: &Path,
@@ -120,6 +121,7 @@ pub(super) async fn interrupt_after_physical_delete(
         .query_pairs_mut()
         .append_pair("application_name", &application);
     let mut child = Command::new(std::env::current_exe().unwrap())
+        .envs(environment.iter().map(|(key, value)| (*key, value)))
         .args([
             "oci_index::reclamation::crash::minio_gc_reclamation_worker",
             "--exact",

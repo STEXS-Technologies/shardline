@@ -1,12 +1,15 @@
 //! Verified finished-history retention, independent of execution authority.
 
-use super::{TaskEvidenceStore, TaskRunIdentity, TaskRunState};
+use super::{
+    TaskEvidenceStore, TaskRunIdentity, TaskRunState, evidence_reader::EvidencePageReader,
+};
 use crate::ServerError;
 use penelope::core::task::Digest;
 use shardline_storage::{ObjectPrefix, ObjectStore};
 use std::{
     collections::BTreeMap,
     io::{Error, ErrorKind},
+    ops::ControlFlow,
 };
 
 impl TaskEvidenceStore {
@@ -90,9 +93,12 @@ impl TaskEvidenceStore {
         limit: usize,
     ) -> Result<BTreeMap<(u64, String), TaskRunIdentity>, ServerError> {
         let prefix = ObjectPrefix::parse(&format!("{}{category}/", super::TASK_EVIDENCE_PREFIX))?;
+        let binding_prefix =
+            ObjectPrefix::parse(&format!("{}scope-bindings/", super::TASK_EVIDENCE_PREFIX))?;
+        let mut binding_reader = EvidencePageReader::new(self, &binding_prefix, None);
         let mut candidates: BTreeMap<(u64, String), TaskRunIdentity> = BTreeMap::new();
         let mut reader = super::evidence_reader::EvidencePageReader::new(self, &prefix, None);
-        self.visit_prefix(&prefix, |metadata| {
+        self.visit_prefix_until(&prefix, None, |metadata| {
             let id = metadata
                 .key()
                 .as_str()
@@ -103,13 +109,13 @@ impl TaskEvidenceStore {
             let read = reader.read(metadata.key().as_str(), &suffix);
             let bytes = match read {
                 Ok(Some(bytes)) => bytes,
-                Ok(None) => return Ok::<(), ServerError>(()),
+                Ok(None) => return Ok::<_, ServerError>(ControlFlow::Continue(())),
                 Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => {
                     tracing::warn!(
                         run = id,
                         "invalid task retention identity; retaining evidence"
                     );
-                    return Ok(());
+                    return Ok(ControlFlow::Continue(()));
                 }
                 Err(error) => return Err(error),
             };
@@ -118,7 +124,7 @@ impl TaskEvidenceStore {
                     run = id,
                     "invalid task retention identity; retaining evidence"
                 );
-                return Ok(());
+                return Ok(ControlFlow::Continue(()));
             };
             if identity.schema == 1
                 && identity.id == id
@@ -141,10 +147,15 @@ impl TaskEvidenceStore {
                                 > (*created_at, selected_id.as_str())
                         })
                 {
-                    return Ok(());
+                    return Ok(ControlFlow::Continue(()));
                 }
-                if !self.retention_scope_matches(&identity, &bytes, deployment)? {
-                    return Ok(());
+                if !self.retention_scope_matches(
+                    &identity,
+                    &bytes,
+                    deployment,
+                    &mut binding_reader,
+                )? {
+                    return Ok(ControlFlow::Continue(()));
                 }
                 // Retained corrupt/unfinished runs must not monopolize the
                 // bounded candidate page and prevent all later cleanup.
@@ -154,14 +165,14 @@ impl TaskEvidenceStore {
                         Ok((TaskRunState::Completed | TaskRunState::Failed, _))
                     )
                 {
-                    return Ok(());
+                    return Ok(ControlFlow::Continue(()));
                 }
                 candidates.insert((identity.created_at, identity.id.clone()), identity);
                 if candidates.len() > limit {
                     candidates.pop_last();
                 }
             }
-            Ok(())
+            Ok(ControlFlow::Continue(()))
         })?;
         Ok(candidates)
     }
@@ -171,12 +182,21 @@ impl TaskEvidenceStore {
         identity: &TaskRunIdentity,
         manifest: &[u8],
         deployment: Digest,
+        binding_reader: &mut EvidencePageReader<'_>,
     ) -> Result<bool, ServerError> {
         let legacy_matches = identity.deployment == deployment;
         let Some(postgres) = &self.postgres_metadata else {
             return Ok(legacy_matches);
         };
-        match self.history_scope_binding_match_for_manifest(identity, postgres.scope, manifest) {
+        let binding_suffix = format!("scope-bindings/{}", identity.id);
+        let binding_key = Self::key(&binding_suffix)?;
+        let binding = binding_reader.read(binding_key.as_str(), &binding_suffix)?;
+        match self.history_scope_binding_match_for_manifest_with_binding(
+            identity,
+            postgres.scope,
+            manifest,
+            binding.as_deref(),
+        ) {
             Ok(Some(false)) => return Ok(false),
             Ok(None) => return Ok(legacy_matches),
             Ok(Some(true)) if legacy_matches => return Ok(true),

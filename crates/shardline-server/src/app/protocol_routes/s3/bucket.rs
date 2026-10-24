@@ -5,8 +5,9 @@
 //! `403 AccessDenied`), `GetBucketLocation` returns the `us-east-1` stub,
 //! `GetBucketVersioning` reports the never-enabled configuration,
 //! `ListObjectsV2` (`?list-type=2`) serves the index-backed listing, and
-//! `DeleteBucket` plus unsupported bucket sub-resources respond
-//! `501 NotImplemented`.
+//! `GetBucketAcl` and `GetBucketOwnershipControls` report the fixed
+//! bucket-owner-enforced model. ACL updates, `DeleteBucket`, and other
+//! unsupported bucket sub-resources respond with explicit errors.
 
 use std::sync::Arc;
 
@@ -73,8 +74,24 @@ pub(crate) async fn s3_create_bucket(
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
     object_headers::reject_unsupported_write_headers(&headers)?;
+    let mut ownership_values = headers.get_all("x-amz-object-ownership").iter();
+    if let Some(ownership) = ownership_values.next() {
+        if ownership_values.next().is_some() {
+            return Err(S3Error::invalid_argument("Repeated x-amz-object-ownership"));
+        }
+        let ownership = ownership
+            .to_str()
+            .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-object-ownership"))?;
+        if !ownership.eq_ignore_ascii_case("BucketOwnerEnforced") {
+            return Err(S3Error::not_implemented());
+        }
+    }
     let query = parse_s3_query(&uri)?;
-    if !classify(&query).is_empty() {
+    let resources = classify(&query);
+    if resources.as_slice() == [S3SubResource::Acl] {
+        return Err(S3Error::acl_not_supported());
+    }
+    if !resources.is_empty() {
         return Err(S3Error::not_implemented());
     }
     Ok(StatusCode::OK.into_response())
@@ -96,15 +113,10 @@ pub(crate) async fn s3_head_bucket(
 
 /// `GET /{bucket}` — query dispatch on the bucket path.
 ///
-/// `?location` serves the `GetBucketLocation` stub
-/// (`<LocationConstraint>us-east-1</LocationConstraint>`); `?list-type=2`
-/// `?versioning` reports the truthful empty configuration (versioning has
-/// never been enabled); `?list-type=2`
-/// dispatches to [`s3_list_objects_v2`](listing::s3_list_objects_v2); a bare
-/// `GET /{bucket}` (no sub-resource) is the S3-default `ListObjects` v1 —
-/// which `s3cmd` and other legacy clients send for `ls` — and dispatches to
-/// [`s3_list_objects_v1`](listing::s3_list_objects_v1); `?list-type=1` and
-/// every other bucket sub-resource respond `501 NotImplemented`.
+/// The handler serves location, versioning state, ACL and ownership controls,
+/// `ListObjectsV2`, and multipart-upload listing. A bare bucket GET remains
+/// S3's default `ListObjects` v1. Unsupported sub-resources fail with
+/// `501 NotImplemented`.
 #[tracing::instrument(skip(auth, state, headers), fields(bucket))]
 pub(crate) async fn s3_get_bucket(
     auth: S3Repository,
@@ -124,6 +136,27 @@ pub(crate) async fn s3_get_bucket(
     }
     if resources.as_slice() == [S3SubResource::Versioning] {
         return Ok(get_bucket_versioning_response());
+    }
+    if resources.as_slice() == [S3SubResource::Acl] {
+        let owner_id = scope_namespace(auth.capability().namespace());
+        return Ok((
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+            super::acl::access_control_policy_xml(&owner_id),
+        )
+            .into_response());
+    }
+    if resources.as_slice() == [S3SubResource::Other]
+        && query
+            .iter()
+            .any(|(name, value)| name == "ownershipControls" && value.is_empty())
+    {
+        return Ok((
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+            super::acl::ownership_controls_xml(),
+        )
+            .into_response());
     }
     if resources.as_slice() == [S3SubResource::Other]
         && query

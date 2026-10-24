@@ -86,6 +86,7 @@ where
         &mut report,
     )
     .await?;
+    crate::native_members::inspect_missing_copies(record_store, &mut report).await?;
     inspect_dedupe_shard_mappings(
         index_store,
         object_root,

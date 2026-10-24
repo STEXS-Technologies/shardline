@@ -932,6 +932,7 @@ async fn row_policies_disable_optional_history_without_stopping_startup_work() {
     let Some(fixture) = Fixture::new().await else {
         return;
     };
+    fixture.migrate().await;
     fixture
         .index()
         .initialize_task_history_scope()
@@ -1192,6 +1193,7 @@ async fn server_metadata_preserves_legacy_history_and_retention() {
         .await
         .unwrap();
     assert!(absent);
+    fixture.migrate().await;
     fixture
         .index()
         .initialize_task_history_scope()
@@ -1368,6 +1370,7 @@ async fn each_postgres_router_role_records_fresh_same_process_startup_history() 
     let Some(fixture) = Fixture::new().await else {
         return;
     };
+    fixture.migrate().await;
     fixture
         .index()
         .initialize_task_history_scope()
@@ -1463,6 +1466,7 @@ async fn normal_router_publishes_and_serves_authenticated_metadata_history() {
     let Some(fixture) = Fixture::new().await else {
         return;
     };
+    fixture.migrate().await;
     fixture
         .index()
         .initialize_task_history_scope()

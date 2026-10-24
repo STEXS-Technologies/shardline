@@ -97,7 +97,7 @@ sqlx = { version = "0.9", default-features = false }
 subtle = { version = "2.6", default-features = false }
 tempfile = "3.15"
 thiserror = { version = "2.0.18", default-features = false }
-tokio = "1.48.0"
+tokio = "1.53.3"
 url = "2.5"
 xet-client = "1.5.1"
 xet-core-structures = "1.5.1"

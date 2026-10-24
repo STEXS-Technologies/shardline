@@ -41,6 +41,8 @@ static PROCESS_CLEANUP_CONTAINERS: OnceLock<Mutex<Vec<String>>> = OnceLock::new(
 static PROCESS_CLEANUP_REGISTERED: Once = Once::new();
 static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+mod minio_probe;
+
 /// Containerized service stack for self-contained end-to-end tests.
 #[derive(Debug)]
 pub struct DockerLocalStack {
@@ -54,6 +56,7 @@ pub struct DockerLocalStack {
 pub struct DockerLocalStackBuilder {
     postgres: bool,
     minio: bool,
+    minio_tmpfs: bool,
     redis: bool,
     redis_tls: bool,
 }
@@ -317,6 +320,18 @@ impl DockerLocalStackBuilder {
         self
     }
 
+    /// Enables disposable MinIO with a bounded 1 GiB memory-backed data volume.
+    ///
+    /// Useful for protocol tests on nearly full build hosts. This retains
+    /// MinIO's default free-space protection but does not qualify object-store
+    /// persistence across MinIO container restarts or host power loss.
+    #[must_use]
+    pub const fn with_minio_tmpfs(mut self) -> Self {
+        self.minio = true;
+        self.minio_tmpfs = true;
+        self
+    }
+
     /// Enables Redis for the stack.
     #[must_use]
     pub const fn with_redis(mut self) -> Self {
@@ -354,7 +369,7 @@ impl DockerLocalStackBuilder {
             stack.postgres = Some(start_postgres_service(&run_id)?);
         }
         if self.minio {
-            stack.minio = Some(start_minio_service(&run_id)?);
+            stack.minio = Some(start_minio_service(&run_id, self.minio_tmpfs)?);
         }
         if self.redis_tls {
             stack.redis = Some(start_redis_tls_service(&run_id)?);
@@ -408,7 +423,7 @@ fn start_postgres_service(run_id: &str) -> Result<PostgresService, IoError> {
     service
 }
 
-fn start_minio_service(run_id: &str) -> Result<MinioService, IoError> {
+fn start_minio_service(run_id: &str, memory_backed: bool) -> Result<MinioService, IoError> {
     let container_name = format!("shardline-test-minio-{run_id}");
     run_command_checked(
         Command::new("docker")
@@ -424,6 +439,11 @@ fn start_minio_service(run_id: &str) -> Result<MinioService, IoError> {
             .arg("127.0.0.1::9000")
             .arg("-p")
             .arg("127.0.0.1::9001")
+            .args(if memory_backed {
+                &["--tmpfs", "/data:rw,size=1g"][..]
+            } else {
+                &[][..]
+            })
             .arg(MINIO_IMAGE)
             .arg("server")
             .arg("/data")
@@ -436,20 +456,8 @@ fn start_minio_service(run_id: &str) -> Result<MinioService, IoError> {
         let mc_host =
             format!("http://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@127.0.0.1:{host_port}");
         wait_for_minio(host_port)?;
-        run_command_checked(
-            Command::new("docker")
-                .arg("run")
-                .arg("--rm")
-                .arg("--network")
-                .arg("host")
-                .arg("-e")
-                .arg(format!("MC_HOST_local={mc_host}"))
-                .arg(MINIO_MC_IMAGE)
-                .arg("mb")
-                .arg("--ignore-existing")
-                .arg(format!("local/{DEFAULT_S3_BUCKET}")),
-            "create minio bucket",
-        )?;
+        minio_probe::create_bucket(run_id, &mc_host)?;
+        minio_probe::verify_writable(run_id, &mc_host)?;
 
         Ok(MinioService {
             container_name: container_name.clone(),
@@ -865,5 +873,5 @@ fn run_command_checked(command: &mut Command, description: &str) -> Result<Outpu
 }
 
 fn run_command(command: &mut Command) -> Result<Output, IoError> {
-    command.output()
+    crate::native_client_output(command, Duration::from_secs(120))
 }

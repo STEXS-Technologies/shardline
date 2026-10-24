@@ -18,16 +18,17 @@ impl super::PostgresBackend {
         mappings: &[shardline_index::DedupeShardMapping],
         references: &[shardline_storage::ObjectKey],
     ) -> Result<(), crate::xet_adapter::XetAdapterError> {
-        self.commit_validated_native_shard_with_xet_identities(records, mappings, references, &[])
+        self.commit_validated_native_shard_with_descriptors(records, mappings, references, &[], &[])
             .await
     }
 
-    pub(super) async fn commit_validated_native_shard_with_xet_identities(
+    pub(super) async fn commit_validated_native_shard_with_descriptors(
         &self,
         records: &[FileRecord],
         mappings: &[shardline_index::DedupeShardMapping],
         references: &[shardline_storage::ObjectKey],
         identities: &[shardline_index::XetFileIdentity],
+        descriptors: &[shardline_index::XetXorbDescriptor],
     ) -> Result<(), crate::xet_adapter::XetAdapterError> {
         let mut connection = self
             .record_store
@@ -35,37 +36,41 @@ impl super::PostgresBackend {
             .acquire()
             .await
             .map_err(PostgresMetadataStoreError::from)?;
-        self.commit_validated_native_shard_on_connection_with_xet_identities(
+        self.commit_validated_native_shard_on_connection_with_descriptors(
             &mut connection,
             records,
             mappings,
             references,
             identities,
+            descriptors,
         )
         .await
     }
 
     /// Recheck validated native backing objects before the transaction releases
     /// reference locks, including the Xet identities published with the shard.
-    pub(super) async fn commit_validated_native_shard_on_connection_with_xet_identities(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn commit_validated_native_shard_on_connection_with_descriptors(
         &self,
         connection: &mut PgConnection,
         records: &[FileRecord],
         mappings: &[shardline_index::DedupeShardMapping],
         references: &[shardline_storage::ObjectKey],
         identities: &[shardline_index::XetFileIdentity],
+        descriptors: &[shardline_index::XetXorbDescriptor],
     ) -> Result<(), crate::xet_adapter::XetAdapterError> {
         let mut transaction = connection
             .begin()
             .await
             .map_err(PostgresMetadataStoreError::from)?;
         self.record_store
-            .commit_native_shard_metadata_on_connection_with_xet_identities(
+            .commit_native_shard_metadata_on_connection_with_descriptors(
                 &mut transaction,
                 records,
                 mappings,
                 references,
                 identities,
+                descriptors,
             )
             .await?;
         let protected: bool = sqlx::query_scalar(

@@ -36,6 +36,7 @@ pub async fn upload_pack(
     body: Body,
 ) -> Result<Response, HubApiError> {
     let auth_ctx = authorize_read_with_context(&state, &headers)?;
+    let repo = super::repository::canonical_name(&state, auth_ctx.as_ref(), &ns, &repo).await?;
     require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
@@ -54,7 +55,7 @@ pub async fn upload_pack(
     let object_filter = filter::Filter::parse(&request_lines)?;
     let mut shallow_request = shallow::Request::parse(&request_lines)?;
     let wants = parse_wants(&request_lines);
-    let haves = parse_haves(&request_lines);
+    let mut haves = parse_haves(&request_lines);
 
     if let Some(request) = v2_ls_refs {
         let capability = match auth_ctx {
@@ -67,11 +68,12 @@ pub async fn upload_pack(
         let projection = super::projection::project_history_admitted(
             state.clone(),
             repo_id.clone(),
-            capability,
+            capability.clone(),
             request_admission,
         )
         .await?;
         let mut refs = super::ref_advertisement::collect_refs(&state, &repo_id).await?;
+        super::ref_advertisement::filter_refs(&state, &repo_id, &capability, &mut refs)?;
         for reference in &mut refs {
             reference.sha1 = projection
                 .identities
@@ -108,6 +110,7 @@ pub async fn upload_pack(
         )?,
         None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
     };
+    let snapshot = crate::revision_access::snapshot_commit(&state, &repo_id, &capability)?;
     let projection = super::projection::project_history_admitted(
         state.clone(),
         repo_id.clone(),
@@ -115,6 +118,11 @@ pub async fn upload_pack(
         request_admission,
     )
     .await?;
+    if let Some(snapshot) = snapshot {
+        let public = projection.identities.get(&snapshot).unwrap_or(&snapshot);
+        haves.retain(|have| have == public);
+        shallow_request.restrict_to_snapshot(public, &wants, v2_fetch.is_some());
+    }
     shallow_request
         .resolve_exclusions(&state, &repo_id, &projection.identities)
         .await?;

@@ -1891,11 +1891,12 @@ async fn native_shard_publication_rejects_a_deleted_validated_xorb() {
         .await
         .unwrap();
     let pending = backend
-        .commit_validated_native_shard_with_xet_identities(
+        .commit_validated_native_shard_with_descriptors(
             &records,
             &mappings,
             &references,
             &identities,
+            &[],
         )
         .await;
     let deleted = backend.object_store().delete_if_present(&physical).unwrap();

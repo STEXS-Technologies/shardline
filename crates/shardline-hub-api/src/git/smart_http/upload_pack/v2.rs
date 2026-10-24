@@ -22,6 +22,11 @@ pub(super) struct Fetch {
 /// Parse a protocol-v2 command. A non-v2 request returns `None`, leaving the
 /// existing protocol-v0/v1 decoder and behavior unchanged.
 pub(super) fn parse(bytes: &[u8]) -> Result<Option<Request>, HubApiError> {
+    // Preserve the established empty/no-wants v0/v1 exchange. Neither an empty
+    // request nor a lone flush packet advertises a protocol-v2 command.
+    if bytes.is_empty() || bytes == pktline::FLUSH.as_bytes() {
+        return Ok(None);
+    }
     let (first, _) = first_packet(bytes)?;
     if first.starts_with(b"command") && !first.starts_with(b"command=") {
         return Err(invalid());
@@ -369,6 +374,14 @@ mod tests {
         }
         body.extend_from_slice(pktline::FLUSH.as_bytes());
         body
+    }
+
+    #[test]
+    fn empty_legacy_negotiation_is_not_a_v2_command() {
+        assert!(parse(b"").unwrap().is_none());
+        assert!(parse(pktline::FLUSH.as_bytes()).unwrap().is_none());
+        assert!(parse(b"000").is_err());
+        assert!(parse(b"000fcommand=bad").is_err());
     }
 
     #[test]

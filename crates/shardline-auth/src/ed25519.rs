@@ -355,6 +355,28 @@ mod tests {
     }
 
     #[test]
+    fn hub_envelope_preserves_ed25519_verification() {
+        let provider = Ed25519AuthProvider::new(&test_seed()).expect("valid provider");
+        let claims = test_claims();
+        let token = provider.mint_token(&claims).expect("mint token");
+        let wrapped = shardline_protocol::format_hub_token(&token).expect("format token");
+        assert_eq!(
+            provider.verify_token(&wrapped).expect("verify envelope"),
+            claims
+        );
+        let other = Ed25519AuthProvider::new(&[42; 32]).expect("other provider");
+        assert!(other.verify_token(&wrapped).is_err());
+        let mut tampered = wrapped.into_bytes();
+        let last = tampered.last_mut().expect("signature");
+        *last = if *last == b'0' { b'1' } else { b'0' };
+        assert!(
+            provider
+                .verify_token(std::str::from_utf8(&tampered).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
     fn verification_only_mode_cannot_mint() {
         let seed = test_seed();
         let signing_key = SigningKey::from_bytes(&seed);

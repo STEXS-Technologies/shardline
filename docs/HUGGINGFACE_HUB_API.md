@@ -4,6 +4,202 @@ Shardline includes a HuggingFace Hub API compatibility layer for the repository
 workflows listed below. It is a compatible subset, not a drop-in replacement for every
 Hugging Face Hub API or client transfer mode.
 
+## Repository creation permissions
+
+`HfApi.create_repo("owner/name")` defaults to a model repository. The generic
+creation endpoint accepts an omitted `type`; explicit `model`, `dataset` and
+`space` values keep their existing meaning.
+
+Both creation routes accept `visibility: "private"` or `visibility: "public"`.
+An explicit `private: true` keeps the repository private even if visibility is
+public. Unsupported visibility values return HTTP 400 without creating metadata;
+Shardline does not implement a separate protected visibility tier.
+The type-specific route also rejects malformed privacy fields and non-object
+request bodies rather than treating them as public creation requests.
+
+Ordinary write tokens may create only the repository named in the token.
+Issuers that have verified namespace ownership can opt into sibling creation
+with `TokenClaims::with_namespace_repository_creation()` before signing. The
+grant covers creation in the token's existing owner namespace only. It grants
+no read, upload, update or delete access to sibling repositories; those actions
+still require a token for the target repository. Read-only tokens cannot create
+repositories even when this grant is present.
+
+Existing tokens retain their serialized form and exact-repository permissions.
+Both repository creation routes enforce the same rule. Creation grants are not
+automatically issued by provider-token exchange.
+
+Repository creation and retry responses use the configured public base URL,
+including its path prefix. Set this to the address clients can reach when
+deploying behind a proxy. Request Host and forwarding headers do not change
+returned repository URLs.
+
+Both creation routes return HTTP 409 when a repository already exists, including
+when another server wins a concurrent creation. A retry never changes the
+winner's visibility. A token scoped to the exact repository receives the usual
+repository response for `exist_ok` compatibility; a creation-only namespace
+grant receives a minimal conflict without private repository metadata.
+
+## Commit operations
+
+The Hub commit API supports file additions, file deletion and recursive folder
+deletion. Folder deletion removes descendants only: deleting `weights/` keeps
+`weights-backup.bin`. Operations run in request order, so a commit can delete a
+folder and then add replacement files. Earlier revisions retain their own trees.
+
+The final tree must fit Git's supported path bounds: at most 1,024 UTF-8 bytes
+and 128 components per file path. A deeper final path returns HTTP 400 before
+the branch or revision history changes. Immutable content already staged by a
+rejected request can remain unpublished for later cleanup.
+
+Shardline verifies the complete Git identity and stores its tree/identity
+archives before advancing a Hub branch. Object-limit errors or archive failures
+leave the branch and revision history unchanged. Preparation alone does not make
+a revision readable. SQLite and PostgreSQL then publish the exact prepared
+timestamp, parent and message in the existing atomic ref/evidence transaction;
+an intervening writer causes a conflict. As with any database commit, losing the
+reply can leave the caller uncertain whether publication completed.
+
+Custom `HubStore` implementations must implement `publish_prepared_revision`
+to support Hub commit publication. Its default fails closed without ref writes.
+Existing revision structures, database tables and stored Git identities remain
+unchanged; the built-in stores support this operation directly.
+
+Official SDK copies of regular files, basic LFS files and native Xet-backed LFS
+files use the existing commit API. For an LFS copy whose instruction omits the
+size, Shardline reads it from the authorized repository's persisted Xet identity
+or stored LFS object metadata. An unknown copy source or malformed explicit size is
+rejected before publishing a revision. Copy plus file deletion supports moves;
+it does not delete the underlying immutable bytes needed by older revisions.
+
+The stock SDK commit checks pass with `huggingface_hub` 1.25.1 and `hf_xet`
+1.6.0/1.7.0 on local storage and PostgreSQL/MinIO. They cover folder replacement,
+branch/history preservation, regular and LFS copies, native LFS moves and exact
+download bytes. Transfer counters verify that copies reuse stored payloads.
+
+## Repository credentials and stored objects
+
+Deleting a repository or creating, listing and deleting its webhooks requires
+a repository-wide token with no revision restriction. Deletion and webhook
+changes also require Write permission. A token limited to `main`, another
+branch, a tag or a commit receives HTTP 403 before configuration is read or
+changed. Use a separate repository-wide credential for these administrative
+operations; branch-scoped upload and download credentials remain restricted.
+Both repository deletion routes enforce this rule.
+
+An LFS batch with an explicit `ref` must also fit the credential's revision
+scope. Unauthorized requests return 403 before transfer actions are issued.
+Uploads require the permitted branch; downloads retain authorized immutable
+history access. Clients that omit `ref` continue using their token's existing
+scope. Omitting it does not expand that token's permissions.
+
+A repository-wide read token can read inline and basic LFS files previously
+uploaded with a token scoped to `main`. Shardline records the original object
+location in metadata; it does not copy or move the file. Existing files in the
+legacy `main` namespace can be discovered on their first read. A token limited
+to another revision does not gain access through this location index.
+
+This adds a frontend metadata migration. PostgreSQL operators must apply the
+pending migrations before starting the new binary.
+
+Native Xet read tokens are pinned to an immutable Hub commit. Before returning
+reconstruction data, Shardline checks that the file's SHA-256 and size occur in
+that repository commit, then finds the original native record. A signed download
+URL permits only its exact serialized range. Commit-scoped CAS credentials
+cannot be reused as ordinary Hub credentials or unrestricted Xorb-read tokens.
+An older commit's token cannot read a file added later. Write-token behavior is
+unchanged.
+
+When a verified native upload replaces the current Xet identity for the same
+SHA-256 and size, Shardline retains the earlier binding for cached downloads.
+It still checks the committed file and its storage record. The upgrade preserves
+bindings present at installation; bindings already overwritten by older versions
+require separate reconciliation.
+
+Repository-wide credentials can read historical commits. A branch-scoped token
+can request an immutable ancestor of its own branch; it cannot enter a sibling
+branch by supplying that branch's commit ID. Tag and immutable-commit tokens
+remain limited to their selected commit. Resolve, tree, paths-info, revision-info,
+commit-history and revision-specific dataset reads check the requested revision
+before returning file metadata or download locations. Branch and tag mutations
+require permission for the exact target ref; managing sibling refs requires a
+repository-wide credential. A preupload check does not grant permission to
+publish a commit to another branch. Default-revision model info, model cards and
+dataset previews check access to `main`; a sibling-only credential must use a
+supported explicit-revision route for that sibling's data. Upgrade every Hub
+replica before relying on these stricter checks; older replicas retain their
+previous authorization behavior.
+
+Git uses the same snapshot policy for tag and immutable-commit tokens. A tag
+clone receives its selected commit as a shallow boundary; an immutable token
+advertises a detached HEAD at that commit. Stock Git can clone these snapshots
+without changing commit hashes. Fetching or unshallowing cannot retrieve parent
+commits or file objects that exist only in older snapshots. The selected commit
+still contains its original parent identifiers; those identifiers do not grant
+access to the parent objects. Branch and repository tokens retain their
+authorized history.
+
+The SDK commit-history endpoint follows this policy too: tag and immutable
+credentials receive only the selected commit. Expanded paths-info returns a
+last-change commit only when that change belongs to the allowed snapshot;
+unchanged paths have no last-change metadata rather than exposing older commit
+messages or timestamps. A full tag name and its short alias are interchangeable
+only when a branch or immutable revision does not take precedence over that alias.
+
+Snapshot views negotiate legacy Git framing even when a client requests v2.
+This avoids recursive lazy fetches observed with Git 2.52's v2 filtered-clone
+handling of server-shallow tips before their pack is read. Standard and filtered
+snapshot clones need no client configuration. Branch/repository views continue
+to negotiate v2. Native v2 snapshot qualification remains open; the relevant
+upstream flow is [`receive_shallow_info` in Git 2.52](https://github.com/git/git/blob/v2.52.0/fetch-pack.c#L1428).
+Removing the advertised `filter` capability does not resolve this case: a
+stock filtered clone can still recursively fetch the missing shallow tip.
+Git's [`prepare_shallow_info`](https://github.com/git/git/blob/v2.52.0/shallow.c#L440)
+checks the tip with promisor fetching enabled before the response pack has
+been consumed. Snapshot client contracts have per-command deadlines and, on
+Unix, terminate the client's subprocess group on timeout. A timed-out client
+fails qualification.
+
+Ref listings show only refs allowed by the credential. The legacy revision
+listing returns reachable history for a branch token and the selected commit
+for a tag or immutable token. Its `ref_name` identifies the credential's selected
+revision, so a reachable commit does not disclose another branch's name.
+Repository-wide listing behavior is unchanged. Scoped history uses a single
+bounded commit-only traversal and indexed revision lookups.
+
+Cached public Git identities can be found across credential storage namespaces
+within the same repository. These are internally verified commit metadata;
+finding an identity does not authorize its revision or expose file bytes.
+Ancestry checking reads bounded commit metadata, including both Git merge
+parents, without reading file payloads. Some legacy objects and commit aliases
+written under different credential namespaces still need location reconciliation;
+these checks do not establish every credential/revision combination.
+
+## Card validation
+
+`POST /api/validate-yaml` checks README YAML front matter. Valid cards return
+HTTP 200; malformed YAML, an unclosed metadata block, a non-mapping root, invalid
+request fields, or a resource-limit violation return HTTP 400. Both responses
+include `warnings` and `errors` arrays. Existing authentication requirements apply.
+
+Validation accepts nested metadata and bounded YAML aliases. Cards are limited
+to 256 KiB, with separate depth, node and alias-expansion limits. A README without
+front matter is valid. This checks syntax and structure; it does not certify
+licenses, dataset identifiers or other Hugging Face catalog entries.
+
+Repository info and revision info use the same parser for README metadata,
+including nested arrays and mappings. Invalid metadata is omitted; the README
+remains downloadable and historical revisions retain their own metadata. These
+reads inspect at most 256 KiB plus delimiter space, matching the validation budget.
+
+In `huggingface_hub` 1.25.1, `ModelCard.validate()` sends its request directly to
+`https://huggingface.co/api/validate-yaml`, even when `HF_ENDPOINT` points elsewhere.
+`ModelCard.push_to_hub()` also invokes that validation. For deployments that must
+keep cards within Shardline, validate against Shardline's endpoint explicitly and
+publish README.md with `HfApi.upload_file()`. Do not send private card content to
+the public service unintentionally. This upstream client limitation is separate
+from Shardline's validation endpoint and metadata support.
+
 ## What It Is
 
 The Hub API frontend translates HuggingFace Hub REST endpoints into Shardline CAS
@@ -61,6 +257,74 @@ uploaded Xet shards and Xorbs without sending the file body through ordinary Hub
 This proves the Hub commit and readback resolve to the CAS content. The flows pass
 with Hub enabled by itself and with Hub, Xet, and S3 enabled together.
 
+Native shard registration verifies an optional SHA-256 identity against the
+selected, authenticated Xorb chunks in file order before publishing it. This
+also rejects contradictory empty-file identities. Older shards that omit the
+optional identity remain accepted. Verification keeps a single source container
+and one decoded chunk, rather than buffering a complete file. It reuses the
+original source read for the first container; additional or revisited containers
+can require further backend reads to establish the claimed SHA-256.
+
+The explicit Linux 1 GiB qualification also checks a cold native download and
+plain HTTP readback without whole-file buffering. Use disk-backed scratch
+(`TMPDIR=/var/tmp`, for example) with sufficient quota when running it; free
+space reported by `df` does not establish available per-user tmpfs quota.
+
+The same full client flow also passes with PostgreSQL metadata and MinIO object
+storage using `huggingface_hub` 1.25.1 with `hf_xet` 1.5.2, 1.6.0, and 1.7.0.
+Run that Docker-backed
+qualification explicitly with:
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo test --manifest-path e2e/Cargo.toml \
+  --test native_huggingface_cli_e2e native_huggingface_cli_flows_with_postgres_and_minio \
+  -- --ignored --test-threads=1
+```
+
+It is mandatory in E2E CI; a missing Docker service or native client fails the
+qualification. This does not establish split-role deployment or URL-expiry
+recovery coverage.
+
+The plain HTTP fallback for Xet-backed Hub files streams with incremental length
+and SHA-256 verification. It holds the final nonempty frame until verification
+succeeds, so a client cannot receive the complete advertised length before the
+integrity check. A failure interrupts the transfer; bytes already streamed cannot
+be recalled. Single-range requests receive `206` and correct `Content-Range`;
+unsatisfiable ranges receive `416`. The final selected frame is held until the
+whole-file SHA-256 passes, including bytes outside the selected range. Memory
+stays bounded, but this fallback still reads the complete file from storage.
+Disconnecting stops further container reads and verification at cancellation
+checkpoints. An already-issued storage request or bounded decoding step may
+finish first; its worker keeps admission until it exits. Successful transfers
+still require the same complete integrity checks.
+
+Native plain HTTP downloads wait up to five seconds for existing reconstruction
+capacity before starting metadata or payload work. This absorbs short bursts
+from analytical range readers without increasing active verification work.
+If capacity remains exhausted, the Hub LFS bridge preserves HTTP
+`503` (or upstream `429`) with `Retry-After: 1`. Clients should retry after that
+delay. This keeps temporary overload distinct from an internal failure; it does
+not bypass admission or weaken content verification.
+
+The analytical HTTP qualification uses DuckDB 1.5.5 and PyArrow 25.0.0, with
+unmodified Hub 2.2.0/hf_xet 1.7.0 uploads. It passes regular and native-Xet
+Parquet reads on local storage and PostgreSQL/MinIO, with combined or split
+API/transfer listeners on one host. It verifies selected payload bytes,
+aggregates, actual `206` responses, ETag-matched ranges, `304`/`412` conditions
+and rejection of anonymous reads. Run all four configurations explicitly:
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo test --manifest-path e2e/Cargo.toml \
+  --test native_huggingface_cli_e2e native_huggingface_http_analytics \
+  -- --include-ignored --test-threads=1
+```
+
+The remote cases require Docker PostgreSQL and disk-backed MinIO. This does not
+qualify multi-host deployments, other analytical client versions or sustained
+overload. The E2E workflow explicitly selects all four cases with the pinned
+Hub 2.2.0 analytical environment; required native-client mode makes missing
+prerequisites fail qualification.
+
 The Hub token exchange keeps the legacy `token` field and adds the `casUrl`,
 `accessToken`, and `exp` JSON fields expected by current `hf_xet` clients. It also
 returns the corresponding Xet response headers. Token exchange verifies that the
@@ -74,6 +338,44 @@ checks those CAS upload counters increase and that the file body did not go thro
 the ordinary Hub LFS upload route. Shardline records the file's LFS SHA-256 in its
 repository-scoped Xet identity, so the committed pointer remains readable by Hub
 downloads. Clients without Xet support continue to use the basic LFS upload path.
+
+Multi-file commits stream one NDJSON instruction at a time rather than buffering
+the complete upload. The transport accepts up to 1 GiB per request, with a
+16 MiB limit per encoded line and the existing 10 MiB decoded inline-file limit.
+The server retains bounded queued file content and publishes the revision only
+after the complete request validates. A failed or interrupted request may leave
+unpublished content-addressed blobs, but cannot publish a partial file tree.
+Existing Git projection and tree limits still apply.
+
+Stored LFS objects and inline `/resolve` files support bounded single-range
+GETs: a satisfiable `Range` returns `206` with `Content-Range`, an unsatisfiable
+range returns `416`, and a nonmatching `If-Range` causes a full `200` response.
+Multi-range requests are currently ignored and return the full object. Xet-backed
+plain HTTP downloads, inline resolves and stored LFS downloads support strong `If-Match`, weak comparison for
+`If-None-Match`, and strong `If-Range`; a stale or weak `If-Range` requests the
+full representation. HEAD returns the full length and quoted SHA-256 ETag without
+reconstructing the file. The native-client E2E flow also checks these plain HTTP
+operations through the normal Hub resolve redirect with SQLite and with
+PostgreSQL/MinIO. A separate HTTP test covers conditional GET/HEAD through inline,
+direct LFS and resolve-to-LFS paths and verifies authentication precedes cache
+validation. Date validators are not advertised, since these routes do not provide
+Last-Modified.
+
+DuckDB 1.5.5 also passes authenticated Parquet queries over the ordinary Hub
+resolve URLs for private regular and native-Xet files on the local backend.
+The test uses PyArrow 25.0.0 fixtures uploaded with `huggingface_hub` 1.25.1 and
+`hf_xet` 1.5.2, observes actual `206` responses through the resolve/LFS path and
+rejects anonymous reads. Remote-storage and split-role analytical qualification
+remain open; this test does not measure backend read amplification.
+
+End-to-end expired-URL recovery passes with Hub 1.25.1 and `hf_xet` 1.5.2,
+1.6.0 and 1.7.0, using both local storage and PostgreSQL/MinIO. Tests cover
+combined roles and separate API/transfer listeners on one host: an expired
+headerless fetch returns 403, the client refreshes reconstruction, and the new
+URL downloads the exact file bytes. The Shardline SDK also passes bearer reads
+through an expired capability URL with separate roles on both backends.
+These results cover the named versions and local deployment fixtures; they do
+not establish the complete client-version matrix or multi-host behavior.
 
 Hub and native Xet both use the `/api/{provider}/{owner}/{repo}/tree/{rev}` and
 `/revisions` paths. Hub requests keep their existing `application/json` behavior.
@@ -112,6 +414,27 @@ understand newly returned Git aliases for NDJSON commits. During a rolling upgra
 route Hub SDK traffic to upgraded nodes; rollback integrations can retain the
 legacy `commit_id` or `/revisions` IDs. This does not require rewriting uploaded data.
 Git commit trees contain the actual inline bytes and LFS pointer metadata.
+Tree listings and paths-info expose Git blob and tree IDs, including for LFS
+pointers; these differ from payload SHA-256 and internal storage hashes. Listed
+paths are relative to the repository root even when listing a nested directory.
+Recursive listings include directories as well as files. A missing directory,
+or a file requested as a tree, returns HTTP 404 with `X-Error-Code: EntryNotFound`;
+an existing directory with an exhausted cursor or zero page limit remains a
+successful empty page. SQLite and PostgreSQL derive paged directory entries from
+the selected immutable file tree within the existing bounded read transaction.
+`expand=true` adds verified last-change commit metadata and returns at most
+50 entries per page. The SDK follows the `Link` header automatically; each next
+page stays on the same immutable commit even if the branch advances. Links use
+the configured public URL. Shardline does not report security scan results that
+it has not performed. Existing non-expanded JSON array and explicit cursor
+behavior is preserved. History lookup retains metadata and legacy payload-work
+bounds; cached tree metadata is not charged as another full payload read.
+Hub-created commits retain verified tree metadata in the existing Git archive so
+subsequent metadata lookups do not need to read file payloads again. Missing
+derived trees can be rebuilt from verified source content; corrupt archived
+trees fail validation. These IDs describe committed content, not the current
+health or availability of its backing objects. Downloads and FSCK still verify
+the stored content.
 Git commit identities depend on repository, Hub revision, and ancestry,
 so adding a branch or tag does not change an existing commit. Commits received
 through Git preserve their original object bytes, modes, and author metadata in
@@ -177,8 +500,8 @@ original objects rather than substituting a different commit under the same ID.
 | --- | --- | --- |
 | `/health` | GET | Health check |
 | `/api/whoami-v2` | GET | Current user identity |
-| `/api/repos/create` | POST | Create a repository |
-| `/api/{type}/{ns}/{repo}` | POST | Create a repository (typed) |
+| `/api/repos/create` | POST | Create or retry creation of the repository named by the write token |
+| `/api/{type}/{ns}/{repo}` | POST | Create the repository only when its path matches the write token |
 | `/api/{type}/{ns}/{repo}` | GET | Get repository info |
 | `/api/{type}/{ns}/{repo}/preupload/{rev}` | POST | Pre-upload check |
 | `/api/{type}/{ns}/{repo}/commit/{rev}` | POST | Commit file changes |
@@ -189,6 +512,7 @@ original objects rather than substituting a different commit under the same ID.
 | `/api/{type}/{ns}/{repo}/tag/{name}` | POST, DELETE | SDK lightweight tag creation (POST uses the source revision in the path) and deletion |
 | `/api/{type}/{ns}/{repo}/tree/{rev}` | GET | Browse the repository root |
 | `/api/{type}/{ns}/{repo}/tree/{rev}/{path}` | GET | Browse file tree |
+| `/api/{type}/{ns}/{repo}/paths-info/{rev}` | POST | Resolve requested file and directory metadata in the format consumed by `huggingface_hub`; accepts form-encoded client requests and JSON |
 | `/api/{type}/{ns}/{repo}/xet-read-token/{rev}` | GET | Xet read token exchange |
 | `/api/{type}/{ns}/{repo}/xet-write-token/{rev}` | GET | Xet write token exchange |
 | `/{type}/{ns}/{repo}/resolve/{rev}/{path}` | GET | Resolve and download a typed file |
@@ -213,8 +537,10 @@ Removing a ref does not remove the immutable commit history.
 
 Hub metadata is persisted to the configured index store:
 
-- **SQLite** (local): the existing `{root_dir}/metadata.sqlite3` database, shared
-  with the storage index and recovery evidence.
+- **SQLite** (local): Hub metadata remains in
+  `{root_dir}/hub/metadata.sqlite3`. Native storage records and Xet identities
+  remain in `{root_dir}/metadata.sqlite3`; an explicit scoped lookup connects
+  the two databases without moving existing data.
 - **Postgres** (production): the configured index database. Run the upgraded
   binary's owner-managed migrations before starting upgraded servers; Hub Xet
   identities and LFS locks add durable tables.
@@ -232,6 +558,31 @@ the same as every other frontend.
 
 The Hub API merges into the main HTTP router at startup, sharing the same bind address
 and TLS configuration as all other frontends.
+
+`paths-info` returns the actual Git OIDs of files and directories, LFS object
+SHA-256/size/pointer-size metadata where applicable, and a verified Xet hash for
+native Xet files. Requested paths that do not exist are omitted. With
+`expand=true`, each returned entry includes the first-parent commit that last
+changed its content or Git mode. Historical queries resolve immutable public
+commit IDs. Security scan results are omitted because Shardline does not run
+the upstream Hub's security scanners.
+
+Metadata hashing shares Git work admission. A request permits up to 1,000 paths
+and 64 KiB of request data. Inline-content hashing is limited to 64 MiB;
+expanded history additionally permits at most 10,000 revisions and one million
+file entries, with a cumulative 64 MiB inline-content budget. Native Xet and
+LFS payloads are represented by their Git pointer blobs and are not downloaded
+to compute metadata. Git-origin paths use verified archived trees directly.
+
+For native Xet files, resolve HEAD and GET responses include `X-Xet-Hash` and
+an absolute `Link` with `rel="xet-auth"`, built from the configured public URL.
+The normal `hf download` flow uses that discovery data to fetch a read token
+and reconstruct through CAS. Clients using plain HTTP continue through the
+LFS download URL.
+
+Storage kind, rather than file size, selects the download path. Small native
+Xet and LFS files use the same discovery and transfer behavior as larger ones;
+ordinary inline files continue streaming from the resolve route.
 
 > **Internals note:** the Hub storage layer is defined by the `HubStore` trait in the
 > `shardline-index` crate, accessed type-erased as `BoxedHubStore`, and its routes

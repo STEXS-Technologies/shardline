@@ -36,7 +36,7 @@ fn checked_ref(name: &str, tag: bool) -> Result<String, HubApiError> {
     Ok(if tag { full } else { name.to_owned() })
 }
 
-fn create_ref(
+async fn create_ref(
     state: &HubState,
     auth: &shardline_server_core::AuthorizedRepository,
     repo_id: &str,
@@ -44,6 +44,7 @@ fn create_ref(
     target: &str,
     message: &str,
 ) -> Result<StatusCode, HubApiError> {
+    crate::revision_access::authorize_write(repo_id, name, auth)?;
     state
         .store
         .get_repo(repo_id)
@@ -51,6 +52,7 @@ fn create_ref(
         .ok_or(HubApiError::RepoNotFound)?;
     let sha = crate::git::smart_http::resolve_commit_id(state, repo_id, target, auth)?
         .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(state, repo_id, target, &sha, auth).await?;
     // Rebind an existing immutable revision. Never manufacture a new commit or
     // replace an existing ref after a read-before-write race.
     match state
@@ -109,6 +111,7 @@ pub(crate) async fn branch_create(
         request.starting_point.as_deref().unwrap_or("main"),
         "Create branch",
     )
+    .await
 }
 
 pub(crate) async fn branch_delete(
@@ -117,6 +120,7 @@ pub(crate) async fn branch_delete(
     Path((_kind, ns, repo, name)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
     let name = checked_ref(&name, false)?;
+    crate::revision_access::authorize_write(&format!("{ns}/{repo}"), &name, _repo.capability())?;
     remove_ref(&state, &format!("{ns}/{repo}"), &name)
 }
 
@@ -135,6 +139,7 @@ pub(crate) async fn tag_create(
         &revision,
         request.message.as_deref().unwrap_or("Create tag"),
     )
+    .await
 }
 
 pub(crate) async fn tag_delete(
@@ -143,5 +148,6 @@ pub(crate) async fn tag_delete(
     Path((_kind, ns, repo, name)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
     let name = checked_ref(&name, true)?;
+    crate::revision_access::authorize_write(&format!("{ns}/{repo}"), &name, _repo.capability())?;
     remove_ref(&state, &format!("{ns}/{repo}"), &name)
 }

@@ -181,8 +181,8 @@ fn compare_and_swap_s3_object_sql(
         }
         if update_part_count {
             persist_multipart_count_sql(transaction, replacement, part_count)?;
-        } else if let Some(part_count) = preserved_part_count {
-            persist_multipart_count_sql(transaction, replacement, Some(part_count))?;
+        } else if let Some(count_to_preserve) = preserved_part_count {
+            persist_multipart_count_sql(transaction, replacement, Some(count_to_preserve))?;
         }
         record_s3_object_transition(transaction, expected, Some(replacement))?;
         return Ok(true);
@@ -237,8 +237,8 @@ fn compare_and_swap_s3_object_sql(
     if changed == 1 {
         if update_part_count {
             persist_multipart_count_sql(transaction, replacement, part_count)?;
-        } else if let Some(part_count) = preserved_part_count {
-            persist_multipart_count_sql(transaction, replacement, Some(part_count))?;
+        } else if let Some(count_to_preserve) = preserved_part_count {
+            persist_multipart_count_sql(transaction, replacement, Some(count_to_preserve))?;
         }
         let before = expected;
         record_s3_object_transition(transaction, before, Some(replacement))?;

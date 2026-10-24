@@ -1,0 +1,80 @@
+use super::*;
+use crate::{admission::BoundedPool, upload_ingest::StagedRequestBody};
+use std::{io::Write, num::NonZeroUsize, path::PathBuf};
+
+fn staged(bytes: &[u8]) -> (StagedRequestBody, PathBuf) {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(bytes).unwrap();
+    let path = file.path().to_path_buf();
+    (
+        StagedRequestBody::File {
+            file,
+            length: u64::try_from(bytes.len()).unwrap(),
+            hash: shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes()),
+        },
+        path,
+    )
+}
+
+#[tokio::test]
+async fn cancelled_native_validation_reclaims_queued_input_without_releasing_another_owner() {
+    let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
+    let held = pool.acquire().await.unwrap();
+    let (wire, _, hash) = crate::test_fixtures::footerless_xorb().unwrap();
+    let (input, path) = staged(&wire);
+    let mut validation = Box::pin(xorb_length(&hash, input, &pool));
+    assert!(futures_util::poll!(&mut validation).is_pending());
+    assert!(path.exists(), "queued validation must retain its source");
+    drop(validation);
+    assert!(!path.exists(), "cancelled validation leaked its source");
+    assert!(
+        pool.try_acquire().is_none(),
+        "unrelated work lost admission"
+    );
+    drop(held);
+    assert!(
+        pool.try_acquire().is_some(),
+        "cancelled waiter retained admission"
+    );
+}
+
+#[tokio::test]
+async fn invalid_native_validation_reclaims_source_and_admission() {
+    let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
+    let (_, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
+    let mut invalid = canonical.to_vec();
+    *invalid.last_mut().unwrap() ^= 0xff;
+    let (input, path) = staged(&invalid);
+    assert!(xorb_length(&hash, input, &pool).await.is_err());
+    assert!(!path.exists(), "failed validation leaked its source");
+    assert!(
+        pool.try_acquire().is_some(),
+        "failed validation leaked admission"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::panic)] // A wrong staged representation must fail this test immediately.
+async fn successful_native_normalization_transfers_scratch_ownership_and_updates_integrity() {
+    let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
+    let (wire, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
+    let (input, source) = staged(&wire);
+    let (output, length) = xorb_length(&hash, input, &pool).await.unwrap();
+    assert!(!source.exists(), "normalized input was not reclaimed");
+    let StagedRequestBody::File {
+        file,
+        length: staged_length,
+        hash: body_hash,
+    } = output
+    else {
+        panic!("normalization must keep file-backed ownership");
+    };
+    let output_path = file.path().to_path_buf();
+    assert_eq!(std::fs::read(&output_path).unwrap(), canonical);
+    assert_eq!(length, u64::try_from(canonical.len()).unwrap());
+    assert_eq!(staged_length, length);
+    assert_eq!(body_hash.as_bytes(), blake3::hash(&canonical).as_bytes());
+    drop(file);
+    assert!(!output_path.exists(), "normalization leaked its output");
+    assert!(pool.try_acquire().is_some());
+}

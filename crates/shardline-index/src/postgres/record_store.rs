@@ -38,14 +38,15 @@ fn record_conversion_budget() -> &'static Arc<Semaphore> {
     BUDGET.get_or_init(|| Arc::new(Semaphore::new(8)))
 }
 
-async fn admit_record_conversion() -> Result<OwnedSemaphorePermit, PostgresMetadataStoreError> {
+pub(crate) async fn admit_record_conversion()
+-> Result<OwnedSemaphorePermit, PostgresMetadataStoreError> {
     Arc::clone(record_conversion_budget())
         .acquire_owned()
         .await
         .map_err(|error| PostgresMetadataStoreError::Unsupported(error.to_string()))
 }
 
-async fn run_record_conversion<T: Send + 'static>(
+pub(crate) async fn run_record_conversion<T: Send + 'static>(
     permit: OwnedSemaphorePermit,
     convert: impl FnOnce() -> Result<T, PostgresMetadataStoreError> + Send + 'static,
 ) -> Result<T, PostgresMetadataStoreError> {
@@ -736,7 +737,34 @@ impl super::PostgresRecordStore {
         references: &[shardline_storage::ObjectKey],
         identities: &[crate::XetFileIdentity],
     ) -> Result<(), PostgresMetadataStoreError> {
+        self.commit_native_shard_metadata_on_connection_with_descriptors(
+            connection,
+            records,
+            dedupe_mappings,
+            references,
+            identities,
+            &[],
+        )
+        .await
+    }
+
+    /// Publishes verified native descriptors on the retained ownership session,
+    /// atomically with records, mappings, reference checks and Hub identities.
+    ///
+    /// # Errors
+    /// Returns an error for invalid/conflicting metadata or database failure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_native_shard_metadata_on_connection_with_descriptors(
+        &self,
+        connection: &mut PgConnection,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+        identities: &[crate::XetFileIdentity],
+        descriptors: &[crate::XetXorbDescriptor],
+    ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
+        super::xet_xorb::stage_descriptors(&mut transaction, descriptors).await?;
         if !references.is_empty()
             && query_scalar::<_, bool>(
                 "SELECT to_regprocedure('shardline_reference_keys_remote_delete_v1(text,text[])') IS NOT NULL",
@@ -1046,6 +1074,74 @@ impl super::PostgresRecordStore {
 impl RecordTraversal for super::PostgresRecordStore {
     type Error = PostgresMetadataStoreError;
     type Locator = PostgresRecordLocator;
+
+    fn native_chunk_reference_page(
+        &self,
+        after: Option<(String, i64)>,
+    ) -> RecordStoreFuture<'_, Vec<(String, i64, String)>, Self::Error> {
+        Box::pin(async move {
+            if after.is_none() {
+                // Optional owner-installed acceleration must not be required
+                // by ordinary GC against a released metadata schema. Check
+                // once per traversal; actual query/permission errors propagate.
+                let present: bool =
+                    sqlx::query_scalar("SELECT to_regclass('shardline_xet_chunks') IS NOT NULL")
+                        .fetch_one(&self.pool)
+                        .await?;
+                if !present {
+                    return Ok(Vec::new());
+                }
+            }
+            let (hash, ordinal) = after.unwrap_or_else(|| (String::new(), -1));
+            sqlx::query_as("SELECT xorb_hash,chunk_index,chunk_hash FROM shardline_xet_chunks WHERE (xorb_hash,chunk_index)>($1,$2) ORDER BY xorb_hash,chunk_index LIMIT 256")
+                .bind(hash).bind(ordinal).fetch_all(&self.pool).await.map_err(Into::into)
+        })
+    }
+
+    fn visit_repository_hash_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        repository: &'operation shardline_protocol::RepositoryScope,
+        hash_hex: &'operation str,
+        mut visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move {
+            let scope_key = shared_repository_scope_key(Some(repository));
+            let mut rows = query(
+                "SELECT r.record_key, r.record_kind, r.scope_key, r.file_id,
+                        r.content_hash, r.record,
+                        FLOOR(EXTRACT(EPOCH FROM r.updated_at))::BIGINT AS modified_since_epoch
+                 FROM shardline_record_membership m
+                 JOIN shardline_file_records r ON r.record_key=m.record_key
+                 WHERE m.scope_key=$1 AND m.member_hash=$2 AND r.scope_key=$1
+                 ORDER BY m.record_key",
+            )
+            .bind(scope_key)
+            .bind(hash_hex)
+            .fetch(&self.pool);
+            loop {
+                let permit = admit_record_conversion().await.map_err(Into::into)?;
+                let Some(row) = rows
+                    .try_next()
+                    .await
+                    .map_err(PostgresMetadataStoreError::from)
+                    .map_err(Into::into)?
+                else {
+                    break;
+                };
+                let record = run_record_conversion(permit, move || stored_record_from_row(&row))
+                    .await
+                    .map_err(Into::into)?;
+                visitor(record)?;
+            }
+            Ok(())
+        })
+    }
     fn list_latest_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
@@ -1452,7 +1548,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pg_xet_identity_replay_preserves_row_and_conflict_rollback() {
         let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
             return;
@@ -1485,6 +1581,13 @@ mod tests {
         );
         first.unwrap();
         second.unwrap();
+        // Upgrade an existing binding, rather than exercising only fresh writes.
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/20261023040000_xet_file_aliases.up.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         let before: String =
             sqlx::query_scalar("SELECT xmin::text FROM shardline_xet_file_identities")
                 .fetch_one(&pool)
@@ -1503,6 +1606,24 @@ mod tests {
             before, after,
             "exact replay must not replace the row version"
         );
+        let alias_before: String =
+            sqlx::query_scalar("SELECT xmin::text FROM shardline_xet_file_aliases")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        store
+            .commit_native_shard_metadata_with_xet_identities(&[], &[], &[], identities)
+            .await
+            .unwrap();
+        let alias_after: String =
+            sqlx::query_scalar("SELECT xmin::text FROM shardline_xet_file_aliases")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            alias_before, alias_after,
+            "exact replay must not rewrite aliases"
+        );
         identity.file_id = "c".repeat(64);
         store
             .commit_native_shard_metadata_with_xet_identities(
@@ -1513,6 +1634,36 @@ mod tests {
             )
             .await
             .unwrap();
+        let aliases: Vec<String> =
+            sqlx::query_scalar("SELECT file_id FROM shardline_xet_file_aliases ORDER BY file_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(aliases, vec!["b".repeat(64), "c".repeat(64)]);
+        let mut conflicting_alias = identity.clone();
+        conflicting_alias.file_id = "b".repeat(64);
+        conflicting_alias.sha256 = "e".repeat(64);
+        assert!(
+            store
+                .commit_native_shard_metadata_with_xet_identities(
+                    &[],
+                    &[],
+                    &[],
+                    &[conflicting_alias.clone()]
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .xet_file_identity(
+                    &conflicting_alias.repository_scope,
+                    &conflicting_alias.sha256
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             store
                 .xet_file_identity(&identity.repository_scope, &identity.sha256)
@@ -1520,8 +1671,42 @@ mod tests {
                 .unwrap(),
             Some(identity.clone())
         );
+        let hub = crate::hub::BoxedHubStore::from_store(super::super::PostgresIndexStore::new(
+            pool.clone(),
+        ));
+        assert_eq!(
+            hub.lookup_xet_file_identity(&identity.repository_scope, &identity.sha256)
+                .unwrap(),
+            Some(identity.clone())
+        );
+        for (owner, repository) in [("team", "other"), ("other", "assets")] {
+            let scope =
+                RepositoryScope::new(RepositoryProvider::GitHub, owner, repository, Some("main"))
+                    .unwrap();
+            assert_eq!(
+                hub.lookup_xet_file_identity(&scope, &identity.sha256)
+                    .unwrap(),
+                None
+            );
+        }
+        // Content identities are repository-wide; revision authorization is
+        // enforced when looking up the committed file, not by duplicating this mapping.
+        let mut historical = identity.clone();
+        historical.repository_scope = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "team",
+            "assets",
+            Some("historical"),
+        )
+        .unwrap();
+        assert_eq!(
+            hub.lookup_xet_file_identity(&historical.repository_scope, &historical.sha256)
+                .unwrap(),
+            Some(historical)
+        );
         let mut new_identity = identity.clone();
         new_identity.sha256 = "d".repeat(64);
+        new_identity.file_id = "f".repeat(64);
         let mut conflict = identity.clone();
         conflict.total_bytes = 43;
         assert!(matches!(

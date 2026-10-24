@@ -406,6 +406,9 @@ The collector:
 - scans file-record metadata through the configured record-store adapter
 - derives live chunk reachability from chunk-backed records and from currently
   referenced native Xet xorb contents
+- preserves indexed native Xorbs containing a live chunk, including references
+  held only by historical generic chunk records; these derived hints retain
+  sources but do not authorize reads
 - computes the current live managed-object set
 - reports orphan managed objects under `chunks/`
 - treats dedupe-shard mappings as derived metadata instead of independent GC roots
@@ -420,6 +423,12 @@ The collector:
 - exports active retention windows as machine-readable JSON when requested
 - exports current orphan inventory as machine-readable JSON when requested
 - prunes empty chunk and quarantine prefix directories after sweep
+
+If inventory shows a referenced chunk copy is missing, GC also verifies candidate
+Xorbs before reclaiming them. This protects intact source data after native member
+index loss. A damaged candidate stops the recovery scan with an error. This
+recovery path can read additional Xorb payloads; it uses the existing inventory
+and adds no per-chunk HEAD requests.
 
 The current lifecycle integration also:
 

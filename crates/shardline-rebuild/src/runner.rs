@@ -55,8 +55,16 @@ where
         issues: Vec::new(),
     };
     let mut candidates = HashMap::new();
+    let mut native_xorbs = HashSet::new();
     RecordTraversal::visit_version_records(record_store, |entry| {
         report.scanned_version_records = checked_increment(report.scanned_version_records)?;
+        if record_store.supports_native_locations()
+            && let Ok(record) = shardline_server_core::parse_stored_file_record_bytes(&entry.bytes)
+            && record.storage_layout()
+                == shardline_index::FileRecordStorageLayout::ReferencedObjectTerms
+        {
+            native_xorbs.extend(record.chunks.into_iter().map(|term| term.hash));
+        }
         collect_candidate(record_store, entry, &mut candidates, &mut report)
     })
     .await?;
@@ -138,6 +146,18 @@ where
         &mut report,
     )
     .await?;
+
+    if report.is_clean() && record_store.supports_native_locations() {
+        for hash in native_xorbs {
+            // Never reconstruct locations from client shard offsets or the
+            // damaged index. Authenticate the entire immutable source first.
+            let descriptor = shardline_xet_adapter::recover_xorb_descriptor(object_store, &hash)?;
+            record_store
+                .cache_native_location(&descriptor)
+                .await
+                .map_err(Into::into)?;
+        }
+    }
 
     Ok(report)
 }

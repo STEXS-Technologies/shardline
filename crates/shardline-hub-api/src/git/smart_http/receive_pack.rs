@@ -48,6 +48,7 @@ pub async fn receive_pack(
     body: Body,
 ) -> Result<Response, HubApiError> {
     let auth_ctx = authorize_write_with_context(&state, &headers)?;
+    let repo = super::repository::canonical_name(&state, auth_ctx.as_ref(), &ns, &repo).await?;
     require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
@@ -66,6 +67,14 @@ pub async fn receive_pack(
         super::admission::read_request(body, MAX_RECEIVE_PACK_REQUEST_BYTES, "receive-pack")
             .await?;
     let (updates, request_tail) = parse_receive_pack_request(&body)?;
+    // Authorize the entire batch before parsing or persisting any objects.
+    for (_, _, reference) in &updates {
+        crate::revision_access::authorize_write(
+            &repo_id,
+            canonical_ref_name(reference),
+            &capability,
+        )?;
+    }
     let negotiated = super::capabilities::receive(&body)?;
     let packed_tail = if negotiated.push_options {
         // Shardline does not execute Git receive hooks. Still consume the
@@ -371,7 +380,17 @@ fn prepare_push_objects(
             }
             continue;
         }
-        let key = lfs_object_key(&file.sha, auth)
+        // Native Xet publication already verified the complete SHA-256 and
+        // durably bound it to this repository. Its payload lives in Xorbs,
+        // rather than in a second basic-LFS object or the Git pack itself.
+        // Reuse the same identity/size/scope validation as Hub resolution.
+        if super::path_metadata::verified_xet_hash(state, auth, &file.sha, file.size)
+            .map_err(|error| SmartHttpError::StoreLfsObject(error.to_string()))?
+            .is_some()
+        {
+            continue;
+        }
+        let key = crate::object_locations::file_key(state, &file.sha, auth)
             .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
         let existing = state
             .object_store
@@ -442,6 +461,13 @@ fn prepare_push_objects(
             .object_store
             .put_if_absent(&key, ObjectBody::from_slice(&blob.data), &integrity)
             .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+        crate::object_locations::remember(
+            state,
+            auth,
+            shardline_index::hub::HubObjectKind::File,
+            &file.sha,
+        )
+        .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
     }
 
     state

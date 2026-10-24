@@ -1,5 +1,6 @@
 use std::path::Path;
 
+mod object_location;
 mod ref_batch;
 
 use rusqlite::{Connection, params};
@@ -88,6 +89,29 @@ const fn repo_type_to_str(t: HubRepoType) -> &'static str {
 }
 
 impl HubStore for LocalIndexStore {
+    fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: crate::hub::HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<crate::hub::HubObjectLocation>, Self::Error> {
+        object_location::lookup(self, scope, kind, object_id)
+    }
+    fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: crate::hub::HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Self::Error> {
+        object_location::remember(self, scope, kind, object_id)
+    }
+    fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Self::Error> {
+        crate::LocalRecordStore::open(self.root().to_owned()).xet_file_identity(scope, sha256)
+    }
     fn supports_atomic_ref_updates(&self) -> bool {
         true
     }
@@ -315,6 +339,25 @@ impl HubStore for LocalIndexStore {
             }
         }
     }
+    fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        match self.publish_hub_revision_at(
+            &revision.repo_id,
+            revision.parent_sha.as_deref(),
+            &revision.sha,
+            &revision.ref_name,
+            revision.message.as_deref().unwrap_or(""),
+            HubRefPublicationMode::UpdateOnly,
+            Some(revision),
+        )? {
+            HubRefCreateOutcome::Created(stored) => Ok(HubRefUpdateOutcome::Updated(stored)),
+            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
+            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
+        }
+    }
+
     fn update_revision_if_current(
         &self,
         repo_id: &str,
@@ -677,36 +720,47 @@ impl HubStore for LocalIndexStore {
         let query_limit = i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
         let mut entries = Vec::new();
         if options.recursive {
-            let cursor = options
-                .cursor
-                .as_ref()
-                .map(|cursor| format!("{prefix}{cursor}"));
-            let lower = cursor.as_ref().unwrap_or(&prefix);
-            let comparison = if cursor.is_some() { ">" } else { ">=" };
-            let upper_clause = if upper.is_some() { "AND path<?3" } else { "" };
-            let cursor_clause = if cursor.is_some() {
-                "AND EXISTS(SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path=?4 AND path<>?6)"
-            } else {
-                ""
-            };
-            let sql = format!("SELECT path,size,sha,is_lfs FROM shardline_hub_file_entries
-                WHERE commit_sha=?1 AND path{comparison}?2 AND path<>?6 {upper_clause} {cursor_clause}
-                ORDER BY path LIMIT ?5");
-            let mut statement = transaction.prepare(&sql)?;
+            let prefix_start =
+                i64::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i64::MAX);
+            let mut statement = transaction.prepare(
+                "WITH RECURSIVE filtered AS (
+                   SELECT substr(path,?4) AS relative,size,sha,is_lfs
+                   FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path>=?2
+                   AND (?3 IS NULL OR path<?3) AND path<>?2),
+                 directories(path,rest) AS (
+                   SELECT substr(relative,1,instr(relative,'/')-1),substr(relative,instr(relative,'/')+1)
+                   FROM filtered WHERE instr(relative,'/')>0
+                   UNION
+                   SELECT path||'/'||substr(rest,1,instr(rest,'/')-1),substr(rest,instr(rest,'/')+1)
+                   FROM directories WHERE instr(rest,'/')>0),
+                 entries AS (
+                   SELECT DISTINCT 0 AS kind,path,NULL AS size,NULL AS sha,NULL AS is_lfs FROM directories
+                   UNION ALL SELECT 1,relative,size,sha,is_lfs FROM filtered)
+                 SELECT kind,path,size,sha,is_lfs FROM entries
+                 WHERE ?5 IS NULL OR (path>?5 AND EXISTS(SELECT 1 FROM entries WHERE path=?5))
+                 ORDER BY path LIMIT ?6")?;
             let rows = statement.query_map(
-                params![commit_sha, lower, upper, cursor, query_limit, prefix],
+                params![
+                    commit_sha,
+                    prefix,
+                    upper,
+                    prefix_start,
+                    options.cursor,
+                    query_limit
+                ],
                 |row| {
-                    let full_path: String = row.get(0)?;
-                    Ok(HubTreePageEntry::File(HubFileEntry {
-                        path: full_path
-                            .strip_prefix(&prefix)
-                            .unwrap_or(&full_path)
-                            .to_owned(),
-                        size: i64_to_u64(row.get(1)?)
-                            .map_err(|error| sqlite_store_error(&error))?,
-                        sha: row.get(2)?,
-                        is_lfs: row.get::<_, i64>(3)? != 0,
-                    }))
+                    let path: String = row.get(1)?;
+                    if row.get::<_, i64>(0)? == 0 {
+                        Ok(HubTreePageEntry::Directory { path })
+                    } else {
+                        Ok(HubTreePageEntry::File(HubFileEntry {
+                            path,
+                            size: i64_to_u64(row.get(2)?)
+                                .map_err(|error| sqlite_store_error(&error))?,
+                            sha: row.get(3)?,
+                            is_lfs: row.get::<_, i64>(4)? != 0,
+                        }))
+                    }
                 },
             )?;
             for row in rows {
@@ -1020,6 +1074,23 @@ impl LocalIndexStore {
         message: &str,
         mode: HubRefPublicationMode,
     ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
+        self.publish_hub_revision_at(repo_id, parent_sha, new_sha, ref_name, message, mode, None)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "shared transactional legacy and prepared publication"
+    )]
+    fn publish_hub_revision_at(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+        mode: HubRefPublicationMode,
+        prepared: Option<&HubRevision>,
+    ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
         let ref_name = canonical_ref_name(ref_name);
         let root = self.root().to_owned();
         let repo_id = repo_id.to_owned();
@@ -1069,13 +1140,14 @@ impl LocalIndexStore {
                 }
             }
 
-            let now = unix_now_seconds_lossy();
+            let published_at = unix_now_seconds_lossy();
+            let now = prepared.map_or(published_at, |r| r.created_at_unix_seconds);
 
             if ref_name == "main" {
                 tx.execute(
                 "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
                  WHERE repo_id = ?3",
-                params![new_sha, u64_to_i64(now)?, repo_id],
+                params![new_sha, u64_to_i64(published_at)?, repo_id],
             )?;
             }
 
@@ -1120,6 +1192,12 @@ impl LocalIndexStore {
                     })
                 },
             )?;
+            if prepared.is_some_and(|expected| !revision.matches_prepared(expected)) {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "conflicting prepared revision metadata".to_owned(),
+                )
+                .into());
+            }
             tx.commit()?;
             Ok(HubRefCreateOutcome::Created(revision))
         })

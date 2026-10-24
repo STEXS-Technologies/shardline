@@ -36,7 +36,9 @@ pub(crate) fn upload_lifecycle_failpoint(
 }
 
 #[cfg(any(test, feature = "test-fault-injection"))]
-pub use enabled::{UploadLifecycleFailpointGuard, arm_upload_interruption};
+pub use enabled::{
+    UploadLifecycleFailpointGuard, arm_upload_interruption, arm_upload_process_pause,
+};
 
 #[cfg(any(test, feature = "test-fault-injection"))]
 mod enabled {
@@ -47,10 +49,11 @@ mod enabled {
 
     use super::UploadLifecycleBoundary;
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     struct ArmedFault {
         boundary: UploadLifecycleBoundary,
         registration_id: u64,
+        pause_marker: Option<std::path::PathBuf>,
     }
 
     static NEXT_REGISTRATION_ID: std::sync::atomic::AtomicU64 =
@@ -92,6 +95,7 @@ mod enabled {
                 ArmedFault {
                     boundary,
                     registration_id,
+                    pause_marker: None,
                 },
             );
         UploadLifecycleFailpointGuard {
@@ -100,16 +104,44 @@ mod enabled {
         }
     }
 
+    /// Pauses a test process at a durable boundary until its parent kills it.
+    /// The marker is written only after reaching that boundary. This facility
+    /// is unavailable in builds without the explicit fault-injection feature.
+    #[must_use]
+    pub fn arm_upload_process_pause(
+        intent_id: String,
+        boundary: UploadLifecycleBoundary,
+        marker: std::path::PathBuf,
+    ) -> UploadLifecycleFailpointGuard {
+        let guard = arm_upload_interruption(intent_id, boundary);
+        if let Some(fault) = FAILPOINTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(&guard.intent_id)
+        {
+            fault.pause_marker = Some(marker);
+        }
+        guard
+    }
+
     pub(super) fn hit(
         intent_id: &str,
         boundary: UploadLifecycleBoundary,
     ) -> Result<(), crate::CasError> {
-        let interrupted = FAILPOINTS
+        let fault = FAILPOINTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(intent_id)
-            .is_some_and(|armed| armed.boundary == boundary);
-        if interrupted {
+            .filter(|armed| armed.boundary == boundary)
+            .cloned();
+        if let Some(fault) = fault {
+            if let Some(marker) = fault.pause_marker {
+                std::fs::write(marker, b"durable boundary reached")
+                    .map_err(|error| crate::CasError::ObjectStore(error.to_string()))?;
+                loop {
+                    std::thread::park();
+                }
+            }
             Err(crate::CasError::InjectedUploadInterruption { boundary })
         } else {
             Ok(())

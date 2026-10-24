@@ -49,32 +49,36 @@ async fn commit_to(test: &common::HubTestContext, repo: &str, content: &[u8]) {
 }
 
 fn git(args: &[&str]) -> std::process::Output {
-    std::process::Command::new("git")
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
-        .env("GIT_HTTP_LOW_SPEED_TIME", "10")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TRACE_PACKET", "1")
-        .env("GIT_AUTHOR_DATE", "2030-01-01T00:00:00+00:00")
-        .env("GIT_COMMITTER_DATE", "2030-01-01T00:00:00+00:00")
-        .output()
-        .expect("installed Git client")
+    shardline_test_support::native_client_output(
+        std::process::Command::new("git")
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+            .env("GIT_HTTP_LOW_SPEED_TIME", "10")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TRACE_PACKET", "1")
+            .env("GIT_AUTHOR_DATE", "2030-01-01T00:00:00+00:00")
+            .env("GIT_COMMITTER_DATE", "2030-01-01T00:00:00+00:00"),
+        std::time::Duration::from_secs(120),
+    )
+    .expect("Git client must complete within its deadline")
 }
 
 fn git_without_lazy_fetch(args: &[&str]) -> std::process::Output {
-    std::process::Command::new("git")
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
-        .env("GIT_HTTP_LOW_SPEED_TIME", "10")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TRACE_PACKET", "1")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .output()
-        .expect("installed Git client")
+    shardline_test_support::native_client_output(
+        std::process::Command::new("git")
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+            .env("GIT_HTTP_LOW_SPEED_TIME", "10")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TRACE_PACKET", "1")
+            .env("GIT_NO_LAZY_FETCH", "1"),
+        std::time::Duration::from_secs(120),
+    )
+    .expect("Git client must complete within its deadline")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

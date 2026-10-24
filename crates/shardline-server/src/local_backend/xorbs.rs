@@ -9,12 +9,9 @@ use shardline_storage::ObjectStore;
 use super::LocalBackend;
 use crate::{
     ServerError,
-    download_stream::{ServerByteStream, object_byte_stream, validated_xorb_byte_range_stream},
-    upload_ingest::{RequestBodyReader, StagedRequestBody, stage_body_for_object_store},
-    xet_adapter::{
-        XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes,
-        store_uploaded_xorb_file_path, xorb_object_key,
-    },
+    download_stream::{ServerByteStream, authorized_xorb_byte_range_stream, object_byte_stream},
+    upload_ingest::{RequestBodyReader, stage_body_with_spill, store_admitted_xorb},
+    xet_adapter::{XorbUploadResponse, resolve_dedupe_shard_object, xorb_object_key},
 };
 
 impl LocalBackend {
@@ -47,11 +44,16 @@ impl LocalBackend {
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
         let object_store = self.object_store();
-        let staged = stage_body_for_object_store(&mut body, &object_store).await?;
+        let staged = stage_body_with_spill(&mut body).await?;
         let (staged, body_length) =
             crate::upload_identity::xorb_length(expected_hash, staged, &self.stream_work_pool)
                 .await?;
         let intent_id = crate::upload_identity::xorb(expected_hash, body_length);
+        let permit = self
+            .stream_work_pool
+            .acquire()
+            .await
+            .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
             intent_id.clone(),
@@ -65,20 +67,12 @@ impl LocalBackend {
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
+        let intent = coordinator
+            .content_addressed_upload_attempt(&intent)
+            .await?;
         coordinator
             .with_upload_intent(&intent, move || async move {
-                match staged {
-                    StagedRequestBody::Memory { bytes, .. } => {
-                        store_uploaded_xorb_bytes(&object_store, expected_hash, &bytes)
-                            .await
-                            .map_err(ServerError::from)
-                    }
-                    StagedRequestBody::File { file, .. } => {
-                        store_uploaded_xorb_file_path(&object_store, expected_hash, file.path())
-                            .await
-                            .map_err(ServerError::from)
-                    }
-                }
+                store_admitted_xorb(&object_store, expected_hash, staged, permit).await
             })
             .await
     }
@@ -106,17 +100,19 @@ impl LocalBackend {
         hash_hex: &str,
         total_length: u64,
         range: ByteRange,
+        coverage: Option<crate::record_store::XorbRangeCoverage>,
     ) -> Result<ServerByteStream, ServerError> {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        validated_xorb_byte_range_stream(
+        authorized_xorb_byte_range_stream(
             &object_store,
             &object_key,
             hash_hex,
             total_length,
             range,
             self.stream_work_pool.clone(),
+            coverage,
         )
         .await
     }
@@ -135,6 +131,14 @@ impl LocalBackend {
         };
 
         Ok(metadata.length())
+    }
+
+    pub(crate) async fn repository_xorb_coverage(
+        &self,
+        hash: &str,
+        scope: &RepositoryScope,
+    ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
+        crate::record_store::repository_xorb_coverage(&self.record_store, hash, scope).await
     }
 
     pub(crate) async fn repository_references_xorb(

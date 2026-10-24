@@ -358,6 +358,16 @@ pub trait RecordTraversal {
     /// Adapter-specific record locator.
     type Locator: Clone + Eq + Ord + Send + Sync;
 
+    /// Pages derived native member references as `(xorb_hash, ordinal, chunk_hash)`.
+    /// These hints may conservatively retain objects; they grant no read access.
+    /// Adapters without native member storage return an empty page.
+    fn native_chunk_reference_page(
+        &self,
+        _after: Option<(String, i64)>,
+    ) -> RecordStoreFuture<'_, Vec<(String, i64, String)>, Self::Error> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// Lists visible latest-file record locators.
     fn list_latest_record_locators(&self)
     -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error>;
@@ -439,6 +449,31 @@ pub trait RecordTraversal {
             }
 
             Ok(())
+        })
+    }
+
+    /// Visits candidate records for one exact repository revision and member hash.
+    /// Indexed adapters narrow the candidate set. The compatibility default
+    /// visits repository records across revisions; callers must validate the
+    /// authoritative record's scope and members before granting access.
+    fn visit_repository_hash_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        repository: &'operation RepositoryScope,
+        _hash_hex: &'operation str,
+        mut visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move {
+            let scope = RepositoryRecordScope::from_repository_scope(repository);
+            self.visit_repository_latest_records(&scope, &mut visitor)
+                .await?;
+            self.visit_repository_version_records(&scope, &mut visitor)
+                .await
         })
     }
 

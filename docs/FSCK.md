@@ -30,6 +30,44 @@ The command exits with:
 - `1` when the scan completed and found one or more integrity issues
 - `2` when the scan could not complete because of an operational failure
 
+Executable regression tests verify these statuses through direct invocation and
+a Unix shell wrapper. The direct command emits a text summary on stdout and
+integrity findings on stderr; it does not provide a `--json` option.
+
+The native-Xet regression suite checks clean publications, a same-length member
+mutation and restoration using the actual CLI. The remote case also removes a
+standalone member copy and checks missing descriptors, absent or incorrect member
+rows, a structurally valid descriptor with an incorrect Merkle root, and malformed
+descriptor JSON. Missing or unauthenticated member locations remain findings;
+malformed descriptor metadata prevents scan completion (exit `2`). Restoring
+verified derived metadata must restore a clean scan without changing the Xorb
+payload. Two independent PostgreSQL repair workers are also forced to contend
+on overlapping batches supplied in opposite orders. Both must commit complete
+member indexes; a scan while they are blocked must retain the unresolved finding.
+A separate check interrupts a repair after it starts updating the first member
+index and blocks on the second container. Both cancellation of the repair future
+and termination of its PostgreSQL session must roll back the partial batch,
+retain the scanner finding and allow a clean retry. These checks do not qualify
+process SIGKILL recovery or concurrent GC.
+SQLite member-index tests also exercise the 8,192-member descriptor limit:
+corruption of the final row and an unexpected extra row must retain every
+missing-copy finding. An injected failure on the last repair insert must leave
+the entire original index unchanged; removing the failure and retrying restores
+the index. This checks derived-metadata handling, not full-container payload I/O
+or operating cost at that size.
+The executable corpus also publishes a real 33-member native container over
+HTTP. With all redundant member copies removed, the scan must remain clean;
+corrupting the retained container must still produce exit `1`, and restoring it
+must restore exit `0`. This runs on local storage and PostgreSQL/MinIO.
+The remote case uses disposable PostgreSQL and MinIO and is selected explicitly
+in E2E CI. To run it locally
+with Docker available:
+
+```bash
+cargo nextest run --locked -p shardline --test fsck_cli --run-ignored all \
+  -E 'test(native_xet_fsck_with_postgres_and_minio)'
+```
+
 ## Current Checks
 
 The checker scans file records through the configured record-store adapter:
@@ -54,11 +92,13 @@ For each record it verifies:
 - the logical byte count matches the recorded chunk lengths
 - native Xet chunk ranges and packed byte ranges stay ordered and non-empty
 - the record content hash matches the recorded reconstruction terms
-- every referenced chunk file exists
+- every referenced chunk is available as a standalone object or an indexed,
+  fully verified native Xorb member
 - every referenced chunk body hashes to the recorded chunk hash
+- native Xet member bodies match the keyed data hashes in their verified Xorb
+  descriptors; these identities differ from the object store's unkeyed digest
 - every referenced chunk body length matches the recorded chunk length
-- native Xet records still have the unpacked chunk objects implied by their referenced
-  xorbs
+- standalone native chunk copies, when present, match their verified Xorb members
 - every visible latest record still has a matching immutable version record
 - every visible latest record still matches the immutable version record it points at
 - quarantine metadata points at existing objects, retains the observed object length,
@@ -71,6 +111,10 @@ For each record it verifies:
   timestamps
 - every persisted StateChronicle Merkle commitment matches its typed reliability
   event, sequence, operation identity, and parent commitment
+
+A missing native chunk copy is recoverable when its read index still resolves
+the member from a verified Xorb. A missing index, missing backing Xorb or damaged
+container remains an integrity failure. FSCK does not remove redundant copies.
 
 Reliability evidence is checked against the authoritative materialized state and
 is never repaired during fsck. An evidence failure is reported separately as

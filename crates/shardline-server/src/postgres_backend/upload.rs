@@ -9,16 +9,11 @@ use crate::{
     ServerError, ShardMetadataLimits,
     model::UploadFileResponse,
     upload_ingest::{
-        FileUploadIngestor, RequestBodyReader, StagedRequestBody, UploadStorage,
-        stage_body_for_object_store, upload_attempt_id,
+        FileUploadIngestor, RequestBodyReader, UploadStorage, stage_body_with_spill,
+        store_admitted_xorb, upload_attempt_id,
     },
     validation::validate_identifier,
-    xet_adapter::{
-        ShardUploadResponse, XorbUploadResponse,
-        register_uploaded_shard_bytes_with_member_references,
-        register_uploaded_shard_file_with_member_references, store_uploaded_xorb_bytes,
-        store_uploaded_xorb_file_path, xorb_object_key,
-    },
+    xet_adapter::{ShardUploadResponse, XorbUploadResponse, xorb_object_key},
 };
 
 impl super::PostgresBackend {
@@ -279,7 +274,7 @@ impl super::PostgresBackend {
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
         let object_store = self.object_store();
-        let staged = stage_body_for_object_store(&mut body, &object_store).await?;
+        let staged = stage_body_with_spill(&mut body).await?;
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
         let (staged, body_length) =
@@ -288,6 +283,13 @@ impl super::PostgresBackend {
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
         let intent_id = crate::upload_identity::xorb(expected_hash, body_length);
+        let permit = self
+            .stream_work_pool
+            .acquire()
+            .await
+            .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
+        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
+            .await?;
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
             intent_id.clone(),
@@ -304,23 +306,16 @@ impl super::PostgresBackend {
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
+        let intent = coordinator
+            .content_addressed_upload_attempt(&intent)
+            .await?;
         let request_session_identity = self.request_session_identity.clone();
         let result = coordinator
             .with_upload_intent(&intent, move || async move {
                 crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
                     .await?;
-                let result = match staged {
-                    StagedRequestBody::Memory { bytes, .. } => {
-                        store_uploaded_xorb_bytes(&object_store, expected_hash, &bytes)
-                            .await
-                            .map_err(ServerError::from)
-                    }
-                    StagedRequestBody::File { file, .. } => {
-                        store_uploaded_xorb_file_path(&object_store, expected_hash, file.path())
-                            .await
-                            .map_err(ServerError::from)
-                    }
-                };
+                let result =
+                    store_admitted_xorb(&object_store, expected_hash, staged, permit).await;
                 crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
                     .await?;
                 result
@@ -346,7 +341,7 @@ impl super::PostgresBackend {
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
         let object_store = self.object_store();
-        let staged = stage_body_for_object_store(&mut body, &object_store).await?;
+        let staged = stage_body_with_spill(&mut body).await?;
         let body_length = staged.length();
         let body_hash = staged.hash();
         let body_hash_hex = hex::encode(body_hash.as_bytes());
@@ -366,21 +361,22 @@ impl super::PostgresBackend {
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
+        let intent = coordinator
+            .content_addressed_upload_attempt(&intent)
+            .await?;
         let result = coordinator
             .with_upload_intent_scoped(
                 "shardline",
                 reliability_repository,
                 &intent,
                 move || async move {
-                    match staged {
-                        StagedRequestBody::Memory { bytes, .. } => {
-                            let publication_backend = publication_backend.clone();
-                            register_uploaded_shard_bytes_with_member_references(
-                                &object_store,
-                                &bytes,
-                                repository_scope,
-                                shard_metadata_limits,
-                                move |records, mappings, references, identities| async move {
+                    let (prepared, _verification_permit) = crate::upload_ingest::prepare_native_shard(
+                        staged, object_store.clone(), repository_scope.cloned(),
+                        shard_metadata_limits, &self.stream_work_pool,
+                    ).await?;
+                    crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity).await?;
+                    prepared.register(
+                                move |records, mappings, references, identities, descriptors| async move {
                                     if let Some(mut connection) =
                                         crate::maintenance_barrier::RequestSession::connection_for(
                                             &request_session_identity,
@@ -388,7 +384,7 @@ impl super::PostgresBackend {
                                         .await
                                     {
                                         publication_backend
-                                            .commit_validated_native_shard_on_connection_with_xet_identities(
+                                            .commit_validated_native_shard_on_connection_with_descriptors(
                                                 connection
                                                     .as_mut()
                                                     .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
@@ -396,15 +392,17 @@ impl super::PostgresBackend {
                                                 &mappings,
                                                 &references,
                                                 &identities,
+                                                &descriptors,
                                             )
                                             .await?;
                                     } else {
                                         publication_backend
-                                        .commit_validated_native_shard_with_xet_identities(
+                                        .commit_validated_native_shard_with_descriptors(
                                             &records,
                                             &mappings,
                                             &references,
                                             &identities,
+                                            &descriptors,
                                         )
                                         .await?;
                                     }
@@ -412,47 +410,6 @@ impl super::PostgresBackend {
                                 },
                             )
                             .await
-                        }
-                        StagedRequestBody::File { file, .. } => {
-                            register_uploaded_shard_file_with_member_references(
-                                &object_store,
-                                file.path(),
-                                repository_scope,
-                                shard_metadata_limits,
-                                move |records, mappings, references, identities| async move {
-                                    if let Some(mut connection) =
-                                        crate::maintenance_barrier::RequestSession::connection_for(
-                                            &request_session_identity,
-                                        )
-                                        .await
-                                    {
-                                        publication_backend
-                                            .commit_validated_native_shard_on_connection_with_xet_identities(
-                                                connection
-                                                    .as_mut()
-                                                    .ok_or_else(|| shardline_index::PostgresMetadataStoreError::from(sqlx::Error::PoolClosed))?,
-                                                &records,
-                                                &mappings,
-                                                &references,
-                                                &identities,
-                                            )
-                                            .await?;
-                                    } else {
-                                        publication_backend
-                                        .commit_validated_native_shard_with_xet_identities(
-                                            &records,
-                                            &mappings,
-                                            &references,
-                                            &identities,
-                                        )
-                                        .await?;
-                                    }
-                                    Ok(())
-                                },
-                            )
-                            .await
-                        }
-                    }
                     .map_err(ServerError::from)
                 },
             )

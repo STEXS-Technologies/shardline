@@ -8,7 +8,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header::AUTHORIZATION},
     response::IntoResponse,
     response::Response,
 };
@@ -22,7 +22,9 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::{commit, error::HubApiError, models::*};
 
-use super::{HubRepository, HubState, lfs_object_key, stream_object};
+use super::{
+    HubRepository, HubState, lfs_object_key, object_io::stream_object_range, stream_object,
+};
 
 /// Maximum number of objects allowed in a single batch request.
 const MAX_LFS_BATCH_OBJECTS: usize = 1024;
@@ -86,9 +88,7 @@ impl LfsUploadStaging {
     async fn file_backed(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
         let temporary = new_lfs_temporary_file(local_root)
             .map_err(|error| HubApiError::CasError(error.to_string()))?;
-        let output = tokio::fs::File::create(temporary.path())
-            .await
-            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        let output = staging_output(&temporary)?;
         Ok(Self {
             memory: None,
             permit: None,
@@ -114,9 +114,7 @@ impl LfsUploadStaging {
 
             let temporary = new_lfs_temporary_file(self.local_root.as_deref())
                 .map_err(|error| HubApiError::CasError(error.to_string()))?;
-            let mut output = tokio::fs::File::create(temporary.path())
-                .await
-                .map_err(|error| HubApiError::CasError(error.to_string()))?;
+            let mut output = staging_output(&temporary)?;
             output
                 .write_all(memory)
                 .await
@@ -159,6 +157,16 @@ impl LfsUploadStaging {
             .map(LfsUploadStagedContent::File)
             .ok_or_else(|| HubApiError::CasError("LFS staging sink is unavailable".to_owned()))
     }
+}
+
+fn staging_output(temporary: &NamedTempFile) -> Result<tokio::fs::File, HubApiError> {
+    // Use the already-open temporary inode. An asynchronous path-based create
+    // can run after cancellation unlinks the guard, recreating an orphan file.
+    let file = temporary
+        .as_file()
+        .try_clone()
+        .map_err(|error| HubApiError::CasError(error.to_string()))?;
+    Ok(tokio::fs::File::from_std(file))
 }
 
 /// Place local-store staging files on the store's filesystem when possible.
@@ -213,8 +221,14 @@ pub(crate) async fn lfs_batch_git(
     Path((ns, repo_name)): Path<(String, String)>,
     Json(request): Json<LfsBatchRequest>,
 ) -> Result<Json<LfsBatchResponse>, HubApiError> {
-    let repo_name = repo_name.strip_suffix(".git").unwrap_or(&repo_name);
-    repo.require_binding(&ns, repo_name)?;
+    let repo_name = crate::git::smart_http::repository::canonical_name_for_claims(
+        &state,
+        repo.capability().claims(),
+        &ns,
+        &repo_name,
+    )
+    .await?;
+    repo.require_binding(&ns, &repo_name)?;
     lfs_batch_inner(&state, repo.capability(), request).await
 }
 
@@ -227,11 +241,17 @@ pub(crate) async fn lfs_batch_git_typed(
     Path((repo_type, ns, repo_name)): Path<(String, String, String)>,
     Json(request): Json<LfsBatchRequest>,
 ) -> Result<Json<LfsBatchResponse>, HubApiError> {
-    if !matches!(repo_type.as_str(), "datasets" | "spaces") {
+    if !matches!(repo_type.as_str(), "models" | "datasets" | "spaces") {
         return Err(HubApiError::NotFound);
     }
-    let repo_name = repo_name.strip_suffix(".git").unwrap_or(&repo_name);
-    repo.require_binding(&ns, repo_name)?;
+    let repo_name = crate::git::smart_http::repository::canonical_name_for_claims(
+        &state,
+        repo.capability().claims(),
+        &ns,
+        &repo_name,
+    )
+    .await?;
+    repo.require_binding(&ns, &repo_name)?;
     lfs_batch_inner(&state, repo.capability(), request).await
 }
 
@@ -256,14 +276,17 @@ async fn lfs_batch_inner(
         ));
     }
 
-    // Validate hash algorithm.
+    // The official Hugging Face JavaScript client spells SHA-256 `sha_256`.
+    // Accept that wire alias without changing object verification or identity.
     if let Some(hash_algo) = request.hash_algo.as_deref()
-        && hash_algo != "sha256"
+        && !matches!(hash_algo, "sha256" | "sha_256")
     {
         return Err(HubApiError::BadRequest(
             "unsupported hash algorithm".to_owned(),
         ));
     }
+
+    super::lfs_revision::authorize(state, capability, &request).await?;
 
     // Xet uploads register both the native reconstruction and the file's LFS
     // SHA-256 in the uploaded shard. Hub commits still contain the ordinary
@@ -287,16 +310,76 @@ async fn lfs_batch_inner(
             commit::validate_lfs_oid(&object.oid)
                 .map_err(|error| HubApiError::BadRequest(error.to_string()))?;
         }
-        let objects = request
-            .objects
-            .into_iter()
-            .map(|object| LfsObjectResponse {
+        let claims = capability.claims().ok_or(HubApiError::Unauthorized)?;
+        let auth = state.auth.as_ref().ok_or(HubApiError::Unauthorized)?;
+        let token = auth
+            .provider()
+            .mint_token(claims)
+            .map_err(|_error| HubApiError::InvalidToken)?;
+        let cas_url = state.public_base_url.trim_end_matches('/').to_owned();
+        // Xet clients use the action href to renew credentials, rather than
+        // uploading a body there. Keep the CAS base in its dedicated header.
+        let scope = claims.repository();
+        let name = format!("{}/{}", scope.owner(), scope.name());
+        let stored_repo = state
+            .store
+            .get_repo(&name)
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        let repo_type = stored_repo.map_or("models", |repo| super::repo_type_path(repo.repo_type));
+        let mut refresh = url::Url::parse(&state.public_base_url)
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        refresh
+            .path_segments_mut()
+            .map_err(|()| HubApiError::CasError("invalid public URL".to_owned()))?
+            .pop_if_empty()
+            .extend([
+                "api",
+                repo_type,
+                scope.owner(),
+                scope.name(),
+                "xet-write-token",
+                if request.ref_.name.is_empty() {
+                    scope.revision().unwrap_or("main")
+                } else {
+                    &request.ref_.name
+                },
+            ]);
+        let headers = BTreeMap::from([
+            ("X-Xet-Cas-Url".to_owned(), cas_url.clone()),
+            ("X-Xet-Access-Token".to_owned(), token),
+            (
+                "X-Xet-Token-Expiration".to_owned(),
+                claims.expires_at_unix_seconds().to_string(),
+            ),
+        ]);
+        let mut objects = Vec::with_capacity(request.objects.len());
+        for object in request.objects {
+            let registered = crate::git::smart_http::xet_file_hash(
+                state.clone(),
+                capability.clone(),
+                object.oid.clone(),
+                object.size,
+            )
+            .await?
+            .is_some();
+            // An absent action means already uploaded to stock Git LFS.
+            // Only a verified repository-scoped native identity justifies it.
+            let actions = (!registered).then(|| LfsObjectActions {
+                upload: Some(LfsObjectAction {
+                    href: refresh.to_string(),
+                    header: Some(headers.clone()),
+                    ssh: None,
+                }),
+                download: None,
+                verify: None,
+            });
+            objects.push(LfsObjectResponse {
                 oid: object.oid,
                 size: object.size,
-                actions: None,
+                actions,
                 error: None,
-            })
-            .collect();
+            });
+        }
         return Ok(Json(LfsBatchResponse {
             transfer: transfer.to_owned(),
             objects,
@@ -305,122 +388,143 @@ async fn lfs_batch_inner(
     }
 
     let action_header = lfs_action_auth_header(state, capability)?;
-
-    let objects: Result<Vec<LfsObjectResponse>, HubApiError> = request
-        .objects
-        .iter()
-        .map(|obj| -> Result<LfsObjectResponse, HubApiError> {
-            let key = match lfs_object_key(&obj.oid, capability) {
-                Ok(k) => k,
-                Err(e) => {
-                    return Ok(LfsObjectResponse {
-                        oid: obj.oid.clone(),
-                        size: obj.size,
-                        actions: None,
-                        error: Some(LfsObjectError {
-                            code: 400,
-                            message: format!("invalid oid: {e}"),
-                        }),
-                    });
-                }
-            };
-            let exists = state
-                .object_store
-                .contains(&key)
-                .map_err(|error| HubApiError::CasError(error.to_string()))?;
-            let actions = match request.operation {
-                LfsBatchOperation::Download => {
-                    if exists {
-                        Some(LfsObjectActions {
-                            download: Some(LfsObjectAction {
-                                href: format!(
-                                    "{}/lfs/objects/{}",
-                                    state.public_base_url.trim_end_matches('/'),
-                                    obj.oid
-                                ),
-                                header: action_header.clone(),
-                                ssh: None,
-                            }),
-                            upload: None,
-                            verify: None,
-                        })
-                    } else {
-                        None
-                    }
-                }
-                LfsBatchOperation::Upload => {
-                    if exists {
-                        // Standard clients treat an object without actions as
-                        // already uploaded and skip it. A verify-only action
-                        // is invalid for their upload flow because it still
-                        // requires an upload action.
-                        None
-                    } else {
-                        Some(LfsObjectActions {
-                            download: None,
-                            upload: Some(LfsObjectAction {
-                                href: lfs_upload_action_url(state, capability, &obj.oid)?,
-                                // huggingface_hub's single-part LFS uploader
-                                // does not forward action headers. The short-
-                                // lived, object-scoped upload URL carries its
-                                // own capability instead.
-                                header: None,
-                                ssh: None,
-                            }),
-                            verify: Some(LfsObjectAction {
-                                href: format!(
-                                    "{}/lfs/objects/{}/verify",
-                                    state.public_base_url.trim_end_matches('/'),
-                                    obj.oid
-                                ),
-                                header: action_header.clone(),
-                                ssh: None,
-                            }),
-                        })
-                    }
-                }
-                LfsBatchOperation::Verify => {
-                    if exists {
-                        Some(LfsObjectActions {
-                            download: None,
-                            upload: None,
-                            verify: Some(LfsObjectAction {
-                                href: format!(
-                                    "{}/lfs/objects/{}/verify",
-                                    state.public_base_url.trim_end_matches('/'),
-                                    obj.oid
-                                ),
-                                header: action_header.clone(),
-                                ssh: None,
-                            }),
-                        })
-                    } else {
-                        None
-                    }
-                }
-            };
-
-            let error = if !exists
-                && (request.operation == LfsBatchOperation::Download
-                    || request.operation == LfsBatchOperation::Verify)
+    let mut published = None;
+    let mut objects = Vec::with_capacity(request.objects.len());
+    for obj in &request.objects {
+        let key = match crate::object_locations::file_key(state, &obj.oid, capability) {
+            Ok(k) => k,
+            Err(e) => {
+                objects.push(LfsObjectResponse {
+                    oid: obj.oid.clone(),
+                    size: obj.size,
+                    actions: None,
+                    error: Some(LfsObjectError {
+                        code: 400,
+                        message: format!("invalid oid: {e}"),
+                    }),
+                });
+                continue;
+            }
+        };
+        let mut exists = state
+            .object_store
+            .contains(&key)
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        if !exists && request.operation == LfsBatchOperation::Download {
+            exists = crate::git::smart_http::xet_file_hash(
+                state.clone(),
+                capability.clone(),
+                obj.oid.clone(),
+                obj.size,
+            )
+            .await?
+            .is_some();
+        }
+        if !exists && request.operation == LfsBatchOperation::Download {
+            if published.is_none() {
+                published =
+                    Some(crate::git::smart_http::scoped_published_files(state, capability).await?);
+            }
+            if let Some(Some(published)) = &published
+                && let Some(published_key) = published.key(state, &obj.oid, capability)?
             {
-                Some(LfsObjectError {
-                    code: 404,
-                    message: "Object not found".to_owned(),
-                })
-            } else {
-                None
-            };
+                exists = state
+                    .object_store
+                    .contains(&published_key)
+                    .map_err(|error| HubApiError::CasError(error.to_string()))?;
+            }
+        }
+        let actions = match request.operation {
+            LfsBatchOperation::Download => {
+                if exists {
+                    Some(LfsObjectActions {
+                        download: Some(LfsObjectAction {
+                            href: format!(
+                                "{}/lfs/objects/{}",
+                                state.public_base_url.trim_end_matches('/'),
+                                obj.oid
+                            ),
+                            header: action_header.clone(),
+                            ssh: None,
+                        }),
+                        upload: None,
+                        verify: None,
+                    })
+                } else {
+                    None
+                }
+            }
+            LfsBatchOperation::Upload => {
+                if exists {
+                    // Standard clients treat an object without actions as
+                    // already uploaded and skip it. A verify-only action
+                    // is invalid for their upload flow because it still
+                    // requires an upload action.
+                    None
+                } else {
+                    Some(LfsObjectActions {
+                        download: None,
+                        upload: Some(LfsObjectAction {
+                            href: lfs_upload_action_url(state, capability, &obj.oid)?,
+                            // huggingface_hub's single-part LFS uploader
+                            // does not forward action headers. The short-
+                            // lived, object-scoped upload URL carries its
+                            // own capability instead.
+                            header: None,
+                            ssh: None,
+                        }),
+                        verify: Some(LfsObjectAction {
+                            href: format!(
+                                "{}/lfs/objects/{}/verify",
+                                state.public_base_url.trim_end_matches('/'),
+                                obj.oid
+                            ),
+                            header: action_header.clone(),
+                            ssh: None,
+                        }),
+                    })
+                }
+            }
+            LfsBatchOperation::Verify => {
+                if exists {
+                    Some(LfsObjectActions {
+                        download: None,
+                        upload: None,
+                        verify: Some(LfsObjectAction {
+                            href: format!(
+                                "{}/lfs/objects/{}/verify",
+                                state.public_base_url.trim_end_matches('/'),
+                                obj.oid
+                            ),
+                            header: action_header.clone(),
+                            ssh: None,
+                        }),
+                    })
+                } else {
+                    None
+                }
+            }
+        };
 
-            Ok(LfsObjectResponse {
-                oid: obj.oid.clone(),
-                size: obj.size,
-                actions,
-                error,
+        let error = if !exists
+            && (request.operation == LfsBatchOperation::Download
+                || request.operation == LfsBatchOperation::Verify)
+        {
+            Some(LfsObjectError {
+                code: 404,
+                message: "Object not found".to_owned(),
             })
-        })
-        .collect();
-    let objects = objects?;
+        } else {
+            None
+        };
+
+        objects.push(LfsObjectResponse {
+            oid: obj.oid.clone(),
+            size: obj.size,
+            actions,
+            error,
+        });
+    }
 
     Ok(Json(LfsBatchResponse {
         transfer: transfer.to_owned(),
@@ -568,6 +672,12 @@ pub(crate) async fn lfs_upload(
         .map_err(|error| HubApiError::CasError(error.to_string()))?
     {
         verify_duplicate_local_lfs_upload(&state, &key, &oid, body, existing).await?;
+        crate::object_locations::remember(
+            &state,
+            &repo,
+            shardline_index::hub::HubObjectKind::File,
+            &oid,
+        )?;
         return Ok(StatusCode::OK);
     }
 
@@ -613,6 +723,12 @@ pub(crate) async fn lfs_upload(
                 HubApiError::CasError(error.to_string())
             })?,
     };
+    crate::object_locations::remember(
+        &state,
+        &repo,
+        shardline_index::hub::HubObjectKind::File,
+        &oid,
+    )?;
     Ok(StatusCode::OK)
 }
 
@@ -734,7 +850,7 @@ pub(crate) async fn lfs_verify(
             "LFS object exceeds verification size limit".to_owned(),
         ));
     }
-    let key = lfs_object_key(&path_oid, repo.capability())?;
+    let key = crate::object_locations::file_key(&state, &path_oid, repo.capability())?;
     let metadata = state
         .object_store
         .metadata(&key)
@@ -822,35 +938,187 @@ pub(crate) async fn lfs_download(
     State(state): State<HubState>,
     repo: HubRepository,
     Path(oid): Path<String>,
+    method: Method,
+    headers: HeaderMap,
 ) -> Result<Response, HubApiError> {
     shardline_metrics::record_hub_api_request("lfs_download", "GET", 200);
     shardline_metrics::record_hub_api_file_download();
-    let key = lfs_object_key(&oid, repo.capability())?;
-    let meta = state
+    let mut key = crate::object_locations::file_key(&state, &oid, repo.capability())?;
+    let mut meta = state
         .object_store
         .metadata(&key)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    if meta.is_none()
+        && let Some(published) =
+            crate::git::smart_http::scoped_published_files(&state, repo.capability()).await?
+        && let Some(published_key) = published.key(&state, &oid, repo.capability())?
+    {
+        key = published_key;
+        meta = state
+            .object_store
+            .metadata(&key)
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+    }
     let Some(meta) = meta else {
-        return stream_hf_xet_object(&state, repo.capability(), &oid).await;
+        return stream_hf_xet_object(&state, repo.capability(), &oid, &method, &headers).await;
     };
     let length = meta.length();
-    let mut response = stream_object(&state.object_store, key, length).into_response();
+    let etag = format!("\"{oid}\"");
+    if let Some(response) = super::download_conditions::precondition_response(&headers, &etag)? {
+        return Ok(response);
+    }
+    let selection = if method == Method::HEAD {
+        LfsRangeSelection::Full
+    } else {
+        parse_lfs_range(&headers, length, &etag)
+    };
+    let mut response = match selection {
+        LfsRangeSelection::Full => {
+            let mut response = if method == Method::HEAD {
+                Response::new(Body::empty())
+            } else {
+                stream_object(&state.object_store, key, length).into_response()
+            };
+            response
+                .headers_mut()
+                .insert(axum::http::header::CONTENT_LENGTH, length.into());
+            response
+        }
+        LfsRangeSelection::Partial(range) => {
+            let range_length = range
+                .end_inclusive()
+                .checked_sub(range.start())
+                .and_then(|distance| distance.checked_add(1))
+                .ok_or_else(|| HubApiError::CasError("invalid LFS range".to_owned()))?;
+            let mut response = stream_object_range(
+                &state.object_store,
+                key,
+                length,
+                range.start(),
+                range_length,
+            )
+            .map_err(|error| HubApiError::CasError(error.to_string()))?
+            .into_response();
+            *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_RANGE,
+                format!("bytes {}-{}/{length}", range.start(), range.end_inclusive())
+                    .parse()
+                    .map_err(|_error| HubApiError::BadRequest("invalid LFS range".to_owned()))?,
+            );
+            response
+                .headers_mut()
+                .insert(axum::http::header::CONTENT_LENGTH, range_length.into());
+            response
+        }
+        LfsRangeSelection::Unsatisfiable => {
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_RANGE,
+                format!("bytes */{length}")
+                    .parse()
+                    .map_err(|_error| HubApiError::NotFound)?,
+            );
+            response
+        }
+    };
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         "application/octet-stream"
             .parse()
             .map_err(|_error| HubApiError::NotFound)?,
     );
-    response
-        .headers_mut()
-        .insert(axum::http::header::CONTENT_LENGTH, length.into());
-    Ok((StatusCode::OK, response).into_response())
+    response.headers_mut().insert(
+        axum::http::header::ACCEPT_RANGES,
+        "bytes".parse().map_err(|_error| HubApiError::NotFound)?,
+    );
+    response.headers_mut().insert(
+        axum::http::header::ETAG,
+        etag.parse().map_err(|_error| HubApiError::NotFound)?,
+    );
+    Ok(response)
+}
+
+pub(crate) enum LfsRangeSelection {
+    Full,
+    Partial(ByteRange),
+    Unsatisfiable,
+}
+
+pub(crate) fn parse_lfs_range(headers: &HeaderMap, length: u64, etag: &str) -> LfsRangeSelection {
+    let Some(range_header) = headers.get(axum::http::header::RANGE) else {
+        return LfsRangeSelection::Full;
+    };
+    if headers
+        .get(axum::http::header::IF_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|if_range| if_range != etag)
+    {
+        return LfsRangeSelection::Full;
+    }
+    let Ok(range) = range_header.to_str() else {
+        return LfsRangeSelection::Full;
+    };
+    let Some(specification) = range.strip_prefix("bytes=") else {
+        return LfsRangeSelection::Full;
+    };
+    if specification.contains(',') {
+        // Multi-range responses are not implemented. RFC 9110 permits ignoring
+        // a Range field, so clients receive the complete representation.
+        return LfsRangeSelection::Full;
+    }
+    let Some((start, end)) = specification.split_once('-') else {
+        return LfsRangeSelection::Full;
+    };
+    if length == 0 {
+        return LfsRangeSelection::Unsatisfiable;
+    }
+
+    let (start, end) = if start.is_empty() {
+        let Ok(suffix_length) = end.parse::<u64>() else {
+            return LfsRangeSelection::Full;
+        };
+        if suffix_length == 0 {
+            return LfsRangeSelection::Unsatisfiable;
+        }
+        let selected_length = suffix_length.min(length);
+        (
+            length.saturating_sub(selected_length),
+            length.saturating_sub(1),
+        )
+    } else {
+        let Ok(start) = start.parse::<u64>() else {
+            return LfsRangeSelection::Full;
+        };
+        if start >= length {
+            return LfsRangeSelection::Unsatisfiable;
+        }
+        let end = if end.is_empty() {
+            length.saturating_sub(1)
+        } else {
+            let Ok(end) = end.parse::<u64>() else {
+                return LfsRangeSelection::Full;
+            };
+            if end < start {
+                return LfsRangeSelection::Unsatisfiable;
+            }
+            end.min(length.saturating_sub(1))
+        };
+        (start, end)
+    };
+
+    ByteRange::new(start, end)
+        .map(LfsRangeSelection::Partial)
+        .unwrap_or(LfsRangeSelection::Unsatisfiable)
 }
 
 async fn stream_hf_xet_object(
     state: &HubState,
     capability: &shardline_server_core::AuthorizedRepository,
     oid: &str,
+    method: &Method,
+    request_headers: &HeaderMap,
 ) -> Result<Response, HubApiError> {
     let auth = state.auth.as_ref().ok_or(HubApiError::NotFound)?;
     let claims = capability.claims().ok_or(HubApiError::NotFound)?;
@@ -873,24 +1141,42 @@ async fn stream_hf_xet_object(
         "{}/v1/hub/xet-files/{oid}",
         state.public_base_url.trim_end_matches('/')
     );
-    let upstream = client
-        .get(url)
-        .bearer_auth(read_token)
+    let mut request = client.request(method.clone(), url).bearer_auth(read_token);
+    for name in [
+        axum::http::header::RANGE,
+        axum::http::header::IF_RANGE,
+        axum::http::header::IF_MATCH,
+        axum::http::header::IF_NONE_MATCH,
+    ] {
+        for value in request_headers.get_all(&name) {
+            request = request.header(name.clone(), value);
+        }
+    }
+    let upstream = request
         .send()
         .await
         .map_err(|error| HubApiError::CasError(error.to_string()))?;
     if upstream.status() == StatusCode::NOT_FOUND {
         return Err(HubApiError::NotFound);
     }
-    if !upstream.status().is_success() {
+    let status = upstream.status();
+    if let Some(response) = retryable_xet_read_response(status) {
+        return Ok(response);
+    }
+    if !status.is_success()
+        && ![
+            StatusCode::NOT_MODIFIED,
+            StatusCode::PRECONDITION_FAILED,
+            StatusCode::RANGE_NOT_SATISFIABLE,
+        ]
+        .contains(&status)
+    {
         return Err(HubApiError::CasError(format!(
             "internal Xet file read returned {}",
             upstream.status()
         )));
     }
-    let content_length = upstream
-        .content_length()
-        .ok_or_else(|| HubApiError::CasError("Xet file response omitted length".to_owned()))?;
+    let response_headers = upstream.headers().clone();
     let stream = upstream
         .bytes_stream()
         .map(|chunk| chunk.map_err(std::io::Error::other));
@@ -901,10 +1187,41 @@ async fn stream_hf_xet_object(
             .parse()
             .map_err(|_error| HubApiError::NotFound)?,
     );
-    response
-        .headers_mut()
-        .insert(axum::http::header::CONTENT_LENGTH, content_length.into());
-    Ok((StatusCode::OK, response).into_response())
+    for name in [
+        axum::http::header::CONTENT_LENGTH,
+        axum::http::header::CONTENT_RANGE,
+        axum::http::header::ACCEPT_RANGES,
+        axum::http::header::ETAG,
+    ] {
+        if let Some(value) = response_headers.get(&name) {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+    *response.status_mut() = status;
+    Ok(response)
+}
+
+// Preserve overload semantics across the Hub/native-reader boundary. Do not
+// forward an upstream error body, which may contain deployment details.
+fn retryable_xet_read_response(status: StatusCode) -> Option<Response> {
+    if !matches!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
+    ) {
+        return None;
+    }
+    let mut response = (
+        status,
+        Json(
+            serde_json::json!({"error": "file reader temporarily unavailable; retry the request"}),
+        ),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("1"),
+    );
+    Some(response)
 }
 
 #[cfg(test)]
@@ -913,6 +1230,25 @@ mod upload_staging_tests {
 
     use super::{LFS_UPLOAD_MEMORY_THRESHOLD, LfsUploadStaging};
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn native_read_overload_preserves_retryable_status() {
+        for status in [
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let response = super::retryable_xet_read_response(status).unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+        }
+        for status in [
+            axum::http::StatusCode::OK,
+            axum::http::StatusCode::FORBIDDEN,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert!(super::retryable_xet_read_response(status).is_none());
+        }
+    }
 
     #[tokio::test]
     async fn small_upload_stays_in_memory() {

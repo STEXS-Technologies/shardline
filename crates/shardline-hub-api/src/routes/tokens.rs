@@ -100,9 +100,31 @@ async fn xet_token_response<const WRITE: bool>(
         .await?;
         // Normalize immutable identities only. A ref-limited token must not
         // gain access to another branch or tag merely sharing today's head.
-        if ![commit_sha.as_str(), public.as_str()].contains(&scoped_revision)
-            || ![commit_sha.as_str(), public.as_str()].contains(&revision)
-        {
+        let immutable_pair = [commit_sha.as_str(), public.as_str()].contains(&scoped_revision)
+            && [commit_sha.as_str(), public.as_str()].contains(&revision);
+        let read_current_commit = !WRITE
+            && [commit_sha.as_str(), public.as_str()].contains(&revision)
+            && crate::git::smart_http::resolve_commit_id(
+                state,
+                &repo_id,
+                scoped_revision,
+                repo.capability(),
+            )?
+            .as_deref()
+                == Some(commit_sha.as_str());
+        let read_history = !WRITE
+            && !immutable_pair
+            && !read_current_commit
+            && [commit_sha.as_str(), public.as_str()].contains(&revision)
+            && crate::revision_access::branch_contains_commit(
+                state,
+                &repo_id,
+                scoped_revision,
+                &commit_sha,
+                repo.capability(),
+            )
+            .await?;
+        if !immutable_pair && !read_current_commit && !read_history {
             return Err(HubApiError::Forbidden);
         }
     }
@@ -113,7 +135,7 @@ async fn xet_token_response<const WRITE: bool>(
         source_repository.provider(),
         namespace,
         repo_name,
-        Some(revision),
+        Some(if WRITE { revision } else { &commit_sha }),
     )
     .map_err(|error| {
         tracing::debug!("failed to scope Xet repository: {error}");
@@ -125,7 +147,11 @@ async fn xet_token_response<const WRITE: bool>(
         TokenScope::Read
     };
     let cas_claims = TokenClaims::new(
-        claims.issuer(),
+        if WRITE {
+            claims.issuer()
+        } else {
+            shardline_protocol::HUB_XET_READ_TOKEN_ISSUER
+        },
         claims.subject(),
         scope,
         repository,

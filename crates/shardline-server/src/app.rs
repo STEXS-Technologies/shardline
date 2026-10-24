@@ -1,15 +1,19 @@
 mod admin_api;
 mod background_tasks;
+mod delta;
+mod hub_xet_download;
 pub use background_tasks::RouterBackgroundTasks;
 mod metadata_routes;
 mod operational;
 mod protocol_routes;
+mod shard_progress;
 #[cfg(test)]
 pub(crate) use protocol_routes::oci::test_helpers::build_oci_postgres_test_cluster;
 mod provider;
 mod provider_routes;
 mod reconstruction_helpers;
 mod reconstruction_routes;
+mod xorb_transfer_capability;
 
 pub use protocol_routes::{LfsPatchEvidenceRepairInput, repair_lfs_patch_evidence};
 pub use provider::{
@@ -79,12 +83,13 @@ use admin_api::{
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use admin_api::{parse_admin_cursor_for_fuzzing, parse_admin_query_for_fuzzing};
+use hub_xet_download::download_hub_xet_file;
 use metadata_routes::{
     create_revision, delete_path, delete_revision, list_revisions, register_path, tree_lookup,
 };
 use operational::{
-    download_hub_xet_file, head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready,
-    stats, upload_shard, upload_xorb, write_xorb_transfer,
+    head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready, stats, upload_shard,
+    upload_xorb, write_xorb_transfer,
 };
 use protocol_routes::{
     bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
@@ -102,7 +107,7 @@ use provider_routes::{
     issue_xet_write_token,
 };
 use reconstruction_routes::{
-    batch_reconstruction, batch_reconstruction_post, reconstruction, reconstruction_v2,
+    batch_reconstruction, batch_reconstruction_post, head_file, reconstruction, reconstruction_v2,
 };
 
 pub const MAX_BATCH_RECONSTRUCTION_FILE_IDS: usize = 1024;
@@ -847,9 +852,15 @@ fn register_xet_routes(
                     )),
             )
             .route("/v1/reconstructions/{file_id}", get(reconstruction))
+            .route("/v1/files/{file_id}", head(head_file))
+            .route(
+                "/v2/file-chunk-hashes/{file_id}",
+                get(delta::file_chunk_hashes),
+            )
             .route("/v1/hub/xet-files/{sha256}", get(download_hub_xet_file))
             .route("/v2/reconstructions/{file_id}", get(reconstruction_v2))
             .route("/shards", post(upload_shard))
+            .route("/v2/shards", post(shard_progress::upload))
             .route("/v1/shards", post(upload_shard));
         if hub_enabled {
             app = app
@@ -910,8 +921,8 @@ async fn dispatch_native_xet_metadata(
     // URI through the native Xet trie, which will insert its own captures.
     let (mut parts, body) = request.into_parts();
     parts.extensions.clear();
-    let request = Request::from_parts(parts, body);
-    match dispatch.xet_routes.oneshot(request).await {
+    let rerouted_request = Request::from_parts(parts, body);
+    match dispatch.xet_routes.oneshot(rerouted_request).await {
         Ok(response) => response,
         Err(never) => match never {},
     }
@@ -934,8 +945,10 @@ fn accepts_native_xet_metadata(request: &Request<Body>) -> bool {
 
 fn is_native_xet_metadata_route(path: &str) -> bool {
     let segments: Vec<_> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
-    (segments.len() == 5 && segments[0] == "api" && segments[4] == "revisions")
-        || (segments.len() == 6 && segments[0] == "api" && segments[4] == "tree")
+    matches!(
+        segments.as_slice(),
+        ["api", _, _, _, "revisions"] | ["api", _, _, _, "tree", _]
+    )
 }
 
 fn register_lfs_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
@@ -1102,9 +1115,16 @@ fn build_hub_state(
                 if let Err(e) = shardline_index::hub::ensure_hub_tables(&hub_root) {
                     tracing::warn!("failed to create hub tables: {e}");
                 }
-                Ok(shardline_index::hub::BoxedHubStore::from_store(
-                    sqlite_store,
-                ))
+                let native_records =
+                    shardline_index::LocalRecordStore::open(root_dir.to_path_buf());
+                Ok(
+                    shardline_index::hub::BoxedHubStore::from_store(sqlite_store)
+                        .with_xet_identity_lookup(move |scope, sha256| {
+                            native_records
+                                .xet_file_identity(scope, sha256)
+                                .map_err(|error| Box::new(error) as _)
+                        }),
+                )
             },
             |pg_url| -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
                 let pool = sqlx::postgres::PgPoolOptions::new()
@@ -1366,6 +1386,13 @@ async fn gc_write_barrier_middleware(
             Err(_) => return ServerError::RequestTimedOut.into_response(),
         };
         let response = session.scope(next.run(request)).await;
+        if response
+            .extensions()
+            .get::<shard_progress::StreamingPublication>()
+            .is_some()
+        {
+            return shard_progress::retain_postgres_owner(response, session);
+        }
         session.finish().await;
         return response;
     }
@@ -1376,12 +1403,20 @@ async fn gc_write_barrier_middleware(
             .acquire_gc_write_barrier(state.config.root_dir()),
     )
     .await;
-    let _guard = match barrier {
+    let guard = match barrier {
         Ok(Ok(guard)) => guard,
         Ok(Err(error)) => return error.into_response(),
         Err(_) => return ServerError::RequestTimedOut.into_response(),
     };
-    next.run(request).await
+    let response = next.run(request).await;
+    if response
+        .extensions()
+        .get::<shard_progress::StreamingPublication>()
+        .is_some()
+    {
+        return shard_progress::retain_local_owner(response, guard);
+    }
+    response
 }
 
 async fn request_timeout_middleware(

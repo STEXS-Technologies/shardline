@@ -331,6 +331,25 @@ fn server_config_builder_with_max_request_body_bytes() {
         config.max_request_body_bytes(),
         NonZeroUsize::new(1_000_000).unwrap()
     );
+    assert_eq!(
+        config.max_xorb_body_bytes(),
+        config.max_request_body_bytes()
+    );
+    let config = config.with_max_xorb_body_bytes(NonZeroUsize::new(2_000_000).unwrap());
+    assert_eq!(config.max_xorb_body_bytes().get(), 2_000_000);
+    assert_eq!(config.max_request_body_bytes().get(), 1_000_000);
+}
+
+#[test]
+fn default_xorb_limit_includes_serialized_framing() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(config.max_request_body_bytes().get(), 64 * 1024 * 1024);
+    assert_eq!(config.max_xorb_body_bytes().get(), 128 * 1024 * 1024);
 }
 
 #[test]

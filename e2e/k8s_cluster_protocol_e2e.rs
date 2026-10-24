@@ -955,9 +955,7 @@ async fn handle_proxy(
             request = request.header(name, value);
         }
     }
-    if !headers.contains_key(AUTHORIZATION)
-        && transfer_path
-    {
+    if !headers.contains_key(AUTHORIZATION) && transfer_path {
         request = request.bearer_auth(&state.access_token);
     }
 

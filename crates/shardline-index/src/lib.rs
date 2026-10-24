@@ -89,6 +89,9 @@ mod test_invariant_error;
 mod tree;
 mod upload_intent;
 mod xet_hash;
+mod xet_repository_file;
+mod xet_xorb;
+pub use xet_xorb::{MAX_XET_DESCRIPTOR_CHUNKS, XetXorbChunk, XetXorbDescriptor};
 
 pub use dedupe::DedupeShardMapping;
 pub use ids::{FileId, StoredObjectId, XorbId};

@@ -11159,7 +11159,10 @@ async fn sqlite_dedupe_mapping_roundtrip() {
         chunks_after, chunks_after_first,
         "dedupe mapping should prevent chunk growth"
     );
-    assert_eq!(objects_after, objects_after_first, "duplicate uploads added objects");
+    assert_eq!(
+        objects_after, objects_after_first,
+        "duplicate uploads added objects"
+    );
     assert_eq!(
         object_bytes_after, object_bytes_after_first,
         "duplicate uploads added stored bytes"

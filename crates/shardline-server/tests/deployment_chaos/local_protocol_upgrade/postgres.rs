@@ -3,9 +3,41 @@ use super::*;
 
 #[tokio::test]
 async fn released_postgres_rolling_upgrade_preserves_live_writes_and_old_restart() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
-        eprintln!("SKIPPED: PostgreSQL rolling upgrade requires DATABASE_URL");
-        return;
+    // The Docker-qualified maintenance gate owns all its fixtures. A missing
+    // optional external URL must not silently skip its rolling-upgrade case.
+    #[cfg(feature = "docker")]
+    let services = if std::env::var_os("DATABASE_URL").is_none() {
+        Some(
+            shardline_test_support::DockerLocalStack::builder()
+                .with_postgres()
+                .start()
+                .expect("PostgreSQL rolling upgrade fixture")
+                .expect("PostgreSQL rolling upgrade requires Docker"),
+        )
+    } else {
+        None
+    };
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(std::env::VarError::NotPresent) => {
+            #[cfg(feature = "docker")]
+            {
+                services
+                    .as_ref()
+                    .and_then(|stack| stack.postgres_url())
+                    .expect("PostgreSQL fixture URL")
+            }
+            #[cfg(not(feature = "docker"))]
+            {
+                eprintln!(
+                    "SKIPPED: PostgreSQL rolling upgrade requires DATABASE_URL or Docker feature"
+                );
+                return;
+            }
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("invalid PostgreSQL rolling upgrade configuration")
+        }
     };
     assert!(resolve_n_minus_one_binary("PostgreSQL rolling upgrade").is_some());
     let pool = sqlx::PgPool::connect(&database_url).await.unwrap();

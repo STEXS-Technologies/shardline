@@ -70,7 +70,7 @@ pub enum S3SubResource {
     DeleteObjects,
     /// `?location` — `GetBucketLocation` stub.
     Location,
-    /// `?acl` — out of scope (`NotImplemented`).
+    /// `?acl` — read-only ACLs; updates are rejected because ACLs are disabled.
     Acl,
     /// `?policy` — out of scope (`NotImplemented`).
     Policy,
@@ -133,7 +133,7 @@ enum QueryParameter {
     /// A recognized-but-unsupported sub-resource (for example `restore`,
     /// `select`, `torrent`, `legal-hold`, `retention`, `attributes`,
     /// `replication`, `website`, `versionId`, `versions`, `logging`,
-    /// `requestPayment`, `accelerate`, or `object-lock`) — maps to
+    /// `requestPayment`, `accelerate`, `object-lock`, or `ownershipControls`) — maps to
     /// [`S3SubResource::Other`].
     Other,
 }
@@ -158,7 +158,9 @@ impl QueryParameter {
             "encryption" => Some(Self::Encryption),
             "restore" | "select" | "torrent" | "legal-hold" | "retention" | "attributes"
             | "replication" | "website" | "versionId" | "versions" | "logging"
-            | "requestPayment" | "accelerate" | "object-lock" => Some(Self::Other),
+            | "requestPayment" | "accelerate" | "object-lock" | "ownershipControls" => {
+                Some(Self::Other)
+            }
             _ => None,
         }
     }

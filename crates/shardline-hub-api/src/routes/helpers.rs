@@ -104,12 +104,13 @@ pub(crate) fn repo_type_path(rt: HubRepoType) -> &'static str {
 ///
 /// The const generic parameter `WRITE` selects the required scope:
 /// `HubRepository` (default, read-scoped) vs `HubRepository<true>` (write-scoped).
-/// `BIND` controls whether the token→repository binding is enforced; it is
-/// disabled only for the deliberately global repo-create routes.
+/// `BIND` controls whether the extractor binds a repository found in the URL.
+/// Pathless create routes disable URL binding and their handlers must bind the
+/// requested body/path identity with [`HubRepository::require_binding`].
 ///
 /// Pathless routes (LFS, repo list/search, repo create) carry no `(ns, repo)`
-/// in the URL; their isolation comes from the token claims carried by the
-/// capability, so the binding is skipped for them.
+/// in the URL. Their isolation comes from token claims; handlers that act on a
+/// repository identity supplied in a body must enforce that binding explicitly.
 #[derive(Debug, Clone)]
 pub struct HubRepository<const WRITE: bool = false, const BIND: bool = true> {
     /// The verified capability. Handlers must pass this (or its
@@ -174,6 +175,18 @@ impl<const WRITE: bool, const BIND: bool> HubRepository<WRITE, BIND> {
         } else {
             Err(HubApiError::Forbidden)
         }
+    }
+
+    /// Authorizes creation only; this grant never widens ordinary repo access.
+    pub(crate) fn require_creation_binding(&self, ns: &str, repo: &str) -> Result<(), HubApiError> {
+        if self
+            .capability
+            .claims()
+            .is_some_and(|claims| claims.grants_namespace_repository_creation(ns))
+        {
+            return Ok(());
+        }
+        self.require_binding(ns, repo)
     }
 }
 
@@ -572,13 +585,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deep_tree_tail_legit_owner_read_succeeds() {
+    async fn deep_tree_tail_legit_owner_reaches_entry_lookup() {
         // F-104 regression: a Read token for `bob/own` reading `bob/own` with a
         // deep tail must NOT be spuriously 403'd by the tail being misparsed as
         // a different repository.
         let (_td, state) = scoped_state("bob", "own");
         let status = get_status(state, "/api/models/bob/own/tree/main/datasets/foo/bar").await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -591,6 +604,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (_td, state) = scoped_state("alice", "models");
         let status = get_status(state, "/api/models/alice/models/tree/main/datasets/foo/bar").await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

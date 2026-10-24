@@ -70,6 +70,10 @@ where
         .iter()
         .map(|chunk_hash_hex| dedupe_shard_mapping(chunk_hash_hex, &parsed.shard_key))
         .collect::<Result<Vec<_>, _>>()?;
+    // Parsing can perform synchronous verification. Give a cancellation queued
+    // during that work a scheduling boundary before invoking durable metadata
+    // publication, even when the callback's future completes immediately.
+    tokio::task::yield_now().await;
     commit_metadata(parsed.records, mappings).await?;
 
     Ok(ShardUploadResponse {
@@ -102,6 +106,7 @@ where
         .iter()
         .map(|chunk_hash_hex| dedupe_shard_mapping(chunk_hash_hex, &parsed.shard_key))
         .collect::<Result<Vec<_>, _>>()?;
+    tokio::task::yield_now().await;
     commit_metadata(parsed.records, mappings).await?;
     Ok(ShardUploadResponse {
         result: parsed.result,
@@ -119,8 +124,8 @@ pub async fn register_uploaded_shard_bytes_with_member_references<Commit, Commit
     object_store: &ServerObjectStore,
     uploaded_body: &[u8],
     repository_scope: Option<&RepositoryScope>,
-    shard_metadata_limits: ShardMetadataLimits,
-    commit_metadata: Commit,
+    limits: ShardMetadataLimits,
+    commit: Commit,
 ) -> Result<ShardUploadResponse, XetAdapterError>
 where
     Commit: FnOnce(
@@ -131,25 +136,47 @@ where
     ) -> CommitFuture,
     CommitFuture: Future<Output = Result<(), XetAdapterError>>,
 {
-    let mut references = std::collections::HashSet::new();
-    let parsed = crate::shard_store::parse_uploaded_shard_from_reader(
+    register_uploaded_shard_bytes_with_verified_descriptors(
+        object_store,
+        uploaded_body,
+        repository_scope,
+        limits,
+        |records, mappings, references, identities, _descriptors| {
+            commit(records, mappings, references, identities)
+        },
+    )
+    .await
+}
+
+/// Registers bounded shard metadata with descriptors from the same complete
+/// Xorb verification pass. The callback must publish the metadata atomically.
+///
+/// # Errors
+/// Returns an error for parsing, source verification or publication failure.
+pub async fn register_uploaded_shard_bytes_with_verified_descriptors<Commit, CommitFuture>(
+    object_store: &ServerObjectStore,
+    uploaded_body: &[u8],
+    repository_scope: Option<&RepositoryScope>,
+    shard_metadata_limits: ShardMetadataLimits,
+    commit_metadata: Commit,
+) -> Result<ShardUploadResponse, XetAdapterError>
+where
+    Commit: FnOnce(
+        Vec<FileRecord>,
+        Vec<DedupeShardMapping>,
+        Vec<ObjectKey>,
+        Vec<XetFileIdentity>,
+        Vec<shardline_index::XetXorbDescriptor>,
+    ) -> CommitFuture,
+    CommitFuture: Future<Output = Result<(), XetAdapterError>>,
+{
+    let prepared = crate::prepare_uploaded_shard(
         &mut std::io::Cursor::new(uploaded_body),
         object_store,
         repository_scope,
         shard_metadata_limits,
-        Some(&mut references),
     )?;
-    let mappings = parsed
-        .dedupe_chunk_hashes
-        .iter()
-        .map(|hash| dedupe_shard_mapping(hash, &parsed.shard_key))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut references: Vec<_> = references.into_iter().collect();
-    references.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
-    commit_metadata(parsed.records, mappings, references, parsed.file_identities).await?;
-    Ok(ShardUploadResponse {
-        result: parsed.result,
-    })
+    prepared.register(commit_metadata).await
 }
 
 /// File-backed registration with references from the same validation pass.
@@ -163,8 +190,8 @@ pub async fn register_uploaded_shard_file_with_member_references<Commit, CommitF
     object_store: &ServerObjectStore,
     path: &Path,
     repository_scope: Option<&RepositoryScope>,
-    shard_metadata_limits: ShardMetadataLimits,
-    commit_metadata: Commit,
+    limits: ShardMetadataLimits,
+    commit: Commit,
 ) -> Result<ShardUploadResponse, XetAdapterError>
 where
     Commit: FnOnce(
@@ -175,27 +202,51 @@ where
     ) -> CommitFuture,
     CommitFuture: Future<Output = Result<(), XetAdapterError>>,
 {
+    register_uploaded_shard_file_with_verified_descriptors(
+        object_store,
+        path,
+        repository_scope,
+        limits,
+        |records, mappings, references, identities, _descriptors| {
+            commit(records, mappings, references, identities)
+        },
+    )
+    .await
+}
+
+/// File-backed registration with verified descriptors and protected references.
+///
+/// # Errors
+/// Returns an error for parsing, source verification or publication failure.
+pub async fn register_uploaded_shard_file_with_verified_descriptors<Commit, CommitFuture>(
+    object_store: &ServerObjectStore,
+    path: &Path,
+    repository_scope: Option<&RepositoryScope>,
+    shard_metadata_limits: ShardMetadataLimits,
+    commit_metadata: Commit,
+) -> Result<ShardUploadResponse, XetAdapterError>
+where
+    Commit: FnOnce(
+        Vec<FileRecord>,
+        Vec<DedupeShardMapping>,
+        Vec<ObjectKey>,
+        Vec<XetFileIdentity>,
+        Vec<shardline_index::XetXorbDescriptor>,
+    ) -> CommitFuture,
+    CommitFuture: Future<Output = Result<(), XetAdapterError>>,
+{
     let mut file = std::fs::File::open(path).map_err(XetAdapterError::Io)?;
-    let mut references = std::collections::HashSet::new();
-    let parsed = crate::shard_store::parse_uploaded_shard_from_reader(
+    let prepared = crate::prepare_uploaded_shard(
         &mut file,
         object_store,
         repository_scope,
         shard_metadata_limits,
-        Some(&mut references),
     )?;
-    let mappings = parsed
-        .dedupe_chunk_hashes
-        .iter()
-        .map(|hash| dedupe_shard_mapping(hash, &parsed.shard_key))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut references: Vec<_> = references.into_iter().collect();
-    references.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
-    commit_metadata(parsed.records, mappings, references, parsed.file_identities).await?;
-    Ok(ShardUploadResponse {
-        result: parsed.result,
-    })
+    prepared.register(commit_metadata).await
 }
+
+#[cfg(test)]
+mod cancellation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -264,7 +315,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(
-                    compute_data_hash(b"fixture"),
+                    shardline_xet_core::merklehash::file_hash(&[(hash, 256_u64); 2]),
                     2_u64,
                     false,
                     false,
@@ -437,18 +488,18 @@ mod tests {
         store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         // 2. Build a shard referencing that xorb
-        let chunk_hash = compute_data_hash(b"x");
-        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+        let chunk_hash = compute_data_hash(&[0_u8; 256]);
+        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
             }],
         );
 
@@ -489,6 +540,80 @@ mod tests {
         assert_eq!(records.len(), 1, "expected one file record");
         assert_eq!(records[0].chunks.len(), 1, "expected one chunk");
         assert!(!records[0].file_id.is_empty());
+    }
+
+    #[test]
+    fn forged_chunk_membership_never_reaches_metadata_publication() {
+        use shardline_storage::ObjectStore;
+
+        let temp = tempfile::tempdir().unwrap();
+        let objects = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        let serialized = SerializedXorbObject::from_xorb_with_compression(
+            build_raw_xorb(1, ChunkSize::Fixed(256)),
+            CompressionScheme::None,
+            true,
+        )
+        .unwrap();
+        store_xorb_sync(
+            &objects,
+            &serialized.hash.hex(),
+            &serialized.serialized_data,
+        );
+        let actual_chunk = compute_data_hash(&[0_u8; 256]);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for mutation in 0..5 {
+            let mut claimed = XorbChunkSequenceEntry::new(actual_chunk, 256, 0);
+            let mut header = XorbChunkSequenceHeader::new(serialized.hash, 1, 256);
+            match mutation {
+                0 => claimed.chunk_hash = compute_data_hash(b"another tenant's content"),
+                1 => claimed.unpacked_segment_bytes = 255,
+                2 => claimed.chunk_byte_range_start = 1,
+                3 => header.num_bytes_in_xorb = 255,
+                _ => {}
+            }
+            let shard = serialize_test_shard(
+                vec![MDBFileInfo {
+                    metadata: FileDataSequenceHeader::new(
+                        file_hash(&[(actual_chunk, 256)]),
+                        1,
+                        false,
+                        false,
+                    ),
+                    segments: vec![FileDataSequenceEntry::new(
+                        serialized.hash,
+                        if mutation == 4 { 255 } else { 256 },
+                        0,
+                        1,
+                    )],
+                    verification: vec![],
+                    metadata_ext: None,
+                }],
+                vec![MDBXorbInfo {
+                    metadata: header,
+                    chunks: vec![claimed],
+                }],
+            );
+            let key = crate::shard_object_key(&compute_data_hash(&shard).hex()).unwrap();
+            let mut committed = false;
+            let result = rt.block_on(register_uploaded_shard_bytes(
+                &objects,
+                &shard,
+                None,
+                DEFAULT_SHARD_METADATA_LIMITS,
+                |_records, _mappings| {
+                    committed = true;
+                    async { Ok(()) }
+                },
+            ));
+            assert!(matches!(
+                result,
+                Err(XetAdapterError::InvalidSerializedShard(
+                    shardline_server_core::InvalidSerializedShardError::ParserRejectedMetadata
+                ))
+            ));
+            assert!(!committed, "unverified membership must not reach the index");
+            assert!(objects.metadata(&key).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -542,18 +667,18 @@ mod tests {
         store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         // 2. Build a shard referencing that xorb
-        let chunk_hash = compute_data_hash(b"x");
-        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+        let chunk_hash = compute_data_hash(&[0_u8; 256]);
+        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
             }],
         );
 
@@ -603,18 +728,18 @@ mod tests {
         let xorb_hash = serialized.hash;
         store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
-        let chunk_hash = compute_data_hash(b"x");
-        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+        let chunk_hash = compute_data_hash(&[0_u8; 256]);
+        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
             }],
         );
 

@@ -1,6 +1,65 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(feature = "docker")]
+#[ignore = "requires Docker and the pinned OCI_CONFORMANCE_BIN"]
+async fn official_oci_distribution_on_postgres_and_minio() {
+    let services = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .with_minio()
+        .start()
+        .expect("start disposable OCI backends")
+        .expect("Docker is required for remote OCI qualification");
+    let database = services.postgres_url().expect("PostgreSQL fixture");
+    let pool = sqlx::PgPool::connect(&database).await.unwrap();
+    shardline_server::apply_database_migrations(&pool)
+        .await
+        .unwrap();
+    let prefix = services.unique_s3_key_prefix("oci-conformance");
+    let raw = services
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO fixture");
+    let environment = [
+        ("TEST_S3_BUCKET", raw.bucket.clone()),
+        (
+            "TEST_S3_ENDPOINT",
+            raw.endpoint.clone().expect("fixture endpoint"),
+        ),
+        (
+            "TEST_S3_ACCESS_KEY",
+            raw.access_key.clone().expect("fixture access key"),
+        ),
+        (
+            "TEST_S3_SECRET_KEY",
+            raw.secret_key.clone().expect("fixture secret key"),
+        ),
+    ];
+    let storage = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_allow_http(true)
+        .with_key_prefix(Some(&prefix))
+        .with_credentials(
+            raw.access_key.map(shardline_protocol::SecretString::new),
+            raw.secret_key.map(shardline_protocol::SecretString::new),
+            None,
+        );
+    let root = tempfile::tempdir().unwrap();
+    let server = start_with_storage(
+        root.path(),
+        ServerFrontend::Oci,
+        false,
+        Some(&database),
+        Some(storage.clone()),
+    )
+    .await;
+    run_official_oci_distribution(root.path(), &server).await;
+    server.stop().await;
+    exercise_referrers(Some(&database), Some(storage.clone())).await;
+    oci_index::qualify_remote_reclamation(&database, storage, &environment).await;
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oci_missing_cross_mount_returns_resumable_upload() {
     let root = tempfile::tempdir().unwrap();
     let server = start(root.path(), ServerFrontend::Oci, false, None).await;

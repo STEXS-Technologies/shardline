@@ -1,6 +1,5 @@
 use axum::body::Bytes;
 use shardline_cas::{CasCoordinator, CasLimits};
-#[cfg(test)]
 use shardline_index::FileRecord;
 use shardline_index::{FileRecordStorageLayout, UploadIntent, UploadIntentState};
 use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
@@ -16,15 +15,11 @@ use crate::{
     model::UploadFileResponse,
     object_store::reconstruct_file_record_bytes,
     upload_ingest::{
-        FileUploadIngestor, RequestBodyReader, StagedRequestBody, UploadStorage,
-        stage_body_for_object_store, upload_attempt_id,
+        FileUploadIngestor, RequestBodyReader, UploadStorage, stage_body_with_spill,
+        upload_attempt_id,
     },
     validation::validate_identifier,
-    xet_adapter::{
-        FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response,
-        register_uploaded_shard_bytes_with_member_references,
-        register_uploaded_shard_file_with_member_references,
-    },
+    xet_adapter::{FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response},
 };
 
 impl LocalBackend {
@@ -96,18 +91,42 @@ impl LocalBackend {
         content_hash: Option<&str>,
         range: Option<ByteRange>,
     ) -> Result<(ServerByteStream, u64), ServerError> {
+        self.read_file_stream_scoped(file_id, content_hash, range, None)
+            .await
+    }
+
+    pub(crate) async fn read_file_stream_scoped(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        range: Option<ByteRange>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<(ServerByteStream, u64), ServerError> {
         // With a content hash the read is pinned to that immutable version
         // record; without one it resolves the latest record.
-        let record = self.read_record(file_id, content_hash, None).await?;
+        let record = self
+            .read_record(file_id, content_hash, repository_scope)
+            .await?;
         let total_bytes = record.total_bytes;
         crate::metrics::record_object_read_by_repr(record.storage_repr.as_str(), total_bytes);
-        let stream = file_record_byte_stream(
-            self.object_store(),
-            record,
-            range,
-            self.stream_work_pool.clone(),
-        )
-        .await?;
+        let stream = if record.storage_layout() == FileRecordStorageLayout::ReferencedObjectTerms {
+            if range.is_some() {
+                return Err(ServerError::RangeNotSatisfiable);
+            }
+            crate::server_frontend::xet::referenced_file_record_byte_stream(
+                self.object_store(),
+                record,
+                self.stream_work_pool.clone(),
+            )?
+        } else {
+            file_record_byte_stream(
+                self.object_store(),
+                record,
+                range,
+                self.stream_work_pool.clone(),
+            )
+            .await?
+        };
         Ok((stream, total_bytes))
     }
 
@@ -299,7 +318,7 @@ impl LocalBackend {
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
         let object_store = self.object_store();
-        let staged = stage_body_for_object_store(&mut body, &object_store).await?;
+        let staged = stage_body_with_spill(&mut body).await?;
         let body_length = staged.length();
         let body_hash = staged.hash();
         let body_hash_hex = hex::encode(body_hash.as_bytes());
@@ -318,57 +337,37 @@ impl LocalBackend {
         // Hold the metadata_write_lock for the entire shard commit to prevent
         // interleaved metadata writes from concurrent shard uploads.
         let _metadata_guard = self.metadata_write_lock.lock().await;
+        let intent = coordinator
+            .content_addressed_upload_attempt(&intent)
+            .await?;
         coordinator
             .with_upload_intent_scoped(
                 "shardline",
                 reliability_repository,
                 &intent,
                 move || async move {
-                    match staged {
-                        StagedRequestBody::Memory { bytes, .. } => {
-                            let record_store = record_store.clone();
-                            register_uploaded_shard_bytes_with_member_references(
-                                &object_store,
-                                &bytes,
-                                repository_scope,
-                                shard_metadata_limits,
+                    let (prepared, _verification_permit) = crate::upload_ingest::prepare_native_shard(
+                        staged, object_store.clone(), repository_scope.cloned(),
+                        shard_metadata_limits, &self.stream_work_pool,
+                    ).await?;
+                    prepared.register(
                                 move |records: Vec<shardline_index::FileRecord>,
                                       mappings: Vec<shardline_index::DedupeShardMapping>,
                                       _references,
-                                      identities: Vec<shardline_index::XetFileIdentity>| async move {
+                                      identities: Vec<shardline_index::XetFileIdentity>,
+                                      descriptors: Vec<shardline_index::XetXorbDescriptor>| async move {
                                     record_store
-                                        .commit_native_shard_metadata_with_identities(
+                                        .commit_native_shard_metadata_with_descriptors(
                                             &records,
                                             &mappings,
                                             &identities,
+                                            &descriptors,
                                         )
                                         .await?;
                                     Ok(())
                                 },
                             )
                             .await
-                        }
-                        StagedRequestBody::File { file, .. } => register_uploaded_shard_file_with_member_references(
-                            &object_store,
-                            file.path(),
-                            repository_scope,
-                            shard_metadata_limits,
-                            move |records: Vec<shardline_index::FileRecord>,
-                                  mappings: Vec<shardline_index::DedupeShardMapping>,
-                                  _references,
-                                  identities: Vec<shardline_index::XetFileIdentity>| async move {
-                                record_store
-                                    .commit_native_shard_metadata_with_identities(
-                                        &records,
-                                        &mappings,
-                                        &identities,
-                                    )
-                                    .await?;
-                                Ok(())
-                            },
-                        )
-                        .await,
-                    }
                     .map_err(ServerError::from)
                 },
             )
@@ -441,7 +440,6 @@ impl LocalBackend {
     ///
     /// Returns [`ServerError`] when the file identifier is invalid or the record is
     /// missing or unreadable.
-    #[cfg(test)]
     pub(crate) async fn file_record(
         &self,
         file_id: &str,
@@ -493,7 +491,23 @@ impl LocalBackend {
     /// Returns [`ServerError`] when the hash is invalid or the chunk is missing.
     pub async fn read_chunk(&self, hash_hex: &str) -> Result<Vec<u8>, ServerError> {
         let object_key = chunk_object_key(hash_hex)?;
-        crate::object_store::read_small_object(self.object_store(), object_key).await
+        match crate::object_store::read_small_object(self.object_store(), object_key).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        crate::native_chunk_read::read_indexed_member(
+            self.object_store(),
+            hash_hex,
+            &self.stream_work_pool,
+            |after| async move {
+                Ok(self
+                    .record_store()
+                    .xet_chunk_candidates_after(hash_hex, None, after.as_deref())
+                    .await?)
+            },
+        )
+        .await
     }
 
     /// Reads a stored chunk only when it is reachable from a concrete file version.
@@ -530,7 +544,7 @@ impl LocalBackend {
         let object_key = chunk_object_key(hash_hex)?;
         let metadata = object_store.metadata(&object_key)?;
         let Some(metadata) = metadata else {
-            return Err(ServerError::NotFound);
+            return Ok(u64::try_from(self.read_chunk(hash_hex).await?.len())?);
         };
 
         Ok(metadata.length())
@@ -539,6 +553,62 @@ impl LocalBackend {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn indexed_native_member_reads_survive_missing_standalone_copy() {
+        use shardline_storage::ObjectStore;
+        let root = tempfile::tempdir().unwrap();
+        let backend = super::LocalBackend::new(
+            root.path().to_owned(),
+            "http://localhost".to_owned(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
+        )
+        .await
+        .unwrap();
+        let content = b"native payload retained only in its verified Xorb";
+        let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(content);
+        backend.upload_xorb(&hash, xorb).await.unwrap();
+        let (shard, _) = crate::test_fixtures::single_file_shard(&[(content, &hash)]);
+        backend
+            .upload_shard_stream(
+                crate::upload_ingest::RequestBodyReader::from_bytes(shard),
+                None,
+                shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            )
+            .await
+            .unwrap();
+        let chunk = shardline_xet_core::merklehash::compute_data_hash(content).hex();
+        let objects = backend.object_store();
+        let chunk_key = crate::chunk_store::chunk_object_key(&chunk).unwrap();
+        objects.delete_if_present(&chunk_key).unwrap();
+        assert!(objects.metadata(&chunk_key).unwrap().is_none());
+        assert_eq!(backend.read_chunk(&chunk).await.unwrap(), content);
+        assert_eq!(
+            backend.chunk_length(&chunk).await.unwrap(),
+            content.len() as u64
+        );
+        let report = shardline_fsck::run_fsck_with_stores(
+            backend.record_store(),
+            &backend.index_store,
+            &root.path().join("chunks"),
+            &objects,
+            crate::ShardMetadataLimits::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            report.is_clean(),
+            "indexed Xorb-backed local member: {:?}",
+            report.issues
+        );
+        objects
+            .delete_if_present(&crate::xet_adapter::xorb_object_key(&hash).unwrap())
+            .unwrap();
+        assert!(matches!(
+            backend.read_chunk(&chunk).await,
+            Err(crate::ServerError::NotFound)
+        ));
+    }
+
     use std::num::NonZeroUsize;
 
     use sha2::{Digest, Sha256};

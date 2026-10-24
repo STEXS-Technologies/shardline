@@ -56,6 +56,16 @@ mod xorb;
 mod xorb_store;
 mod xorb_visit;
 
+pub use shard_store::{
+    PreparedShardUpload, prepare_uploaded_shard, prepare_uploaded_shard_with_checkpoint,
+};
+pub use shard_store::{
+    dedup_xorb_candidates, recover_dedup_xorb_descriptor,
+    recover_dedup_xorb_descriptor_from_candidates, recover_xorb_descriptor,
+};
+pub use xorb_store::normalize_uploaded_xorb_file;
+pub use xorb_store::read_verified_xorb_chunk;
+
 pub use error::XetAdapterError;
 pub use frontend::{
     XET_METADATA_ACCEPT, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
@@ -65,8 +75,10 @@ pub use frontend::{
 };
 pub use ingest::{
     register_uploaded_shard_bytes, register_uploaded_shard_bytes_with_member_references,
-    register_uploaded_shard_file, register_uploaded_shard_file_with_member_references,
-    store_uploaded_xorb_bytes, store_uploaded_xorb_file_path,
+    register_uploaded_shard_bytes_with_verified_descriptors, register_uploaded_shard_file,
+    register_uploaded_shard_file_with_member_references,
+    register_uploaded_shard_file_with_verified_descriptors, store_uploaded_xorb_bytes,
+    store_uploaded_xorb_file_path,
 };
 pub use model::{
     BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
@@ -93,7 +105,8 @@ pub use xorb::{
 };
 pub use xorb_store::{
     canonical_uploaded_xorb_file_length, canonical_uploaded_xorb_length, normalize_serialized_xorb,
-    store_uploaded_xorb, store_uploaded_xorb_file, store_uploaded_xorb_with_metrics,
+    store_owned_xorb_file, store_uploaded_xorb, store_uploaded_xorb_file,
+    store_uploaded_xorb_with_metrics, store_xorb_bytes_with_resources,
     visit_stored_xorb_chunk_hashes, xorb_chunks_cache_hash_from_key_if_present,
     xorb_hash_from_object_key_if_present, xorb_object_key,
 };

@@ -71,13 +71,21 @@ pub(super) fn reject_unsupported_read_headers(headers: &HeaderMap) -> Result<(),
 pub(super) fn reject_unsupported_write_headers(headers: &HeaderMap) -> Result<(), S3Error> {
     reject_unsupported_read_headers(headers)?;
     for name in headers.keys().map(HeaderName::as_str) {
-        if name == "x-amz-acl"
-            || name.starts_with("x-amz-grant-")
-            || name.starts_with("x-amz-object-lock-")
-            || name == "x-amz-bypass-governance-retention"
-        {
+        if name.starts_with("x-amz-grant-") {
+            return Err(S3Error::acl_not_supported());
+        }
+        if name.starts_with("x-amz-object-lock-") || name == "x-amz-bypass-governance-retention" {
             return Err(S3Error::not_implemented());
         }
+    }
+    let mut acl_values = headers.get_all("x-amz-acl").iter();
+    if let Some(acl) = acl_values.next()
+        && (acl_values.next().is_some()
+            || !acl
+                .to_str()
+                .is_ok_and(|value| value.eq_ignore_ascii_case("bucket-owner-full-control")))
+    {
+        return Err(S3Error::acl_not_supported());
     }
     let mut storage_classes = headers.get_all("x-amz-storage-class").iter();
     if let Some(storage_class) = storage_classes.next() {

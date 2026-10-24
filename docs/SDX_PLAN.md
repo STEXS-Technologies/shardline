@@ -727,16 +727,19 @@ record.
    uploads (`X-Range-Dirty`) cannot be fully exercised against shardline; defer
    unless a user needs in-place overwrite semantics. CLI `cp` overwrite can
    degrade to full re-upload for now.
-2. **Signed-URL xorb fetch (XetHub/HF)** vs shardline's plain ranged
-   `/transfer/xorb` — upstream 1.5.4 has **no** `X-Xet-Signed-Range` header
-   handling anywhere; signed URLs are carried in the reconstruction JSON
-   (`fetch_info[].url`), and shardline already emits a full absolute
-   `{base}/transfer/xorb/default/{hash}` URL there. The client's real job:
-   **use the `url` from the reconstruction response and `Range` against it** —
-   identical for shardline and HF. Keep the header-based signed-range check
-   (`Expires`/`Policy`/`Signature`/`Key-Pair-Id`) as an optional XetHub/S3
-   probe only (refresh on 403); on shardline a 403 means token expiry
-   (§4.4.1), not URL rotation.
+2. **Signed Xorb fetch URLs:** upstream 1.5.4 reads the URL and requested
+   `Range` from reconstruction data; it does not add an `X-Xet-Signed-Range`
+   header. Shardline now signs each authenticated reconstruction URL for 15
+   minutes, binding it to the repository, file, Xorb, and exact byte range. The
+   URL is itself a bearer capability, so reconstruction responses are marked
+   `Cache-Control: private, no-store` and clients/operators must not log or
+   share the URL. A bearer-enabled sdx client can fall back to its repository
+   token for the same exact range after the URL capability expires. A client
+   without that header must request fresh reconstruction data. Actual stock
+   `hf_xet` expiry and refresh behavior still needs an end-to-end test; do not
+   claim that flow is fully qualified yet. The optional
+   `Expires`/`Policy`/`Signature`/`Key-Pair-Id` header probe remains for external
+   XetHub/S3 signed-URL formats.
 3. **Xorb writer parity (resolved):** shardline's xorb format is identical to
    upstream for the `default` namespace; `ByteGrouping4LZ4` is handled client-side
    via the pinned `xet-core-structures` (workspace declares 1.5.1, lock resolves

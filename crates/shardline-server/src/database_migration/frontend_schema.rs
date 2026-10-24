@@ -13,6 +13,14 @@ fn incompatible(name: &str) -> DatabaseMigrationError {
 
 pub(super) async fn install(pool: &PgPool) -> Result<u64, DatabaseMigrationError> {
     let mut transaction = pool.begin().await?;
+    // Released metadata writers take the shared barrier before touching their
+    // tables. Take its exclusive side before any DDL to avoid acquiring table
+    // locks in the opposite order to an in-flight publication transaction.
+    // Ownership and DDL share this transaction, including rollback on failure.
+    query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::maintenance_barrier::GC_WRITE_BARRIER_KEY)
+        .execute(&mut *transaction)
+        .await?;
     let mut installed_count = 0_u64;
     // The caller holds the existing migration lock for the whole owner command.
     raw_sql(
@@ -111,6 +119,79 @@ pub(super) async fn install(pool: &PgPool) -> Result<u64, DatabaseMigrationError
         &["SELECT", "INSERT", "UPDATE", "DELETE"],
     )
     .await?;
+    mirror_grants(
+        &mut transaction,
+        "shardline_file_records",
+        "shardline_record_membership",
+        &["SELECT"],
+    )
+    .await?;
+    // The invoker-rights trigger replaces a record's derived candidate set.
+    // Grant only the derived-table operations needed by existing writers.
+    mirror_grants_as(
+        &mut transaction,
+        "shardline_file_records",
+        "shardline_record_membership",
+        &["INSERT", "UPDATE"],
+        Some(&["SELECT", "INSERT", "DELETE"]),
+    )
+    .await?;
+    mirror_grants_as(
+        &mut transaction,
+        "shardline_file_records",
+        "shardline_record_membership",
+        &["DELETE"],
+        Some(&["SELECT", "DELETE"]),
+    )
+    .await?;
+    for table in ["shardline_xet_xorbs", "shardline_xet_chunks"] {
+        mirror_grants(
+            &mut transaction,
+            "shardline_file_records",
+            table,
+            &["SELECT"],
+        )
+        .await?;
+        mirror_grants_as(
+            &mut transaction,
+            "shardline_file_records",
+            table,
+            &["INSERT", "UPDATE"],
+            Some(&["SELECT", "INSERT"]),
+        )
+        .await?;
+    }
+    mirror_grants(
+        &mut transaction,
+        "shardline_hub_repos",
+        "shardline_hub_object_locations",
+        &["SELECT"],
+    )
+    .await?;
+    mirror_grants_as(
+        &mut transaction,
+        "shardline_hub_repos",
+        "shardline_hub_object_locations",
+        &["INSERT", "UPDATE"],
+        Some(&["SELECT", "INSERT", "UPDATE"]),
+    )
+    .await?;
+    // Copy the final effective identity grants, including those installed above.
+    mirror_grants(
+        &mut transaction,
+        "shardline_xet_file_identities",
+        "shardline_xet_file_aliases",
+        &["SELECT"],
+    )
+    .await?;
+    mirror_grants_as(
+        &mut transaction,
+        "shardline_xet_file_identities",
+        "shardline_xet_file_aliases",
+        &["INSERT", "UPDATE"],
+        Some(&["SELECT", "INSERT"]),
+    )
+    .await?;
     transaction.commit().await?;
     Ok(installed_count)
 }
@@ -154,6 +235,16 @@ async fn mirror_grants(
     target: &str,
     allowed: &[&str],
 ) -> Result<(), DatabaseMigrationError> {
+    mirror_grants_as(connection, source, target, allowed, None).await
+}
+
+async fn mirror_grants_as(
+    connection: &mut PgConnection,
+    source: &str,
+    target: &str,
+    allowed: &[&str],
+    target_privileges: Option<&[&str]>,
+) -> Result<(), DatabaseMigrationError> {
     let schema: String = query_scalar("SELECT current_schema()")
         .fetch_one(&mut *connection)
         .await?;
@@ -164,26 +255,30 @@ async fn mirror_grants(
         AND acl.privilege_type IN ('SELECT','INSERT','UPDATE','DELETE')")
         .bind(&schema).bind(source).fetch_all(&mut *connection).await?;
     for grant in grants {
-        let privilege: String = grant.try_get("privilege_type")?;
-        if !allowed.contains(&privilege.as_str()) {
+        let source_privilege: String = grant.try_get("privilege_type")?;
+        if !allowed.contains(&source_privilege.as_str()) {
             continue;
         }
-        let privilege = match privilege.as_str() {
-            "SELECT" => "SELECT",
-            "INSERT" => "INSERT",
-            "DELETE" => "DELETE",
-            _ => continue,
-        };
         let role = grant
             .try_get::<Option<String>, _>("grantee")?
             .map_or_else(|| "PUBLIC".to_owned(), |name| quote(&name));
-        query(sqlx::AssertSqlSafe(format!(
-            "GRANT {privilege} ON {}.{} TO {role}",
-            quote(&schema),
-            quote(target)
-        )))
-        .execute(&mut *connection)
-        .await?;
+        let original = [source_privilege.as_str()];
+        for privilege in target_privileges.unwrap_or(&original) {
+            let privilege = match *privilege {
+                "SELECT" => "SELECT",
+                "INSERT" => "INSERT",
+                "UPDATE" => "UPDATE",
+                "DELETE" => "DELETE",
+                _ => continue,
+            };
+            query(sqlx::AssertSqlSafe(format!(
+                "GRANT {privilege} ON {}.{} TO {role}",
+                quote(&schema),
+                quote(target)
+            )))
+            .execute(&mut *connection)
+            .await?;
+        }
     }
     Ok(())
 }
@@ -297,6 +392,138 @@ async fn check_on_connection(connection: &mut PgConnection) -> Result<(), Databa
     if !invalidation_trigger_exists {
         return Err(incompatible("S3 multipart count invalidation trigger"));
     }
+    verify_table(
+        connection,
+        "shardline_record_membership",
+        &[
+            ("record_key", "text"),
+            ("scope_key", "text"),
+            ("member_hash", "text"),
+        ],
+        &["PRIMARY KEY (record_key, member_hash)"],
+    )
+    .await?;
+    verify_xet_aliases(connection).await?;
+    verify_table(
+        connection,
+        "shardline_hub_object_locations",
+        &[
+            ("repository_key", "text"),
+            ("object_kind", "text"),
+            ("object_id", "text"),
+            ("storage_revision", "text"),
+        ],
+        &[
+            "CHECK (object_kind = ANY (ARRAY['file'::text, 'git-archive'::text]))",
+            "PRIMARY KEY (repository_key, object_kind, object_id)",
+        ],
+    )
+    .await?;
+    verify_table(
+        connection,
+        "shardline_xet_xorbs",
+        &[("xorb_hash", "text"), ("descriptor", "jsonb")],
+        &["PRIMARY KEY (xorb_hash)"],
+    )
+    .await?;
+    verify_table(
+        connection,
+        "shardline_xet_chunks",
+        &[
+            ("xorb_hash", "text"),
+            ("chunk_index", "bigint"),
+            ("chunk_hash", "text"),
+        ],
+        &[
+            "CHECK (chunk_index >= 0)",
+            "FOREIGN KEY (xorb_hash) REFERENCES shardline_xet_xorbs(xorb_hash) ON DELETE CASCADE",
+            "PRIMARY KEY (xorb_hash, chunk_index)",
+        ],
+    )
+    .await?;
+    let xet_lookup_valid: bool = query_scalar(
+        "SELECT COALESCE((SELECT index.indisvalid AND index.indisready
+            AND index.indnkeyatts=3 AND index.indpred IS NULL AND index.indexprs IS NULL
+            AND index.indrelid=to_regclass(format('%I.shardline_xet_chunks',current_schema()))
+            AND (SELECT array_agg(attribute.attname::text ORDER BY key.ordinality)
+                 FROM unnest(index.indkey) WITH ORDINALITY key(attnum,ordinality)
+                 JOIN pg_attribute attribute ON attribute.attrelid=index.indrelid AND attribute.attnum=key.attnum)
+                 =ARRAY['chunk_hash','xorb_hash','chunk_index']::text[]
+            FROM pg_index index WHERE index.indexrelid=to_regclass(format('%I.shardline_xet_chunks_hash_idx',current_schema()))),false)"
+    ).fetch_one(&mut *connection).await?;
+    if !xet_lookup_valid {
+        return Err(incompatible("Xet chunk lookup index"));
+    }
+    let read_indexes: &[(&str, &str, &[&str])] = &[
+        (
+            "shardline_file_records_file_scope_idx",
+            "shardline_file_records",
+            &["file_id", "scope_key", "record_kind"],
+        ),
+        (
+            "shardline_xet_file_identities_file_scope_idx",
+            "shardline_xet_file_identities",
+            &["file_id", "scope_key"],
+        ),
+        (
+            "shardline_hub_file_entries_hash_idx",
+            "shardline_hub_file_entries",
+            &["commit_sha", "sha", "is_lfs", "size"],
+        ),
+    ];
+    for (name, table, columns) in read_indexes {
+        let valid: bool = query_scalar(
+            "SELECT COALESCE((SELECT i.indisvalid AND i.indisready AND NOT i.indisunique
+             AND i.indnkeyatts=cardinality($3::text[]) AND i.indnatts=i.indnkeyatts
+             AND i.indpred IS NULL AND i.indexprs IS NULL
+             AND i.indrelid=to_regclass(format('%I.%I',current_schema(),$2))
+             AND (SELECT array_agg(a.attname::text ORDER BY k.ordinality)
+                  FROM unnest(i.indkey) WITH ORDINALITY k(attnum,ordinality)
+                  JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum)=$3::text[]
+             FROM pg_index i WHERE i.indexrelid=to_regclass(format('%I.%I',current_schema(),$1))),false)",
+        ).bind(name).bind(table).bind(columns).fetch_one(&mut *connection).await?;
+        if !valid {
+            return Err(incompatible(name));
+        }
+    }
+    let membership_function = FRONTEND_MIGRATIONS
+        .iter()
+        .find(|migration| migration.name == "record_membership")
+        .and_then(|migration| migration.up_sql.split_once("AS $$"))
+        .and_then(|(_, tail)| tail.split_once("$$;"))
+        .map(|(body, _)| body)
+        .ok_or_else(|| incompatible("bundled record membership function"))?;
+    let membership_trigger: bool = query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_trigger trigger_row
+         JOIN pg_proc trigger_function ON trigger_function.oid=trigger_row.tgfoid
+         WHERE trigger_row.tgname='shardline_record_membership_refresh'
+           AND trigger_row.tgrelid=to_regclass(format('%I.shardline_file_records',current_schema()))
+           AND trigger_row.tgenabled <> 'D' AND NOT trigger_row.tgisinternal
+           AND trigger_row.tgtype=29
+           AND trigger_function.proname='shardline_refresh_record_membership'
+           AND NOT trigger_function.prosecdef
+           AND trigger_function.prosrc=$1
+           AND trigger_function.proconfig=ARRAY['search_path=pg_catalog']::text[])",
+    )
+    .bind(membership_function)
+    .fetch_one(&mut *connection)
+    .await?;
+    if !membership_trigger {
+        return Err(incompatible("record membership trigger"));
+    }
+    let membership_index: bool = query_scalar(
+        "SELECT COALESCE((SELECT index.indisvalid AND index.indisready
+         AND index.indnkeyatts=3 AND index.indnatts=3
+         AND index.indpred IS NULL AND index.indexprs IS NULL
+         AND index.indrelid=to_regclass(format('%I.shardline_record_membership',current_schema()))
+         AND pg_get_indexdef(index.indexrelid,1,true)='member_hash'
+         AND pg_get_indexdef(index.indexrelid,2,true)='scope_key'
+         AND pg_get_indexdef(index.indexrelid,3,true)='record_key'
+         FROM pg_index index WHERE index.indexrelid=to_regclass(format('%I.shardline_record_membership_lookup_idx',current_schema()))),false)",
+    ).fetch_one(&mut *connection).await?;
+    if !membership_index {
+        return Err(incompatible("record membership index"));
+    }
     let index_valid: bool = query_scalar("SELECT COALESCE((SELECT index.indisvalid AND index.indisready
         AND NOT index.indisunique AND index.indnkeyatts=2 AND index.indnatts=2
         AND index.indpred IS NULL AND index.indexprs IS NULL
@@ -345,13 +572,59 @@ async fn reject_row_security_on_sources(
          ORDER BY relation.relname LIMIT 1",
     )
     .bind(schema)
-    .bind(["shardline_schema_migrations", "shardline_file_records"])
+    .bind([
+        "shardline_schema_migrations",
+        "shardline_file_records",
+        "shardline_hub_repos",
+        "shardline_xet_file_identities",
+    ])
     .fetch_optional(&mut *connection)
     .await?;
     if let Some(relation) = relation {
         // Grant copying cannot reproduce arbitrary row policies on tables with
         // a different shape. Refuse the upgrade instead of widening access.
         return Err(incompatible(&format!("{relation} row-level security")));
+    }
+    Ok(())
+}
+
+async fn verify_xet_aliases(connection: &mut PgConnection) -> Result<(), DatabaseMigrationError> {
+    verify_table(
+        connection,
+        "shardline_xet_file_aliases",
+        &[
+            ("scope_key", "text"),
+            ("file_id", "text"),
+            ("sha256", "text"),
+            ("total_bytes", "bigint"),
+        ],
+        &[
+            "CHECK (total_bytes >= 0)",
+            "PRIMARY KEY (scope_key, file_id)",
+        ],
+    )
+    .await?;
+    let body = FRONTEND_MIGRATIONS
+        .iter()
+        .find(|migration| migration.name == "xet_file_aliases")
+        .and_then(|migration| migration.up_sql.split_once("AS $$"))
+        .and_then(|(_, tail)| tail.split_once("$$;"))
+        .map(|(body, _)| body)
+        .ok_or_else(|| incompatible("bundled Xet alias function"))?;
+    let valid: bool = query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc f ON f.oid=t.tgfoid
+         WHERE t.tgname='shardline_xet_file_aliases_preserve'
+           AND t.tgrelid=to_regclass(format('%I.shardline_xet_file_identities',current_schema()))
+           AND t.tgenabled IN ('O','A') AND NOT t.tgisinternal AND t.tgtype=21
+           AND f.proname='shardline_preserve_xet_file_alias_v1'
+           AND NOT f.prosecdef AND f.prosrc=$1
+           AND f.proconfig=ARRAY['search_path=pg_catalog']::text[])",
+    )
+    .bind(body)
+    .fetch_one(connection)
+    .await?;
+    if !valid {
+        return Err(incompatible("Xet alias preservation trigger"));
     }
     Ok(())
 }

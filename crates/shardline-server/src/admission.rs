@@ -6,7 +6,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::ServerConfigError;
 
 mod blocking;
-pub(crate) use blocking::{blocking_work, blocking_work_with_permit, blocking_work_with_setup};
+pub(crate) use blocking::{blocking_work, blocking_work_with_permit};
+pub(crate) use blocking::{cancellable_work_with_permit, cancellable_work_with_setup};
 
 /// Largest capacity representable by batch permit counts and Tokio's semaphore.
 pub(crate) fn maximum_counted_capacity() -> usize {

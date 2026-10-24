@@ -152,6 +152,7 @@ pub struct ServerConfig {
     pub(crate) s3_object_store_config: Option<S3ObjectStoreConfig>,
     pub(crate) s3_signing_identities: Vec<super::S3SigningIdentity>,
     pub(crate) max_request_body_bytes: NonZeroUsize,
+    pub(crate) max_xorb_body_bytes: NonZeroUsize,
     pub(crate) shard_metadata_limits: ShardMetadataLimits,
     pub(crate) chunk_size: NonZeroUsize,
     pub(crate) upload_max_in_flight_chunks: NonZeroUsize,
@@ -229,6 +230,7 @@ impl ServerConfig {
             s3_object_store_config: None,
             s3_signing_identities: Vec::new(),
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+            max_xorb_body_bytes: super::DEFAULT_MAX_XORB_BODY_BYTES,
             shard_metadata_limits: DEFAULT_SHARD_METADATA_LIMITS,
             chunk_size,
             upload_max_in_flight_chunks: default_upload_max_in_flight_chunks(),
@@ -348,6 +350,12 @@ impl ServerConfig {
         self.max_request_body_bytes
     }
 
+    /// Returns the streamed native Xorb wire-size limit, including framing.
+    #[must_use]
+    pub const fn max_xorb_body_bytes(&self) -> NonZeroUsize {
+        self.max_xorb_body_bytes
+    }
+
     /// Returns the bounded-parser limits for native Xet shard metadata.
     #[must_use]
     pub const fn shard_metadata_limits(&self) -> ShardMetadataLimits {
@@ -461,6 +469,15 @@ impl ServerConfig {
         max_request_body_bytes: NonZeroUsize,
     ) -> Self {
         self.max_request_body_bytes = max_request_body_bytes;
+        // Preserve explicit global limits unless the caller overrides Xorbs.
+        self.max_xorb_body_bytes = max_request_body_bytes;
+        self
+    }
+
+    /// Overrides the native Xorb wire-size limit without changing other routes.
+    #[must_use]
+    pub const fn with_max_xorb_body_bytes(mut self, limit: NonZeroUsize) -> Self {
+        self.max_xorb_body_bytes = limit;
         self
     }
 

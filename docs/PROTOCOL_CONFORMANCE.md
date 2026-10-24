@@ -39,7 +39,21 @@ Requirements:
 - Require read scope.
 - Support optional `Range: bytes=start-end`.
 - Return `416 Range Not Satisfiable` when the requested start exceeds file length.
-- Return fetch URLs that require the requested byte ranges.
+- Return fetch URLs that require the requested byte ranges. In authenticated
+  deployments with a token-signing key, each URL carries a short-lived,
+  cryptographically signed capability bound to the repository, file, Xorb, and
+  exact serialized byte range. The transfer request can therefore work without
+  forwarding the CAS bearer token, as required by clients that fetch the URL
+  directly.
+- Send `Cache-Control: private, no-store` on reconstruction responses because
+  their URLs contain bearer capabilities. Treat those URLs as secrets; do not
+  log or share them.
+- Keep existing bearer-authenticated transfer URLs working for older clients.
+  A bearer client can still read its repository's exact authorized range after
+  a URL capability expires; a client without a bearer token must request fresh
+  reconstruction data.
+- Reject a missing, altered, or widened range for a capability URL. A capability
+  cannot authorize another repository, file, or Xorb.
 - Preserve term ordering.
 - Never return reconstruction terms for unauthorized repository or revision scopes.
 

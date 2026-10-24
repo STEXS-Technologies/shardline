@@ -3,6 +3,7 @@
 use super::*;
 use shardline_index::{LocalRecordStore, XetFileIdentity};
 
+mod native_xet;
 mod postgres;
 
 struct LocalServer {
@@ -18,6 +19,25 @@ impl LocalServer {
     }
 
     fn spawn_with_postgres(binary: &Path, root: &Path, postgres: Option<&str>) -> Self {
+        Self::spawn_with_frontends(binary, root, postgres, "s3,lfs")
+    }
+
+    fn spawn_with_frontends(
+        binary: &Path,
+        root: &Path,
+        postgres: Option<&str>,
+        frontends: &str,
+    ) -> Self {
+        Self::spawn_with_storage(binary, root, postgres, frontends, &[])
+    }
+
+    fn spawn_with_storage(
+        binary: &Path,
+        root: &Path,
+        postgres: Option<&str>,
+        frontends: &str,
+        storage_env: &[(&str, String)],
+    ) -> Self {
         let port = free_tcp_port().expect("local upgrade port");
         let log = NamedTempFile::new().unwrap();
         let config = NamedTempFile::new().unwrap();
@@ -27,16 +47,19 @@ impl LocalServer {
         if let Some(url) = postgres {
             command.env("SHARDLINE_INDEX_POSTGRES_URL", url);
         }
-        let child = command
+        command
             .arg("--config")
             .arg(config.path())
             .arg("serve")
             .env("SHARDLINE_ROOT_DIR", root)
+            // env_clear must not silently move large native staging back onto
+            // a quota-limited /tmp when the drill selected disk-backed scratch.
+            .env("TMPDIR", std::env::temp_dir())
             .env("SHARDLINE_BIND_ADDR", format!("127.0.0.1:{port}"))
             .env("SHARDLINE_PUBLIC_BASE_URL", &base)
             .env("SHARDLINE_OBJECT_STORAGE_ADAPTER", "local")
             .env("SHARDLINE_SERVER_ROLE", "all")
-            .env("SHARDLINE_SERVER_FRONTENDS", "s3,lfs")
+            .env("SHARDLINE_SERVER_FRONTENDS", frontends)
             .env("SHARDLINE_AUTH_PROVIDER", "local")
             .env(
                 "SHARDLINE_TOKEN_SIGNING_KEY",
@@ -44,9 +67,11 @@ impl LocalServer {
             )
             .env("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER", "memory")
             .stdout(Stdio::from(log.reopen().unwrap()))
-            .stderr(Stdio::from(log.reopen().unwrap()))
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::from(log.reopen().unwrap()));
+        for (name, value) in storage_env {
+            command.env(name, value);
+        }
+        let child = command.spawn().unwrap();
         Self {
             child,
             base,
@@ -103,6 +128,9 @@ impl Drop for LocalServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if std::thread::panicking() {
+            eprintln!("upgrade server {} diagnostics:\n{}", self.base, self.logs());
+        }
     }
 }
 
@@ -164,8 +192,9 @@ async fn rolling_upgrade(postgres: Option<&str>) {
                 s3_put(&old_base, &writer_token, &format!("rolling-{index}"), bytes).await;
             assert!(
                 response.status().is_success(),
-                "live write {index}: {}",
-                response.status()
+                "live write {index}: {}: {}",
+                response.status(),
+                response.text().await.unwrap()
             );
             if let Some(started) = started.take() {
                 started.send(()).unwrap();

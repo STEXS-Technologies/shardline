@@ -36,6 +36,9 @@ use crate::{
     xet_adapter::{FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse},
 };
 
+mod dedup;
+mod delta;
+mod hub_read;
 mod lfs_locks;
 
 #[cfg(test)]
@@ -908,22 +911,23 @@ impl ServerBackend {
         }
     }
 
-    /// Downloads one logical file version using the active metadata backend.
-    pub(crate) async fn download_file(
+    /// Opens a bounded-memory stream for a logical file, optionally enforcing repository scope.
+    pub(crate) async fn read_file_stream_scoped(
         &self,
         file_id: &str,
         content_hash: Option<&str>,
+        range: Option<ByteRange>,
         repository_scope: Option<&RepositoryScope>,
-    ) -> Result<Vec<u8>, ServerError> {
+    ) -> Result<(ServerByteStream, u64), ServerError> {
         match self {
             Self::Local(backend) => {
                 backend
-                    .download_file(file_id, content_hash, repository_scope)
+                    .read_file_stream_scoped(file_id, content_hash, range, repository_scope)
                     .await
             }
             Self::Postgres(backend) => {
                 backend
-                    .download_file(file_id, content_hash, repository_scope)
+                    .read_file_stream_scoped(file_id, content_hash, range, repository_scope)
                     .await
             }
         }
@@ -1363,16 +1367,17 @@ impl ServerBackend {
         hash_hex: &str,
         total_length: u64,
         range: ByteRange,
+        coverage: Option<crate::record_store::XorbRangeCoverage>,
     ) -> Result<ServerByteStream, ServerError> {
         match self {
             Self::Local(backend) => {
                 backend
-                    .read_xorb_range_stream(hash_hex, total_length, range)
+                    .read_xorb_range_stream(hash_hex, total_length, range, coverage)
                     .await
             }
             Self::Postgres(backend) => {
                 backend
-                    .read_xorb_range_stream(hash_hex, total_length, range)
+                    .read_xorb_range_stream(hash_hex, total_length, range, coverage)
                     .await
             }
         }
@@ -1385,6 +1390,19 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.read_dedupe_shard_stream(hash_hex).await,
             Self::Postgres(backend) => backend.read_dedupe_shard_stream(hash_hex).await,
+        }
+    }
+
+    pub(crate) async fn repository_xorb_coverage(
+        &self,
+        hash: &str,
+        scope: &RepositoryScope,
+    ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
+        #[cfg(test)]
+        count_repository_reference_probe_for_tests(hash);
+        match self {
+            Self::Local(backend) => backend.repository_xorb_coverage(hash, scope).await,
+            Self::Postgres(backend) => backend.repository_xorb_coverage(hash, scope).await,
         }
     }
 

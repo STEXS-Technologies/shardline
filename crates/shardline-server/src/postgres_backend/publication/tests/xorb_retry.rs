@@ -5,6 +5,105 @@ use crate::{
 use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
 
 #[tokio::test]
+async fn failed_native_attempts_preserve_history_and_allow_verified_retries() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: failed native retries require DATABASE_URL");
+        return;
+    };
+    fixture
+        .index()
+        .initialize_remote_delete_guard()
+        .await
+        .unwrap();
+    let backend = fixture.postgres();
+    let payload = b"failed native attempt retry";
+    let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(payload);
+    let xorb_intent = UploadIntent::new(
+        crate::upload_identity::xorb(&hash, xorb.len() as u64),
+        crate::xet_adapter::xorb_object_key(&hash)
+            .unwrap()
+            .as_str()
+            .to_owned(),
+        hash.clone(),
+        xorb.len() as u64,
+    );
+    let (shard, file_hash) = crate::test_fixtures::single_file_shard(&[(payload, &hash)]);
+    let body_hash = blake3::hash(&shard).to_hex().to_string();
+    let (shard_id, _) = crate::upload_identity::native_shard(&body_hash, None).unwrap();
+    let shard_intent = UploadIntent::new(
+        shard_id,
+        format!("shards/{}/{body_hash}.shard", &body_hash[..2]),
+        body_hash,
+        shard.len() as u64,
+    );
+    let mut evidence = Vec::new();
+    for intent in [&xorb_intent, &shard_intent] {
+        fixture.index().create_intent(intent).await.unwrap();
+        assert!(
+            fixture
+                .index()
+                .transition_intent(intent.intent_id(), UploadIntentState::Failed)
+                .await
+                .unwrap()
+        );
+        evidence.push(
+            serde_json::to_value(
+                fixture
+                    .index()
+                    .reliability_events(intent.intent_id())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+    }
+    backend.upload_xorb(&hash, xorb).await.unwrap();
+    backend
+        .upload_shard_stream(
+            crate::upload_ingest::RequestBodyReader::from_bytes(shard),
+            None,
+            crate::ShardMetadataLimits::default(),
+        )
+        .await
+        .unwrap();
+    for (intent, before) in [&xorb_intent, &shard_intent].into_iter().zip(evidence) {
+        assert_eq!(
+            fixture
+                .index()
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Failed
+        );
+        assert_eq!(
+            serde_json::to_value(
+                fixture
+                    .index()
+                    .reliability_events(intent.intent_id())
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            before
+        );
+        assert_eq!(
+            fixture
+                .index()
+                .intent_by_id(&format!("{}-retry-1", intent.intent_id()))
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Visible
+        );
+    }
+    assert!(backend.read_record(&file_hash, None, None).await.is_ok());
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn footerless_and_canonical_xorb_retries_preserve_legacy_history() {
     let Some(fixture) = PostgresFixture::new().await else {
         eprintln!("SKIPPED: canonical xorb retries require DATABASE_URL");
@@ -77,6 +176,17 @@ async fn footerless_and_canonical_xorb_retries_preserve_legacy_history() {
 
 #[tokio::test]
 async fn footerless_xorb_recovery_uses_stored_length_at_every_checkpoint() {
+    recover_encoding_at_every_checkpoint(footerless_xorb).await;
+}
+
+#[tokio::test]
+async fn alternate_xorb_encoding_recovery_preserves_every_checkpoint() {
+    recover_encoding_at_every_checkpoint(crate::test_fixtures::alternate_xorb_encodings).await;
+}
+
+async fn recover_encoding_at_every_checkpoint(
+    encoding: fn() -> std::io::Result<(axum::body::Bytes, axum::body::Bytes, String)>,
+) {
     for (ordinal, state) in [
         UploadIntentState::Created,
         UploadIntentState::Storing,
@@ -96,7 +206,7 @@ async fn footerless_xorb_recovery_uses_stored_length_at_every_checkpoint() {
             .await
             .unwrap();
         let backend = fixture.postgres();
-        let (wire, canonical, hash) = footerless_xorb().unwrap();
+        let (wire, canonical, hash) = encoding().unwrap();
         let intent = UploadIntent::new(
             crate::upload_identity::xorb(&hash, canonical.len() as u64),
             crate::xet_adapter::xorb_object_key(&hash)

@@ -29,7 +29,9 @@ async fn blocked_history_read_times_out_and_recovers_after_lock_release() {
         .await
         .unwrap();
     assert!(matches!(result, Err(ServerError::Io(error))
-        if error.kind() == std::io::ErrorKind::TimedOut));
+        if error.kind() == std::io::ErrorKind::TimedOut
+            && error.to_string().contains("task metadata read exceeded")
+            && std::error::Error::source(&error).is_some()));
     lock.commit().await.unwrap();
     tokio::task::spawn_blocking(move || {
         assert_eq!(

@@ -1,0 +1,220 @@
+//! Real process termination at native-Xorb durability boundaries.
+#![cfg(unix)]
+#![allow(clippy::panic_in_result_fn)]
+
+use shardline_cas::UploadLifecycleBoundary;
+use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+use shardline_server::{ServerConfig, serve_with_listener};
+use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
+use shardline_xet_core::{
+    merklehash::{compute_data_hash, xorb_hash},
+    xorb_object::{
+        CompressionScheme, xorb_format_test_utils::serialized_xorb_object_from_components,
+    },
+};
+use std::{
+    net::SocketAddr,
+    num::NonZeroUsize,
+    path::Path,
+    process::{Child, Command, Stdio},
+    time::Duration,
+};
+
+type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+const KEY: &[u8] = b"native-process-test-signing-key-32";
+const CHILD_ROOT: &str = "SHARDLINE_TEST_NATIVE_PROCESS_ROOT";
+
+mod native_upload_client;
+#[cfg(feature = "docker")]
+mod native_upload_remote;
+
+struct Process(Child);
+impl Drop for Process {
+    fn drop(&mut self) {
+        let _kill = self.0.kill();
+        let _wait = self.0.wait();
+    }
+}
+
+fn start(root: &Path, address: SocketAddr, cut: Option<(&str, &str)>) -> Result<Process> {
+    start_with_environment(root, address, cut, &[])
+}
+
+fn start_with_environment(
+    root: &Path,
+    address: SocketAddr,
+    cut: Option<(&str, &str)>,
+    environment: &[(&str, String)],
+) -> Result<Process> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(["--exact", "native_upload_child", "--ignored", "--nocapture"])
+        .env(CHILD_ROOT, root)
+        .env("SHARDLINE_TEST_NATIVE_PROCESS_ADDRESS", address.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    if let Some((boundary, intent)) = cut {
+        command
+            .env("SHARDLINE_TEST_NATIVE_PROCESS_CUT", boundary)
+            .env("SHARDLINE_TEST_NATIVE_PROCESS_INTENT", intent);
+    } else {
+        command
+            .env_remove("SHARDLINE_TEST_NATIVE_PROCESS_CUT")
+            .env_remove("SHARDLINE_TEST_NATIVE_PROCESS_INTENT");
+    }
+    Ok(Process(command.spawn()?))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "subprocess fixture; launched by the parent process tests"]
+async fn native_upload_child() -> Result {
+    let root = std::env::var_os(CHILD_ROOT).ok_or("subprocess fixture requires its parent")?;
+    let root = std::path::PathBuf::from(root);
+    let address: SocketAddr = std::env::var("SHARDLINE_TEST_NATIVE_PROCESS_ADDRESS")?.parse()?;
+    let pause = if let Ok(cut) = std::env::var("SHARDLINE_TEST_NATIVE_PROCESS_CUT") {
+        let boundary = match cut.as_str() {
+            "created" => UploadLifecycleBoundary::AfterIntentCreated,
+            "storing" => UploadLifecycleBoundary::AfterStoring,
+            "object" => UploadLifecycleBoundary::AfterObjectWork,
+            "stored" => UploadLifecycleBoundary::AfterStored,
+            "committed" => UploadLifecycleBoundary::AfterMetadataCommitted,
+            "visible" => UploadLifecycleBoundary::AfterVisible,
+            _ => return Err("invalid process cut".into()),
+        };
+        Some(shardline_cas::arm_upload_process_pause(
+            std::env::var("SHARDLINE_TEST_NATIVE_PROCESS_INTENT")?,
+            boundary,
+            root.join("reached"),
+        ))
+    } else {
+        None
+    };
+    let listener = tokio::net::TcpListener::bind(address).await?;
+    let config = ServerConfig::new(
+        address,
+        format!("http://{address}"),
+        root,
+        NonZeroUsize::new(65536).ok_or("chunk size")?,
+    )
+    .with_token_signing_key(KEY.to_vec())?;
+    let config = native_upload_client::configure_remote(config)?;
+    let result = serve_with_listener(config, listener).await;
+    drop(pause);
+    result?;
+    Ok(())
+}
+
+async fn ready(client: &reqwest::Client, base: &str, child: &mut Process) -> Result {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(status) = child.0.try_wait()? {
+                return Err(format!("server exited: {status}").into());
+            }
+            if let Ok(response) = client.get(format!("{base}/healthz")).send().await
+                && response.status().is_success()
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_xorb_retry_survives_sigkill_at_every_durable_boundary() -> Result {
+    use shardline_index::UploadIntentStore;
+    use std::os::unix::process::ExitStatusExt;
+    let content = b"verified native process interruption payload";
+    let chunk = compute_data_hash(content);
+    let content_length = u64::try_from(content.len())?;
+    let identity = xorb_hash(&[(chunk, content_length)]);
+    let hash = shardline_server::test_fixtures::xet_hash_hex(&identity);
+    let bytes = serialized_xorb_object_from_components(
+        &identity,
+        content.to_vec(),
+        vec![(chunk, content_length)],
+        CompressionScheme::None,
+    )?
+    .serialized_data;
+    let intent = format!("xorb-v2-{hash}-{}", bytes.len());
+    let scope = RepositoryScope::new(RepositoryProvider::Generic, "process", "retry", None)?;
+    let token = LocalHmacProvider::new(KEY)?.mint_token(&TokenClaims::new(
+        "shardline",
+        "process-test",
+        TokenScope::Write,
+        scope,
+        u64::MAX,
+    )?)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    for cut in [
+        "created",
+        "storing",
+        "object",
+        "stored",
+        "committed",
+        "visible",
+    ] {
+        let root = tempfile::tempdir()?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let base = format!("http://{address}");
+        let mut child = start(root.path(), address, Some((cut, &intent)))?;
+        ready(&client, &base, &mut child).await?;
+        let request = client
+            .post(format!("{base}/v1/xorbs/default/{hash}"))
+            .bearer_auth(&token)
+            .body(bytes.clone());
+        let upload = tokio::spawn(async move { request.send().await });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !root.path().join("reached").exists() {
+                assert!(child.0.try_wait()?.is_none(), "process exited before {cut}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        child.0.kill()?;
+        assert_eq!(child.0.wait()?.signal(), Some(9));
+        upload.abort();
+        let _upload_result = upload.await;
+        drop(child);
+        let mut restarted = start(root.path(), address, None)?;
+        ready(&client, &base, &mut restarted).await?;
+        let response = client
+            .post(format!("{base}/v1/xorbs/default/{hash}"))
+            .bearer_auth(&token)
+            .body(bytes.clone())
+            .send()
+            .await?;
+        let status = response.status();
+        assert!(
+            status.is_success(),
+            "retry at {cut}: {status} {}",
+            response.text().await?
+        );
+        let stored = std::fs::read(
+            root.path()
+                .join(format!("chunks/xorbs/default/{}/{hash}.xorb", &hash[..2])),
+        )?;
+        assert_eq!(stored, bytes, "persisted Xorb at {cut}");
+        let index = shardline_index::LocalIndexStore::new(root.path().to_owned())?;
+        let original = index
+            .intent_by_id(&intent)
+            .await?
+            .ok_or("missing original intent")?;
+        assert!(matches!(
+            original.state(),
+            shardline_index::UploadIntentState::Visible
+                | shardline_index::UploadIntentState::Failed
+        ));
+        drop(restarted);
+    }
+    Ok(())
+}

@@ -1262,12 +1262,15 @@ async fn a_completed_scan_with_missing_objects_preserves_failure_exit_status() -
     );
     let state = sandbox.path().join("maintenance");
     let result = command(&state, &root, "fsck").output()?;
-    assert!(!result.status.success());
+    assert_eq!(result.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&result.stdout).contains("maintenance.status: completed"),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(!command(&state, &root, "fsck").output()?.status.success());
+    assert_eq!(
+        command(&state, &root, "fsck").output()?.status.code(),
+        Some(1)
+    );
     Ok(())
 }

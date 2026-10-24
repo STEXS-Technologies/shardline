@@ -130,6 +130,16 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
     );
 
     // Reconstruction routes — authenticated
+    registry.register(
+        "GET",
+        "/v2/file-chunk-hashes/{file_id}",
+        RouteAuthPolicy::Authenticated,
+    );
+    registry.register(
+        "HEAD",
+        "/v1/files/{file_id}",
+        RouteAuthPolicy::Authenticated,
+    );
     registry.register("GET", "/v1/reconstructions", RouteAuthPolicy::Authenticated);
     registry.register(
         "POST",
@@ -144,6 +154,7 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
 
     // Shard upload — write
     registry.register("POST", "/v1/shards", RouteAuthPolicy::AuthenticatedWrite);
+    registry.register("POST", "/v2/shards", RouteAuthPolicy::AuthenticatedWrite);
 
     // Chunk read — authenticated
     registry.register(

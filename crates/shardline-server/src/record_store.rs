@@ -1,5 +1,8 @@
 use crate::ServerError;
 
+mod xorb_range;
+pub(crate) use xorb_range::{Coverage as XorbRangeCoverage, repository_xorb_coverage};
+
 pub(crate) use shardline_index::LocalRecordStore;
 
 pub(crate) fn parse_stored_file_record_bytes(

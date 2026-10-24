@@ -553,15 +553,37 @@ impl LocalRecordStore {
         dedupe_mappings: &[DedupeShardMapping],
         identities: &[crate::XetFileIdentity],
     ) -> Result<(), LocalIndexStoreError> {
+        self.commit_native_shard_metadata_with_descriptors(
+            records,
+            dedupe_mappings,
+            identities,
+            &[],
+        )
+        .await
+    }
+
+    /// Publishes verified native descriptors together with file metadata.
+    ///
+    /// # Errors
+    /// Returns an error for invalid/conflicting metadata or database failure.
+    pub async fn commit_native_shard_metadata_with_descriptors(
+        &self,
+        records: &[FileRecord],
+        dedupe_mappings: &[DedupeShardMapping],
+        identities: &[crate::XetFileIdentity],
+        descriptors: &[crate::XetXorbDescriptor],
+    ) -> Result<(), LocalIndexStoreError> {
         let store = self.clone();
         let records = records.to_vec();
         let dedupe_mappings = dedupe_mappings.to_vec();
         let identities = identities.to_vec();
+        let descriptors = descriptors.to_vec();
         tokio::task::spawn_blocking(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
                 let now = unix_now_seconds_lossy();
+                super::xet_xorb::stage_descriptors(&transaction, &descriptors)?;
                 for record in &records {
                     let version_locator = store.version_record_locator(record);
                     helpers::upsert_file_record_row(&transaction, &version_locator, record, now)?;

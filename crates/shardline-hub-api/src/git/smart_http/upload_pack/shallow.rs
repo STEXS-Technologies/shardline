@@ -14,9 +14,22 @@ pub(super) struct Request {
     exclude_refs: Vec<String>,
     excluded_roots: HashSet<String>,
     relative: bool,
+    snapshot: Option<String>,
+    suppress_updates: bool,
 }
 
 impl Request {
+    pub(super) fn restrict_to_snapshot(&mut self, commit: &str, wants: &[String], v2: bool) {
+        self.suppress_updates =
+            !v2 && self.depth.is_none() && self.since.is_none() && self.exclude_refs.is_empty();
+        self.snapshot = Some(commit.to_owned());
+        self.depth = wants.iter().any(|want| want == commit).then_some(1);
+        self.since = None;
+        self.exclude_refs.clear();
+        self.excluded_roots.clear();
+        self.relative = false;
+    }
+
     pub(super) fn parse(lines: &[Vec<u8>]) -> Result<Self, HubApiError> {
         let invalid = || HubApiError::BadRequest("invalid Git shallow request".to_owned());
         let mut request = Self::default();
@@ -189,6 +202,33 @@ pub(super) fn negotiate(
         .iter()
         .map(|object| (hex::encode(object.sha1()), object))
         .collect();
+    if let Some(snapshot) = &request.snapshot {
+        let mut allowed = HashSet::new();
+        let mut pending = vec![snapshot.clone()];
+        while let Some(id) = pending.pop() {
+            if !allowed.insert(id.clone()) {
+                continue;
+            }
+            let object = by_id.get(&id).ok_or_else(|| {
+                HubApiError::CasError("missing authorized Git snapshot object".to_owned())
+            })?;
+            for child in super::super::projection::object_children(object)? {
+                if by_id
+                    .get(&child)
+                    .is_some_and(|child_object| child_object.object_type != ObjectType::Commit)
+                {
+                    pending.push(child);
+                }
+            }
+        }
+        if wants
+            .iter()
+            .chain(&request.boundaries)
+            .any(|id| !allowed.contains(id))
+        {
+            return Err(HubApiError::Forbidden);
+        }
+    }
     // A depth cut is intentional; a missing or mistyped parent is corruption.
     // Validate before cutting so a shallow request cannot conceal broken history.
     for object in &objects {
@@ -348,6 +388,9 @@ pub(super) fn negotiate(
     };
     let wanted = reachable(wants, false)?;
     let known = reachable(haves, true)?;
+    if request.suppress_updates {
+        updates.clear();
+    }
     Ok((
         objects
             .into_iter()

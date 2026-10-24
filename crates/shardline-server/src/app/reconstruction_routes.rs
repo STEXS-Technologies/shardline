@@ -3,8 +3,12 @@ use std::time::Instant;
 
 use axum::{
     Json,
-    extract::{FromRequestParts, Path, Query, State},
-    http::{HeaderMap, Uri, request::Parts},
+    extract::{FromRequestParts, Path, Query, State, rejection::JsonRejection},
+    http::{
+        HeaderMap, HeaderValue, StatusCode, Uri,
+        header::{CACHE_CONTROL, CONTENT_LENGTH},
+        request::Parts,
+    },
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -15,17 +19,18 @@ use crate::{
     ServerError,
     admission::weights,
     xet_adapter::{
-        BatchReconstructionResponse, build_batch_reconstruction_response,
-        reconstruction_v2_from_v1, validate_hash_path, validate_optional_content_hash,
+        build_batch_reconstruction_response, reconstruction_v2_from_v1, validate_hash_path,
+        validate_optional_content_hash,
     },
 };
 
 use super::{
     AppState, authorize,
     reconstruction_helpers::{
-        load_reconstruction_range_response, load_reconstruction_response,
+        hub_storage_scope, load_reconstruction_range_response, load_reconstruction_response,
         load_reconstruction_v2_response, parse_batch_reconstruction_file_ids,
     },
+    xorb_transfer_capability::XorbReadCapabilitySigner,
 };
 
 #[derive(Debug, Deserialize)]
@@ -47,7 +52,11 @@ fn authorize_repository(
     headers: &HeaderMap,
     required_scope: TokenScope,
 ) -> Result<AuthorizedRepository, ServerError> {
-    authorize(state, headers, required_scope)?.map_or_else(
+    let context = match state.auth.as_ref() {
+        Some(auth) => Some(auth.authorize_xet(headers, required_scope)?),
+        None => authorize(state, headers, required_scope)?,
+    };
+    context.map_or_else(
         || Ok(AuthorizedRepository::anonymous_full_access()),
         |ctx| {
             // The verified context (minted by the auth layer's
@@ -80,7 +89,7 @@ pub(super) struct XetWriteRepository {
 
 impl XetRepository {
     /// Read-scoped construction from request headers.
-    fn read(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
+    pub(super) fn read(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
         Ok(Self {
             auth: authorize_repository(state, headers, TokenScope::Read)?,
         })
@@ -128,6 +137,37 @@ impl FromRequestParts<Arc<AppState>> for XetWriteRepository {
     ) -> Result<Self, Self::Rejection> {
         Self::write(state, &parts.headers)
     }
+}
+
+/// File existence is authoritative metadata, not a payload integrity scan.
+pub(super) async fn head_file(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    repo: XetRepository,
+) -> Result<impl IntoResponse, ServerError> {
+    let _admit = state
+        .admission
+        .try_acquire(weights::RECONSTRUCTION)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let _parsing = state
+        .pools
+        .parsing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    validate_hash_path(&file_id)?;
+    let hub_scope = hub_storage_scope(&state, &file_id, repo.capability()).await?;
+    let scope = hub_scope.as_ref().or_else(|| repo.capability().namespace());
+    let length = state
+        .backend
+        .file_total_bytes(&file_id, None, scope)
+        .await?;
+    Ok((
+        StatusCode::OK,
+        [
+            (CONTENT_LENGTH, length.to_string()),
+            (CACHE_CONTROL, "private, no-store".to_owned()),
+        ],
+    ))
 }
 
 #[tracing::instrument(skip(state, headers), fields(file_id))]
@@ -182,7 +222,9 @@ pub(super) async fn reconstruction(
             shardline_metrics::record_reconstruction(false, elapsed, 0);
         }
     }
-    Ok(Json(result?))
+    let mut response = result?;
+    sign_reconstruction_response(&state, &repo, &file_id, &mut response)?;
+    Ok(no_store_json(response))
 }
 
 #[tracing::instrument(skip(state, headers), fields(file_id))]
@@ -237,7 +279,13 @@ pub(super) async fn reconstruction_v2(
             shardline_metrics::record_reconstruction(false, elapsed, 0);
         }
     }
-    Ok(Json(result?))
+    let mut response = result?;
+    let signer =
+        XorbReadCapabilitySigner::for_authorized_repository(&state.config, repo.capability())?;
+    if let (Some(signer), Some(claims)) = (signer.as_ref(), repo.capability().claims()) {
+        signer.sign_file_v2_response(claims, &file_id, &mut response)?;
+    }
+    Ok(no_store_json(response))
 }
 
 #[tracing::instrument(skip(state, uri))]
@@ -245,7 +293,7 @@ pub(super) async fn batch_reconstruction(
     State(state): State<Arc<AppState>>,
     repo: XetRepository,
     uri: Uri,
-) -> Result<Json<BatchReconstructionResponse>, ServerError> {
+) -> Result<axum::response::Response, ServerError> {
     // Acquire admission permit for batch reconstruction
     let _admit = state
         .admission
@@ -259,10 +307,20 @@ pub(super) async fn batch_reconstruction(
     let file_ids = parse_batch_reconstruction_file_ids(&uri)?;
     let start = Instant::now();
     let mut responses = Vec::new();
+    let signer =
+        XorbReadCapabilitySigner::for_authorized_repository(&state.config, repo.capability())?;
 
     for file_id in file_ids {
         match load_reconstruction_response(&state, &file_id, None, None, repo.capability()).await {
-            Ok(response) => responses.push((file_id, response)),
+            Ok(mut response) => {
+                sign_with_optional_capability(
+                    signer.as_ref(),
+                    repo.capability(),
+                    &file_id,
+                    &mut response,
+                )?;
+                responses.push((file_id, response));
+            }
             Err(ServerError::NotFound) => {}
             Err(error) => return Err(error),
         }
@@ -275,7 +333,9 @@ pub(super) async fn batch_reconstruction(
         .sum();
     shardline_metrics::record_reconstruction(true, elapsed, total_chunks);
 
-    Ok(Json(build_batch_reconstruction_response(responses)))
+    Ok(no_store_json(build_batch_reconstruction_response(
+        responses,
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,8 +349,15 @@ pub(super) struct BatchReconstructionRequestItem {
 pub(super) async fn batch_reconstruction_post(
     State(state): State<Arc<AppState>>,
     repo: XetRepository,
-    Json(request): Json<Vec<BatchReconstructionRequestItem>>,
-) -> Result<Json<BatchReconstructionResponse>, ServerError> {
+    request: Result<Json<Vec<BatchReconstructionRequestItem>>, JsonRejection>,
+) -> Result<axum::response::Response, ServerError> {
+    let Json(request) = request.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ServerError::RequestBodyTooLarge
+        } else {
+            ServerError::InvalidContentHash
+        }
+    })?;
     let _admit = state
         .admission
         .try_acquire(weights::BATCH_OPERATION)
@@ -318,10 +385,22 @@ pub(super) async fn batch_reconstruction_post(
 
     let start = Instant::now();
     let mut responses = Vec::new();
+    let signer =
+        XorbReadCapabilitySigner::for_authorized_repository(&state.config, repo.capability())?;
     for file_id in file_ids {
         match load_reconstruction_response(&state, &file_id, None, None, repo.capability()).await {
-            Ok(response) => responses.push((file_id, response)),
-            Err(ServerError::NotFound) => {}
+            Ok(mut response) => {
+                sign_with_optional_capability(
+                    signer.as_ref(),
+                    repo.capability(),
+                    &file_id,
+                    &mut response,
+                )?;
+                responses.push((file_id, response));
+            }
+            // The published POST contract fails the entire batch when any
+            // member is missing. Legacy GET intentionally retains omission.
+            Err(ServerError::NotFound) => return Err(ServerError::NotFound),
             Err(error) => return Err(error),
         }
     }
@@ -331,7 +410,42 @@ pub(super) async fn batch_reconstruction_post(
         .map(|(_, response)| u64::try_from(response.terms.len()).unwrap_or(0))
         .sum();
     shardline_metrics::record_reconstruction(true, elapsed, total_chunks);
-    Ok(Json(build_batch_reconstruction_response(responses)))
+    Ok(no_store_json(build_batch_reconstruction_response(
+        responses,
+    )))
+}
+
+fn no_store_json<T: serde::Serialize>(value: T) -> axum::response::Response {
+    let mut response = Json(value).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    response
+}
+
+fn sign_reconstruction_response(
+    state: &AppState,
+    repository: &XetRepository,
+    file_id: &str,
+    response: &mut crate::xet_adapter::FileReconstructionResponse,
+) -> Result<(), ServerError> {
+    let signer = XorbReadCapabilitySigner::for_authorized_repository(
+        &state.config,
+        repository.capability(),
+    )?;
+    sign_with_optional_capability(signer.as_ref(), repository.capability(), file_id, response)
+}
+
+fn sign_with_optional_capability(
+    signer: Option<&XorbReadCapabilitySigner>,
+    repository: &AuthorizedRepository,
+    file_id: &str,
+    response: &mut crate::xet_adapter::FileReconstructionResponse,
+) -> Result<(), ServerError> {
+    if let (Some(signer), Some(claims)) = (signer, repository.claims()) {
+        signer.sign_file_response(claims, file_id, response)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

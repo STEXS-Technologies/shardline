@@ -107,7 +107,9 @@ async fn empty_repo_and_missing_repository_keep_existing_head_contract() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_head_tracks_live_ref_after_rollback_and_timestamp_ties() {
-    let Ok(url) = std::env::var("SHARDLINE_HEAD_TEST_DATABASE_URL") else {
+    let Some(url) =
+        shardline_test_support::postgres_fixture_url("SHARDLINE_HEAD_TEST_DATABASE_URL")
+    else {
         return;
     };
     let root = tempfile::TempDir::new().unwrap();

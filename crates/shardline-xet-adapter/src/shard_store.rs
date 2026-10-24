@@ -37,6 +37,17 @@ use crate::error::XetAdapterError;
 
 use super::{ValidatedXorbChunk, validate_serialized_xorb, xorb_object_key};
 
+mod checkpoint_reader;
+mod dedup;
+mod file_digests;
+#[cfg(test)]
+mod file_digests_tests;
+mod verification;
+pub use dedup::{
+    dedup_xorb_candidates, recover_dedup_xorb_descriptor,
+    recover_dedup_xorb_descriptor_from_candidates, recover_xorb_descriptor,
+};
+
 fn shard_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
     shardline_server_core::validate_content_hash_with(hash_hex, || {
         XetAdapterError::InvalidContentHash
@@ -55,6 +66,110 @@ pub struct ParsedShardUpload {
     pub file_identities: Vec<XetFileIdentity>,
     pub shard_key: ObjectKey,
     pub dedupe_chunk_hashes: Vec<String>,
+}
+
+/// Fully verified shard metadata which has not published any object or record.
+/// This owned value can cross a blocking-worker boundary; dropping it publishes
+/// nothing. Publication must remain with the request's current owner.
+#[derive(Debug)]
+pub struct PreparedShardUpload {
+    objects: ServerObjectStore,
+    normalized: NormalizedShardUpload,
+    references: Vec<ObjectKey>,
+    descriptors: Vec<shardline_index::XetXorbDescriptor>,
+}
+
+/// Performs bounded, read-only verification of a native shard and its sources.
+///
+/// # Errors
+/// Returns an error for malformed metadata, missing/corrupt sources or limits.
+pub fn prepare_uploaded_shard<R: Read + Seek>(
+    reader: &mut R,
+    object_store: &ServerObjectStore,
+    repository_scope: Option<&RepositoryScope>,
+    limits: ShardMetadataLimits,
+) -> Result<PreparedShardUpload, XetAdapterError> {
+    prepare_uploaded_shard_with_checkpoint(reader, object_store, repository_scope, limits, &|| {
+        Ok(())
+    })
+}
+
+/// Read-only preparation with a request-lifetime check between verification units.
+/// The callback must return an interrupted I/O error after request cancellation.
+/// S3 materialization checks between response frames; an already-waiting read
+/// retains the storage backend's timeout. Local reads retain the source inode.
+///
+/// # Errors
+/// Returns verification, storage, limit or checkpoint errors without publication.
+pub fn prepare_uploaded_shard_with_checkpoint<R: Read + Seek>(
+    reader: &mut R,
+    object_store: &ServerObjectStore,
+    repository_scope: Option<&RepositoryScope>,
+    limits: ShardMetadataLimits,
+    checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
+) -> Result<PreparedShardUpload, XetAdapterError> {
+    let mut references = HashSet::new();
+    let mut descriptors = Vec::new();
+    let preparation = parse_shard_records_with_checkpoint(
+        &mut checkpoint_reader::CheckpointReader { reader, checkpoint },
+        object_store,
+        repository_scope,
+        limits,
+        Some(&mut references),
+        Some(&mut descriptors),
+        checkpoint,
+    );
+    checkpoint()?;
+    let normalized = preparation?;
+    let mut references: Vec<_> = references.into_iter().collect();
+    references.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    Ok(PreparedShardUpload {
+        objects: object_store.clone(),
+        normalized,
+        references,
+        descriptors,
+    })
+}
+
+impl PreparedShardUpload {
+    /// Persists the immutable shard and atomically publishes metadata through
+    /// the caller's callback. Verification workers must never call this method.
+    ///
+    /// # Errors
+    /// Returns storage, mapping or metadata-publication failure.
+    pub async fn register<Commit, CommitFuture>(
+        self,
+        commit: Commit,
+    ) -> Result<crate::ShardUploadResponse, XetAdapterError>
+    where
+        Commit: FnOnce(
+            Vec<FileRecord>,
+            Vec<DedupeShardMapping>,
+            Vec<ObjectKey>,
+            Vec<XetFileIdentity>,
+            Vec<shardline_index::XetXorbDescriptor>,
+        ) -> CommitFuture,
+        CommitFuture: std::future::Future<Output = Result<(), XetAdapterError>>,
+    {
+        let parsed = persist_normalized_shard(&self.objects, self.normalized)?;
+        let mappings = parsed
+            .dedupe_chunk_hashes
+            .iter()
+            .map(|hash| dedupe_shard_mapping(hash, &parsed.shard_key))
+            .collect::<Result<Vec<_>, _>>()?;
+        tokio::task::yield_now().await;
+        commit(
+            parsed.records,
+            mappings,
+            self.references,
+            parsed.file_identities,
+            self.descriptors,
+        )
+        .await?;
+        Ok(crate::ShardUploadResponse {
+            result: parsed.result,
+        })
+    }
 }
 
 /// # Errors
@@ -94,13 +209,39 @@ pub(crate) fn parse_uploaded_shard_from_reader<R: Read + Seek>(
     limits: ShardMetadataLimits,
     member_references: Option<&mut HashSet<ObjectKey>>,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
+    parse_uploaded_shard_with_descriptors(
+        reader,
+        object_store,
+        repository_scope,
+        limits,
+        member_references,
+        None,
+    )
+}
+
+pub(crate) fn parse_uploaded_shard_with_descriptors<R: Read + Seek>(
+    reader: &mut R,
+    object_store: &ServerObjectStore,
+    repository_scope: Option<&RepositoryScope>,
+    limits: ShardMetadataLimits,
+    member_references: Option<&mut HashSet<ObjectKey>>,
+    descriptors: Option<&mut Vec<shardline_index::XetXorbDescriptor>>,
+) -> Result<ParsedShardUpload, XetAdapterError> {
     let parsed_shard = parse_shard_records_from_reader(
         reader,
         object_store,
         repository_scope,
         limits,
         member_references,
+        descriptors,
     )?;
+    persist_normalized_shard(object_store, parsed_shard)
+}
+
+fn persist_normalized_shard(
+    object_store: &ServerObjectStore,
+    parsed_shard: NormalizedShardUpload,
+) -> Result<ParsedShardUpload, XetAdapterError> {
     let shard_key = shard_object_key_local(&parsed_shard.shard_hash_hex)?;
     let was_present = object_store.metadata(&shard_key)?.is_some();
     let shard_length = u64::try_from(parsed_shard.normalized_bytes.len())?;
@@ -197,6 +338,7 @@ pub fn retained_shard_chunk_hashes_from_reader<R: Read + std::io::Seek>(
         .map(|bounded_shard| bounded_shard.dedupe_chunk_hashes)
 }
 
+#[derive(Debug)]
 struct NormalizedShardUpload {
     shard_hash_hex: String,
     normalized_bytes: Vec<u8>,
@@ -206,12 +348,34 @@ struct NormalizedShardUpload {
 }
 
 fn parse_shard_records_from_reader<R: Read + Seek>(
+    shard_reader: &mut R,
+    object_store: &ServerObjectStore,
+    repository_scope: Option<&RepositoryScope>,
+    limits: ShardMetadataLimits,
+    member_references: Option<&mut HashSet<ObjectKey>>,
+    descriptors: Option<&mut Vec<shardline_index::XetXorbDescriptor>>,
+) -> Result<NormalizedShardUpload, XetAdapterError> {
+    parse_shard_records_with_checkpoint(
+        shard_reader,
+        object_store,
+        repository_scope,
+        limits,
+        member_references,
+        descriptors,
+        &|| Ok(()),
+    )
+}
+
+fn parse_shard_records_with_checkpoint<R: Read + Seek>(
     mut shard_reader: &mut R,
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     limits: ShardMetadataLimits,
     member_references: Option<&mut HashSet<ObjectKey>>,
+    descriptors: Option<&mut Vec<shardline_index::XetXorbDescriptor>>,
+    checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
 ) -> Result<NormalizedShardUpload, XetAdapterError> {
+    checkpoint()?;
     shard_reader
         .seek(std::io::SeekFrom::Start(0))
         .map_err(XetAdapterError::Io)?;
@@ -221,14 +385,50 @@ fn parse_shard_records_from_reader<R: Read + Seek>(
     let bounded_shard = read_bounded_shard_sections(&mut shard_reader, limits, version)?;
     let mut in_memory_shard = MDBInMemoryShard::default();
     validate_referenced_xorb_count(&bounded_shard.file_infos, limits.max_xorbs().get())?;
+    let mut xorb_cache = HashMap::new();
+    let mut file_digests = file_digests::FileDigestVerifier::default();
+    let mut member_references = member_references;
 
     for file_info in &bounded_shard.file_infos {
+        checkpoint()?;
         in_memory_shard
             .add_file_reconstruction_info(file_info.clone())
             .map_err(|error| invalid_serialized_shard(&error))?;
     }
 
+    // Visit sources in logical file order so validation and SHA-256 derivation
+    // share the same bounded materialization. Verify all client CAS metadata,
+    // including unreferenced blocks, before producing a publishable result.
+    let (records, file_identities) = build_file_records_with_cache(
+        bounded_shard.file_infos,
+        object_store,
+        repository_scope,
+        member_references.as_deref_mut(),
+        &mut xorb_cache,
+        &mut file_digests,
+        checkpoint,
+    )?;
+    drop(file_digests);
+
     for xorb_info in bounded_shard.xorb_infos {
+        checkpoint()?;
+        let hash = xorb_info.metadata.xorb_hash.hex();
+        if !xorb_cache.contains_key(&hash) {
+            let (verified, _source) = load_xorb_range_info_with_checkpoint(
+                object_store,
+                &hash,
+                member_references.as_deref_mut(),
+                checkpoint,
+            )?;
+            xorb_cache.insert(hash.clone(), verified);
+        }
+        let verified = xorb_cache
+            .get(&hash)
+            .ok_or(XetAdapterError::InvalidSerializedShard(
+                InvalidSerializedShardError::XorbMetadataCacheInsertionFailed,
+            ))?;
+        checkpoint()?;
+        verification::verify_xorb_members(&xorb_info, &verified.verified_chunks)?;
         in_memory_shard
             .add_xorb_block(xorb_info)
             .map_err(|error| invalid_serialized_shard(&error))?;
@@ -238,12 +438,19 @@ fn parse_shard_records_from_reader<R: Read + Seek>(
         .to_bytes()
         .map_err(|error| invalid_serialized_shard(&error))?;
     let shard_hash_hex = compute_data_hash(&normalized_bytes).hex();
-    let (records, file_identities) = build_file_records_from_infos(
-        bounded_shard.file_infos,
-        object_store,
-        repository_scope,
-        member_references,
-    )?;
+    if let Some(descriptors) = descriptors {
+        for (hash, info) in &xorb_cache {
+            checkpoint()?;
+            // The derived standard-protocol lookup has its own memory ceiling.
+            // Do not tighten historical ingestion acceptance as a side effect
+            // of installing an optional acceleration index.
+            if info.verified_chunks.len() > shardline_index::MAX_XET_DESCRIPTOR_CHUNKS {
+                continue;
+            }
+            descriptors.push(info.descriptor(hash));
+        }
+        descriptors.sort_unstable_by(|left, right| left.hash.cmp(&right.hash));
+    }
 
     Ok(NormalizedShardUpload {
         shard_hash_hex,
@@ -501,26 +708,31 @@ pub fn shard_hash_from_object_key_if_present(
     Ok(Some(hash_hex))
 }
 
-fn build_file_records_from_infos(
+fn build_file_records_with_cache(
     file_infos: Vec<MDBFileInfo>,
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     mut member_references: Option<&mut HashSet<ObjectKey>>,
+    xorb_cache: &mut HashMap<String, XorbRangeInfo>,
+    file_digests: &mut file_digests::FileDigestVerifier,
+    checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
 ) -> Result<(Vec<FileRecord>, Vec<XetFileIdentity>), XetAdapterError> {
-    let mut xorb_cache = HashMap::<String, XorbRangeInfo>::new();
     let mut records = Vec::with_capacity(file_infos.len());
     let mut file_identities = Vec::new();
 
     for file_info in file_infos {
+        checkpoint()?;
         let file_id = file_info.metadata.file_hash.hex();
-        let sha256 = file_info
+        let expected_sha256 = file_info
             .metadata_ext
             .as_ref()
             .map(|metadata| metadata.sha256.hex());
+        let mut digest = file_digests::FileDigest::new(expected_sha256, repository_scope.is_some());
         let mut offset = 0_u64;
         let mut chunks = Vec::with_capacity(file_info.segments.len());
 
-        for segment in file_info.segments {
+        for segment in &file_info.segments {
+            checkpoint()?;
             let hash = segment.xorb_hash.hex();
             let range_start = segment.chunk_index_start;
             let range_end = segment.chunk_index_end;
@@ -533,8 +745,15 @@ fn build_file_records_from_infos(
             let xorb_info = if let Some(info) = xorb_cache.get(&hash) {
                 info
             } else {
-                let loaded =
-                    load_xorb_range_info(object_store, &hash, member_references.as_deref_mut())?;
+                // Drop the previous spool before materializing another source.
+                file_digests.release_source();
+                let (loaded, source) = load_xorb_range_info_with_checkpoint(
+                    object_store,
+                    &hash,
+                    member_references.as_deref_mut(),
+                    checkpoint,
+                )?;
+                file_digests.retain_verified_source(&hash, source);
                 xorb_cache.insert(hash.clone(), loaded);
                 xorb_cache
                     .get(&hash)
@@ -544,6 +763,8 @@ fn build_file_records_from_infos(
             };
             let packed_start = xorb_info.packed_start(range_start)?;
             let packed_end = xorb_info.packed_end(range_end)?;
+            verification::verify_term_length(segment, &xorb_info.verified_chunks)?;
+            digest.update(file_digests, object_store, segment, xorb_info, checkpoint)?;
             let length = segment.unpacked_segment_bytes;
             chunks.push(FileChunkRecord {
                 hash,
@@ -559,6 +780,44 @@ fn build_file_records_from_infos(
                 .ok_or(XetAdapterError::Overflow)?;
         }
 
+        // The file hash is also a proof of knowledge of the selected member
+        // hashes. Never publish an arbitrary claimed identity for guessed ranges
+        // of a shared Xorb. All ranges were checked above; iterate the verified
+        // cache without allocating a vector proportional to logical file size.
+        let members = file_info
+            .segments
+            .iter()
+            .flat_map(|segment| {
+                xorb_cache
+                    .get(&segment.xorb_hash.hex())
+                    .into_iter()
+                    .flat_map(move |info| {
+                        info.verified_chunks
+                            .iter()
+                            .skip(usize::try_from(segment.chunk_index_start).unwrap_or(usize::MAX))
+                            .take(
+                                usize::try_from(
+                                    segment
+                                        .chunk_index_end
+                                        .saturating_sub(segment.chunk_index_start),
+                                )
+                                .unwrap_or(0),
+                            )
+                    })
+            })
+            .map(|chunk| {
+                (
+                    MerkleHash::from(*chunk.hash().as_bytes()),
+                    chunk.unpacked_len(),
+                )
+            });
+        if shardline_xet_core::merklehash::file_hash_from_iter(members)
+            != file_info.metadata.file_hash
+        {
+            return Err(InvalidSerializedShardError::ParserRejectedMetadata.into());
+        }
+
+        let sha256 = digest.finish()?;
         records.push(FileRecord {
             file_id: file_id.clone(),
             content_hash: content_hash(offset, 0, &chunks),
@@ -606,14 +865,43 @@ fn load_xorb_range_info(
     hash_hex: &str,
     member_references: Option<&mut HashSet<ObjectKey>>,
 ) -> Result<XorbRangeInfo, XetAdapterError> {
+    load_xorb_range_info_with_source(object_store, hash_hex, member_references)
+        .map(|(info, _source)| info)
+}
+
+fn load_xorb_range_info_with_source(
+    object_store: &ServerObjectStore,
+    hash_hex: &str,
+    member_references: Option<&mut HashSet<ObjectKey>>,
+) -> Result<(XorbRangeInfo, shardline_server_core::MaterializedObject), XetAdapterError> {
+    load_xorb_range_info_with_checkpoint(object_store, hash_hex, member_references, &|| Ok(()))
+}
+
+fn load_xorb_range_info_with_checkpoint(
+    object_store: &ServerObjectStore,
+    hash_hex: &str,
+    member_references: Option<&mut HashSet<ObjectKey>>,
+    checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
+) -> Result<(XorbRangeInfo, shardline_server_core::MaterializedObject), XetAdapterError> {
+    checkpoint()?;
     let key = xorb_object_key(hash_hex)?;
-    let Some((mut reader, _length)) =
-        object_store.materialize_bounded_object_if_present(&key, 0)?
-    else {
+    let source =
+        object_store.materialize_bounded_object_if_present_with_checkpoint(&key, 0, checkpoint);
+    checkpoint()?;
+    let Some((mut reader, _length)) = source? else {
+        tracing::warn!(xorb_hash = hash_hex, "shard referenced a missing Xorb");
         return Err(XetAdapterError::MissingReferencedXorb);
     };
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
+    let validation = validate_serialized_xorb(
+        &mut checkpoint_reader::CheckpointReader {
+            reader: &mut reader,
+            checkpoint,
+        },
+        expected_hash,
+    );
+    checkpoint()?;
+    let validated = validation?;
     if let Some(references) = member_references {
         for chunk in validated.chunks() {
             let hash = shardline_index::xet_hash_hex_string(chunk.hash());
@@ -625,7 +913,14 @@ fn load_xorb_range_info(
         .iter()
         .map(ValidatedXorbChunk::packed_end)
         .collect();
-    Ok(XorbRangeInfo { packed_chunk_ends })
+    Ok((
+        XorbRangeInfo {
+            total_length: validated.total_length(),
+            packed_chunk_ends,
+            verified_chunks: validated.chunks().to_vec(),
+        },
+        reader,
+    ))
 }
 
 /// # Errors
@@ -650,10 +945,29 @@ const fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
 
 #[derive(Debug, Clone)]
 struct XorbRangeInfo {
+    total_length: u64,
     packed_chunk_ends: Vec<u64>,
+    verified_chunks: Vec<ValidatedXorbChunk>,
 }
 
 impl XorbRangeInfo {
+    fn descriptor(&self, hash: &str) -> shardline_index::XetXorbDescriptor {
+        shardline_index::XetXorbDescriptor {
+            hash: hash.to_owned(),
+            total_bytes: self.total_length,
+            chunks: self
+                .verified_chunks
+                .iter()
+                .map(|chunk| shardline_index::XetXorbChunk {
+                    hash: shardline_index::xet_hash_hex_string(chunk.hash()),
+                    packed_start: chunk.packed_start(),
+                    packed_end: chunk.packed_end(),
+                    unpacked_start: chunk.unpacked_start(),
+                    unpacked_end: chunk.unpacked_end(),
+                })
+                .collect(),
+        }
+    }
     fn packed_start(&self, range_start: u64) -> Result<u64, XetAdapterError> {
         let range_start = usize::try_from(range_start)?;
         if range_start == 0 {
@@ -686,6 +1000,9 @@ impl XorbRangeInfo {
             })
     }
 }
+
+#[cfg(test)]
+mod empty_files;
 
 #[cfg(test)]
 mod tests {
@@ -743,7 +1060,9 @@ mod tests {
         .unwrap();
         let hash = serialized.hash;
         let mut outcomes = Vec::new();
-        for collect_members in [false, true] {
+        for (collect_members, verify_sha256) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             listener.set_nonblocking(true).unwrap();
@@ -820,28 +1139,56 @@ mod tests {
             .unwrap();
             let info = MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(
-                    compute_data_hash(b"fixture"),
+                    file_hash(&[(hash, 256_u64); 2]),
                     2_u64,
                     false,
-                    false,
+                    verify_sha256,
                 ),
                 segments: vec![FileDataSequenceEntry::new(hash, 256_u64, 0_u64, 1_u64); 2],
                 verification: Vec::new(),
-                metadata_ext: None,
+                metadata_ext: if verify_sha256 {
+                    use sha2::{Digest, Sha256};
+                    Some(super::FileMetadataExt::new(
+                        MerkleHash::from_hex(&format!("{:x}", Sha256::digest([0_u8; 512])))
+                            .unwrap(),
+                    ))
+                } else {
+                    None
+                },
             };
             let mut references = std::collections::HashSet::new();
-            let (records, identities) = super::build_file_records_from_infos(
+            let shard = serialize_test_shard(
                 vec![info],
+                vec![MDBXorbInfo {
+                    metadata: XorbChunkSequenceHeader::new(hash, 1, 256),
+                    chunks: vec![XorbChunkSequenceEntry::new(
+                        compute_data_hash(&[0_u8; 256]),
+                        256,
+                        0,
+                    )],
+                }],
+            );
+            let mut descriptors = Vec::new();
+            let parsed = super::parse_shard_records_from_reader(
+                &mut std::io::Cursor::new(shard),
                 &objects,
                 None,
+                DEFAULT_SHARD_METADATA_LIMITS,
                 if collect_members {
                     Some(&mut references)
                 } else {
                     None
                 },
+                Some(&mut descriptors),
             )
             .unwrap();
-            assert!(identities.is_empty());
+            assert!(parsed.file_identities.is_empty());
+            assert_eq!(descriptors.len(), 1);
+            assert_eq!(
+                descriptors.first().unwrap().total_bytes,
+                u64::try_from(serialized.serialized_data.len()).unwrap()
+            );
+            assert!(descriptors.first().unwrap().has_valid_structure());
             stop.store(true, Ordering::Relaxed);
             let reads = server.join().unwrap().unwrap();
             assert_eq!(
@@ -853,7 +1200,7 @@ mod tests {
             } else {
                 assert!(references.is_empty());
             }
-            outcomes.push((records, reads));
+            outcomes.push((parsed.records, reads));
         }
         let first = outcomes.first().unwrap();
         let last = outcomes.last().unwrap();
@@ -1345,7 +1692,9 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_start_zero_for_index_zero() {
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![100, 200, 300],
+            verified_chunks: vec![],
         };
         assert_eq!(info.packed_start(0).unwrap(), 0);
     }
@@ -1353,7 +1702,9 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_start_uses_previous_chunk_end() {
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![100, 200, 300],
+            verified_chunks: vec![],
         };
         assert_eq!(info.packed_start(1).unwrap(), 100);
         assert_eq!(info.packed_start(2).unwrap(), 200);
@@ -1362,7 +1713,9 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_start_rejects_past_end() {
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![100, 200],
+            verified_chunks: vec![],
         };
         assert!(info.packed_start(3).is_err());
     }
@@ -1370,7 +1723,9 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_end_uses_zero_based_index() {
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![100, 200, 300],
+            verified_chunks: vec![],
         };
         // packed_end(1) = packed_chunk_ends[0] = 100
         assert_eq!(info.packed_end(1).unwrap(), 100);
@@ -1381,7 +1736,9 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_end_rejects_past_end() {
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![100, 200],
+            verified_chunks: vec![],
         };
         assert!(info.packed_end(3).is_err());
     }
@@ -1500,18 +1857,18 @@ mod tests {
         store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         // Build a shard referencing it
-        let chunk_hash = compute_data_hash(b"x");
-        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+        let chunk_hash = compute_data_hash(&[0_u8; 256]);
+        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
             }],
         );
 
@@ -1562,18 +1919,18 @@ mod tests {
         store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         // 2. Build a shard referencing that xorb
-        let chunk_hash = compute_data_hash(b"x");
-        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+        let chunk_hash = compute_data_hash(&[0_u8; 256]);
+        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
             }],
         );
 
@@ -1612,18 +1969,18 @@ mod tests {
         let xorb_hash = serialized.hash;
         store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
-        let chunk_hash = compute_data_hash(b"x");
-        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+        let chunk_hash = compute_data_hash(&[0_u8; 256]);
+        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
             }],
         );
 
@@ -1742,19 +2099,19 @@ mod tests {
         let xorb_hash = serialized.hash;
         store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
-        let chunk_hash = compute_data_hash(b"x");
-        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+        let chunk_hash = compute_data_hash(&[0_u8; 256]);
+        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
         // Create file info with verification=true, metadata_ext=false
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1u64, true, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
                 verification: vec![FileVerificationEntry::new(MerkleHash::default())],
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
             }],
         );
 
@@ -1838,7 +2195,9 @@ mod tests {
     fn xorb_range_info_packed_start_rejects_subtract_underflow_for_index_above_zero() {
         // range_start > 0 but previous_index underflows when range_start = 0
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![100],
+            verified_chunks: vec![],
         };
         // This is fine - packed_start(0) = 0
         assert_eq!(info.packed_start(0).unwrap(), 0);
@@ -1847,7 +2206,9 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_start_rejects_index_beyond_list() {
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![100],
+            verified_chunks: vec![],
         };
         // packed_start(2) -> range_start=2 -> previous_index = 1 -> out of bounds
         let result = info.packed_start(2);
@@ -1860,7 +2221,9 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_end_rejects_zero_index() {
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![100, 200],
+            verified_chunks: vec![],
         };
         // packed_end(0) -> range_end = 0 -> saturating_sub(1) = 0 -> get(0) = Some(100)
         assert_eq!(info.packed_end(0).unwrap(), 100);
@@ -1869,7 +2232,9 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_end_rejects_empty_chunks() {
         let info = super::XorbRangeInfo {
+            total_length: 0,
             packed_chunk_ends: vec![],
+            verified_chunks: vec![],
         };
         // packed_end(1) -> range_end = 1 -> saturating_sub(1) = 0 -> get(0) = None
         let result = info.packed_end(1);

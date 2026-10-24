@@ -194,7 +194,9 @@ async fn sqlite_search_filters_and_sorts_before_limit() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_search_filters_and_sorts_before_limit() {
-    let Ok(url) = std::env::var("SHARDLINE_HUB_SEARCH_TEST_DATABASE_URL") else {
+    let Some(url) =
+        shardline_test_support::postgres_fixture_url("SHARDLINE_HUB_SEARCH_TEST_DATABASE_URL")
+    else {
         return;
     };
     let root = tempfile::TempDir::new().unwrap();

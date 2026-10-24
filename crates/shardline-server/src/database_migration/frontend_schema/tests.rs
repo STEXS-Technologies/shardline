@@ -3,6 +3,66 @@ use super::*;
 use crate::test_support::postgres_fixture::PostgresFixture;
 use shardline_index::{S3ObjectEntry, S3ObjectIndexStore};
 
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn native_alias_trigger_preserves_update_only_role_and_fails_closed_if_disabled() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    let role = quote(&format!("alias_writer_{}", fixture.schema));
+    let schema = quote(&fixture.schema);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role}; GRANT USAGE ON SCHEMA {schema} TO {role};
+         GRANT SELECT,UPDATE ON {schema}.shardline_xet_file_identities TO {role};
+         INSERT INTO {schema}.shardline_xet_file_identities VALUES ('scope','sha','old',42)"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    install(pool).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    query("UPDATE shardline_xet_file_identities SET file_id='new' WHERE scope_key='scope'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let aliases: Vec<String> =
+        query_scalar("SELECT file_id FROM shardline_xet_file_aliases ORDER BY file_id")
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+    assert_eq!(aliases, vec!["new", "old"]);
+    assert!(
+        query(
+            "UPDATE shardline_xet_file_identities SET sha256='different' WHERE scope_key='scope'"
+        )
+        .execute(&mut *connection)
+        .await
+        .is_err()
+    );
+    assert!(
+        query("INSERT INTO shardline_xet_file_identities VALUES ('scope','other','ungranted',42)")
+            .execute(&mut *connection)
+            .await
+            .is_err()
+    );
+    query("RESET ROLE").execute(&mut *connection).await.unwrap();
+    drop(connection);
+    raw_sql("ALTER TABLE shardline_xet_file_identities DISABLE TRIGGER shardline_xet_file_aliases_preserve")
+        .execute(pool).await.unwrap();
+    assert!(check(pool).await.is_err());
+    assert!(install(pool).await.is_err());
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
 async fn move_frontend_history_to_prerelease_ledger(pool: &PgPool) {
     for migration in FRONTEND_MIGRATIONS {
         query(
@@ -35,9 +95,13 @@ async fn adoption_preserves_original_history_and_durable_frontend_rows() {
     .execute(pool)
     .await
     .unwrap();
-    let before: Vec<(String,String,String)> = sqlx::query_as("SELECT version,checksum,applied_at::text FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000','20261023000000') ORDER BY version")
-        .fetch_all(pool).await.unwrap();
-    assert_eq!(before.len(), 3);
+    let versions: Vec<_> = FRONTEND_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    let before: Vec<(String,String,String)> = sqlx::query_as("SELECT version,checksum,applied_at::text FROM shardline_schema_migrations WHERE version = ANY($1) ORDER BY version")
+        .bind(&versions).fetch_all(pool).await.unwrap();
+    assert_eq!(before.len(), FRONTEND_MIGRATIONS.len());
     let report =
         super::super::run_database_migration(&super::super::DatabaseMigrationOptions::new(
             fixture.config.index_postgres_url().unwrap().to_owned(),
@@ -46,14 +110,20 @@ async fn adoption_preserves_original_history_and_durable_frontend_rows() {
         .await
         .unwrap();
     assert_eq!(report.pending_count, 0);
-    assert_eq!(report.applied_count, 3);
-    assert_eq!(report.applied_total_count, 38);
+    let frontend_count = u64::try_from(FRONTEND_MIGRATIONS.len()).unwrap();
+    assert_eq!(report.applied_count, frontend_count);
+    assert_eq!(report.applied_total_count, 35 + frontend_count);
     install(pool).await.unwrap();
     check(pool).await.unwrap();
     let after: Vec<(String,String,String)> = sqlx::query_as("SELECT version,checksum,applied_at::text FROM shardline_frontend_schema_v1 ORDER BY version")
         .fetch_all(pool).await.unwrap();
     assert_eq!(after, before);
-    let legacy: i64 = query_scalar("SELECT count(*) FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000','20261023000000')").fetch_one(pool).await.unwrap();
+    let legacy: i64 =
+        query_scalar("SELECT count(*) FROM shardline_schema_migrations WHERE version = ANY($1)")
+            .bind(&versions)
+            .fetch_one(pool)
+            .await
+            .unwrap();
     assert_eq!(legacy, 0);
     let identity: String = query_scalar("SELECT file_id FROM shardline_xet_file_identities")
         .fetch_one(pool)
@@ -177,6 +247,9 @@ async fn existing_read_only_role_can_check_without_ddl_or_new_write_permissions(
         HISTORY,
         "shardline_xet_file_identities",
         "shardline_lfs_locks",
+        "shardline_record_membership",
+        "shardline_xet_xorbs",
+        "shardline_xet_chunks",
     ] {
         let permissions: (bool, bool, bool, bool) = sqlx::query_as(
             "SELECT
@@ -199,6 +272,63 @@ async fn existing_read_only_role_can_check_without_ddl_or_new_write_permissions(
     assert!(!ddl);
     query("RESET ROLE").execute(pool).await.unwrap();
     // The role owns no objects: remove only its fixture grants before dropping it.
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn membership_trigger_preserves_existing_update_only_runtime_role() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    let role_name = format!("membership_writer_{}", fixture.schema);
+    let role = quote(&role_name);
+    let schema = quote(&fixture.schema);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role}; GRANT USAGE ON SCHEMA {schema} TO {role};
+         GRANT SELECT,UPDATE ON {schema}.shardline_file_records TO {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    install(pool).await.unwrap();
+    query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record)
+           VALUES ('legacy','latest','scope','file','content',$1)")
+        .bind(sqlx::types::Json(serde_json::json!({"chunks": [{"hash": "before"}]})))
+        .execute(pool).await.unwrap();
+    query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
+        .execute(pool)
+        .await
+        .unwrap();
+    query("UPDATE shardline_file_records SET record=$1 WHERE record_key='legacy'")
+        .bind(sqlx::types::Json(
+            serde_json::json!({"chunks": [{"hash": "after"}]}),
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    let hashes: Vec<String> = query_scalar(
+        "SELECT member_hash FROM shardline_record_membership WHERE record_key='legacy'",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(hashes, vec!["after"]);
+    let can_insert_source: bool =
+        query_scalar("SELECT has_table_privilege(current_user,'shardline_file_records','INSERT')")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert!(
+        !can_insert_source,
+        "migration must preserve the source role policy"
+    );
+    query("RESET ROLE").execute(pool).await.unwrap();
     raw_sql(sqlx::AssertSqlSafe(format!(
         "DROP OWNED BY {role}; DROP ROLE {role}"
     )))

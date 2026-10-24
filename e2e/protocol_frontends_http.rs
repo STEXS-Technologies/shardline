@@ -766,7 +766,11 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
         let prefix = prefix?;
         for entry in fs::read_dir(prefix.path())? {
             let entry = entry?;
-            if entry.path().extension().is_some_and(|extension| extension == "xorb") {
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "xorb")
+            {
                 let path = entry.path();
                 let hash = path
                     .file_stem()

@@ -1226,13 +1226,18 @@ mod tests {
         let role = format!("{schema}_writer");
         let identifier = format!("\"{}\"", schema.replace('"', "\"\""));
         let role_identifier = format!("\"{}\"", role.replace('"', "\"\""));
+        // This role is created after fixture migration. Match the derived-index
+        // grants that frontend installation mirrors for existing record writers;
+        // do not grant access to retention or remote-delete fencing tables.
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE {role_identifier};
              GRANT USAGE ON SCHEMA {identifier} TO {role_identifier};
              GRANT SELECT, INSERT, UPDATE ON {identifier}.shardline_dedupe_shards,
                  {identifier}.shardline_file_records,
                  {identifier}.shardline_file_reconstructions,
-                 {identifier}.shardline_stored_objects TO {role_identifier};"
+                 {identifier}.shardline_stored_objects TO {role_identifier};
+             GRANT SELECT, INSERT, DELETE ON {identifier}.shardline_record_membership
+                 TO {role_identifier};"
         )))
         .execute(&pool)
         .await

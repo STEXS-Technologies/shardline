@@ -10,8 +10,10 @@ readme = "README.md"
 description = "Xet xorb and shard adapter for the Shardline server ecosystem."
 
 [dependencies]
+tempfile.workspace = true
 axum.workspace = true
 blake3.workspace = true
+sha2.workspace = true
 serde = { workspace = true, features = ["derive"] }
 shardline-index.workspace = true
 shardline-metrics.workspace = true
@@ -19,12 +21,12 @@ shardline-protocol.workspace = true
 shardline-server-core.workspace = true
 shardline-storage.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 shardline-xet-core.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
-tempfile.workspace = true
 
 [[bench]]
 name = "xorb_validate"

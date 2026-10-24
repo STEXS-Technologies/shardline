@@ -85,7 +85,7 @@ operation supports them.
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
 | `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; `fetch-owner=true` returns the stable repository-scoped owner ID; zero object-store reads — the index rows carry size/ETag/mtime |
 | `ListObjects` v1 | bare `GET /{bucket}`; `prefix`/`delimiter`/`max-keys`/`marker`; emits `NextMarker` when truncated |
-| `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, standard object HTTP metadata (`Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Expires`, and `x-amz-website-redirect-location`), `x-amz-meta-*`, `x-amz-tagging`, explicit `x-amz-storage-class: STANDARD`, `x-ignore-*`, success status/redirect fields, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums. Other storage classes, ACLs and encryption options are rejected. |
+| `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, standard object HTTP metadata (`Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Expires`, and `x-amz-website-redirect-location`), `x-amz-meta-*`, `x-amz-tagging`, explicit `x-amz-storage-class: STANDARD`, `acl: bucket-owner-full-control`, `x-ignore-*`, success status/redirect fields, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums. Other ACLs, storage classes and encryption options are rejected. |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
 | Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
@@ -93,6 +93,9 @@ operation supports them.
 | Read date conditions | GetObject, HeadObject and supported GetObjectAttributes honor `If-Modified-Since` (`304`) and `If-Unmodified-Since` (`412`) using the same committed timestamp as their other metadata. `If-Match` takes precedence over `If-Unmodified-Since`; `If-None-Match` takes precedence over `If-Modified-Since`. Invalid/repeated dates and dates on legacy records without a known modification time are ignored. |
 | Conditional ranges | GetObject honors one matching strong `If-Range` ETag; stale, weak, malformed, repeated or date validators return the entire representation (`200`). Date validators are conservatively ignored because the route does not have a strong date validator. |
 | `ListBuckets` | service-level `GET /`; lists the caller's single `{owner}.{name}` bucket |
+| `GetBucketAcl` / `GetObjectAcl` | reports one full-control grant to the repository owner; ACLs cannot be used to grant access |
+| `GetBucketOwnershipControls` | reports the fixed `BucketOwnerEnforced` mode; ownership controls cannot be changed |
+| ACL writes | `bucket-owner-full-control` is accepted on object uploads; ACL subresource writes and other ACL grants fail with `400 AccessControlListNotSupported` |
 | `GetBucketVersioning` / `ListObjectVersions` | `GetBucketVersioning` returns the empty configuration because Shardline has never enabled versioning. `ListObjectVersions` reports one current `null` version per live object, supports key pagination and includes an opaque repository-scoped owner ID; enabling/suspending versioning, historical versions and delete markers are unsupported |
 
 ### Planned (near-term follow-up)
@@ -108,24 +111,25 @@ parameter is not accepted and returns `501 NotImplemented`.
 
 | Operation | Reconsider when |
 |---|---|
-| Restore / select / torrent / legal-hold / retention / ACL | not implemented |
-| Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / replication / website, `DeleteBucket` | not yet implemented |
+| Restore / select / torrent / legal-hold / retention | not implemented |
+| Bucket policy / lifecycle / versioning / CORS / notification / encryption / replication / website, `DeleteBucket` | not yet implemented |
 
-Bucket and object requests fail with `501 NotImplemented` when they include
-unsupported ACL, encryption, expected-owner or requester-payer options. Object
-writes accept `x-amz-storage-class: STANDARD`, which is the default storage
-class; other classes are rejected. Browser `PostObject` form fields for ACL,
-storage class and encryption remain unsupported and are rejected rather than
-ignored.
+The bucket and object ACL reads reflect Shardline's fixed `BucketOwnerEnforced`
+model. ACLs do not grant access; repository-scoped authorization remains
+authoritative. ACL updates return `400 AccessControlListNotSupported`, matching
+S3 behavior when ACLs are disabled. Object writes may omit ACLs or specify only
+`bucket-owner-full-control`. Encryption, expected-owner and requester-payer
+options fail explicitly. Object writes accept `x-amz-storage-class: STANDARD`,
+which is the default storage class; other classes are rejected.
 
 `PostObject` currently supports the signed path-style form described above. A
 valid HTTP(S) `success_action_redirect` (or deprecated `redirect`) receives a
 `303 See Other`; Shardline appends the stored bucket, expanded key and ETag to
 the destination's query parameters. Existing query parameters are preserved.
 Unparseable or non-HTTP(S) redirect values are ignored, following S3 behavior.
-It does not implement other form fields that need object properties or service
-behavior Shardline does not persist yet, including ACLs, storage class and
-encryption. Object tags are stored in the object's evidence-bound private
+The form accepts only `acl: bucket-owner-full-control`; other ACLs, storage
+classes and encryption settings are rejected. Object tags are stored in the
+object's evidence-bound private
 metadata and are available through `GetObjectTagging`, `PutObjectTagging`, and
 `DeleteObjectTagging`. `PutObjectTagging` verifies the supplied Content-MD5 or
 supported request checksum before committing the tag change. These features

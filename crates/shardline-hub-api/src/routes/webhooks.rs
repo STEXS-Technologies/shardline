@@ -358,6 +358,8 @@ pub(crate) async fn webhook_create(
     Json(request): Json<WebhookCreateRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_create", "POST", 201);
+    let name = format!("{ns}/{repo}");
+    crate::revision_access::authorize_repository_wide(&name, _repo.capability())?;
     // The extractor has already required Write scope and bound the token to
     // this repository before the handler runs.
     if request.events.len() > MAX_WEBHOOK_EVENTS {
@@ -366,7 +368,6 @@ pub(crate) async fn webhook_create(
         )));
     }
     validate_webhook_url(&request.url)?;
-    let name = format!("{ns}/{repo}");
     let _ = state
         .store
         .get_repo(&name)
@@ -427,6 +428,7 @@ pub(crate) async fn webhook_list(
 ) -> Result<Json<WebhookListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_list", "GET", 200);
     let name = format!("{ns}/{repo}");
+    crate::revision_access::authorize_repository_wide(&name, _repo.capability())?;
     let webhooks = state
         .store
         .list_webhooks(&name)
@@ -445,6 +447,7 @@ pub(crate) async fn webhook_delete(
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_delete", "DELETE", 204);
     let name = format!("{ns}/{repo}");
+    crate::revision_access::authorize_repository_wide(&name, _repo.capability())?;
     state
         .store
         .delete_webhook(&name, &webhook_id)

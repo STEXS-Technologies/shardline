@@ -9,6 +9,7 @@
 //! typed [`AuthorizedRepository`] capability that storage entry points require;
 //! handlers then dispatch on the query sub-resources.
 
+mod acl;
 pub(super) mod aws_chunked;
 pub(super) mod bucket;
 mod checksum;

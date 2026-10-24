@@ -28,6 +28,7 @@ use crate::{
     object_store::run_before_local_object_read_hook,
 };
 
+pub(crate) mod checkpoint_reader;
 mod collect;
 mod xorb_files;
 pub(crate) use collect::collect_file_record_bytes;
@@ -80,6 +81,7 @@ struct SerializedXorbStreamState {
 ///
 /// Returns [`ServerError`] when the object is missing, its stored length or requested
 /// range is invalid, or the serialized xorb does not match `hash_hex`.
+#[cfg(test)]
 pub(crate) async fn validated_xorb_byte_range_stream(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
@@ -87,6 +89,28 @@ pub(crate) async fn validated_xorb_byte_range_stream(
     total_length: u64,
     range: ByteRange,
     pool: BoundedPool,
+) -> Result<ServerByteStream, ServerError> {
+    authorized_xorb_byte_range_stream(
+        object_store,
+        object_key,
+        hash_hex,
+        total_length,
+        range,
+        pool,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn authorized_xorb_byte_range_stream(
+    object_store: &ServerObjectStore,
+    object_key: &ObjectKey,
+    hash_hex: &str,
+    total_length: u64,
+    range: ByteRange,
+    pool: BoundedPool,
+    coverage: Option<crate::record_store::XorbRangeCoverage>,
 ) -> Result<ServerByteStream, ServerError> {
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
@@ -102,44 +126,67 @@ pub(crate) async fn validated_xorb_byte_range_stream(
     } else {
         0
     };
-    let file = blocking_stream_work(&pool, move || {
-        let (materialized, observed_length) = match &store {
-            ServerObjectStore::Local(local) => {
-                let metadata = store
-                    .metadata(&key)?
-                    .ok_or(crate::object_store::ServerObjectStoreError::NotFound)?;
-                run_before_local_object_read_hook(&local.path_for_key(&key));
-                let file = local.open_object_file(&key)?;
-                let observed_length = file.metadata()?.len();
-                if observed_length != metadata.length() {
-                    return Err(
-                        crate::object_store::ServerObjectStoreError::StoredObjectLengthMismatch
-                            .into(),
-                    );
+    let file = crate::admission::cancellable_work_with_setup(
+        &pool,
+        || (),
+        move |(), cancel| {
+            let (materialized, observed_length) = match &store {
+                ServerObjectStore::Local(local) => {
+                    let metadata = store
+                        .metadata(&key)?
+                        .ok_or(crate::object_store::ServerObjectStoreError::NotFound)?;
+                    run_before_local_object_read_hook(&local.path_for_key(&key));
+                    cancel.check()?;
+                    let file = local.open_object_file(&key)?;
+                    let observed_length = file.metadata()?.len();
+                    if observed_length != metadata.length() {
+                        return Err(
+                            crate::object_store::ServerObjectStoreError::StoredObjectLengthMismatch
+                                .into(),
+                        );
+                    }
+                    (MaterializedObject::Local(file), observed_length)
                 }
-                (MaterializedObject::Local(file), observed_length)
+                ServerObjectStore::S3(_) => store
+                    .materialize_bounded_object_if_present_with_checkpoint(
+                        &key,
+                        maximum_memory_length,
+                        &|| cancel.check_io(),
+                    )?
+                    .ok_or(crate::object_store::ServerObjectStoreError::NotFound)?,
+                ServerObjectStore::Blackhole => {
+                    return Err(crate::object_store::ServerObjectStoreError::NotFound.into());
+                }
+            };
+            if observed_length != total_length {
+                return Err(
+                    crate::object_store::ServerObjectStoreError::StoredObjectLengthMismatch.into(),
+                );
             }
-            ServerObjectStore::S3(_) => store
-                .materialize_bounded_object_if_present(&key, maximum_memory_length)?
-                .ok_or(crate::object_store::ServerObjectStoreError::NotFound)?,
-            ServerObjectStore::Blackhole => {
-                return Err(crate::object_store::ServerObjectStoreError::NotFound.into());
-            }
-        };
-        if observed_length != total_length {
-            return Err(
-                crate::object_store::ServerObjectStoreError::StoredObjectLengthMismatch.into(),
+            let memory_permit =
+                retain_memory_permit_for_materialized_object(&materialized, memory_permit);
+            let mut file = XorbReadFile {
+                object: materialized,
+                _memory_permit: memory_permit,
+            };
+            let validated = crate::xet_adapter::validate_serialized_xorb(
+                &mut checkpoint_reader::CheckpointReader {
+                    reader: &mut file,
+                    checkpoint: &|| cancel.check_io(),
+                },
+                expected_hash,
             );
-        }
-        let memory_permit =
-            retain_memory_permit_for_materialized_object(&materialized, memory_permit);
-        let mut file = XorbReadFile {
-            object: materialized,
-            _memory_permit: memory_permit,
-        };
-        crate::xet_adapter::validate_serialized_xorb(&mut file, expected_hash)?;
-        Ok(file)
-    })
+            cancel.check()?;
+            let validated = validated?;
+            if coverage
+                .as_ref()
+                .is_some_and(|allowed| !allowed.permits(range, validated.packed_content_length()))
+            {
+                return Err(ServerError::NotFound);
+            }
+            Ok(file)
+        },
+    )
     .await?;
     let state = SerializedXorbStreamState {
         file,
@@ -239,10 +286,10 @@ async fn read_xorb_backed_chunks(
     };
     // Allocate the caller's result on its runtime worker, rather than growing
     // large retained allocator arenas across blocking validation workers.
-    let Some((file, validated, decoded)) = crate::admission::blocking_work_with_setup(
+    let Some((file, validated, decoded)) = crate::admission::cancellable_work_with_setup(
         &pool,
         move || Vec::with_capacity(decoded_byte_budget),
-        move |decoded_buffer| {
+        move |decoded_buffer, cancel| {
             let mut file = match &object_store {
                 ServerObjectStore::Local(local) => {
                     let Some(metadata) = object_store.metadata(&key)? else {
@@ -253,6 +300,7 @@ async fn read_xorb_backed_chunks(
                     // the already-open inode as the validation/read snapshot rather
                     // than copying the full container into a second scratch file.
                     run_before_local_object_read_hook(&local.path_for_key(&key));
+                    cancel.check()?;
                     let file = local.open_object_file(&key)?;
                     if file.metadata()?.len() != length {
                         return Err(ServerError::ObjectStore(
@@ -266,7 +314,11 @@ async fn read_xorb_backed_chunks(
                 }
                 ServerObjectStore::S3(_) => {
                     let Some((object, _length)) = object_store
-                        .materialize_bounded_object_if_present(&key, maximum_memory_length)?
+                        .materialize_bounded_object_if_present_with_checkpoint(
+                            &key,
+                            maximum_memory_length,
+                            &|| cancel.check_io(),
+                        )?
                     else {
                         return Ok(None);
                     };
@@ -279,12 +331,17 @@ async fn read_xorb_backed_chunks(
                 }
                 ServerObjectStore::Blackhole => return Ok(None),
             };
-            let (validated, decoded) = shardline_xet_adapter::validate_serialized_xorb_with_data(
-                &mut file,
+            let validated = shardline_xet_adapter::validate_serialized_xorb_with_data(
+                &mut checkpoint_reader::CheckpointReader {
+                    reader: &mut file,
+                    checkpoint: &|| cancel.check_io(),
+                },
                 expected_hash,
                 decoded_byte_budget,
                 decoded_buffer,
-            )?;
+            );
+            cancel.check()?;
+            let (validated, decoded) = validated?;
             Ok(Some((file, validated, decoded)))
         },
     )

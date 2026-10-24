@@ -240,6 +240,7 @@ async fn postgres_router_serves_while_large_file_recovery_is_held_for_every_role
         eprintln!("SKIPPED: large-file startup fixture requires DATABASE_URL");
         return;
     };
+    fixture.migrate().await;
     fixture
         .index()
         .initialize_remote_delete_guard()

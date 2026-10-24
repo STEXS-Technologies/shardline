@@ -10,6 +10,28 @@
 mod read_only;
 
 #[tokio::test]
+async fn native_reference_cursor_allows_absent_optional_index_but_rejects_malformed_table() {
+    use crate::RecordTraversal;
+    let root = tempfile::tempdir().unwrap();
+    let store = LocalRecordStore::new(root.path().to_path_buf()).unwrap();
+    let connection = store.open_connection().unwrap();
+    connection
+        .execute_batch("DROP TABLE shardline_xet_chunks")
+        .unwrap();
+    assert!(
+        store
+            .native_chunk_reference_page(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    connection
+        .execute_batch("CREATE TABLE shardline_xet_chunks(unrelated TEXT)")
+        .unwrap();
+    assert!(store.native_chunk_reference_page(None).await.is_err());
+}
+
+#[tokio::test]
 async fn xet_identity_replay_preserves_row_and_conflict_rollback() {
     let root = tempfile::tempdir().unwrap();
     let index = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
@@ -54,8 +76,27 @@ async fn xet_identity_replay_preserves_row_and_conflict_rollback() {
             .unwrap(),
         Some(identity.clone())
     );
+    let hub = crate::hub::BoxedHubStore::from_store(index.clone());
+    assert_eq!(
+        hub.lookup_xet_file_identity(&identity.repository_scope, &identity.sha256)
+            .unwrap(),
+        Some(identity.clone())
+    );
+    let other_scope = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub,
+        "unrelated",
+        "repository",
+        Some("main"),
+    )
+    .unwrap();
+    assert_eq!(
+        hub.lookup_xet_file_identity(&other_scope, &identity.sha256)
+            .unwrap(),
+        None
+    );
     let mut new_identity = identity.clone();
     new_identity.sha256 = "d".repeat(64);
+    new_identity.file_id = "f".repeat(64);
     let mut conflict = identity.clone();
     conflict.total_bytes = 43;
     assert!(matches!(
@@ -78,9 +119,45 @@ async fn xet_identity_replay_preserves_row_and_conflict_rollback() {
         store
             .xet_file_identity(&identity.repository_scope, &identity.sha256)
             .unwrap(),
-        Some(identity)
+        Some(identity.clone())
     );
     assert_eq!(updates(), 1);
+
+    // A mixed-version writer may only know the canonical identity table. The
+    // additive trigger must preserve its old and new bindings without requiring
+    // that writer to call the candidate's alias-publication implementation.
+    let scope_key = crate::XetFileIdentity::repository_key_for_scope(&identity.repository_scope);
+    connection
+        .execute(
+            "UPDATE shardline_xet_file_identities SET file_id=?1 WHERE scope_key=?2 AND sha256=?3",
+            rusqlite::params!["e".repeat(64), scope_key, identity.sha256],
+        )
+        .unwrap();
+    let aliases: Vec<String> = connection
+        .prepare(
+            "SELECT file_id FROM shardline_xet_file_aliases WHERE scope_key=?1 ORDER BY file_id",
+        )
+        .unwrap()
+        .query_map([&scope_key], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        aliases,
+        vec!["b".repeat(64), "c".repeat(64), "e".repeat(64)]
+    );
+    assert!(connection.execute(
+        "UPDATE shardline_xet_file_identities SET total_bytes=43 WHERE scope_key=?1 AND sha256=?2",
+        rusqlite::params![scope_key, identity.sha256],
+    ).is_err(), "conflicting legacy writes must fail atomically");
+    let reopened = LocalRecordStore::new(root.path().to_path_buf()).unwrap();
+    identity.file_id = "e".repeat(64);
+    assert_eq!(
+        reopened
+            .xet_file_identity(&identity.repository_scope, &identity.sha256)
+            .unwrap(),
+        Some(identity)
+    );
 }
 
 #[test]

@@ -287,8 +287,13 @@ fn hex_digit(nibble: u8) -> char {
 }
 
 fn push_xml_element(xml: &mut String, name: &str, value: &str) {
-    use std::fmt::Write as _;
-    let _ = write!(xml, "<{name}>{}</{name}>", xml_escape(value));
+    xml.push('<');
+    xml.push_str(name);
+    xml.push('>');
+    xml.push_str(&xml_escape(value));
+    xml.push_str("</");
+    xml.push_str(name);
+    xml.push('>');
 }
 
 /// Builds one page over Contents and CommonPrefixes rather than over child keys.

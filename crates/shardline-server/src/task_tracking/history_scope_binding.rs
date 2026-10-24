@@ -212,19 +212,37 @@ impl TaskEvidenceStore {
         scope: Digest,
         manifest: &[u8],
     ) -> Result<Option<bool>, ServerError> {
+        let binding = self.read(
+            &format!("scope-bindings/{}", identity.id),
+            MAX_BINDING_BYTES,
+        )?;
+        self.history_scope_binding_match_for_manifest_with_binding(
+            identity,
+            scope,
+            manifest,
+            binding.as_deref(),
+        )
+    }
+
+    pub(crate) fn history_scope_binding_match_for_manifest_with_binding(
+        &self,
+        identity: &TaskRunIdentity,
+        scope: Digest,
+        manifest: &[u8],
+        binding_bytes: Option<&[u8]>,
+    ) -> Result<Option<bool>, ServerError> {
         let stored: TaskRunIdentity =
             serde_json::from_slice(manifest).map_err(|_error| invalid())?;
         if serde_json::to_vec(&stored)? != serde_json::to_vec(identity)? {
             return Err(invalid());
         }
-        let Some(bytes) = self.read(
-            &format!("scope-bindings/{}", identity.id),
-            MAX_BINDING_BYTES,
-        )?
-        else {
+        let Some(bytes) = binding_bytes else {
             return Ok(None);
         };
-        let binding: Binding = serde_json::from_slice(&bytes).map_err(|_error| invalid())?;
+        if u64::try_from(bytes.len()).map_err(|_error| invalid())? > MAX_BINDING_BYTES {
+            return Err(ServerError::RequestBodyTooLarge);
+        }
+        let binding: Binding = serde_json::from_slice(bytes).map_err(|_error| invalid())?;
         if binding.schema != 1 || binding.manifest != Digest::of(manifest) {
             return Err(invalid());
         }

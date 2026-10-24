@@ -15,6 +15,8 @@ use thiserror::Error;
 
 const MAX_BUFFERED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 
+mod checkpoint_writer;
+
 /// Object-store backend error.
 #[derive(Debug, Error)]
 pub enum ServerObjectStoreError {
@@ -434,6 +436,28 @@ impl ServerObjectStore {
         object_key: &ObjectKey,
         maximum_memory_length: u64,
     ) -> Result<Option<(MaterializedObject, u64)>, ServerObjectStoreError> {
+        self.materialize_bounded_object_if_present_with_checkpoint(
+            object_key,
+            maximum_memory_length,
+            &|| Ok(()),
+        )
+    }
+
+    /// Materializes an object with cancellation checks before access and each
+    /// S3 output frame. An already-pending provider read retains its timeout.
+    /// Partial scratch files and memory are discarded on error.
+    ///
+    /// # Errors
+    /// Returns storage, checkpoint or temporary-file errors. Interrupted
+    /// checkpoint writes become ConnectionAborted so write_all cannot retry
+    /// cancellation indefinitely.
+    pub fn materialize_bounded_object_if_present_with_checkpoint(
+        &self,
+        object_key: &ObjectKey,
+        maximum_memory_length: u64,
+        checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
+    ) -> Result<Option<(MaterializedObject, u64)>, ServerObjectStoreError> {
+        checkpoint()?;
         match self {
             Self::Local(store) => {
                 let Some(metadata) = ObjectStore::metadata(store, object_key)? else {
@@ -444,13 +468,18 @@ impl ServerObjectStore {
                 if length != metadata.length() {
                     return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
                 }
+                checkpoint()?;
                 Ok(Some((MaterializedObject::Local(file), length)))
             }
             Self::S3(store) => {
                 let mut output = BoundedObjectSink::new(maximum_memory_length)?;
-                let Some(length) =
-                    store.copy_object_to_writer_if_present(object_key, &mut output)?
-                else {
+                let mut guarded = checkpoint_writer::CheckpointWriter {
+                    output: &mut output,
+                    checkpoint,
+                };
+                let result = store.copy_object_to_writer_if_present(object_key, &mut guarded);
+                checkpoint()?;
+                let Some(length) = result? else {
                     return Ok(None);
                 };
                 Ok(Some((
@@ -910,6 +939,47 @@ pub enum OpsRecordKind {
 
 /// Extra locator metadata needed by operator tooling.
 pub trait OpsRecordStore: RecordStore {
+    /// Returns derived metadata with a complete, consistent member index.
+    /// Callers must still authenticate the descriptor against verified content.
+    fn native_indexed_xorb<'operation>(
+        &'operation self,
+        _xorb: &'operation str,
+    ) -> shardline_index::RecordStoreFuture<
+        'operation,
+        Option<shardline_index::XetXorbDescriptor>,
+        <Self as RecordTraversal>::Error,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Whether operator rebuild can persist verified native member locations.
+    fn supports_native_locations(&self) -> bool {
+        false
+    }
+
+    /// Installs derived metadata only after the caller verifies the full source.
+    fn cache_native_location<'operation>(
+        &'operation self,
+        _descriptor: &'operation shardline_index::XetXorbDescriptor,
+    ) -> shardline_index::RecordStoreFuture<'operation, (), <Self as RecordTraversal>::Error> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Finds the indexed source used by native member reads. A descriptor is
+    /// only a discovery hint; tooling must authenticate it against source data.
+    /// Adapters without a native index conservatively require standalone copies.
+    fn native_chunk_location<'operation>(
+        &'operation self,
+        _member: &'operation str,
+        _xorb: &'operation str,
+    ) -> shardline_index::RecordStoreFuture<
+        'operation,
+        Option<shardline_index::XetXorbDescriptor>,
+        <Self as RecordTraversal>::Error,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
     /// Renders a stable operator-facing location for one record locator.
     fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String;
 
@@ -929,6 +999,42 @@ pub trait OpsRecordStore: RecordStore {
 }
 
 impl OpsRecordStore for LocalRecordStore {
+    fn native_indexed_xorb<'operation>(
+        &'operation self,
+        xorb: &'operation str,
+    ) -> shardline_index::RecordStoreFuture<
+        'operation,
+        Option<shardline_index::XetXorbDescriptor>,
+        <Self as RecordTraversal>::Error,
+    > {
+        Box::pin(async move { self.xet_indexed_xorb_descriptor(xorb).await })
+    }
+
+    fn supports_native_locations(&self) -> bool {
+        true
+    }
+
+    fn cache_native_location<'operation>(
+        &'operation self,
+        descriptor: &'operation shardline_index::XetXorbDescriptor,
+    ) -> shardline_index::RecordStoreFuture<'operation, (), <Self as RecordTraversal>::Error> {
+        Box::pin(async move {
+            self.cache_xet_xorb_descriptors(std::slice::from_ref(descriptor))
+                .await
+        })
+    }
+
+    fn native_chunk_location<'operation>(
+        &'operation self,
+        member: &'operation str,
+        xorb: &'operation str,
+    ) -> shardline_index::RecordStoreFuture<
+        'operation,
+        Option<shardline_index::XetXorbDescriptor>,
+        <Self as RecordTraversal>::Error,
+    > {
+        Box::pin(async move { self.xet_chunk_location(member, xorb).await })
+    }
     fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String {
         locator.record_key().to_owned()
     }
@@ -955,6 +1061,41 @@ impl OpsRecordStore for LocalRecordStore {
 }
 
 impl OpsRecordStore for PostgresRecordStore {
+    fn native_indexed_xorb<'operation>(
+        &'operation self,
+        xorb: &'operation str,
+    ) -> shardline_index::RecordStoreFuture<
+        'operation,
+        Option<shardline_index::XetXorbDescriptor>,
+        <Self as RecordTraversal>::Error,
+    > {
+        Box::pin(async move { self.xet_indexed_xorb_descriptor(xorb).await })
+    }
+
+    fn supports_native_locations(&self) -> bool {
+        true
+    }
+
+    fn cache_native_location<'operation>(
+        &'operation self,
+        descriptor: &'operation shardline_index::XetXorbDescriptor,
+    ) -> shardline_index::RecordStoreFuture<'operation, (), <Self as RecordTraversal>::Error> {
+        Box::pin(async move {
+            self.cache_xet_xorb_descriptors(std::slice::from_ref(descriptor))
+                .await
+        })
+    }
+    fn native_chunk_location<'operation>(
+        &'operation self,
+        member: &'operation str,
+        xorb: &'operation str,
+    ) -> shardline_index::RecordStoreFuture<
+        'operation,
+        Option<shardline_index::XetXorbDescriptor>,
+        <Self as RecordTraversal>::Error,
+    > {
+        Box::pin(async move { self.xet_chunk_location(member, xorb).await })
+    }
     fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String {
         locator.record_key().to_owned()
     }

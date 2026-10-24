@@ -51,7 +51,15 @@ async fn minio_oci_physical_reclamation_preserves_live_referrers() {
     admin.close().await;
 }
 
-async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) {
+pub(super) async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) {
+    exercise_with_environment(database, storage, &[]).await;
+}
+
+pub(super) async fn exercise_with_environment(
+    database: Option<&str>,
+    storage: Option<S3ObjectStoreConfig>,
+    environment: &[(&str, String)],
+) {
     let root = tempfile::tempdir().unwrap();
     let fresh = tempfile::tempdir().unwrap();
     let server = start_with_storage(
@@ -125,6 +133,7 @@ async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) 
         )
         .unwrap();
         crash::interrupt_after_physical_delete(
+            environment,
             database,
             storage,
             root.path(),
@@ -139,6 +148,7 @@ async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) 
             "first crash must precede companion deletion"
         );
         crash::interrupt_after_physical_delete(
+            environment,
             database,
             storage,
             root.path(),
@@ -232,6 +242,7 @@ async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) 
             .header("content-type", INDEX)
             .body(serde_json::to_vec(&removed_doc).unwrap());
         crash::interrupt_after_physical_delete(
+            environment,
             database,
             storage,
             next_root,

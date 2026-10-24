@@ -148,6 +148,7 @@ pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lf
 pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
 mod gc_tests;
+mod native_chunk_read;
 mod transfer_limiter;
 mod upload_identity;
 pub mod upload_ingest;

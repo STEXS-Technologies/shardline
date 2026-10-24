@@ -3,6 +3,7 @@ name = "shardline-e2e"
 version = "0.0.0"
 edition = "2024"
 publish = false
+license = "MIT OR Apache-2.0"
 
 [workspace]
 
@@ -84,26 +85,29 @@ shardline-storage = { path = "../crates/shardline-storage" }
 shardline-test-support = { path = "../crates/shardline-test-support", features = ["docker"] }
 shardline-vcs = { path = "../crates/shardline-vcs" }
 shardline-xet-core = { path = "../crates/shardline-xet-core" }
+sdx = { path = "../crates/sdx" }
 blake3 = "1.8.3"
 redis = "1.0.2"
 sqlx = { version = "0.9", default-features = false }
 xet-client = "1.5.1"
 xet-data = "1.5.1"
 xet-runtime = "1.5.1"
+xet-core-structures = "1.5.2"
 url = "2.5"
 axum = "0.8.8"
 base64 = "0.22"
 bytes = "1.10.1"
 hex = "0.4"
 hmac = "0.12"
-reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = { version = "0.10", features = ["compress"] }
 rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
-tokio = { version = "1.48.0", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 tempfile = "3.15"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 futures-util = "0.3"
 async-trait = "0.1"
 

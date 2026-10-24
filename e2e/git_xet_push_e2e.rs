@@ -1,14 +1,15 @@
 mod native_client_policy;
+mod native_git_xet_hub;
 mod support;
 
 use std::{
     error::Error,
     fs::{create_dir_all, read, write as write_file},
-    io::{Cursor, Error as IoError, Write},
+    io::{Cursor, Error as IoError},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     str::from_utf8,
     sync::{Arc, Mutex},
     time::Duration,
@@ -1567,22 +1568,18 @@ fn run_git_http_backend(
                 .unwrap_or(""),
         )
         .env("CONTENT_LENGTH", body.len().to_string())
-        .env("REMOTE_ADDR", "127.0.0.1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env("REMOTE_ADDR", "127.0.0.1");
 
     for (name, value) in headers {
         let variable = http_header_env_name(name);
         command.env(variable, value.to_str().unwrap_or(""));
     }
 
-    let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(body)?;
-    }
-
-    let output = child.wait_with_output()?;
+    let output = shardline_test_support::native_client_output_with_input(
+        &mut command,
+        Duration::from_secs(600),
+        body,
+    )?;
     if !output.status.success() {
         return Err(command_error("git http-backend", &output).into());
     }
@@ -1943,7 +1940,10 @@ fn format_cas_observations(
 }
 
 fn run_command(command: &mut Command) -> Result<Output, TestError> {
-    Ok(command.output()?)
+    Ok(shardline_test_support::native_client_output(
+        command,
+        Duration::from_secs(600),
+    )?)
 }
 
 fn run_command_checked(command: &mut Command, description: &str) -> Result<(), TestError> {
@@ -1957,17 +1957,17 @@ fn run_command_checked(command: &mut Command, description: &str) -> Result<(), T
 
 fn command_error(description: &str, output: &Output) -> IoError {
     ServerE2eInvariantError::new(format!(
-        "{description} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "{description} failed with status {}",
+        output.status
     ))
     .into()
 }
 
 fn command_available(program: &str) -> bool {
-    let available = Command::new(program)
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
+    let available = shardline_test_support::native_client_output(
+        Command::new(program).arg("--version"),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success());
     native_client_policy::require_available(program, available)
 }

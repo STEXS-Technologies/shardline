@@ -16,6 +16,75 @@ use shardline_storage::{ObjectKey, ObjectStore};
 /// resident body chunk; it is deliberately independent of file size.
 pub(crate) const OBJECT_STREAM_CHUNK_BYTES: u64 = 64 * 1024;
 
+/// Preserve a safe storage category and operation in internal errors. Never
+/// emit external HTTP errors, whose messages may contain signed URLs.
+pub(crate) fn storage_failure(
+    operation: &'static str,
+    error: &ServerObjectStoreError,
+) -> crate::error::HubApiError {
+    use std::error::Error;
+    use std::fmt::Write as _;
+    let mut detail = match error {
+        ServerObjectStoreError::S3(cause) => cause.to_string(),
+        ServerObjectStoreError::NotFound
+        | ServerObjectStoreError::Overflow
+        | ServerObjectStoreError::InvalidContentHash
+        | ServerObjectStoreError::StoredObjectLengthMismatch
+        | ServerObjectStoreError::Local(_)
+        | ServerObjectStoreError::Io(_)
+        | ServerObjectStoreError::NumericConversion(_) => error.to_string(),
+    };
+    if let ServerObjectStoreError::S3(shardline_storage::S3ObjectStoreError::External(provider)) =
+        error
+        && let Some(code) = provider_error_code(&provider.to_string())
+    {
+        write!(detail, " (provider {code})").unwrap_or_default();
+    }
+    let mut cause: &(dyn Error + 'static) = error;
+    for _ in 0..16 {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            write!(detail, " (I/O {:?})", io_error.kind()).unwrap_or_default();
+        }
+        if let Some(http_error) = cause.downcast_ref::<reqwest::Error>() {
+            if http_error.is_timeout() {
+                detail.push_str(" (HTTP timeout)");
+            } else if http_error.is_connect() {
+                detail.push_str(" (HTTP connection failure)");
+            }
+            if let Some(status) = http_error.status() {
+                write!(detail, " (HTTP {})", status.as_u16()).unwrap_or_default();
+            }
+        }
+        let Some(source) = cause.source() else { break };
+        cause = source;
+    }
+    crate::error::HubApiError::CasError(format!("{operation}: {detail}"))
+}
+
+// The provider library's status/body error type is private. Retain only known
+// S3 XML codes, never an arbitrary response body or request URL.
+fn provider_error_code(message: &str) -> Option<&'static str> {
+    [
+        "XMinioStorageFull",
+        "SlowDown",
+        "RequestTimeout",
+        "InternalError",
+        "ServiceUnavailable",
+        "SignatureDoesNotMatch",
+        "InvalidAccessKeyId",
+        "AccessDenied",
+        "NoSuchBucket",
+        "NoSuchKey",
+        "BadDigest",
+        "InvalidRequest",
+        "AuthorizationHeaderMalformed",
+        "InvalidRange",
+        "NotImplemented",
+    ]
+    .into_iter()
+    .find(|code| message.contains(&format!("<Code>{code}</Code>")))
+}
+
 /// Reads at most `limit` bytes from the beginning of an object.
 ///
 /// This is intended for metadata/front-matter and bounded dataset previews. It
@@ -64,20 +133,43 @@ pub(crate) fn read_object_prefix(
 /// Storage access is moved to Tokio's blocking pool because the current local
 /// and S3 adapters expose synchronous range reads through `ServerObjectStore`.
 pub(crate) fn stream_object(store: &ServerObjectStore, key: ObjectKey, object_length: u64) -> Body {
-    let initial = (Arc::new(store.clone()), key, 0_u64);
+    stream_object_range(store, key, object_length, 0, object_length).unwrap_or_else(|_error| {
+        Body::from_stream(stream::once(async {
+            Err::<Bytes, _>(io::Error::other("invalid full-object stream range"))
+        }))
+    })
+}
+
+/// Streams a bounded byte interval of an object using fixed-size backend reads.
+/// `start` is inclusive and `length` is the number of bytes to return.
+pub(crate) fn stream_object_range(
+    store: &ServerObjectStore,
+    key: ObjectKey,
+    object_length: u64,
+    start: u64,
+    length: u64,
+) -> Result<Body, ServerObjectStoreError> {
+    let limit_exclusive = start
+        .checked_add(length)
+        .filter(|end| start <= object_length && *end <= object_length)
+        .ok_or(ServerObjectStoreError::Overflow)?;
+    if length == 0 {
+        return Ok(Body::empty());
+    }
+    let initial = (Arc::new(store.clone()), key, start, limit_exclusive);
     let stream = stream::try_unfold(
         initial,
-        move |(store_state, key_state, offset)| async move {
-            if offset >= object_length {
+        move |(store_state, key_state, offset, end_exclusive)| async move {
+            if offset >= end_exclusive {
                 return Ok(None);
             }
-            let end_exclusive = offset
+            let chunk_end_exclusive = offset
                 .checked_add(OBJECT_STREAM_CHUNK_BYTES)
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
                 })?
-                .min(object_length);
-            let end = end_exclusive.checked_sub(1).ok_or_else(|| {
+                .min(end_exclusive);
+            let end = chunk_end_exclusive.checked_sub(1).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
             })?;
             let range = ByteRange::new(offset, end).map_err(|_error| {
@@ -108,11 +200,11 @@ pub(crate) fn stream_object(store: &ServerObjectStore, key: ObjectKey, object_le
             }
             Ok(Some((
                 Bytes::from(chunk),
-                (store_state, key_state, end_exclusive),
+                (store_state, key_state, chunk_end_exclusive, end_exclusive),
             )))
         },
     );
-    Body::from_stream(stream)
+    Ok(Body::from_stream(stream))
 }
 
 #[cfg(test)]
@@ -121,6 +213,38 @@ mod tests {
     use http_body_util::BodyExt;
     use shardline_protocol::ShardlineHash;
     use shardline_storage::{ObjectBody, ObjectIntegrity};
+
+    #[test]
+    fn storage_diagnostics_keep_operation_and_category_without_source_secrets() {
+        assert_eq!(
+            provider_error_code("URL?token=secret <Code>XMinioStorageFull</Code>"),
+            Some("XMinioStorageFull")
+        );
+        assert_eq!(provider_error_code("<Code>secret</Code>"), None);
+        let message = storage_failure(
+            "archive write",
+            &ServerObjectStoreError::S3(shardline_storage::S3ObjectStoreError::Io(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "secret signed URL and credentials",
+            ))),
+        )
+        .to_string();
+        assert!(message.contains("archive write"));
+        assert!(message.contains("StorageFull"));
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("credentials"));
+        let request_error = reqwest::Client::new()
+            .get("http://[invalid/?token=secret")
+            .build()
+            .expect_err("malformed URL");
+        let message = storage_failure(
+            "read",
+            &ServerObjectStoreError::Io(io::Error::other(request_error)),
+        )
+        .to_string();
+        assert!(!message.contains("token="));
+        assert!(!message.contains("secret"));
+    }
 
     fn local_store() -> (tempfile::TempDir, ServerObjectStore) {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -233,6 +357,24 @@ mod tests {
             Bytes::from_static(b"small")
         );
         assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_range_returns_exact_interval_across_backend_read_boundaries() {
+        let (_temp, store) = local_store();
+        let key = ObjectKey::parse("hub/ranged-stream.bin").expect("key");
+        let bytes: Vec<u8> = (0..(OBJECT_STREAM_CHUNK_BYTES as usize * 3 + 19))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        put(&store, &key, &bytes);
+        let start = 37_u64;
+        let length = OBJECT_STREAM_CHUNK_BYTES * 2 + 11;
+        let body = stream_object_range(&store, key, bytes.len() as u64, start, length)
+            .expect("valid range");
+        let selected = body.collect().await.expect("range stream").to_bytes();
+        let start = usize::try_from(start).expect("start fits usize");
+        let end = start + usize::try_from(length).expect("length fits usize");
+        assert_eq!(selected.as_ref(), &bytes[start..end]);
     }
 
     #[tokio::test]

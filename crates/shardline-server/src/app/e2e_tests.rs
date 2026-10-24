@@ -1028,6 +1028,10 @@ async fn embedded_postgres_router_lifetime_preserves_shared_metadata_for_every_r
         eprintln!("SKIPPED: embedded PostgreSQL router lifetime requires DATABASE_URL");
         return;
     };
+    // The fixture clones table definitions and core history, not installed
+    // frontend history or triggers. Exercise normal router startup only after
+    // the explicit owner migration has installed that additive state.
+    fixture.migrate().await;
     fixture
         .index()
         .initialize_task_history_scope()
@@ -8686,26 +8690,39 @@ async fn hub_tree_returns_file_listing() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // Tree listing — returns empty array for fresh repo.
-    // Axum's {*path} wildcard requires at least one path segment, so use "."
-    // as a sentinel for "root".
-    let response = app
-        .clone()
+    // Preserve the existing root sentinel for normal, paged and expanded SDK
+    // requests. A genuinely absent directory must still fail.
+    for suffix in [".", ".?limit=1", ".?expand=true&limit=1"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/models/tree-team/tree-model/tree/main/{suffix}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{suffix}");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+    let missing = app
         .oneshot(
             Request::builder()
-                .method("GET")
-                .uri("/api/models/tree-team/tree-model/tree/main/.")
+                .uri("/api/models/tree-team/tree-model/tree/main/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json.is_array(), "tree response should be an array");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

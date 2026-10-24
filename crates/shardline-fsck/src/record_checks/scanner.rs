@@ -602,7 +602,13 @@ fn inspect_native_xet_term(
         }
         let chunk_bytes =
             read_full_object(object_store, &chunk_object_key, chunk_metadata.length())?;
-        let actual_chunk_hash = xet_hash_hex_string(chunk_hash(&chunk_bytes));
+        // The validated Xorb descriptor commits to Xet's keyed data hash.
+        // ObjectIntegrity uses Shardline's separate unkeyed storage digest;
+        // comparing that digest to a native member identity flags healthy data.
+        let native_hash = shardline_xet_core::merklehash::compute_data_hash(&chunk_bytes);
+        let actual_chunk_hash = xet_hash_hex_string(shardline_protocol::ShardlineHash::from_bytes(
+            native_hash.into(),
+        ));
         if actual_chunk_hash != chunk_hash_hex {
             push_issue(
                 report,

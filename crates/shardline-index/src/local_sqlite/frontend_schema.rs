@@ -117,6 +117,18 @@ pub(super) fn check(connection: &Connection) -> Result<(), LocalIndexStoreError>
     }
     reject_unknown_history(connection)?;
     let expected = Connection::open_in_memory()?;
+    // Source tables belong to the unchanged core ledger. This stub lets the
+    // derived frontend index install its triggers in the comparison database.
+    expected.execute_batch(
+        "CREATE TABLE shardline_file_records (
+        record_key TEXT PRIMARY KEY, scope_key TEXT NOT NULL, record TEXT NOT NULL,
+        file_id TEXT NOT NULL, record_kind TEXT NOT NULL
+    );
+    CREATE TABLE shardline_hub_file_entries (
+        commit_sha TEXT NOT NULL, sha TEXT NOT NULL, is_lfs INTEGER NOT NULL,
+        size INTEGER NOT NULL
+    );",
+    )?;
     for migration in FRONTEND_MIGRATIONS {
         let installed: Option<(String, String)> = connection
             .query_row(
@@ -133,7 +145,8 @@ pub(super) fn check(connection: &Connection) -> Result<(), LocalIndexStoreError>
         expected.execute_batch(migration.up_sql)?;
     }
     let mut statement = expected.prepare(
-        "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'",
+        "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+         AND name NOT IN ('shardline_file_records','shardline_hub_file_entries')",
     )?;
     let definitions = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

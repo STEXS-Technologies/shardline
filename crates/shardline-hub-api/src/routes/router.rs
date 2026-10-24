@@ -4,6 +4,7 @@ use axum::{
 };
 
 use super::HubState;
+use crate::git::smart_http::model_routes;
 use crate::git::{info_refs, receive_pack, upload_pack};
 
 /// Builds the Hub API router with [`HubState`] as the shared state.
@@ -85,11 +86,15 @@ pub fn router_with_dataset_query(
         )
         .route(
             "/api/{type}/{ns}/{repo}/tree/{rev}",
-            get(super::file_tree_at_root),
+            get(super::tree_root_http),
+        )
+        .route(
+            "/api/{type}/{ns}/{repo}/paths-info/{rev}",
+            post(super::paths_info),
         )
         .route(
             "/api/{type}/{ns}/{repo}/tree/{rev}/{*path}",
-            get(super::file_tree),
+            get(super::tree_path_http),
         )
         .route(
             "/objects/batch",
@@ -159,7 +164,17 @@ pub fn router_with_dataset_query(
         .route("/{type}/{ns}/{repo}/info/refs", get(info_refs))
         .route("/{type}/{ns}/{repo}/HEAD", get(super::git_head))
         .route("/{type}/{ns}/{repo}/git-upload-pack", post(upload_pack))
-        .route("/{type}/{ns}/{repo}/git-receive-pack", post(receive_pack));
+        .route("/{type}/{ns}/{repo}/git-receive-pack", post(receive_pack))
+        .route("/{ns}/{repo}/info/refs", get(model_routes::info_refs))
+        .route("/{ns}/{repo}/HEAD", get(model_routes::head))
+        .route(
+            "/{ns}/{repo}/git-upload-pack",
+            post(model_routes::upload_pack),
+        )
+        .route(
+            "/{ns}/{repo}/git-receive-pack",
+            post(model_routes::receive_pack),
+        );
     if dataset_query_enabled {
         r = r.route(
             "/api/datasets/{ns}/{repo}/query",

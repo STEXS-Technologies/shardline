@@ -181,6 +181,15 @@ fn ndjson_headers(token: &str) -> HeaderMap {
     headers
 }
 
+fn json_headers(token: &str) -> HeaderMap {
+    let mut headers = auth_header(token);
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers
+}
+
 fn request(method: &str, uri: &str, headers: HeaderMap, body: Body) -> Request<Body> {
     let mut req = Request::builder()
         .method(method)
@@ -291,6 +300,218 @@ async fn git_protocol_v2_discovery_enforces_repository_read_binding() {
         .await
         .unwrap();
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repo_create_cannot_create_outside_the_write_token_repository() {
+    let (_tmp, state) = build_state();
+    state
+        .store
+        .create_repo(HubRepoType::Model, "bob/secret", true)
+        .unwrap();
+    let app = shardline_hub_api::hub_routes(state.clone(), true);
+
+    for (uri, body) in [
+        (
+            "/api/repos/create",
+            r#"{"type":"model","organization":"bob","name":"secret","private":false}"#,
+        ),
+        (
+            "/api/repos/create",
+            r#"{"organization":"bob","name":"secret","visibility":"public"}"#,
+        ),
+        ("/api/models/bob/secret", r#"{"private":false}"#),
+        (
+            "/api/repos/create",
+            r#"{"type":"model","organization":"alice","name":"sibling","private":true}"#,
+        ),
+        (
+            "/api/repos/create",
+            r#"{"organization":"alice","name":"sibling","visibility":"private"}"#,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                uri,
+                json_headers("alice:own:write"),
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("bob/secret"));
+    }
+
+    assert!(state.store.get_repo("bob/secret").unwrap().is_some());
+    assert!(state.store.get_repo("alice/sibling").unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repository_visibility_never_silently_downgrades_to_public() {
+    for uri in ["/api/repos/create", "/api/models/alice/visibility"] {
+        for visibility in ["protected", "PRIVATE", "", "unknown"] {
+            let (_tmp, state) = build_state();
+            let app = shardline_hub_api::hub_routes(state.clone(), true);
+            let body = serde_json::json!({
+                "organization":"alice", "name":"visibility", "visibility":visibility,
+            });
+            let response = app
+                .oneshot(request(
+                    "POST",
+                    uri,
+                    json_headers("alice:visibility:write"),
+                    Body::from(body.to_string()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(state.store.get_repo("alice/visibility").unwrap().is_none());
+        }
+        for (visibility, private, expected_private) in [
+            ("private", false, true),
+            ("public", false, false),
+            ("public", true, true),
+        ] {
+            let (_tmp, state) = build_state();
+            let app = shardline_hub_api::hub_routes(state.clone(), true);
+            let body = serde_json::json!({
+                "organization":"alice", "name":"visibility", "visibility":visibility,
+                "private":private,
+            });
+            let response = app
+                .oneshot(request(
+                    "POST",
+                    uri,
+                    json_headers("alice:visibility:write"),
+                    Body::from(body.to_string()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert_eq!(
+                state
+                    .store
+                    .get_repo("alice/visibility")
+                    .unwrap()
+                    .unwrap()
+                    .private,
+                expected_private
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_creation_rejects_malformed_privacy_without_publishing() {
+    for body in [
+        r#"{"private":"true"}"#,
+        r#"{"private":1}"#,
+        r#"{"private":null}"#,
+        r#"{"visibility":true}"#,
+        r#"{"visibility":{}}"#,
+        "null",
+        "[]",
+    ] {
+        let (_tmp, state) = build_state();
+        let app = shardline_hub_api::hub_routes(state.clone(), true);
+        let response = app
+            .oneshot(request(
+                "POST",
+                "/api/models/alice/privacy",
+                json_headers("alice:privacy:write"),
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.store.get_repo("alice/privacy").unwrap().is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repo_create_allows_exact_scoped_target_and_safe_retry() {
+    let (_tmp, state) = build_state();
+    let app = shardline_hub_api::hub_routes(state.clone(), true);
+    let create = || {
+        request(
+            "POST",
+            "/api/repos/create",
+            json_headers("alice:new-repo:write"),
+            Body::from(r#"{"organization":"alice","name":"new-repo"}"#),
+        )
+    };
+
+    let created = app.clone().oneshot(create()).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(
+        state
+            .store
+            .get_repo("alice/new-repo")
+            .unwrap()
+            .unwrap()
+            .repo_id,
+        "alice/new-repo"
+    );
+
+    let retry = app.oneshot(create()).await.unwrap();
+    assert_eq!(retry.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(retry.into_body(), 4096).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("alice/new-repo"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn creation_urls_ignore_untrusted_host_and_forwarding_headers() {
+    for (kind, prefix, suffix) in [
+        ("model", "", "models"),
+        ("dataset", "/datasets", "datasets"),
+        ("space", "/spaces", "spaces"),
+    ] {
+        let (_tmp, mut state) = build_state();
+        state.public_base_url = "https://hub.example.com/shardline/".to_owned();
+        let app = shardline_hub_api::hub_routes(state, true);
+        let mut headers = json_headers("alice:origin:write");
+        headers.insert("host", HeaderValue::from_static("attacker.invalid"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("other.invalid"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        let body = serde_json::json!({
+            "type":kind,"organization":"alice","name":"origin","private":true,
+        });
+        // Generic creation followed by typed and generic authorized retries.
+        // Both conflict responses must use the same trusted public target.
+        for (uri, expected) in [
+            ("/api/repos/create".to_owned(), StatusCode::CREATED),
+            (format!("/api/{suffix}/alice/origin"), StatusCode::CONFLICT),
+            ("/api/repos/create".to_owned(), StatusCode::CONFLICT),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    &uri,
+                    headers.clone(),
+                    Body::from(body.to_string()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                response["url"],
+                format!("https://hub.example.com/shardline{prefix}/alice/origin")
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

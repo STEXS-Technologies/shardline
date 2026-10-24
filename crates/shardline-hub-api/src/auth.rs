@@ -52,6 +52,9 @@ impl HubAuth {
         })?;
         let token = parse_bearer_token(header)?;
         let ctx = self.provider.verify_verified(token)?;
+        if ctx.claims().issuer() == shardline_protocol::HUB_XET_READ_TOKEN_ISSUER {
+            return Err(HubApiError::Forbidden);
+        }
         if !scope_allows(ctx.scope(), required_scope) {
             return Err(HubApiError::Forbidden);
         }

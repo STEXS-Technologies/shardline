@@ -74,15 +74,21 @@ async fn build_test_state() -> (Arc<AppState>, TempDir) {
 /// durable object-store session path. Returns `None` outside the Postgres CI job.
 async fn build_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
     let database_url = isolated_postgres_url().await?;
-    let tmp = TempDir::new().ok()?;
-    let object_store =
-        crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).ok()?;
+    let tmp = TempDir::new().expect("configured PostgreSQL fixture scratch directory");
+    let object_store = crate::object_store::ServerObjectStore::local(tmp.path().join("objects"))
+        .expect("configured PostgreSQL fixture object store");
     let state = build_postgres_state(&database_url, tmp.path(), object_store).await?;
     Some((state, tmp))
 }
 
 async fn isolated_postgres_url() -> Option<String> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(std::env::VarError::NotUnicode(_value)) => {
+            panic!("configured PostgreSQL fixture URL must be valid Unicode")
+        }
+    };
     let schema = format!(
         "s3_fixture_{}_{}",
         std::process::id(),
@@ -125,21 +131,21 @@ async fn build_postgres_state(
     root: &Path,
     object_store: crate::object_store::ServerObjectStore,
 ) -> Option<Arc<AppState>> {
-    let chunk_size = NonZeroUsize::new(65_536)?;
+    let chunk_size = NonZeroUsize::new(65_536).unwrap();
     let config = ServerConfig::new(
-        "127.0.0.1:0".parse().ok()?,
+        "127.0.0.1:0".parse().unwrap(),
         "http://127.0.0.1:8080".to_owned(),
         root.to_path_buf(),
         chunk_size,
     )
     .with_server_frontends([ServerFrontend::S3])
-    .ok()?
+    .expect("configured PostgreSQL fixture frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .ok()?
-    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576)?)
-    .ok()?
+    .expect("configured PostgreSQL fixture signing key")
+    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
+    .expect("configured PostgreSQL fixture maximum part size")
     .with_s3_min_part_bytes(NonZeroU64::MIN)
-    .ok()?;
+    .expect("configured PostgreSQL fixture minimum part size");
     let backend = crate::PostgresBackend::new_with_object_store(
         root.to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -148,8 +154,9 @@ async fn build_postgres_state(
         object_store,
     )
     .await
-    .ok()?;
-    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).ok()?;
+    .unwrap_or_else(|_error| panic!("configured PostgreSQL fixture backend initialization"));
+    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY)
+        .expect("configured PostgreSQL fixture authentication");
     let state = Arc::new(AppState {
         config,
         role: ServerRole::All,
@@ -157,13 +164,22 @@ async fn build_postgres_state(
         auth: Some(auth),
         provider_tokens: None,
         reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64)?),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256)?),
+        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256).unwrap()),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
     });
     Some(state)
+}
+
+#[tokio::test]
+#[should_panic(expected = "configured PostgreSQL fixture backend initialization")]
+async fn configured_postgres_backend_failure_does_not_skip_test() {
+    let temporary = TempDir::new().unwrap();
+    let objects =
+        crate::object_store::ServerObjectStore::local(temporary.path().join("objects")).unwrap();
+    build_postgres_state("invalid-postgres-url", temporary.path(), objects).await;
 }
 
 /// Like [`build_test_state`] but with an explicit S3 minimum part size and
@@ -1382,7 +1398,6 @@ async fn s3_unsupported_storage_acl_and_encryption_options_fail_closed() {
 
     for (name, value) in [
         ("x-amz-storage-class", "GLACIER"),
-        ("x-amz-acl", "public-read"),
         ("x-amz-server-side-encryption", "AES256"),
     ] {
         let mut request = put_request(format!("/{BUCKET}/{key}"), b"must not replace".to_vec());
@@ -1396,6 +1411,15 @@ async fn s3_unsupported_storage_acl_and_encryption_options_fail_closed() {
             "unsupported option {name} must not be silently accepted"
         );
     }
+
+    let mut public_acl = put_request(format!("/{BUCKET}/{key}"), b"must not replace".to_vec());
+    public_acl
+        .headers_mut()
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    let public_acl = app.clone().oneshot(public_acl).await.unwrap();
+    assert_eq!(public_acl.status(), StatusCode::BAD_REQUEST);
+    let public_acl = String::from_utf8(body_bytes(public_acl).await).unwrap();
+    assert!(public_acl.contains("<Code>AccessControlListNotSupported</Code>"));
 
     let encrypted_read = app
         .clone()
@@ -1569,6 +1593,35 @@ async fn s3_bucket_stubs_create_head_location() {
         .await
         .unwrap();
     assert_eq!(create.status(), StatusCode::OK);
+
+    let enforced_create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}"))
+                .header(header::AUTHORIZATION, &write_auth)
+                .header("x-amz-object-ownership", "BucketOwnerEnforced")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enforced_create.status(), StatusCode::OK);
+    let unsupported_ownership = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}"))
+                .header(header::AUTHORIZATION, &write_auth)
+                .header("x-amz-object-ownership", "ObjectWriter")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unsupported_ownership.status(), StatusCode::NOT_IMPLEMENTED);
 
     // HeadBucket → 200.
     let head = app
@@ -1860,6 +1913,80 @@ async fn s3_delete_bucket_returns_501_not_implemented() {
         .await
         .unwrap();
     assert_eq!(delete.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_acl_reads_report_enforced_owner_and_acl_writes_fail_closed() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let read_auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
+    let write_auth = sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME));
+
+    for (uri, expected) in [
+        (
+            format!("/{BUCKET}?ownershipControls"),
+            "<ObjectOwnership>BucketOwnerEnforced</ObjectOwnership>",
+        ),
+        (
+            format!("/{BUCKET}?acl"),
+            "<Permission>FULL_CONTROL</Permission>",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, &read_auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(body_bytes(response).await).unwrap();
+        assert!(body.contains(expected), "{body}");
+    }
+
+    put_object(&app, "acl/object.txt", b"data").await;
+    let object_acl = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/{BUCKET}/acl/object.txt?acl"))
+                .header(header::AUTHORIZATION, &read_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(object_acl.status(), StatusCode::OK);
+    let object_acl = String::from_utf8(body_bytes(object_acl).await).unwrap();
+    assert!(object_acl.contains("<Permission>FULL_CONTROL</Permission>"));
+
+    for uri in [
+        format!("/{BUCKET}?acl"),
+        format!("/{BUCKET}/acl/object.txt?acl"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, &write_auth)
+                    .body(Body::from("<AccessControlPolicy/>"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = String::from_utf8(body_bytes(response).await).unwrap();
+        assert!(
+            body.contains("<Code>AccessControlListNotSupported</Code>"),
+            "{body}"
+        );
+    }
 }
 
 // =========================================================================

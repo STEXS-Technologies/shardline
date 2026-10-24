@@ -50,6 +50,34 @@ pub fn footerless_xorb() -> io::Result<(Bytes, Bytes, String)> {
     ))
 }
 
+/// Builds compressed and plain representations of the same verified content.
+///
+/// # Errors
+/// Returns an error when the native fixture cannot be serialized.
+pub fn alternate_xorb_encodings() -> io::Result<(Bytes, Bytes, String)> {
+    let data = vec![b'a'; 128 * 1024];
+    let length = u64::try_from(data.len()).map_err(io::Error::other)?;
+    let member = compute_data_hash(&data);
+    let identity = xorb_hash(&[(member, length)]);
+    let compressed = serialized_xorb_object_from_components(
+        &identity,
+        data.clone(),
+        vec![(member, length)],
+        CompressionScheme::LZ4,
+    )
+    .map_err(io::Error::other)?
+    .serialized_data;
+    let plain = serialized_xorb_object_from_components(
+        &identity,
+        data,
+        vec![(member, length)],
+        CompressionScheme::None,
+    )
+    .map_err(io::Error::other)?
+    .serialized_data;
+    Ok((compressed.into(), plain.into(), identity.hex()))
+}
+
 /// # Panics
 ///
 /// Panics if serialized xorb object creation fails.

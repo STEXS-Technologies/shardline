@@ -43,6 +43,24 @@ impl PostgresFixture {
             .await
             .unwrap();
         }
+        // LIKE INCLUDING ALL does not copy foreign keys. Preserve the new
+        // descriptor/member relation inside the disposable schema as well.
+        let has_xet_chunks: bool = sqlx::query_scalar(
+            "SELECT to_regclass(format('%I.shardline_xet_chunks',$1)) IS NOT NULL",
+        )
+        .bind(&schema)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        if has_xet_chunks {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.shardline_xet_chunks ADD FOREIGN KEY (xorb_hash)
+                 REFERENCES {schema}.shardline_xet_xorbs(xorb_hash) ON DELETE CASCADE"
+            )))
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO {schema}.shardline_schema_migrations SELECT * FROM public.shardline_schema_migrations"
         ))).execute(&admin).await.unwrap();
@@ -95,6 +113,19 @@ impl PostgresFixture {
             None
         };
         backend.expect("fixture constructs PostgreSQL")
+    }
+
+    /// Complete owner-installed additive state before exercising router startup.
+    /// Raw migration tests deliberately keep `new()`'s cloned history untouched.
+    pub(crate) async fn migrate(&self) {
+        crate::database_migration::run_database_migration(
+            &crate::database_migration::DatabaseMigrationOptions::new(
+                self.config.index_postgres_url().unwrap().to_owned(),
+                crate::database_migration::DatabaseMigrationCommand::Up { steps: None },
+            ),
+        )
+        .await
+        .unwrap();
     }
 
     pub(crate) fn index(&self) -> &PostgresIndexStore {

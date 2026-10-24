@@ -13,15 +13,39 @@ the validated workflows covered by this repository.
 Release notes identify which source-tree capabilities are included in each published
 version.
 
+Clients that require an `hf_` token prefix can use the opt-in
+`shardline_protocol::format_hub_token` formatter on an existing signed Shardline
+credential. The prefix changes presentation only; signature, expiry and repository
+permissions are still verified. Existing bare tokens and default token issuance
+remain supported. Use prefixed tokens only after all receiving servers support
+this format; older releases expect bare credentials.
+
+For native-Xet files, Hub resolve supports explicit
+`Accept: application/vnd.xet-fileinfo+json` discovery with file identity, size,
+token-refresh and reconstruction links. Requests without that media type retain
+the ordinary download behavior. The unmodified `@huggingface/hub` 2.17.1 client
+passes model and dataset native upload, token refresh, delta editing and
+byte-for-byte native download on SQLite/local, PostgreSQL/local and
+PostgreSQL/MinIO, including split API/transfer roles behind a path-routing front
+door. The MinIO protocol fixture uses a bounded memory-backed volume; it does
+not qualify durable MinIO restarts. Cancellation and SDK background handle
+cleanup remain separate qualification items. The one-shot test exits
+after all awaited assertions, rather than waiting for SDK background handles.
+
+In the deterministic 9 MiB fixture with a 32 KiB edit, Xorb upload payload falls
+from 9,438,424 to 266,697 bytes (97.17%). This measures client-to-CAS Xorb bytes,
+excluding shard/control traffic and backend duplication; it is not a general
+storage or provider-billing saving.
+
 ## Surface Maturity
 
 | Surface | Tier | Evidence |
 | --- | --- | --- |
-| Xet CAS | **Stable** | Native Xet upload and download flows; checked-in `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, historical checkout, and sparse checkout flows exercise Shardline CAS, while the Git/Xet test supplies a mock forge LFS control plane. CAS batch reconstruction accepts the published JSON `POST /v1/reconstructions` request while retaining Shardline's older GET form. With Hub and Xet enabled together, native Xet metadata clients select the Xet tree and revision-list response formats using `application/vnd.stexs.xet-metadata+json`; normal Hub requests keep their existing routes and formats. |
+| Xet CAS | **Stable** | Native Xet upload and download flows; checked-in `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, historical checkout, and sparse checkout flows exercise Shardline CAS, with broader scenarios using a mock forge LFS control plane. A separate stock git-xet 0.2.1 test uses the actual Hub Git/LFS control plane for native upload, repeat-upload recognition and cold clone through standard Git LFS on SQLite/local and PostgreSQL/MinIO. CAS batch reconstruction accepts the published JSON `POST /v1/reconstructions` request while retaining Shardline's older GET form. Authenticated reconstruction URLs carry short-lived repository/file/Xorb/range-bound capabilities and are tested without an Authorization header; stock `hf_xet` expiry/refresh behavior has local and PostgreSQL/MinIO split-role qualification; external S3 presigning remains unqualified. With Hub and Xet enabled together, native Xet metadata clients select the Xet tree and revision-list response formats using `application/vnd.stexs.xet-metadata+json`; normal Hub requests keep their existing routes and formats. |
 | Git LFS | **Beta** | LFS batch negotiation plus direct object GET/HEAD/PUT routes; pinned Git LFS 3.7.1 and adjacent 3.6.1 push/pull plus separate pull and fetch --all flows; conformance-tested but limited production evidence |
 | Bazel HTTP remote cache | **Beta** | `ac` and `cas` object GET and PUT routes; pinned Bazel 8.7.0 and 9.2.0 remote-cache flows with `remote_download_outputs=all` and `toplevel`; conformance-tested but limited production evidence |
 | OCI Distribution | **Stable** | Full blob upload/download, manifest PUT/GET/HEAD/DELETE, tag listing with pagination, token-service flow at /v2/token, upload cancellation, scoped upload-session handling; checked-in `skopeo`, Docker, Helm, and Podman client coverage |
-| Hugging Face Hub API | **Beta** | Repository create/info/delete, revision and tree lookup, size-aware preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search, webhooks, Git Smart HTTP clone/fetch/push, and LFS transfers. The native `hf` CLI E2E covers small model and dataset files plus 9 MiB `hf_xet` uploads, Hub commits, and byte-for-byte downloads for both repository types. It verifies Xet shard and Xorb transfer, no ordinary LFS body-upload fallback, and repository-scoped SHA-256 to native Xet file mappings. The flows pass with Hub enabled alone and with Hub, Xet, and S3 enabled together. The Xet-token response includes current JSON connection fields and matching headers. The separate git-xet E2E uses a mock forge LFS control plane while exercising Shardline CAS. Git Smart HTTP supports protocol v2 upload-pack (`ls-refs` and `fetch`) plus the traditional v0/v1 upload-pack and receive-pack flow; receive-pack supports negotiated `push-options` but has no Git receive hooks, and protocol v2 push remains unsupported. |
+| Hugging Face Hub API | **Beta** | Repository create/info/delete, revision and tree lookup, size-aware preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search, webhooks, Git Smart HTTP clone/fetch/push, and LFS transfers. The native `hf` CLI E2E covers small model and dataset files plus 9 MiB `hf_xet` uploads, Hub commits, and byte-for-byte downloads for both repository types. It verifies Xet shard and Xorb transfer, no ordinary LFS body-upload fallback, and repository-scoped SHA-256 to native Xet file mappings. The flows pass with Hub enabled alone and with Hub, Xet, and S3 enabled together. The Xet-token response includes current JSON connection fields and matching headers. Stock git-xet 0.2.1 also passes native upload and cold clone through the actual Hub Git/LFS control plane with separate client homes on SQLite/local and PostgreSQL/MinIO; broader Git/Xet scenarios retain their mock forge fixture. Git Smart HTTP supports protocol v2 upload-pack (`ls-refs` and `fetch`) plus the traditional v0/v1 upload-pack and receive-pack flow; receive-pack supports negotiated `push-options` but has no Git receive hooks. Git protocol v2 defines fetch negotiation; push continues through receive-pack. |
 | S3 frontend (protocol) | **Stable** | Scoped object, listing and multipart workflows documented in [S3_FRONTEND.md](S3_FRONTEND.md), not the entire AWS S3 service. Existing access-key-as-token and Bearer credentials remain supported. Optional configured signing identities verify SigV4, session credentials, presigned GET/PUT, signed browser PostObject policies, classic signed payload streams, and signed checksum trailers. Trailer coverage is qualified with the documented MinIO client version; broader client-version and remote-failure qualification remains. Extended service APIs remain unimplemented as listed in the S3 guide. Native client coverage includes `mc`, AWS CLI, boto3, `s3cmd`, `rclone`, and pyarrow 25. |
 | Ed25519 auth provider | **Beta** | Signing and verification, bounded overlapping key rotation, verification-only mode, environment/TOML configuration, authenticated HTTP flows, and operator CLI mint-to-verify interoperability have targeted tests; broader deployment evidence remains graduation work |
 | Local filesystem storage | **Stable** | Checked-in adapter, concurrency, and operator workflow coverage |
@@ -44,6 +68,38 @@ version.
 - **Internal**: architectural component, not a user-facing promise.
 
 ### Client Test Execution
+
+The E2E workflow pins these Hub/Xet client combinations. This is the required
+test matrix, not a claim that the current branch has passed release CI.
+
+| `huggingface_hub` | `hf_xet` | Required workflows |
+| --- | --- | --- |
+| 1.25.1 | 1.5.2 | Expired download URL and refresh |
+| 1.25.1 | 1.6.0 | Large transfers, interrupted uploads, URL refresh and identity checks |
+| 1.25.1 | 1.7.0 | Model/dataset upload and download on local and PostgreSQL/MinIO storage, URL refresh and interrupted uploads |
+| 2.2.0 | 1.7.0 | Model/dataset upload and download on SQLite/filesystem, PostgreSQL/filesystem and PostgreSQL/MinIO storage; URL refresh with combined and split API/transfer roles |
+
+Versions outside this matrix require qualification before support is claimed.
+The narrower 1.5.2 refresh test does not establish all workflows for that version.
+
+Xet's newer [`GET /v2/file-chunk-hashes/{file_id}`](https://huggingface.co/docs/xet/api#9-get-file-chunk-hashes)
+delta-upload API is implemented with repository authorization, chunk-aligned edit
+windows and upstream-compatible gap commitments. HTTP tests cover proof
+composition, verified legacy descriptor recovery and rejection of tampered
+descriptors. A composed-file workflow uploads only the changed Xorb, reuses the
+existing unchanged source, publishes the shard and downloads byte-exact content
+with the upstream Xet download library. Two PostgreSQL-backed replicas sharing filesystem objects also
+preserve unresolved-delete blocking across restart. Stock-client delta uploads,
+MinIO qualification and delayed in-flight deletion scenarios remain pending.
+The composed-file fixture does not establish automatic delta selection by `hf`.
+
+Snapshot-scoped Git credentials currently negotiate the legacy fetch protocol,
+including when stock Git requests v2. Repository and branch credentials retain
+native v2 support. Native v2 snapshot fetch remains unqualified; a requested-v2
+clone that falls back to legacy framing is not evidence that it works.
+Git 2.52.0 also reproduces recursive filtered fetching against an unmodified
+stock shallow Git server; an unfiltered v2 clone of that fixture passes strict
+fsck. Shardline's snapshot fallback remains necessary for the tested clients.
 
 The Hub API's native Git regression compares incremental-fetch HTTP response
 bytes with a fresh clone at the same commit. It requires less transfer for the
@@ -158,7 +214,7 @@ history. Version visibility and overwrite behavior belong to the frontend contra
 | Git LFS | Version history comes from Git commits and refs; the LFS object endpoint alone is a blob store. |
 | Hugging Face Hub | Repository revisions and commits expose historical states. |
 | OCI | Blobs and manifests are immutable by digest; tags are mutable, database-linearized pointers and have no tag-history API here. Digest-guarded deletion cannot remove a concurrently retargeted tag. |
-| S3 | A `PUT` replaces the logical object key. `ListObjectVersions` reports the current object as a `null` version and both version listing and `ListObjectsV2` expose the stable repository-scoped owner ID. Historical versions and delete markers are not implemented. |
+| S3 | A `PUT` replaces the logical object key. `ListObjectVersions` reports the current object as a `null` version and both version listing and `ListObjectsV2` expose the stable repository-scoped owner ID. Bucket/object ACL reads report the fixed `BucketOwnerEnforced` model; ACLs do not grant access. Historical versions and delete markers are not implemented. |
 | Bazel HTTP cache | Digest-keyed cache entries have no user-facing version history. |
 
 When an overwrite makes a prior record unreachable, its unique chunks become GC

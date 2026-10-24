@@ -584,6 +584,23 @@ Comparison retains one transport frame per object, adds no temporary file and
 does not buffer whole objects. Each response must declare the expected complete
 length and range, and both bodies must reach EOF at that length.
 
+#### Hub PostgreSQL file metadata
+
+Hub file metadata writes now use INSERT batches of at most 1,000 entries inside
+the existing transaction. A repeated path starts another statement, preserving
+ordered updates instead of dropping intermediate entries. Invalid sizes still
+abort the complete transaction, including batches already executed.
+
+A PostgreSQL statement-trigger counter observed three INSERTs for 1,003 input
+entries containing repeated paths; the previous loop issued one INSERT per entry.
+This measures fewer database round trips, not a throughput, WAL, storage-cost or
+SSD-endurance improvement. Statement-level triggers run once per batch.
+The same contract verifies that unchanged replay preserves the row's PostgreSQL
+version and that a later invalid-size entry rolls back earlier writes. An invalid
+intermediate duplicate is rejected even if a later entry would replace it.
+An injected PostgreSQL trigger rejection in a later batch also rolls back all
+earlier inserts and updates; repeated-path updates preserve the final LFS flag.
+
 #### PostgreSQL deletion
 
 An October 17 PostgreSQL deletion comparison replaced a listing-row SELECT

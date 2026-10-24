@@ -662,16 +662,20 @@ SHARDLINE_INDEX_POSTGRES_URL=postgres://user:password@db.example.com:5432/shardl
 
 Secrets must not be printed by `config check`.
 
-`SHARDLINE_MAX_REQUEST_BODY_BYTES` caps the maximum accepted HTTP request body size.
-Transfer routes for xorb and shard uploads enforce this limit before Xet normalization
-and validation. Upload bodies are not staged to local `incoming` files; immutable bytes
-are persisted through the configured object-storage adapter.
-S3 deployments therefore do not require local disk for upload-body persistence.
-Ranged xorb and shard downloads stream stored object bytes through the response path.
-Control-plane JSON and webhook routes still buffer bounded request bodies before
-parsing. The default is `67108864` bytes.
-Raise it to match expected asset sizes and keep the transfer role behind an upstream
-limit that is at least as strict.
+`SHARDLINE_MAX_REQUEST_BODY_BYTES` defaults to `67108864` bytes (64 MiB).
+Native Xorb uploads have a separate default wire limit of `134217728` bytes
+(128 MiB), because a valid 64 MiB container also carries framing bytes.
+Set `SHARDLINE_MAX_XORB_BODY_BYTES` (or `[server].max_xorb_body_bytes` in TOML)
+to override that limit. An explicitly configured general body limit also applies
+to Xorbs unless the Xorb limit is set separately, preserving existing operator
+restrictions. Other upload routes retain the general limit.
+
+Both limits are enforced before normalization and validation. Large transfer
+bodies and footerless normalization use bounded temporary files; allow scratch
+space even with S3 storage. Immutable objects are persisted through the configured
+storage adapter. Downloads stream stored bytes. Control-plane JSON and webhook
+routes buffer bounded bodies before parsing. Configure upstream proxies to allow
+the intended wire sizes; a 64 MiB proxy limit can reject valid native Xorbs.
 
 Shard metadata limits cap per-upload metadata fanout, not logical asset size.
 They prevent a shard body from forcing unbounded file sections, xorb sections,

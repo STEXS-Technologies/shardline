@@ -9,8 +9,6 @@ use std::{
 
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ShardlineHash;
-#[cfg(test)]
-use shardline_server_core::read_full_object;
 use shardline_server_core::{ServerObjectStore, chunk_hash};
 use shardline_storage::{
     AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome,
@@ -30,7 +28,7 @@ fn chunk_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> 
 
 use crate::{
     error::XetAdapterError,
-    xorb::{MAX_XORB_UNPACKED_BYTES, declared_unpacked_length_of_serialized},
+    xorb::{MAX_XORB_UNPACKED_BYTES, declared_footerless_unpacked_length},
 };
 
 use super::{
@@ -38,10 +36,12 @@ use super::{
     try_for_each_serialized_xorb_chunk_trusted, validate_serialized_xorb,
 };
 
-/// Legacy git-xet clients can send footerless xorbs that require a
-/// compatibility normalization pass. Keep that fallback explicitly bounded;
-/// canonical uploads continue through the file-backed streaming path.
-const MAX_COMPAT_XORB_NORMALIZE_BYTES: u64 = 16 * 1024 * 1024;
+mod blocking;
+mod encoding;
+mod member_read;
+mod normalization;
+pub use member_read::read_verified_xorb_chunk;
+pub use normalization::normalize_uploaded_xorb_file;
 
 #[derive(Debug)]
 pub struct StoredXorbUpload {
@@ -185,6 +185,20 @@ pub async fn store_uploaded_xorb(
     expected_hash: &str,
     uploaded_bytes: &[u8],
 ) -> Result<StoredXorbUpload, XetAdapterError> {
+    store_xorb_bytes_with_resources(object_store, expected_hash, uploaded_bytes, ()).await
+}
+
+/// Stores verified in-memory input while retaining admission through immutable
+/// persistence and any full verification of an equivalent retained encoding.
+///
+/// # Errors
+/// Returns the same validation and storage errors as [`store_uploaded_xorb`].
+pub async fn store_xorb_bytes_with_resources<R: Send + 'static>(
+    object_store: &ServerObjectStore,
+    expected_hash: &str,
+    uploaded_bytes: &[u8],
+    resources: R,
+) -> Result<StoredXorbUpload, XetAdapterError> {
     let expected_hash_value = parse_xet_hash_hex(expected_hash)?;
     let (canonical_bytes, validated) =
         canonicalize_uploaded_xorb(expected_hash_value, uploaded_bytes)?;
@@ -244,12 +258,17 @@ pub async fn store_uploaded_xorb(
     let serialized_key = xorb_object_key(expected_hash)?;
     let serialized_integrity =
         ObjectIntegrity::new(chunk_hash(canonical_bytes.as_ref()), canonical_length);
-    let serialized_outcome = AsyncObjectStore::put_if_absent(
-        object_store,
-        &serialized_key,
-        ObjectBody::from_vec(canonical_bytes.into_owned()),
-        &serialized_integrity,
-    )
+    let store = object_store.clone();
+    let bytes = canonical_bytes.into_owned();
+    let serialized_outcome = blocking::cancellable_write(resources, move || {
+        let result = shardline_storage::ObjectStore::put_if_absent(
+            &store,
+            &serialized_key,
+            ObjectBody::from_vec(bytes),
+            &serialized_integrity,
+        );
+        encoding::resolve_conflict(&store, &serialized_key, &validated, result)
+    })
     .await?;
     if matches!(serialized_outcome, PutOutcome::Inserted) {
         stored_bytes = stored_bytes
@@ -264,10 +283,8 @@ pub async fn store_uploaded_xorb(
 }
 
 /// Stores a canonical serialized xorb directly from a seekable file. The
-/// decoder keeps only one decompressed chunk in memory. Non-canonical
-/// footerless inputs are rejected here because normalizing them requires a
-/// second complete container; callers may use the legacy byte API for those
-/// explicitly bounded compatibility uploads.
+/// decoder keeps only one decompressed chunk in memory. Footerless inputs use
+/// a verified temporary file, preserving bounded memory at standard Xorb sizes.
 ///
 /// # Errors
 ///
@@ -277,23 +294,36 @@ pub async fn store_uploaded_xorb_file(
     expected_hash: &str,
     path: &Path,
 ) -> Result<StoredXorbUpload, XetAdapterError> {
+    store_xorb_file_with_resources(object_store, expected_hash, path, ()).await
+}
+
+/// Persists an owned staged container, retaining application admission through
+/// any synchronous write that outlives cancellation of its caller.
+///
+/// # Errors
+/// Returns the same validation and storage errors as [`store_uploaded_xorb_file`].
+pub async fn store_owned_xorb_file<R: Send + 'static>(
+    object_store: &ServerObjectStore,
+    expected_hash: &str,
+    file: tempfile::NamedTempFile,
+    resources: R,
+) -> Result<StoredXorbUpload, XetAdapterError> {
+    let path = file.path().to_owned();
+    store_xorb_file_with_resources(object_store, expected_hash, &path, (file, resources)).await
+}
+
+async fn store_xorb_file_with_resources<R: Send + 'static>(
+    object_store: &ServerObjectStore,
+    expected_hash: &str,
+    path: &Path,
+    resources: R,
+) -> Result<StoredXorbUpload, XetAdapterError> {
     let expected_hash_value = parse_xet_hash_hex(expected_hash)?;
+    let normalized = normalize_uploaded_xorb_file(expected_hash, path)?;
+    let path = normalized.as_ref().map_or(path, |file| file.path());
     let mut file = File::open(path).map_err(XetAdapterError::Io)?;
     let canonical_length = file.metadata().map_err(XetAdapterError::Io)?.len();
-    let validated = match validate_serialized_xorb(&mut file, expected_hash_value) {
-        Ok(validated) => validated,
-        Err(error) => {
-            // Older git-xet releases omit the footer that Shardline uses for
-            // zero-copy validation. Preserve interoperability for small
-            // compatibility xorbs without reopening whole-file buffering for
-            // arbitrary uploads.
-            if canonical_length > MAX_COMPAT_XORB_NORMALIZE_BYTES {
-                return Err(XetAdapterError::from(error));
-            }
-            let bytes = std::fs::read(path).map_err(XetAdapterError::Io)?;
-            return store_uploaded_xorb(object_store, expected_hash, &bytes).await;
-        }
-    };
+    let validated = validate_serialized_xorb(&mut file, expected_hash_value)?;
     let unpacked_length = Arc::new(AtomicU64::new(0));
     let stored_bytes = Arc::new(AtomicU64::new(0));
     try_for_each_serialized_xorb_chunk_async_trusted(&mut file, &validated, {
@@ -336,14 +366,15 @@ pub async fn store_uploaded_xorb_file(
     }
     let key = xorb_object_key(expected_hash)?;
     let integrity = ObjectIntegrity::new(chunk_hash_file(path)?, canonical_length);
+    tracing::debug!(xorb_hash = expected_hash, "persisting verified Xorb");
     let store = object_store.clone();
     let key_for_store = key.clone();
     let path_for_store = path.to_owned();
-    let outcome = tokio::task::spawn_blocking(move || {
-        store.put_content_addressed_file(&key_for_store, &path_for_store, &integrity)
+    let outcome = blocking::cancellable_write((normalized, resources), move || {
+        let result = store.put_content_addressed_file(&key_for_store, &path_for_store, &integrity);
+        encoding::resolve_conflict(&store, &key_for_store, &validated, result)
     })
-    .await
-    .map_err(|error| XetAdapterError::Io(std::io::Error::other(error)))??;
+    .await?;
     let mut stored = stored_bytes.load(Ordering::Relaxed);
     if matches!(outcome, PutOutcome::Inserted) {
         stored = stored
@@ -370,7 +401,7 @@ pub fn canonical_uploaded_xorb_length(
 }
 
 /// Returns a staged file's stored length without buffering canonical containers.
-/// Footerless compatibility inputs retain the upload path's existing size cap.
+/// Footerless inputs use bounded file-backed normalization.
 ///
 /// # Errors
 /// Returns an error for unreadable, invalid, or oversized compatibility inputs.
@@ -378,17 +409,8 @@ pub fn canonical_uploaded_xorb_file_length(
     expected_hash: &str,
     path: &Path,
 ) -> Result<u64, XetAdapterError> {
-    let expected = parse_xet_hash_hex(expected_hash)?;
-    let mut file = File::open(path).map_err(XetAdapterError::Io)?;
-    let length = file.metadata().map_err(XetAdapterError::Io)?.len();
-    match validate_serialized_xorb(&mut file, expected) {
-        Ok(_) => Ok(length),
-        Err(error) if length > MAX_COMPAT_XORB_NORMALIZE_BYTES => Err(error.into()),
-        Err(_) => canonical_uploaded_xorb_length(
-            expected_hash,
-            &std::fs::read(path).map_err(XetAdapterError::Io)?,
-        ),
-    }
+    let normalized = normalize_uploaded_xorb_file(expected_hash, path)?;
+    Ok(std::fs::metadata(normalized.as_ref().map_or(path, |file| file.path()))?.len())
 }
 
 fn chunk_hash_file(path: &Path) -> Result<ShardlineHash, XetAdapterError> {
@@ -435,13 +457,22 @@ pub fn normalize_serialized_xorb(
     expected_hash: ShardlineHash,
     bytes: &[u8],
 ) -> Result<Vec<u8>, XetAdapterError> {
+    match validate_serialized_xorb(&mut Cursor::new(bytes), expected_hash) {
+        Ok(_validated) => return Ok(bytes.to_vec()),
+        Err(crate::xorb::XorbParseError::HashMismatch) => {
+            return Err(XetAdapterError::XorbHashMismatch);
+        }
+        Err(_error) => {}
+    }
     // Reject a decompression bomb BEFORE the reconstruct pass allocates: scan
     // the chunk headers and bound the total declared unpacked size upfront. The
     // reconstruct pass itself is streaming (at most one bounded chunk in memory
     // at a time), but this check avoids paying decompression work on obviously
     // oversized inputs and keeps the declared-total cap consistent with the
     // footer-bearing validation path.
-    let declared_total = declared_unpacked_length_of_serialized(bytes)?;
+    // A failed footer-bearing validation must not be repaired by ignoring the
+    // footer. This scan requires chunk framing to consume every input byte.
+    let declared_total = declared_footerless_unpacked_length(bytes)?;
     if declared_total > MAX_XORB_UNPACKED_BYTES {
         return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
     }
@@ -467,6 +498,9 @@ const fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
 }
 
 #[cfg(test)]
+mod encoding_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{borrow::Cow, io::Cursor};
 
@@ -478,9 +512,8 @@ mod tests {
     };
 
     use super::{
-        canonicalize_uploaded_xorb, normalize_serialized_xorb, read_full_object,
-        validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
-        xorb_hash_from_object_key_if_present, xorb_object_key,
+        canonicalize_uploaded_xorb, normalize_serialized_xorb, validate_serialized_xorb,
+        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::error::XetAdapterError;
     use crate::xorb::MAX_XORB_UNPACKED_BYTES;
@@ -1011,11 +1044,9 @@ mod tests {
     }
 
     #[test]
-    fn store_uploaded_xorb_neutralizes_declared_unpacked_bomb() {
-        // A footer-present xorb whose footer declares a bomb-scale unpacked
-        // total is rejected by validation; the canonicalize fallback re-derives
-        // metadata from the actual (small) chunk content, so the stored xorb is
-        // the safe canonical form and never the attacker's declaration.
+    fn store_uploaded_xorb_rejects_forged_footer_without_publication() {
+        // Invalid footer-bearing input is not a footerless compatibility case.
+        // Reject the forged declaration before publishing any replacement.
         use shardline_xet_core::xorb_object::XorbObject;
 
         let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
@@ -1045,23 +1076,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
         let result = async_store_xorb(&object_store, &serialized.hash.hex(), &forged);
-        assert!(
-            result.is_ok(),
-            "bomb declaration must be neutralized into a canonical xorb, got {result:?}"
-        );
-
-        // The canonicalized stored form is the small, valid xorb.
+        assert!(result.is_err(), "forged footer was accepted: {result:?}");
         let key = xorb_object_key(&serialized.hash.hex()).unwrap();
-        let stored_meta = ObjectStore::metadata(&object_store, &key)
-            .unwrap()
-            .expect("stored xorb");
-        let stored_bytes = read_full_object(&object_store, &key, stored_meta.length()).unwrap();
-        let mut cursor = Cursor::new(stored_bytes);
-        let revalidated = validate_serialized_xorb(&mut cursor, expected_hash).unwrap();
-        assert_eq!(
-            revalidated.unpacked_length(),
-            256,
-            "the stored xorb must carry the actual small unpacked length"
+        assert!(
+            ObjectStore::metadata(&object_store, &key)
+                .unwrap()
+                .is_none()
         );
     }
 

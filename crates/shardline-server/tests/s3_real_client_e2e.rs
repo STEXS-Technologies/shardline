@@ -2,8 +2,8 @@
 //! `aws` CLI, boto3 (AWS SDK), DuckDB, `s3cmd`, `rclone`, and pyarrow, driven against
 //! an in-process `app::router` on a random port.
 //!
-//! These tests are **skip-gated**: if a client is not on `PATH`, the
-//! corresponding test prints a clear SKIP message and returns. When present,
+//! Missing tools skip optional developer runs, but fail when
+//! `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1` enables mandatory qualification. When present,
 //! they exercise the wire behavior real clients depend on (AWS-chunked bodies,
 //! trailing-slash bucket paths, `DeleteObjects` batch delete, conditional
 //! requests, multipart uploads, seekable ranged reads) that the in-process e2e
@@ -33,11 +33,27 @@ use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
+#[path = "s3_real_client/prerequisites.rs"]
+mod prerequisites;
+
 /// Test signing key matching the server's `with_token_signing_key`.
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const OWNER: &str = "ac";
 const NAME: &str = "assets";
 const BUCKET: &str = "ac.assets";
+
+fn client_output(command: &mut std::process::Command) -> std::process::Output {
+    shardline_test_support::native_client_output(command, Duration::from_secs(600))
+        .expect("native S3 client failed to execute or exceeded its deadline")
+}
+
+fn probe_client(program: &str, args: &[&str]) -> bool {
+    shardline_test_support::native_client_output(
+        std::process::Command::new(program).args(args),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success())
+}
 
 /// Mints a bearer token scoped to `{owner}.{name}` with the test signing key.
 fn mint_token(owner: &str, name: &str) -> String {
@@ -137,12 +153,12 @@ async fn mc_run(config_dir: &Path, args: &[&str]) -> std::process::Output {
     let config_dir = config_dir.to_path_buf();
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("mc")
-            .arg("--config-dir")
-            .arg(config_dir)
-            .args(&args)
-            .output()
-            .unwrap()
+        client_output(
+            std::process::Command::new("mc")
+                .arg("--config-dir")
+                .arg(config_dir)
+                .args(&args),
+        )
     })
     .await
     .unwrap()
@@ -162,16 +178,15 @@ async fn mc_alias_set(config_dir: &Path, alias: &str, endpoint: &str, token: &st
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success() && !stderr.contains("mc: <ERROR>"),
-        "mc alias set failed (stderr): {stderr}"
+        "mc alias set failed with status {} or reported an error",
+        output.status
     );
 }
 
 /// Returns whether `mc` is on PATH.
 fn mc_available() -> bool {
-    std::process::Command::new("mc")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let available = probe_client("mc", &["--version"]);
+    shardline_test_support::require_native_client("mc", available)
 }
 
 /// Fails the test if an `mc` local-fallback artifact (`s3test-*`) was created
@@ -197,18 +212,14 @@ fn assert_no_leaked_mc_artifacts() {
 
 /// Returns whether `python3` with pyarrow is available.
 fn pyarrow_available() -> bool {
-    std::process::Command::new("python3")
-        .args(["-c", "import pyarrow"])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let available = probe_client("python3", &["-c", "import pyarrow"]);
+    shardline_test_support::require_native_client("python3 + pyarrow", available)
 }
 
 /// Returns whether Python DuckDB and PyArrow are available.
 fn duckdb_available() -> bool {
-    std::process::Command::new("python3")
-        .args(["-c", "import duckdb, pyarrow"])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let available = probe_client("python3", &["-c", "import duckdb, pyarrow"]);
+    shardline_test_support::require_native_client("python3 + duckdb + pyarrow", available)
 }
 
 // ---------------------------------------------------------------------------
@@ -231,11 +242,7 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
 
     // CreateBucket (mc sends PUT /{bucket}/ — the trailing-slash form).
     let mb = mc_run(&config_dir, &["mb", &format!("{alias_name}/{BUCKET}")]).await;
-    assert!(
-        mb.status.success(),
-        "mc mb failed: {}",
-        String::from_utf8_lossy(&mb.stderr)
-    );
+    assert!(mb.status.success(), "mc mb failed: {}", mb.status);
 
     // PutObject (mc streams an AWS-chunked body).
     let file = tmp.path().join("hello.txt");
@@ -249,11 +256,7 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
         ],
     )
     .await;
-    assert!(
-        cp.status.success(),
-        "mc cp failed: {}",
-        String::from_utf8_lossy(&cp.stderr)
-    );
+    assert!(cp.status.success(), "mc cp failed: {}", cp.status);
 
     // GetObject (mc cat) — must return the DECODED bytes.
     let cat = mc_run(
@@ -268,10 +271,7 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
     let ls = mc_run(&config_dir, &["ls", &format!("{alias_name}/{BUCKET}")]).await;
     assert!(ls.status.success(), "mc ls failed");
     let listing = String::from_utf8_lossy(&ls.stdout);
-    assert!(
-        listing.contains("hello.txt"),
-        "mc ls must list hello.txt: {listing}"
-    );
+    assert!(listing.contains("hello.txt"), "mc ls must list hello.txt");
 
     // HeadObject.
     let stat = mc_run(
@@ -281,7 +281,10 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
     .await;
     assert!(stat.status.success(), "mc stat failed");
     let stat_out = String::from_utf8_lossy(&stat.stdout);
-    assert!(stat_out.contains("hello.txt"), "{stat_out}");
+    assert!(
+        stat_out.contains("hello.txt"),
+        "mc stat must name hello.txt"
+    );
 
     // DeleteObject (mc rm uses the DeleteObjects batch endpoint).
     let rm = mc_run(
@@ -289,17 +292,14 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
         &["rm", &format!("{alias_name}/{BUCKET}/hello.txt")],
     )
     .await;
-    assert!(
-        rm.status.success(),
-        "mc rm failed: {}",
-        String::from_utf8_lossy(&rm.stderr)
-    );
+    assert!(rm.status.success(), "mc rm failed: {}", rm.status);
 
     let ls_after = mc_run(&config_dir, &["ls", &format!("{alias_name}/{BUCKET}")]).await;
+    assert!(ls_after.status.success(), "mc ls after removal failed");
     let listing_after = String::from_utf8_lossy(&ls_after.stdout);
     assert!(
         !listing_after.contains("hello.txt"),
-        "hello.txt must be gone after rm: {listing_after}"
+        "hello.txt must be gone after rm"
     );
 
     assert_no_leaked_mc_artifacts();
@@ -339,11 +339,7 @@ async fn mc_multipart_upload_matches_source() {
         ],
     )
     .await;
-    assert!(
-        up.status.success(),
-        "mc multipart cp failed: {}",
-        String::from_utf8_lossy(&up.stderr)
-    );
+    assert!(up.status.success(), "mc multipart cp failed: {}", up.status);
 
     // Download and compare bytes (verifies the aws-chunked decode + CDC).
     let cat = mc_run(
@@ -416,12 +412,12 @@ print("ALL PYARROW CHECKS PASSED")
 "#,
     )
     .unwrap();
-    std::process::Command::new("python3")
-        .arg(script.to_str().unwrap())
-        .env("S3_ENDPOINT", endpoint)
-        .env("S3_TOKEN", token)
-        .output()
-        .unwrap()
+    client_output(
+        std::process::Command::new("python3")
+            .arg(script.to_str().unwrap())
+            .env("S3_ENDPOINT", endpoint)
+            .env("S3_TOKEN", token),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -438,14 +434,14 @@ async fn pyarrow_parquet_write_read_info() {
 
     let output = run_pyarrow(&server.base_url, &token, &tmp);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "pyarrow subprocess failed:\n{stdout}\n{stderr}"
+        "pyarrow subprocess failed with status {}",
+        output.status
     );
     assert!(
         stdout.contains("ALL PYARROW CHECKS PASSED"),
-        "pyarrow checks did not complete:\n{stdout}\n{stderr}"
+        "pyarrow checks did not complete"
     );
 
     assert_no_leaked_mc_artifacts();
@@ -521,12 +517,12 @@ print("ALL DUCKDB CHECKS PASSED")
 "#,
     )
     .unwrap();
-    std::process::Command::new("python3")
-        .arg(script.to_str().unwrap())
-        .env("S3_ENDPOINT", endpoint)
-        .env("S3_TOKEN", token)
-        .output()
-        .unwrap()
+    client_output(
+        std::process::Command::new("python3")
+            .arg(script.to_str().unwrap())
+            .env("S3_ENDPOINT", endpoint)
+            .env("S3_TOKEN", token),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -542,14 +538,14 @@ async fn duckdb_parquet_glob_filter_aggregate_and_write() {
     let tmp = TempDir::new().unwrap();
     let output = run_duckdb(&server.base_url, &token, &tmp);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "DuckDB subprocess failed:\n{stdout}\n{stderr}"
+        "DuckDB subprocess failed with status {}",
+        output.status
     );
     assert!(
         stdout.contains("ALL DUCKDB CHECKS PASSED"),
-        "DuckDB checks did not complete:\n{stdout}\n{stderr}"
+        "DuckDB checks did not complete"
     );
 }
 
@@ -559,10 +555,8 @@ async fn duckdb_parquet_glob_filter_aggregate_and_write() {
 
 /// Returns whether the AWS CLI is on PATH.
 fn aws_available() -> bool {
-    std::process::Command::new("aws")
-        .args(["--version"])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let available = probe_client("aws", &["--version"]);
+    shardline_test_support::require_native_client("aws", available)
 }
 
 /// Runs `aws` against the in-process server. The access key is the Shardline
@@ -575,17 +569,17 @@ async fn aws_run(endpoint: &str, token: &str, args: &[&str]) -> std::process::Ou
     let token = token.to_owned();
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("aws")
-            .args(&args)
-            .env("AWS_ACCESS_KEY_ID", &token)
-            .env("AWS_SECRET_ACCESS_KEY", "dummy-secret")
-            .env("AWS_DEFAULT_REGION", "us-east-1")
-            .env("AWS_ENDPOINT_URL", &endpoint)
-            .env("AWS_EC2_METADATA_DISABLED", "true")
-            .env("AWS_PAGER", "")
-            .env("AWS_REQUEST_CHECKSUM_CALCULATION", "when_supported")
-            .output()
-            .unwrap()
+        client_output(
+            std::process::Command::new("aws")
+                .args(&args)
+                .env("AWS_ACCESS_KEY_ID", &token)
+                .env("AWS_SECRET_ACCESS_KEY", "dummy-secret")
+                .env("AWS_DEFAULT_REGION", "us-east-1")
+                .env("AWS_ENDPOINT_URL", &endpoint)
+                .env("AWS_EC2_METADATA_DISABLED", "true")
+                .env("AWS_PAGER", "")
+                .env("AWS_REQUEST_CHECKSUM_CALCULATION", "when_supported"),
+        )
     })
     .await
     .unwrap()
@@ -604,11 +598,7 @@ async fn aws_cli_put_get_copy_rm_roundtrip() {
 
     // CreateBucket (`aws s3 mb`).
     let mb = aws_run(&server.base_url, &token, &["s3", "mb", &bucket_url]).await;
-    assert!(
-        mb.status.success(),
-        "aws s3 mb failed: {}",
-        String::from_utf8_lossy(&mb.stderr)
-    );
+    assert!(mb.status.success(), "aws s3 mb failed: {}", mb.status);
 
     // PutObject (`aws s3 cp` up, single non-multipart PUT).
     let file = tmp.path().join("note.txt");
@@ -624,20 +614,13 @@ async fn aws_cli_put_get_copy_rm_roundtrip() {
         ],
     )
     .await;
-    assert!(
-        cp.status.success(),
-        "aws s3 cp up failed: {}",
-        String::from_utf8_lossy(&cp.stderr)
-    );
+    assert!(cp.status.success(), "aws s3 cp up failed: {}", cp.status);
 
     // ListObjectsV2 (`aws s3 ls`).
     let ls = aws_run(&server.base_url, &token, &["s3", "ls", &bucket_url]).await;
     assert!(ls.status.success(), "aws s3 ls failed");
     let listing = String::from_utf8_lossy(&ls.stdout);
-    assert!(
-        listing.contains("note.txt"),
-        "aws s3 ls must list note.txt: {listing}"
-    );
+    assert!(listing.contains("note.txt"), "aws s3 ls must list note.txt");
 
     // GetObject (`aws s3 cp` down) — verify decoded bytes.
     let dl = tmp.path().join("down.txt");
@@ -655,7 +638,7 @@ async fn aws_cli_put_get_copy_rm_roundtrip() {
     assert!(
         get.status.success(),
         "aws s3 cp down failed: {}",
-        String::from_utf8_lossy(&get.stderr)
+        get.status
     );
     assert_eq!(std::fs::read(&dl).unwrap(), b"aws cli payload\n");
 
@@ -671,11 +654,7 @@ async fn aws_cli_put_get_copy_rm_roundtrip() {
         ],
     )
     .await;
-    assert!(
-        mv.status.success(),
-        "aws s3 mv failed: {}",
-        String::from_utf8_lossy(&mv.stderr)
-    );
+    assert!(mv.status.success(), "aws s3 mv failed: {}", mv.status);
     let head = aws_run(
         &server.base_url,
         &token,
@@ -692,7 +671,7 @@ async fn aws_cli_put_get_copy_rm_roundtrip() {
     assert!(
         head.status.success(),
         "aws s3api head-object failed: {}",
-        String::from_utf8_lossy(&head.stderr)
+        head.status
     );
 
     // DeleteObject (`aws s3 rm`).
@@ -702,11 +681,7 @@ async fn aws_cli_put_get_copy_rm_roundtrip() {
         &["s3", "rm", &format!("{bucket_url}/renamed.txt")],
     )
     .await;
-    assert!(
-        rm.status.success(),
-        "aws s3 rm failed: {}",
-        String::from_utf8_lossy(&rm.stderr)
-    );
+    assert!(rm.status.success(), "aws s3 rm failed: {}", rm.status);
 }
 
 // ---------------------------------------------------------------------------
@@ -715,10 +690,8 @@ async fn aws_cli_put_get_copy_rm_roundtrip() {
 
 /// Returns whether python3 with boto3 is available.
 fn boto3_available() -> bool {
-    std::process::Command::new("python3")
-        .args(["-c", "import boto3"])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let available = probe_client("python3", &["-c", "import boto3"]);
+    shardline_test_support::require_native_client("python3 + boto3", available)
 }
 
 /// Runs the boto3 SDK assertions in a subprocess with the endpoint + token in
@@ -739,6 +712,8 @@ import zlib
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BConfig
+from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError
 
 s3 = boto3.client(
     "s3",
@@ -768,6 +743,47 @@ def crc64nvme(payload):
 
 # CreateBucket (boto3 sends PUT /bucket without a trailing slash).
 s3.create_bucket(Bucket=B)
+ownership = s3.get_bucket_ownership_controls(Bucket=B)
+assert ownership["OwnershipControls"]["Rules"][0]["ObjectOwnership"] == "BucketOwnerEnforced", ownership
+bucket_acl = s3.get_bucket_acl(Bucket=B)
+assert len(bucket_acl["Grants"]) == 1, bucket_acl
+assert bucket_acl["Grants"][0]["Permission"] == "FULL_CONTROL", bucket_acl
+assert bucket_acl["Owner"]["ID"], bucket_acl
+
+# ACLs are disabled: the compatible owner-full-control canned ACL is accepted,
+# reads report the owner grant, and public ACLs fail without replacing data.
+s3.put_object(Bucket=B, Key="acl-check.txt", Body=b"acl", ACL="bucket-owner-full-control")
+object_acl = s3.get_object_acl(Bucket=B, Key="acl-check.txt")
+assert len(object_acl["Grants"]) == 1, object_acl
+assert object_acl["Grants"][0]["Permission"] == "FULL_CONTROL", object_acl
+try:
+    s3.put_object(Bucket=B, Key="acl-check.txt", Body=b"public", ACL="public-read")
+except ClientError as exc:
+    assert exc.response["Error"]["Code"] == "AccessControlListNotSupported", exc.response
+else:
+    raise AssertionError("public ACL must be rejected")
+assert s3.get_object(Bucket=B, Key="acl-check.txt")["Body"].read() == b"acl"
+s3.delete_object(Bucket=B, Key="acl-check.txt")
+ownership = s3.get_bucket_ownership_controls(Bucket=B)
+assert ownership["OwnershipControls"]["Rules"][0]["ObjectOwnership"] == "BucketOwnerEnforced", ownership
+bucket_acl = s3.get_bucket_acl(Bucket=B)
+assert len(bucket_acl["Grants"]) == 1, bucket_acl
+assert bucket_acl["Grants"][0]["Permission"] == "FULL_CONTROL", bucket_acl
+assert bucket_acl["Owner"]["ID"], bucket_acl
+
+# Bucket-owner-enforced mode accepts its compatible canned ACL, reads object
+# ACLs, and rejects ACLs that would grant access outside repository auth.
+s3.put_object(Bucket=B, Key="acl-check.txt", Body=b"acl", ACL="bucket-owner-full-control")
+object_acl = s3.get_object_acl(Bucket=B, Key="acl-check.txt")
+assert len(object_acl["Grants"]) == 1, object_acl
+assert object_acl["Grants"][0]["Permission"] == "FULL_CONTROL", object_acl
+try:
+    s3.put_object(Bucket=B, Key="acl-check.txt", Body=b"public", ACL="public-read")
+except ClientError as exc:
+    assert exc.response["Error"]["Code"] == "AccessControlListNotSupported", exc.response
+else:
+    raise AssertionError("public ACL must be rejected")
+s3.delete_object(Bucket=B, Key="acl-check.txt")
 
 # Version listing returns the required owner structure without claiming that
 # Shardline has historical versions or delete markers.
@@ -1033,12 +1049,12 @@ print("ALL BOTO3 CHECKS PASSED")
 "#,
     )
     .unwrap();
-    std::process::Command::new("python3")
-        .arg(script.to_str().unwrap())
-        .env("S3_ENDPOINT", endpoint)
-        .env("S3_TOKEN", token)
-        .output()
-        .unwrap()
+    client_output(
+        std::process::Command::new("python3")
+            .arg(script.to_str().unwrap())
+            .env("S3_ENDPOINT", endpoint)
+            .env("S3_TOKEN", token),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1053,14 +1069,14 @@ async fn boto3_sdk_roundtrip() {
 
     let output = run_boto3(&server.base_url, &token, &tmp);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "boto3 subprocess failed:\n{stdout}\n{stderr}"
+        "boto3 subprocess failed with status {}",
+        output.status
     );
     assert!(
         stdout.contains("ALL BOTO3 CHECKS PASSED"),
-        "boto3 checks did not complete:\n{stdout}\n{stderr}"
+        "boto3 checks did not complete"
     );
 }
 
@@ -1070,10 +1086,8 @@ async fn boto3_sdk_roundtrip() {
 
 /// Returns whether s3cmd is on PATH.
 fn s3cmd_available() -> bool {
-    std::process::Command::new("s3cmd")
-        .args(["--version"])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let available = probe_client("s3cmd", &["--version"]);
+    shardline_test_support::require_native_client("s3cmd", available)
 }
 
 /// Runs `s3cmd` with a fresh per-test config file (path-style custom endpoint,
@@ -1092,12 +1106,12 @@ async fn s3cmd_run(host: &str, token: &str, tmp: &TempDir, args: &[&str]) -> std
     let config = config.clone();
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("s3cmd")
-            .arg("--config")
-            .arg(config)
-            .args(&args)
-            .output()
-            .unwrap()
+        client_output(
+            std::process::Command::new("s3cmd")
+                .arg("--config")
+                .arg(config)
+                .args(&args),
+        )
     })
     .await
     .unwrap()
@@ -1117,11 +1131,7 @@ async fn s3cmd_put_get_ls_del_roundtrip() {
     let bucket_url = format!("s3://{BUCKET}");
 
     let mb = s3cmd_run(&host, &token, &tmp, &["mb", &bucket_url]).await;
-    assert!(
-        mb.status.success(),
-        "s3cmd mb failed: {}",
-        String::from_utf8_lossy(&mb.stderr)
-    );
+    assert!(mb.status.success(), "s3cmd mb failed: {}", mb.status);
 
     let file = tmp.path().join("note.txt");
     std::fs::write(&file, b"s3cmd payload\n").unwrap();
@@ -1136,11 +1146,7 @@ async fn s3cmd_put_get_ls_del_roundtrip() {
         ],
     )
     .await;
-    assert!(
-        put.status.success(),
-        "s3cmd put failed: {}",
-        String::from_utf8_lossy(&put.stderr)
-    );
+    assert!(put.status.success(), "s3cmd put failed: {}", put.status);
 
     let dl = tmp.path().join("down.txt");
     let get = s3cmd_run(
@@ -1154,20 +1160,13 @@ async fn s3cmd_put_get_ls_del_roundtrip() {
         ],
     )
     .await;
-    assert!(
-        get.status.success(),
-        "s3cmd get failed: {}",
-        String::from_utf8_lossy(&get.stderr)
-    );
+    assert!(get.status.success(), "s3cmd get failed: {}", get.status);
     assert_eq!(std::fs::read(&dl).unwrap(), b"s3cmd payload\n");
 
     let ls = s3cmd_run(&host, &token, &tmp, &["ls", &bucket_url]).await;
     assert!(ls.status.success(), "s3cmd ls failed");
     let listing = String::from_utf8_lossy(&ls.stdout);
-    assert!(
-        listing.contains("note.txt"),
-        "s3cmd ls must list note.txt: {listing}"
-    );
+    assert!(listing.contains("note.txt"), "s3cmd ls must list note.txt");
 
     let del = s3cmd_run(
         &host,
@@ -1176,17 +1175,14 @@ async fn s3cmd_put_get_ls_del_roundtrip() {
         &["del", &format!("{bucket_url}/note.txt")],
     )
     .await;
-    assert!(
-        del.status.success(),
-        "s3cmd del failed: {}",
-        String::from_utf8_lossy(&del.stderr)
-    );
+    assert!(del.status.success(), "s3cmd del failed: {}", del.status);
 
     let ls_after = s3cmd_run(&host, &token, &tmp, &["ls", &bucket_url]).await;
+    assert!(ls_after.status.success(), "s3cmd ls after removal failed");
     let listing_after = String::from_utf8_lossy(&ls_after.stdout);
     assert!(
         !listing_after.contains("note.txt"),
-        "note.txt must be gone after del: {listing_after}"
+        "note.txt must be gone after del"
     );
 }
 
@@ -1196,10 +1192,8 @@ async fn s3cmd_put_get_ls_del_roundtrip() {
 
 /// Returns whether rclone is on PATH.
 fn rclone_available() -> bool {
-    std::process::Command::new("rclone")
-        .args(["--version"])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let available = probe_client("rclone", &["--version"]);
+    shardline_test_support::require_native_client("rclone", available)
 }
 
 /// Runs `rclone` against the in-process server using a Minio-style S3 remote
@@ -1209,16 +1203,16 @@ async fn rclone_run(endpoint: &str, token: &str, args: &[&str]) -> std::process:
     let token = token.to_owned();
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("rclone")
-            .args(&args)
-            .env("RCLONE_CONFIG_REMOTE_TYPE", "s3")
-            .env("RCLONE_CONFIG_REMOTE_PROVIDER", "Minio")
-            .env("RCLONE_CONFIG_REMOTE_ENDPOINT", &endpoint)
-            .env("RCLONE_CONFIG_REMOTE_ACCESS_KEY_ID", &token)
-            .env("RCLONE_CONFIG_REMOTE_SECRET_ACCESS_KEY", "dummy-secret")
-            .env("RCLONE_CONFIG_REMOTE_NO_CHECK_BUCKET", "true")
-            .output()
-            .unwrap()
+        client_output(
+            std::process::Command::new("rclone")
+                .args(&args)
+                .env("RCLONE_CONFIG_REMOTE_TYPE", "s3")
+                .env("RCLONE_CONFIG_REMOTE_PROVIDER", "Minio")
+                .env("RCLONE_CONFIG_REMOTE_ENDPOINT", &endpoint)
+                .env("RCLONE_CONFIG_REMOTE_ACCESS_KEY_ID", &token)
+                .env("RCLONE_CONFIG_REMOTE_SECRET_ACCESS_KEY", "dummy-secret")
+                .env("RCLONE_CONFIG_REMOTE_NO_CHECK_BUCKET", "true"),
+        )
     })
     .await
     .unwrap()
@@ -1240,7 +1234,7 @@ async fn rclone_copy_ls_cat_delete() {
     assert!(
         mkdir.status.success(),
         "rclone mkdir failed: {}",
-        String::from_utf8_lossy(&mkdir.stderr)
+        mkdir.status
     );
 
     // Copy (upload) + verify via cat.
@@ -1252,11 +1246,7 @@ async fn rclone_copy_ls_cat_delete() {
         &["copy", file.to_str().unwrap(), &remote_bucket],
     )
     .await;
-    assert!(
-        copy.status.success(),
-        "rclone copy failed: {}",
-        String::from_utf8_lossy(&copy.stderr)
-    );
+    assert!(copy.status.success(), "rclone copy failed: {}", copy.status);
     let cat = rclone_run(
         &server.base_url,
         &token,
@@ -1270,10 +1260,7 @@ async fn rclone_copy_ls_cat_delete() {
     let ls = rclone_run(&server.base_url, &token, &["ls", &remote_bucket]).await;
     assert!(ls.status.success(), "rclone ls failed");
     let listing = String::from_utf8_lossy(&ls.stdout);
-    assert!(
-        listing.contains("note.txt"),
-        "rclone ls must list note.txt: {listing}"
-    );
+    assert!(listing.contains("note.txt"), "rclone ls must list note.txt");
 
     // Delete + verify gone.
     let del = rclone_run(
@@ -1282,16 +1269,13 @@ async fn rclone_copy_ls_cat_delete() {
         &["delete", &format!("{remote_bucket}/note.txt")],
     )
     .await;
-    assert!(
-        del.status.success(),
-        "rclone delete failed: {}",
-        String::from_utf8_lossy(&del.stderr)
-    );
+    assert!(del.status.success(), "rclone delete failed: {}", del.status);
     let ls_after = rclone_run(&server.base_url, &token, &["ls", &remote_bucket]).await;
+    assert!(ls_after.status.success(), "rclone ls after removal failed");
     let listing_after = String::from_utf8_lossy(&ls_after.stdout);
     assert!(
         !listing_after.contains("note.txt"),
-        "note.txt must be gone after rclone delete: {listing_after}"
+        "note.txt must be gone after rclone delete"
     );
 }
 
@@ -1333,7 +1317,7 @@ async fn mc_mirror_recursive_rm_stat() {
     assert!(
         mirror.status.success(),
         "mc mirror failed: {}",
-        String::from_utf8_lossy(&mirror.stderr)
+        mirror.status
     );
 
     // Recursive listing shows every key.
@@ -1345,10 +1329,7 @@ async fn mc_mirror_recursive_rm_stat() {
     assert!(ls_r.status.success(), "mc ls --recursive failed");
     let listing = String::from_utf8_lossy(&ls_r.stdout);
     for key in ["a.txt", "b.txt", "sub/c.txt"] {
-        assert!(
-            listing.contains(key),
-            "mc ls --recursive missing {key}: {listing}"
-        );
+        assert!(listing.contains(key), "mc ls --recursive missing {key}");
     }
 
     // HeadObject via `mc stat --json`.
@@ -1359,10 +1340,7 @@ async fn mc_mirror_recursive_rm_stat() {
     .await;
     assert!(stat.status.success(), "mc stat --json failed");
     let stat_out = String::from_utf8_lossy(&stat.stdout);
-    assert!(
-        stat_out.contains("a.txt"),
-        "stat --json must name a.txt: {stat_out}"
-    );
+    assert!(stat_out.contains("a.txt"), "stat --json must name a.txt");
 
     // Batch delete via `mc rm --recursive` (DeleteObjects); `--force` is
     // required by mc for recursive removal.
@@ -1379,7 +1357,7 @@ async fn mc_mirror_recursive_rm_stat() {
     assert!(
         rm.status.success(),
         "mc rm --recursive failed: {}",
-        String::from_utf8_lossy(&rm.stderr)
+        rm.status
     );
 
     let ls_after = mc_run(
@@ -1387,10 +1365,14 @@ async fn mc_mirror_recursive_rm_stat() {
         &["ls", "--recursive", &format!("{alias_name}/{BUCKET}")],
     )
     .await;
+    assert!(
+        ls_after.status.success(),
+        "recursive mc ls after removal failed"
+    );
     let listing_after = String::from_utf8_lossy(&ls_after.stdout);
     assert!(
         listing_after.trim().is_empty(),
-        "bucket must be empty after recursive rm: {listing_after}"
+        "bucket must be empty after recursive rm"
     );
 
     assert_no_leaked_mc_artifacts();

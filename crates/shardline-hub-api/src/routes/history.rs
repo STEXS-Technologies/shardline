@@ -30,10 +30,32 @@ pub(crate) async fn repo_commits(
         _repo.capability(),
     )?
     .ok_or(HubApiError::RevisionNotFound)?;
-    let revisions = state
-        .store
-        .list_revisions_bounded(&repo_id, MAX_HISTORY_REVISIONS)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    crate::revision_access::authorize_read(
+        &state,
+        &repo_id,
+        &revision_name,
+        &head,
+        _repo.capability(),
+    )
+    .await?;
+    let snapshot = crate::revision_access::snapshot_commit(&state, &repo_id, _repo.capability())?;
+    if snapshot.as_deref().is_some_and(|allowed| allowed != head) {
+        return Err(HubApiError::Forbidden);
+    }
+    let revisions = if snapshot.is_some() {
+        vec![
+            state
+                .store
+                .get_revision(&repo_id, &head)
+                .map_err(|e| HubApiError::CasError(e.to_string()))?
+                .ok_or(HubApiError::RevisionNotFound)?,
+        ]
+    } else {
+        state
+            .store
+            .list_revisions_bounded(&repo_id, MAX_HISTORY_REVISIONS)
+            .map_err(|e| HubApiError::CasError(e.to_string()))?
+    };
     let mut by_sha: HashMap<_, _> = revisions
         .into_iter()
         .map(|revision| (revision.sha.clone(), revision))
@@ -67,7 +89,11 @@ pub(crate) async fn repo_commits(
             "title": title,
             "message": description,
         }));
-        next = revision.parent_sha;
+        next = if snapshot.is_some() {
+            None
+        } else {
+            revision.parent_sha
+        };
     }
     Ok(Json(result))
 }

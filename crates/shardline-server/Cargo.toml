@@ -56,6 +56,7 @@ crc-fast = "1.10"
 sha1.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
 sha2.workspace = true
+hmac.workspace = true
 sqlx = { workspace = true, features = [
     "runtime-tokio",
     "tls-rustls",
@@ -84,7 +85,6 @@ shardline-storage = { workspace = true, features = ["test-fault-injection"] }
 dotenvy.workspace = true
 ed25519-dalek.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
-hmac.workspace = true
 proptest.workspace = true
 redis = { workspace = true, features = ["tokio-rustls-comp"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
@@ -102,6 +102,10 @@ test-utils = []
 
 [lints]
 workspace = true
+
+[[test]]
+name = "native_shard_reads"
+required-features = ["docker"]
 
 [[bench]]
 name = "local_backend"

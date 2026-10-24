@@ -400,7 +400,12 @@ fn checksum_mode_enabled(headers: &HeaderMap) -> Result<bool, S3Error> {
     let mut values = headers.get_all("x-amz-checksum-mode").iter();
     match values.next() {
         Some(value) if values.next().is_none() => {
-            if value.to_str().is_ok_and(|value| value == "ENABLED") {
+            // Arrow's stock S3 client sends the lowercase token. Accept its
+            // spelling without accepting unknown or repeated mode values.
+            if value
+                .to_str()
+                .is_ok_and(|value| value.eq_ignore_ascii_case("ENABLED"))
+            {
                 Ok(true)
             } else {
                 Err(S3Error::invalid_argument("Invalid checksum mode"))
@@ -456,6 +461,9 @@ pub(crate) async fn s3_put_object(
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
     reject_response_overrides(&query)?;
+    if resources.as_slice() == [S3SubResource::Acl] {
+        return Err(S3Error::acl_not_supported());
+    }
     if resources.as_slice() == [S3SubResource::Tagging] {
         return put_object_tagging(&state, &context, headers, body).await;
     }
@@ -1237,6 +1245,17 @@ pub(crate) async fn s3_get_object(
     if !resources.is_empty() && !response_overrides.is_empty() {
         return Err(S3Error::not_implemented());
     }
+    if resources.as_slice() == [S3SubResource::Acl] {
+        s3_object_entry(&state, &context)
+            .await?
+            .ok_or_else(|| S3Error::no_such_key(&context.key))?;
+        return Ok((
+            StatusCode::OK,
+            [(CONTENT_TYPE, s3_xml_content_type())],
+            super::acl::access_control_policy_xml(&context.scope_namespace),
+        )
+            .into_response());
+    }
     if resources.as_slice() == [S3SubResource::Tagging] {
         let entry = s3_object_entry(&state, &context)
             .await?
@@ -1721,6 +1740,25 @@ fn last_modified_from_entry(entry: Option<&S3ObjectEntry>) -> String {
 mod conditional_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn checksum_mode_accepts_arrow_spelling_and_rejects_ambiguous_modes() {
+        assert!(!checksum_mode_enabled(&HeaderMap::new()).unwrap());
+        for mode in ["ENABLED", "enabled", "Enabled"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-amz-checksum-mode", mode.parse().unwrap());
+            assert!(checksum_mode_enabled(&headers).unwrap());
+        }
+        for mode in ["", "DISABLED", "enabled,enabled", " enabled"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-amz-checksum-mode", mode.parse().unwrap());
+            assert!(checksum_mode_enabled(&headers).is_err());
+        }
+        let mut repeated = HeaderMap::new();
+        repeated.append("x-amz-checksum-mode", HeaderValue::from_static("enabled"));
+        repeated.append("x-amz-checksum-mode", HeaderValue::from_static("ENABLED"));
+        assert!(checksum_mode_enabled(&repeated).is_err());
+    }
 
     #[test]
     fn response_overrides_accept_standard_headers_and_reject_invalid_parameters() {

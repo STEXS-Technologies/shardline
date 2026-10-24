@@ -72,7 +72,7 @@ fn make_delete_test_store() -> (tempfile::TempDir, BoxedHubStore) {
 }
 
 /// Helper: returns (TempDir, HubState) with no auth.
-fn make_test_state() -> (tempfile::TempDir, HubState) {
+pub(super) fn make_test_state() -> (tempfile::TempDir, HubState) {
     let (td, store) = make_delete_test_store();
     let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
         .expect("local object store");
@@ -458,10 +458,10 @@ fn tree_entries_at_path_nested() {
     let entries = tree_entries_at_path(&files, "src");
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].entry_type, "file");
-    assert_eq!(entries[0].path, "lib.rs");
+    assert_eq!(entries[0].path, "src/lib.rs");
     assert!(entries[0].lfs.is_some());
     assert_eq!(entries[1].entry_type, "file");
-    assert_eq!(entries[1].path, "main.rs");
+    assert_eq!(entries[1].path, "src/main.rs");
 }
 
 #[test]
@@ -491,10 +491,12 @@ fn tree_entries_recursive_root() {
             is_lfs: false,
         },
     ];
-    let entries = tree_entries_recursive(&files, "");
-    assert_eq!(entries.len(), 2);
+    let entries = tree_entries_recursive(&files, "").unwrap();
+    assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].path, "README.md");
-    assert_eq!(entries[1].path, "src/main.rs");
+    assert_eq!(entries[1].path, "src");
+    assert_eq!(entries[1].entry_type, "directory");
+    assert_eq!(entries[2].path, "src/main.rs");
 }
 
 #[test]
@@ -514,7 +516,7 @@ fn tree_entries_recursive_nested() {
             is_lfs: true,
         },
     ];
-    let entries = tree_entries_recursive(&files, "src");
+    let entries = tree_entries_recursive(&files, "src").unwrap();
     assert_eq!(entries.len(), 2);
 }
 
@@ -527,7 +529,7 @@ fn tree_entries_recursive_lfs_shows_lfs_info() {
         sha: "abcd".into(),
         is_lfs: true,
     }];
-    let entries = tree_entries_recursive(&files, "");
+    let entries = tree_entries_recursive(&files, "").unwrap();
     assert_eq!(entries.len(), 1);
     let lfs = entries[0].lfs.as_ref().expect("expected LFS info");
     assert_eq!(lfs.oid, "abcd");
@@ -536,7 +538,7 @@ fn tree_entries_recursive_lfs_shows_lfs_info() {
 
 #[test]
 fn tree_entries_recursive_empty() {
-    assert!(tree_entries_recursive(&[], "").is_empty());
+    assert!(tree_entries_recursive(&[], "").unwrap().is_empty());
 }
 
 // -----------------------------------------------------------------------
@@ -875,12 +877,9 @@ fn parse_yaml_frontmatter_closing_on_same_line() {
 }
 
 #[test]
-fn parse_yaml_frontmatter_line_without_colon_skipped() {
+fn parse_yaml_frontmatter_malformed_line_omits_metadata() {
     let content = b"---\nkey: value\nno_colon_line\nother: val\n---\n";
-    let result = parse_yaml_frontmatter(content).unwrap();
-    assert_eq!(result.get("key").and_then(|v| v.as_str()), Some("value"));
-    assert_eq!(result.get("other").and_then(|v| v.as_str()), Some("val"));
-    assert!(result.get("no_colon_line").is_none());
+    assert!(parse_yaml_frontmatter(content).is_none());
 }
 
 #[test]
@@ -926,7 +925,7 @@ fn tree_entries_recursive_non_matching_prefix() {
         sha: "x".into(),
         is_lfs: false,
     }];
-    let entries = tree_entries_recursive(&files, "nonexistent");
+    let entries = tree_entries_recursive(&files, "nonexistent").unwrap();
     assert!(entries.is_empty());
 }
 
@@ -1636,8 +1635,8 @@ async fn handler_repo_create_type_success() {
     .await
     .unwrap();
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json.id, "ns/my-repo");
-    assert_eq!(json.repo_type, RepoType::Model);
+    assert_eq!(json["id"], "ns/my-repo");
+    assert_eq!(json["type"], "model");
 }
 
 #[tokio::test]
@@ -1652,8 +1651,8 @@ async fn handler_repo_create_type_private() {
     )
     .await
     .unwrap();
-    assert!(json.private);
-    assert_eq!(json.repo_type, RepoType::Dataset);
+    assert_eq!(json["private"], true);
+    assert_eq!(json["type"], "dataset");
 }
 
 // ------------------------------------------------------------------
@@ -2194,6 +2193,7 @@ async fn handler_file_tree_basic() {
         webhook_secret_cipher: None,
         public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
+    materialize_tree_fixture(&state, "sha_tree");
     let entries = file_tree(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -2214,6 +2214,30 @@ async fn handler_file_tree_basic() {
     .unwrap();
     // Expect 2 entries: README.md at root and src/ directory
     assert_eq!(entries.len(), 2);
+}
+
+fn materialize_tree_fixture(state: &HubState, revision: &str) {
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+    let mut files = state.store.get_files(revision).unwrap();
+    for file in &mut files {
+        assert!(!file.is_lfs);
+        let content = vec![b'x'; usize::try_from(file.size).unwrap()];
+        let hash = blake3::hash(&content);
+        file.sha = hash.to_hex().to_string();
+        let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{}", file.sha)).unwrap();
+        state
+            .object_store
+            .put_if_absent(
+                &key,
+                ObjectBody::from_slice(&content),
+                &ObjectIntegrity::new(
+                    shardline_protocol::ShardlineHash::from_bytes(*hash.as_bytes()),
+                    file.size,
+                ),
+            )
+            .unwrap();
+    }
+    state.store.store_files(revision, &files).unwrap();
 }
 
 #[tokio::test]
@@ -2247,6 +2271,7 @@ async fn handler_file_tree_recursive() {
         webhook_secret_cipher: None,
         public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
+    materialize_tree_fixture(&state, "sha_tree_rec");
     let entries = file_tree(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -2265,8 +2290,9 @@ async fn handler_file_tree_recursive() {
     )
     .await
     .unwrap();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].entry_type, "file");
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].path, "src");
+    assert_eq!(entries[0].entry_type, "directory");
 }
 
 #[tokio::test]
@@ -2306,6 +2332,7 @@ async fn handler_file_tree_with_limit_and_cursor() {
         webhook_secret_cipher: None,
         public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
+    materialize_tree_fixture(&state, "sha_tree_lim");
     let entries = file_tree(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -2370,6 +2397,7 @@ async fn handler_resolve_file_inline() {
             "main".into(),
             "data.txt".into(),
         )),
+        HeaderMap::new(),
     )
     .await;
     assert!(result.is_ok(), "resolve_file failed: {:?}", result.err());
@@ -2381,6 +2409,72 @@ async fn handler_resolve_file_inline() {
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
     assert_eq!(ct, Some("application/octet-stream"));
+}
+
+#[tokio::test]
+async fn handler_resolve_large_lfs_file_returns_absolute_redirect_and_metadata() {
+    let content = vec![42_u8; 1_048_577];
+    let oid = blake3::hash(&content).to_hex().to_string();
+    let (_td, store) = make_store_with_revision(
+        HubRepoType::Model,
+        "org/resolve-lfs",
+        "sha_resolve_lfs",
+        &[HubFileEntry {
+            path: "weights.bin".into(),
+            size: content.len() as u64,
+            sha: oid.clone(),
+            is_lfs: true,
+        }],
+    );
+    store_test_content(&_td, &oid, &content);
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
+    let state = HubState {
+        store,
+        object_store,
+        auth: None,
+        http_client: None,
+        webhook_secret_cipher: None,
+        public_base_url: "https://hub.example.test/".to_owned(),
+    };
+
+    let response = resolve_file(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path((
+            "models".into(),
+            "org".into(),
+            "resolve-lfs".into(),
+            "main".into(),
+            "weights.bin".into(),
+        )),
+        HeaderMap::new(),
+    )
+    .await
+    .expect("resolve should return an LFS redirect");
+
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("https://hub.example.test/lfs/objects/{oid}").as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-linked-size")
+            .and_then(|value| value.to_str().ok()),
+        Some("1048577")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-linked-etag")
+            .and_then(|value| value.to_str().ok()),
+        Some(oid.as_str())
+    );
 }
 
 #[tokio::test]
@@ -2407,6 +2501,7 @@ async fn handler_resolve_file_not_found() {
             "main".into(),
             "nope.txt".into(),
         )),
+        HeaderMap::new(),
     )
     .await;
     assert!(result.is_err());
@@ -2756,7 +2851,21 @@ async fn handler_lfs_batch_prefers_xet_when_offered_with_write_auth() {
     .await
     .unwrap();
     assert_eq!(result.transfer, "xet");
-    assert!(result.objects[0].actions.is_none());
+    let action = result.objects[0]
+        .actions
+        .as_ref()
+        .unwrap()
+        .upload
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        action.href,
+        "http://127.0.0.1:8080/api/models/alice/own/xet-write-token/main"
+    );
+    let headers = action.header.as_ref().unwrap();
+    assert_eq!(headers["X-Xet-Cas-Url"], "http://127.0.0.1:8080");
+    assert_eq!(headers["X-Xet-Token-Expiration"], u64::MAX.to_string());
+    assert!(!headers["X-Xet-Access-Token"].is_empty());
 }
 
 #[tokio::test]
@@ -2842,6 +2951,31 @@ async fn handler_lfs_batch_xet_transfer_with_basic_fallback() {
 }
 
 #[tokio::test]
+async fn handler_lfs_batch_accepts_official_javascript_sha256_alias() {
+    let (_td, state) = make_lfs_state();
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects: vec![LfsObjectRequest {
+                oid: "d0".repeat(32),
+                size: 1000,
+            }],
+            transfers: vec!["basic".into()],
+            hash_algo: Some("sha_256".into()),
+        }),
+    )
+    .await
+    .expect("official JavaScript SHA-256 spelling is supported");
+    assert_eq!(result.objects.len(), 1);
+    assert_eq!(result.transfer, "basic");
+}
+
+#[tokio::test]
 async fn handler_lfs_batch_rejects_unsupported_hash_algo() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
@@ -2891,7 +3025,7 @@ async fn handler_lfs_batch_rejects_too_many_objects() {
 }
 
 #[tokio::test]
-async fn handler_lfs_batch_xet_upload_uses_registered_reconstruction_without_lfs_actions() {
+async fn handler_lfs_batch_xet_upload_missing_reconstruction_requires_upload_action() {
     use crate::auth::HubAuth;
     use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
     use shardline_server_core::{AuthError, AuthProvider};
@@ -2948,7 +3082,7 @@ async fn handler_lfs_batch_xet_upload_uses_registered_reconstruction_without_lfs
     .unwrap();
 
     assert_eq!(result.transfer, "xet");
-    assert!(result.objects[0].actions.is_none());
+    assert!(result.objects[0].actions.as_ref().unwrap().upload.is_some());
 }
 
 #[tokio::test]
@@ -3206,6 +3340,8 @@ async fn handler_lfs_download_missing() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path("b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5".to_string()),
+        axum::http::Method::GET,
+        HeaderMap::new(),
     )
     .await;
     assert!(result.is_err());
@@ -3235,6 +3371,8 @@ async fn handler_lfs_download_success() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_string()),
+        axum::http::Method::GET,
+        HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -3244,6 +3382,123 @@ async fn handler_lfs_download_success() {
     // Verify content-type header name
     // (the response body is consumed above, so inspect this contract in the
     // route-level integration tests as well.)
+}
+
+#[tokio::test]
+async fn handler_lfs_download_supports_single_ranges_and_if_range() {
+    let (_td, state) = make_test_state();
+    let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let bytes = b"0123456789abcdef";
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+    let key = crate::routes::lfs_object_key(
+        oid,
+        &shardline_server_core::AuthorizedRepository::anonymous_full_access(),
+    )
+    .unwrap();
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes()),
+        bytes.len() as u64,
+    );
+    state
+        .object_store
+        .put_if_absent(&key, ObjectBody::from_slice(bytes), &integrity)
+        .unwrap();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(axum::http::header::RANGE, "bytes=3-7".parse().unwrap());
+    let response = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_owned()),
+        axum::http::Method::GET,
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::ACCEPT_RANGES)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some("5")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes 3-7/16")
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), b"34567");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(axum::http::header::RANGE, "bytes=-4".parse().unwrap());
+    headers.insert(
+        axum::http::header::IF_RANGE,
+        "\"stale-etag\"".parse().unwrap(),
+    );
+    let response = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_owned()),
+        axum::http::Method::GET,
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), bytes);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(axum::http::header::RANGE, "bytes=-4".parse().unwrap());
+    headers.insert(
+        axum::http::header::IF_RANGE,
+        "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
+            .parse()
+            .unwrap(),
+    );
+    let response = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_owned()),
+        axum::http::Method::GET,
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), b"cdef");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(axum::http::header::RANGE, "bytes=99-".parse().unwrap());
+    let response = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_owned()),
+        axum::http::Method::GET,
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes */16")
+    );
 }
 
 // ------------------------------------------------------------------
@@ -4459,6 +4714,7 @@ async fn handler_file_tree_at_root_returns_files() {
         webhook_secret_cipher: None,
         public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
+    materialize_tree_fixture(&state, "sha_root_tree");
     let entries = file_tree_at_root(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4591,7 +4847,7 @@ async fn handler_repo_create_conflict() {
 }
 
 #[tokio::test]
-async fn repo_create_conflict_other_tenant_returns_minimal_body() {
+async fn repo_create_conflict_other_tenant_returns_forbidden_without_metadata() {
     // Alice's Write-scoped token is bound to alice/own; the victim
     // bob/private-repo already exists and is private.
     let (_td, state) = make_write_alice_auth_state();
@@ -4602,26 +4858,14 @@ async fn repo_create_conflict_other_tenant_returns_minimal_body() {
         private: false,
         visibility: None,
     };
-    let (status, json) = repo_create(
+    let result = repo_create(
         State(state.clone()),
         alice_headers(),
         test_repo(&state, &alice_headers()),
         Json(req),
     )
-    .await
-    .unwrap();
-    assert_eq!(status, StatusCode::CONFLICT);
-    // The victim's RepoResponse must not leak: no id/private/url/last_modified
-    // keys in the conflict body, matching the cross-tenant privacy filter on
-    // repo_list/repo_search.
-    let obj = json.as_object().expect("conflict body is an object");
-    for key in ["id", "private", "url", "last_modified"] {
-        assert!(
-            !obj.contains_key(key),
-            "other-tenant conflict leaked victim metadata key '{key}': {json:?}"
-        );
-    }
-    assert_eq!(obj["message"], "repository already exists");
+    .await;
+    assert!(matches!(result, Err(HubApiError::Forbidden)));
 }
 
 #[tokio::test]
@@ -4835,12 +5079,170 @@ async fn handler_xet_token_normalizes_immutable_ids_without_widening_branch_scop
     }
 }
 
+#[tokio::test]
+async fn read_token_pins_commit_and_preserves_branch_isolation() {
+    for scoped in [None, Some("main")] {
+        let (_td, state, minted, headers) = make_revision_scoped_xet_token_state(scoped);
+        let repo = test_repo::<false, true>(&state, &headers);
+        let public = crate::git::smart_http::public_commit_id(
+            &state,
+            "alice/own",
+            "sha_main",
+            repo.capability(),
+        )
+        .await
+        .unwrap();
+        xet_read_token(
+            State(state.clone()),
+            repo,
+            Path(("alice".into(), "own".into(), public.clone())),
+            format!("/api/models/alice/own/xet-read-token/{public}")
+                .parse()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let minted = minted.lock().unwrap();
+        let claims = minted.as_ref().unwrap();
+        assert_eq!(claims.scope(), shardline_protocol::TokenScope::Read);
+        assert_eq!(
+            claims.issuer(),
+            shardline_protocol::HUB_XET_READ_TOKEN_ISSUER
+        );
+        assert_eq!(claims.repository().revision(), Some("sha_main"));
+    }
+    let (_td, state, minted, headers) = make_revision_scoped_xet_token_state(Some("release"));
+    let result = xet_read_token(
+        State(state.clone()),
+        test_repo::<false, true>(&state, &headers),
+        Path(("alice".into(), "own".into(), "main".into())),
+        axum::http::Uri::from_static("/api/models/alice/own/xet-read-token/main"),
+    )
+    .await;
+    assert!(matches!(result, Err(HubApiError::Forbidden)));
+    assert!(minted.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn branch_read_tokens_reach_ancestors_but_not_siblings_tags_or_write_history() {
+    for (scope, write, target, allowed) in [
+        ("main", false, "old", true),
+        ("refs/heads/main", false, "old", true),
+        ("sha_main", false, "old", true),
+        ("main", false, "sibling", false),
+        ("main", true, "old", false),
+        ("sha_new", false, "old", false),
+        ("refs/tags/release", false, "old", false),
+        ("tag-only", false, "old", false),
+        ("main", false, "release", false),
+    ] {
+        let (_td, state, minted, headers) = make_revision_scoped_xet_token_state(Some(scope));
+        state
+            .store
+            .create_revision("alice/own", Some("sha_main"), "sha_side", "side", "side")
+            .unwrap();
+        state
+            .store
+            .create_revision("alice/own", Some("sha_main"), "sha_new", "main", "next")
+            .unwrap();
+        state
+            .store
+            .create_revision(
+                "alice/own",
+                Some("sha_new"),
+                "sha_new",
+                "refs/tags/release",
+                "tag",
+            )
+            .unwrap();
+        state
+            .store
+            .create_revision(
+                "alice/own",
+                Some("sha_new"),
+                "sha_new",
+                "refs/tags/tag-only",
+                "tag",
+            )
+            .unwrap();
+        state
+            .store
+            .create_revision(
+                "alice/own",
+                Some("sha_main"),
+                "sha_main",
+                "release",
+                "alias",
+            )
+            .unwrap();
+        let internal = if target == "sibling" {
+            "sha_side"
+        } else {
+            "sha_main"
+        };
+        let public = crate::git::smart_http::public_commit_id(
+            &state,
+            "alice/own",
+            internal,
+            test_repo::<false, true>(&state, &headers).capability(),
+        )
+        .await
+        .unwrap();
+        let requested = if target == "release" {
+            "release"
+        } else {
+            &public
+        };
+        let path = Path(("alice".into(), "own".into(), requested.to_owned()));
+        let result = if write {
+            xet_write_token(
+                State(state.clone()),
+                test_repo::<true, true>(&state, &headers),
+                path,
+                format!("/api/models/alice/own/xet-write-token/{requested}")
+                    .parse()
+                    .unwrap(),
+            )
+            .await
+        } else {
+            xet_read_token(
+                State(state.clone()),
+                test_repo::<false, true>(&state, &headers),
+                path,
+                format!("/api/models/alice/own/xet-read-token/{requested}")
+                    .parse()
+                    .unwrap(),
+            )
+            .await
+        };
+        if allowed {
+            result.unwrap();
+            assert_eq!(
+                minted
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .repository()
+                    .revision(),
+                Some("sha_main")
+            );
+        } else {
+            assert!(
+                matches!(result, Err(HubApiError::Forbidden)),
+                "{scope} {write} {target}: {result:?}"
+            );
+            assert!(minted.lock().unwrap().is_none());
+        }
+    }
+}
+
 // ------------------------------------------------------------------
-// repo_response_for_request — Dataset and Space URL logic
+// repo_response_for_public_base — Dataset and Space URL logic
 // ------------------------------------------------------------------
 
 #[test]
-fn repo_response_for_request_dataset_url() {
+fn repo_response_for_public_base_dataset_url() {
     use shardline_index::hub::HubRepo;
     let repo = HubRepo {
         repo_id: "org/mydata".to_owned(),
@@ -4850,16 +5252,13 @@ fn repo_response_for_request_dataset_url() {
         created_at_unix_seconds: 0,
         updated_at_unix_seconds: 0,
     };
-    let mut headers = HeaderMap::new();
-    headers.insert("x-forwarded-proto", "https".parse().unwrap());
-    headers.insert(axum::http::header::HOST, "hub.example.com".parse().unwrap());
-    let resp = repo_response_for_request(&headers, &repo);
+    let resp = repo_response_for_public_base("https://hub.example.com/", &repo);
     assert_eq!(resp.url, "https://hub.example.com/datasets/org/mydata");
     assert_eq!(resp.repo_type, RepoType::Dataset);
 }
 
 #[test]
-fn repo_response_for_request_space_url() {
+fn repo_response_for_public_base_space_url() {
     use shardline_index::hub::HubRepo;
     let repo = HubRepo {
         repo_id: "org/myspace".to_owned(),
@@ -4869,10 +5268,7 @@ fn repo_response_for_request_space_url() {
         created_at_unix_seconds: 0,
         updated_at_unix_seconds: 0,
     };
-    let mut headers = HeaderMap::new();
-    headers.insert("x-forwarded-proto", "https".parse().unwrap());
-    headers.insert(axum::http::header::HOST, "hub.example.com".parse().unwrap());
-    let resp = repo_response_for_request(&headers, &repo);
+    let resp = repo_response_for_public_base("https://hub.example.com", &repo);
     assert_eq!(resp.url, "https://hub.example.com/spaces/org/myspace");
     assert_eq!(resp.repo_type, RepoType::Space);
 }
@@ -4951,6 +5347,8 @@ async fn handler_lfs_upload_and_download_roundtrip() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid),
+        axum::http::Method::GET,
+        HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -4993,6 +5391,8 @@ async fn handler_large_lfs_upload_roundtrips_through_local_filesystem_staging() 
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid),
+        axum::http::Method::GET,
+        HeaderMap::new(),
     )
     .await
     .unwrap();

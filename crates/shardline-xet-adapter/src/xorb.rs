@@ -581,37 +581,33 @@ fn declared_unpacked_length(parsed: &XorbObject) -> u64 {
         .saturating_mul(MAX_CHUNK_SIZE.load(Ordering::Relaxed))
 }
 
-/// Scans the chunk headers of a serialized xorb byte stream and returns the
+/// Scans the chunk headers of a footerless xorb byte stream and returns the
 /// total declared uncompressed length, without decompressing any chunk payload.
 ///
-/// Stops at the footer ident (`XETBLOB`) or at end-of-input, mirroring the
-/// chunk loop in `reconstruct_xorb_with_footer`. Used to reject a decompression
-/// bomb BEFORE the reconstruct pass allocates its output.
-pub(crate) fn declared_unpacked_length_of_serialized(bytes: &[u8]) -> Result<u64, XetAdapterError> {
+/// Requires complete chunk framing through end-of-input. An invalid footer or
+/// trailing bytes are not a footerless compatibility case. Rejects malformed
+/// framing before reconstruction allocates its output.
+pub(crate) fn declared_footerless_unpacked_length(bytes: &[u8]) -> Result<u64, XetAdapterError> {
     let mut cursor = Cursor::new(bytes);
     let mut total: u64 = 0;
     loop {
         if cursor.position() as usize >= bytes.len() {
             break;
         }
-        let header = match deserialize_chunk_header(&mut cursor) {
-            Ok(header) => header,
-            Err(CoreError::ChunkHeaderParse) => break,
-            Err(error) => return Err(XetAdapterError::from(map_core_error(&error))),
-        };
+        let header = deserialize_chunk_header(&mut cursor)
+            .map_err(|_error| XetAdapterError::InvalidSerializedXorb)?;
         total = total
             .checked_add(u64::from(header.get_uncompressed_length()))
             .ok_or(XetAdapterError::Overflow)?;
         let compressed_len = u64::from(header.get_compressed_length());
-        let Some(next_position) = cursor.position().checked_add(compressed_len) else {
-            return Ok(total);
-        };
+        let next_position = cursor
+            .position()
+            .checked_add(compressed_len)
+            .ok_or(XetAdapterError::Overflow)?;
         if next_position > bytes.len() as u64 {
-            // Truncated payload: let the reconstruct pass surface the precise
-            // error. The bytes seen so far were already accounted for.
-            break;
+            return Err(XetAdapterError::InvalidSerializedXorb);
         }
-        cursor.seek(SeekFrom::Current(compressed_len as i64))?;
+        cursor.seek(SeekFrom::Start(next_position))?;
     }
     Ok(total)
 }

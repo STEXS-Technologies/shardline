@@ -9,15 +9,15 @@ mod native_client_policy;
 mod native_client_requirements;
 mod support;
 
-use native_client_policy::required as native_clients_required;
+use shardline_test_support::native_clients_required;
 use std::{
     error::Error,
     fs::{create_dir_all, read, write as write_file},
-    io::{Error as IoError, Write},
+    io::Error as IoError,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     time::Duration,
 };
 
@@ -1691,14 +1691,15 @@ fn command_available(program: &str) -> bool {
 }
 
 fn probe_command(program: &str) -> bool {
-    Command::new(program)
-        .arg(if program == "helm" {
+    shardline_test_support::native_client_output(
+        Command::new(program).arg(if program == "helm" {
             "version"
         } else {
             "--version"
-        })
-        .output()
-        .is_ok_and(|output| output.status.success())
+        }),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 fn bazel_program() -> Option<&'static str> {
@@ -1882,21 +1883,17 @@ fn run_bazel_build_with_download_mode(
 }
 
 fn run_command(command: &mut Command) -> Result<Output, IoError> {
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    shardline_test_support::native_client_output(command, Duration::from_secs(600))
 }
 
 fn run_command_with_stdin(command: &mut Command, input: &[u8]) -> Result<Output, IoError> {
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(input)?;
-        stdin.write_all(b"\n")?;
-    }
-    child.wait_with_output()
+    let mut input = input.to_vec();
+    input.push(b'\n');
+    shardline_test_support::native_client_output_with_input(
+        command,
+        Duration::from_secs(600),
+        &input,
+    )
 }
 
 fn run_command_checked(command: &mut Command, description: &str) -> Result<Output, TestError> {
@@ -1923,9 +1920,8 @@ fn run_command_with_stdin_checked(
 
 fn command_error(description: &str, output: &Output) -> IoError {
     ServerE2eInvariantError::new(format!(
-        "{description} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "{description} failed with status {}",
+        output.status
     ))
     .into()
 }

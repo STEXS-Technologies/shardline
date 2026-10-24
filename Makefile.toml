@@ -76,7 +76,7 @@ workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "cargo"
-args = ["nextest", "run", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
+args = ["nextest", "run", "--locked", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
 
 [tasks.test-reliability-contracts]
 description = "Verify historical evidence, native profiles and durable task recovery without external services"
@@ -103,7 +103,7 @@ command = "bash"
 args = ["scripts/test-postgres.sh"]
 
 [tasks.test-postgres-process-cuts]
-description = "Verify owned PostgreSQL process cuts against the pinned released 1.11.3 executable"
+description = "Verify owned PostgreSQL process cuts against the pinned released compatibility baseline"
 workspace = false
 command = "bash"
 args = ["scripts/shardline/run_postgres_process_cut_gate.sh", "${@}"]
@@ -120,7 +120,7 @@ workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "cargo"
-args = ["nextest", "run", "--locked", "--all-features", "--no-tests=pass", "${@}"]
+args = ["nextest", "run", "--locked", "--all-features", "${@}"]
 cwd = "e2e"
 
 [tasks.test-docker]
@@ -129,7 +129,7 @@ workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "bash"
-args = ["-c", "docker version >/dev/null && cargo nextest run -p shardline-server --features docker --no-tests=pass && (cd e2e && cargo nextest run --all-features --no-tests=pass)"]
+args = ["-c", "docker version >/dev/null && cargo nextest run --locked -p shardline-server --features docker && (cd e2e && cargo nextest run --locked --all-features)"]
 
 [tasks.test-kubernetes]
 description = "Run the disposable kind deployment smoke test"
@@ -327,6 +327,12 @@ install_crate = "cargo-deny"
 command = "cargo"
 args = ["deny", "check"]
 
+[tasks.deny-e2e]
+description = "Check the separate E2E dependency graph against the repository security policy"
+workspace = false
+command = "bash"
+args = ["-c", "cargo deny --manifest-path e2e/Cargo.toml check --config \"$PWD/deny.toml\""]
+
 [tasks.check-dependency-exceptions]
 description = "Fail CI when a dependency-security exception lacks ownership or has expired"
 workspace = false
@@ -365,7 +371,7 @@ args = ["scripts/check_coverage_ratchet.sh"]
 [tasks.ci]
 description = "Run the core contributor CI checks"
 workspace = false
-dependencies = ["format-check", "clippy", "check-dependency-exceptions", "deny", "test", "test-reliability-contracts", "test-maintenance-contracts", "verify-release-binary", "check-migration-sync"]
+dependencies = ["format-check", "clippy", "check-dependency-exceptions", "deny", "deny-e2e", "test", "test-reliability-contracts", "test-maintenance-contracts", "verify-release-binary", "check-migration-sync"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"

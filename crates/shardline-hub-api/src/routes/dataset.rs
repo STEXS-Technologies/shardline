@@ -9,7 +9,7 @@ use crate::query::DatasetQueryRequest;
 use crate::{error::HubApiError, models::*};
 use shardline_index::hub::{HubFileEntry, HubRepoType};
 
-use super::{HubRepository, HubState, lfs_object_key};
+use super::{HubRepository, HubState};
 
 struct QueryCancellationGuard {
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -92,6 +92,8 @@ pub(crate) async fn dataset_parquet(
         .resolve_revision(&name, &entry.default_branch)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(&state, &name, "main", &commit_sha, _repo.capability())
+        .await?;
     let files = state
         .store
         .get_files(&commit_sha)
@@ -136,6 +138,8 @@ pub(crate) async fn dataset_first_rows(
         .resolve_revision(&name, &entry.default_branch)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(&state, &name, "main", &commit_sha, repo.capability())
+        .await?;
     let files = state
         .store
         .get_files(&commit_sha)
@@ -180,6 +184,8 @@ pub(crate) async fn dataset_viewer(
         .resolve_revision(&name, &entry.default_branch)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(&state, &name, "main", &commit_sha, repo.capability())
+        .await?;
     let files = state
         .store
         .get_files(&commit_sha)
@@ -241,6 +247,14 @@ pub(crate) async fn dataset_query(
         repo.capability(),
     )?
     .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(
+        &state,
+        &name,
+        &request.revision,
+        &revision,
+        repo.capability(),
+    )
+    .await?;
     if revision != request.revision
         && crate::git::smart_http::public_commit_id(&state, &name, &revision, repo.capability())
             .await?
@@ -263,7 +277,7 @@ pub(crate) async fn dataset_query(
             "structured query requires parquet".to_owned(),
         ));
     }
-    let key = lfs_object_key(&file.sha, repo.capability())
+    let key = crate::object_locations::file_key(&state, &file.sha, repo.capability())
         .map_err(|e| HubApiError::PathValidation(e.to_string()))?;
     let size = state
         .object_store
@@ -495,7 +509,7 @@ fn read_dataset_rows(
     limit: usize,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
-    let key = lfs_object_key(&file.sha, auth)
+    let key = crate::object_locations::file_key(state, &file.sha, auth)
         .map_err(|error| HubApiError::PathValidation(error.to_string()))?;
     let size = state
         .object_store

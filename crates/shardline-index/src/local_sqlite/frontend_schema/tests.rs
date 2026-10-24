@@ -6,7 +6,15 @@ fn fixture() -> Connection {
     super::super::helpers::ensure_local_schema_migrations_table(&connection).unwrap();
     connection
         .execute_batch(
-            "CREATE TABLE shardline_s3_objects (
+            "CREATE TABLE shardline_file_records (
+                record_key TEXT PRIMARY KEY, scope_key TEXT NOT NULL, record TEXT NOT NULL,
+                file_id TEXT NOT NULL, record_kind TEXT NOT NULL
+            );
+            CREATE TABLE shardline_hub_file_entries (
+                commit_sha TEXT NOT NULL, sha TEXT NOT NULL, is_lfs INTEGER NOT NULL,
+                size INTEGER NOT NULL
+            );
+            CREATE TABLE shardline_s3_objects (
                 scope_namespace TEXT NOT NULL,
                 object_key TEXT NOT NULL,
                 file_id TEXT NOT NULL,
@@ -60,7 +68,10 @@ fn adoption_preserves_prerelease_history_and_durable_rows() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(timestamps, 3);
+    assert_eq!(
+        timestamps,
+        i64::try_from(FRONTEND_MIGRATIONS.len()).unwrap()
+    );
     let lock: String = connection
         .query_row("SELECT id FROM shardline_lfs_locks", [], |r| r.get(0))
         .unwrap();
@@ -169,7 +180,7 @@ fn incompatible_prerelease_table_preserves_all_original_history() {
     let count: i64 = connection.query_row(
         &format!("SELECT count(*) FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE} WHERE applied_at_unix_seconds=17"), [], |r| r.get(0)
     ).unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, i64::try_from(FRONTEND_MIGRATIONS.len()).unwrap());
     let registry: i64 = connection
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE name='shardline_frontend_schema_v1'",

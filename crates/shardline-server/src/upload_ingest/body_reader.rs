@@ -1,6 +1,7 @@
 use std::{
     num::NonZeroUsize,
     pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
@@ -131,6 +132,17 @@ impl StagedRequestBody {
 }
 
 impl RequestBodyReader {
+    /// Counts consumed payload bytes without changing size hints, byte limits,
+    /// validation, or staging. Used for actual successful native-Xet traffic.
+    pub(crate) fn with_byte_counter(mut self, counter: Arc<AtomicU64>) -> Self {
+        self.stream = Box::pin(self.stream.map(move |frame| {
+            if let Ok(bytes) = &frame {
+                counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            }
+            frame
+        }));
+        self
+    }
     /// Creates a reader over an HTTP request body with a maximum accepted byte count.
     pub(crate) fn from_body(body: Body, max_bytes: NonZeroUsize) -> Result<Self, ServerError> {
         let size_hint = body.size_hint();
@@ -352,7 +364,15 @@ pub(crate) async fn stage_body_for_object_store(
         });
     }
 
-    // Small local protocol objects can be validated in memory and then written
+    stage_body_with_spill(reader).await
+}
+
+/// Bounds native-container staging independently of the storage backend.
+/// Larger bodies use an owned temporary file, removed on failure or cancellation.
+pub(crate) async fn stage_body_with_spill(
+    reader: &mut RequestBodyReader,
+) -> Result<StagedRequestBody, ServerError> {
+    // Small protocol objects can be validated in memory and then written
     // once to their final content-addressed path. Avoid a disposable scratch
     // write for those bodies. Unknown or larger bodies spill after a strict
     // per-request memory bound.
@@ -628,6 +648,25 @@ mod tests {
             hash,
             shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&actual).as_bytes())
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic)] // A memory result must fail this spill/cleanup test immediately.
+    async fn native_staging_spills_and_removes_the_owned_file_on_drop() {
+        let bytes = vec![0x5a; MAX_IN_MEMORY_STAGED_BODY_BYTES + 1];
+        let expected_hash =
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes());
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from(bytes.clone()));
+        let staged = super::stage_body_with_spill(&mut reader).await.unwrap();
+        let StagedRequestBody::File { file, length, hash } = staged else {
+            panic!("large native body must spill independently of its destination");
+        };
+        let path = file.path().to_owned();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(length, bytes.len() as u64);
+        assert_eq!(hash, expected_hash);
+        drop(file);
+        assert!(!path.exists());
     }
 
     #[tokio::test]

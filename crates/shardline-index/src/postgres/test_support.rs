@@ -116,6 +116,24 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
             "isolated table copy",
         );
     }
+    // LIKE INCLUDING ALL omits foreign keys. Preserve descriptor ownership in
+    // isolated fixtures so deletion and rollback tests exercise real constraints.
+    let has_xet_descriptors = fixture_stage(
+        query_scalar::<_, bool>("SELECT to_regclass('public.shardline_xet_chunks') IS NOT NULL")
+            .fetch_one(&admin_pool)
+            .await,
+        "descriptor table catalog",
+    );
+    if has_xet_descriptors {
+        fixture_stage(
+            query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.shardline_xet_chunks ADD FOREIGN KEY(xorb_hash) REFERENCES {schema}.shardline_xet_xorbs(xorb_hash) ON DELETE CASCADE"
+            )))
+            .execute(&admin_pool)
+            .await,
+            "isolated descriptor foreign key",
+        );
+    }
     let trigger_definitions = fixture_stage(
         query_scalar::<_, String>(
             "SELECT pg_get_triggerdef(trigger.oid)

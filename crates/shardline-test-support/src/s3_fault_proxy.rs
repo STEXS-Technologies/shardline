@@ -3,7 +3,7 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -32,6 +32,7 @@ pub struct S3FaultProxy {
     endpoint: String,
     armed: Arc<AtomicBool>,
     injected: Arc<AtomicBool>,
+    get_requests: Arc<AtomicUsize>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -74,6 +75,8 @@ impl S3FaultProxy {
         let endpoint = format!("http://{}", listener.local_addr()?);
         let armed = Arc::new(AtomicBool::new(initially_armed));
         let injected = Arc::new(AtomicBool::new(false));
+        let get_requests = Arc::new(AtomicUsize::new(0));
+        let worker_get_requests = Arc::clone(&get_requests);
         let worker_armed = Arc::clone(&armed);
         let worker_injected = Arc::clone(&injected);
         let (stop, stopped) = mpsc::channel();
@@ -90,6 +93,7 @@ impl S3FaultProxy {
                             fault.clone(),
                             &worker_armed,
                             &worker_injected,
+                            &worker_get_requests,
                         )
                         .ok();
                     }
@@ -104,6 +108,7 @@ impl S3FaultProxy {
             endpoint,
             armed,
             injected,
+            get_requests,
             stop: Some(stop),
             thread: Some(thread),
         })
@@ -125,6 +130,12 @@ impl S3FaultProxy {
     pub fn fault_was_injected(&self) -> bool {
         self.injected.load(Ordering::Acquire)
     }
+
+    /// Number of actual HTTP GET attempts received, including injected failures.
+    #[must_use]
+    pub fn get_requests(&self) -> usize {
+        self.get_requests.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for S3FaultProxy {
@@ -144,11 +155,15 @@ fn proxy_one_s3_request(
     fault: S3ProxyFault,
     armed: &AtomicBool,
     injected: &AtomicBool,
+    get_requests: &AtomicUsize,
 ) -> std::io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(10)))?;
     let request = read_http_request(&mut client)?;
     let is_put = request.starts_with(b"PUT ");
     let is_get = request.starts_with(b"GET ");
+    if is_get {
+        get_requests.fetch_add(1, Ordering::AcqRel);
+    }
     let is_delete = request.starts_with(b"DELETE ");
     if is_put
         && matches!(fault, S3ProxyFault::ServiceUnavailableOnce)

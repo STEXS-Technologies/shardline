@@ -312,11 +312,19 @@ releases capacity before the next frame is read.
 When unset, the transfer budget scales with host parallelism so larger deployments do
 not inherit the same fixed ceiling as a small single-node install.
 
-Shardline enforces `SHARDLINE_MAX_REQUEST_BODY_BYTES` as a maximum accepted request body
-size. Native Xorb and shard uploads stage small bodies in bounded memory;
+Shardline enforces `SHARDLINE_MAX_REQUEST_BODY_BYTES` for general request bodies.
+Native Xorb bodies default to a separate 128 MiB wire limit so framing does not
+reject standard 64 MiB containers. Explicit general limits also constrain Xorbs
+unless `SHARDLINE_MAX_XORB_BODY_BYTES` overrides them. Native Xorb and shard uploads stage small bodies in bounded memory;
 bodies above 256 KiB spill to temporary files. The server validates content before
 publishing immutable objects through the configured storage adapter. S3-backed
 uploads can therefore still use local scratch I/O for staging and verification.
+Native shard verification visits sources in file order and reuses the same
+materialization for SHA-256 calculation. A two-container MinIO qualification
+requires exactly two provider GETs during preparation and rejects injected
+source corruption. This avoids repeated downloads and temporary writes when
+sources are first consumed sequentially; revisited containers may be read again.
+It does not establish an annual cost reduction or remove decoded chunk storage.
 Control-plane JSON and webhook bodies still use bounded extractor buffering because they
 are small metadata requests.
 Native xorb and shard ingest now also pre-size those bounded in-memory buffers from the

@@ -23,6 +23,7 @@ mod copy_parts;
 mod git_atomic;
 mod lfs_errors;
 mod multipart_listing;
+mod native_lfs_locks;
 mod oci_conformance;
 mod oci_index;
 mod s3_attributes;
@@ -2404,12 +2405,17 @@ async fn exercise_referrers(database: Option<&str>, storage: Option<S3ObjectStor
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires OCI_CONFORMANCE_BIN from distribution-spec v1.1.1"]
 async fn official_oci_distribution_conformance() {
-    let executable = std::env::var("OCI_CONFORMANCE_BIN").expect("OCI_CONFORMANCE_BIN is required");
     let root = tempfile::tempdir().unwrap();
     let server = start(root.path(), ServerFrontend::Oci, false, None).await;
+    run_official_oci_distribution(root.path(), &server).await;
+    server.stop().await;
+}
+
+async fn run_official_oci_distribution(root: &Path, server: &Runtime) {
+    let executable = std::env::var("OCI_CONFORMANCE_BIN").expect("OCI_CONFORMANCE_BIN is required");
     let mut command = std::process::Command::new(executable);
     command
-        .current_dir(root.path())
+        .current_dir(root)
         .arg("-ginkgo.timeout=5m")
         .arg("-ginkgo.no-color")
         .arg("-ginkgo.v")

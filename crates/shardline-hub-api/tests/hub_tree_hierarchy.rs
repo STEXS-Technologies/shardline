@@ -146,7 +146,9 @@ async fn sqlite_hub_path_conflicts_are_rejected_before_revision_publication() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_hub_path_conflicts_are_rejected_before_revision_publication() {
-    let Ok(url) = std::env::var("SHARDLINE_TREE_HIERARCHY_TEST_DATABASE_URL") else {
+    let Some(url) =
+        shardline_test_support::postgres_fixture_url("SHARDLINE_TREE_HIERARCHY_TEST_DATABASE_URL")
+    else {
         return;
     };
     let root = tempfile::TempDir::new().unwrap();

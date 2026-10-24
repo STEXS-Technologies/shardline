@@ -166,8 +166,9 @@ async fn compare_and_swap_s3_object_with_optional_count(
         if matches {
             if update_part_count {
                 persist_multipart_count(&mut transaction, replacement, part_count).await?;
-            } else if let Some(part_count) = preserved_part_count {
-                persist_multipart_count(&mut transaction, replacement, Some(part_count)).await?;
+            } else if let Some(count_to_preserve) = preserved_part_count {
+                persist_multipart_count(&mut transaction, replacement, Some(count_to_preserve))
+                    .await?;
             }
             record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
         }
@@ -224,8 +225,8 @@ async fn compare_and_swap_s3_object_with_optional_count(
     if changed {
         if update_part_count {
             persist_multipart_count(&mut transaction, replacement, part_count).await?;
-        } else if let Some(part_count) = preserved_part_count {
-            persist_multipart_count(&mut transaction, replacement, Some(part_count)).await?;
+        } else if let Some(count_to_preserve) = preserved_part_count {
+            persist_multipart_count(&mut transaction, replacement, Some(count_to_preserve)).await?;
         }
         record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
     }

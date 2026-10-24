@@ -48,6 +48,9 @@ jobs:
       - name: Apply disposable PostgreSQL schema as owner
         run: target/release/shardline db migrate up --database-url "$DATABASE_URL"
 
+      - name: Qualify Hub PostgreSQL HTTP contracts in fresh databases
+        run: SHARDLINE_BIN=target/release/shardline bash scripts/test-hub-postgres.sh
+
       - name: Install real clients
         run: |
           set -euo pipefail
@@ -73,7 +76,12 @@ jobs:
             | sha256sum --check --strict
           sudo chmod 0755 /usr/local/bin/bazelisk
           USE_BAZEL_VERSION=8.7.0 bazelisk version
-          pip3 install --break-system-packages huggingface_hub hf_xet pyarrow duckdb awscli boto3 s3cmd
+          pip3 install --break-system-packages huggingface_hub hf_xet httpx pyarrow duckdb awscli boto3 s3cmd
+          python3 -c "import huggingface_hub, hf_xet, httpx"
+          hf_python="$(sed -n '1s/^#!//p' "$(command -v hf)")"
+          test -x "$hf_python"
+          "$hf_python" -m pip install httpx
+          "$hf_python" -c "import huggingface_hub, hf_xet, httpx"
           hf --version
           python3 -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
           python3 -c "import duckdb; print('duckdb', duckdb.__version__)"
@@ -114,8 +122,116 @@ jobs:
           USE_BAZEL_VERSION: "8.7.0"
         run: cargo make test-e2e
 
+      - name: Qualify repository creation races across PostgreSQL replicas
+        run: >-
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml
+          --test hub_api_e2e --run-ignored only
+          -E 'test(postgres_repository_creation_preserves_winner_visibility_across_replicas)'
+
       - name: Qualify native Xet with PostgreSQL and MinIO
         run: bash scripts/shardline/verify_maintenance_native_xet.sh
+
+      - name: Qualify native Hugging Face Hub with PostgreSQL and MinIO
+        run: >-
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml
+          --test native_huggingface_cli_e2e --run-ignored all
+          -E 'test(native_huggingface_cli_flows_with_postgres_and_minio)'
+
+      - name: Qualify stock git-xet through the real Hub with PostgreSQL and MinIO
+        run: >-
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml
+          --test git_xet_push_e2e --run-ignored all
+          -E 'test(stock_git_xet_real_hub_with_postgres_and_minio)'
+
+      - name: Qualify native Xet FSCK with PostgreSQL and MinIO
+        run: >-
+          cargo nextest run --locked -p shardline --test fsck_cli
+          --run-ignored all -E 'test(native_xet_fsck_with_postgres_and_minio)'
+
+      - name: Qualify HTTP disconnect during remote Xet verification and downloads
+        run: >-
+          cargo nextest run --locked -p shardline-server --features docker --lib
+          --run-ignored all
+          -E 'test(disconnect_during_remote_shard_verification_prevents_publication_and_allows_retry) | test(disconnected_remote_native_download_stops_before_next_source_and_retries_verified)'
+
+      - name: Qualify native shard source reuse and corruption rejection
+        run: >-
+          cargo nextest run --locked -p shardline-server --features docker
+          --test native_shard_reads --run-ignored only
+          -E 'test(native_shard_preparation_reuses_each_verified_provider_source)'
+
+      - name: Qualify native member recovery without standalone copies
+        run: >-
+          cargo nextest run --locked -p shardline-server --features docker --lib
+          --run-ignored only
+          -E 'test(native_members_survive_replica_restart_without_standalone_copies)'
+
+      - name: Qualify Xet deduplication and delta reads during deletion and restart
+        run: >-
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml
+          --test transfer_http --run-ignored only
+          -E 'test(native_dedup_delete_fencing_survives_replica_restart) or test(native_delta_delete_fencing_survives_replica_restart)'
+
+      - name: Qualify large native Xet transfers and process recovery
+        run: |
+          client_env="${RUNNER_TEMP}/native-xet-qualification"
+          python3 -m venv "$client_env"
+          "$client_env/bin/pip" install huggingface_hub==1.25.1 hf_xet==1.6.0
+          export PATH="$client_env/bin:$PATH"
+          cargo nextest run --locked -p shardline-server --features docker \
+            --test native_upload_process --run-ignored all \
+            -E 'test(stock_xet_large_upload_recovers) or test(native_xorb_remote_sigkill_at_every_durable_boundary) or test(native_xorb_remote_alternate_encoding_round_trip) or test(native_xorb_retry_survives_sigkill_at_every_durable_boundary)'
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml \
+            --test native_huggingface_cli_e2e --run-ignored all \
+            -E 'test(native_huggingface_one_gib) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_sdx_reads_expired_xorb_url) or test(native_huggingface_permissive_whoami_preserves_anonymous_identity)'
+
+      - name: Qualify official JavaScript native delta edits
+        run: |
+          node --version
+          client_root="$RUNNER_TEMP/hf-js-2171"
+          npm install --prefix "$client_root" --no-audit --no-fund @huggingface/hub@2.17.1
+          SHARDLINE_HF_JS_ROOT="$client_root" cargo nextest run --locked --manifest-path e2e/Cargo.toml \
+            --test native_huggingface_cli_e2e --run-ignored all \
+            -E 'test(official_huggingface_js_edits_use_native_delta)'
+
+      - name: Qualify hf_xet 1.5 expiry recovery
+        run: |
+          client_env="${RUNNER_TEMP}/native-xet-15-qualification"
+          python3 -m venv "$client_env"
+          "$client_env/bin/pip" install huggingface_hub==1.25.1 hf_xet==1.5.2
+          export PATH="$client_env/bin:$PATH"
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml \
+            --test native_huggingface_cli_e2e --run-ignored all \
+            -E 'test(native_huggingface_cli_recovers_after_expired_xorb_url)'
+
+      - name: Qualify hf_xet 1.7 client compatibility
+        run: |
+          client_env="${RUNNER_TEMP}/native-xet-17-qualification"
+          python3 -m venv "$client_env"
+          "$client_env/bin/pip" install huggingface_hub==1.25.1 hf_xet==1.7.0
+          export PATH="$client_env/bin:$PATH"
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml \
+            --test native_huggingface_cli_e2e --run-ignored all \
+            -E 'test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_cli_flows_with_postgres_and_local_objects) or test(native_huggingface_cli_recovers_after_expired_xorb_url)'
+          cargo nextest run --locked -p shardline-server --features docker \
+            --test native_upload_process --run-ignored all \
+            -E 'test(stock_xet_large_upload_recovers)'
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml \
+            --test native_huggingface_cli_e2e --run-ignored all \
+            -E 'test(native_huggingface_one_gib)'
+
+      - name: Qualify Hugging Face Hub 2.2 client compatibility
+        run: |
+          client_env="${RUNNER_TEMP}/native-hub-22-qualification"
+          python3 -m venv "$client_env"
+          "$client_env/bin/pip" install huggingface_hub==2.2.0 hf_xet==1.7.0 httpx==0.28.1 duckdb==1.5.5 pyarrow==25.0.0
+          export PATH="$client_env/bin:$PATH"
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml \
+            --test native_huggingface_cli_e2e --run-ignored all \
+            -E 'test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_cli_recovers_after_expired_xorb_url)'
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml \
+            --test native_huggingface_cli_e2e --run-ignored all --test-threads 1 \
+            -E 'test(native_huggingface_http_analytics::)'
 
       - name: Run native Bazel client flows
         env:
@@ -125,7 +241,7 @@ jobs:
           for attempt in 1 2 3; do
             if cargo nextest run --locked --manifest-path e2e/Cargo.toml \
               --test native_protocol_frontends_e2e \
-              -E 'test(native_bazel)' --run-ignored all --no-tests=pass; then
+              -E 'test(native_bazel)' --run-ignored all; then
               exit 0
             fi
             if [ "${attempt}" -lt 3 ]; then
@@ -150,16 +266,22 @@ jobs:
           bash scripts/verify-protocol-conformance.sh
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_protocol_frontends_e2e \
-            -E 'test(native_git_lfs)' --no-tests=pass
+            -E 'test(native_git_lfs)'
           USE_BAZEL_VERSION=9.2.0 cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_protocol_frontends_e2e \
-            -E 'test(native_bazel)' --run-ignored all --no-tests=pass
+            -E 'test(native_bazel)' --run-ignored all
 
       - name: Run S3 real-client e2e tests
-        run: cargo nextest run --locked -p shardline-server --test s3_real_client_e2e --no-tests=pass
+        run: cargo nextest run --locked -p shardline-server --test s3_real_client_e2e
+
+      - name: Qualify stock Git LFS locks across replicas and restart
+        run: >-
+          cargo nextest run --locked -p shardline-server --features docker
+          --test protocol_completion --run-ignored all
+          -E 'test(stock_git_lfs_locks_across)'
 
       - name: Run DuckDB against Postgres + MinIO deployment shape
         run: >-
           cargo nextest run --locked -p shardline-server --features docker
-          --test postgres_s3_e2e_http --no-tests=pass
+          --test postgres_s3_e2e_http
           -E 'test(duckdb_real_client_postgres_s3_deployment_shape)'

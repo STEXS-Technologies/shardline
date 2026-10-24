@@ -40,6 +40,7 @@ database_url="postgres://postgres:owned_fixture_password@127.0.0.1:$pg_port/shar
 sql() { docker exec "$container_id" psql -U postgres -d shardline -At -v ON_ERROR_STOP=1 -c "$1"; }
 "$released" db migrate up --database-url "$database_url" > "$fixture/released-migrate.log" 2>&1
 sql 'SELECT * FROM shardline_schema_migrations ORDER BY version' > "$fixture/ledger-before"
+task_reader_before=$(sql "SELECT to_regprocedure('public.shardline_task_artifact_read_v1(text,text,bigint)') IS NULL")
 # Model an existing publication account. The installer alone owns the schema.
 # Publishing tags needs its released repository-fence permissions, but not
 # tombstone INSERT. Keep those existing grants identical through the upgrade.
@@ -48,15 +49,16 @@ GRANT CONNECT ON DATABASE shardline TO existing_oci_writer;
 GRANT USAGE ON SCHEMA public TO existing_oci_writer;
 DO \$\$ DECLARE target text; BEGIN
   FOR target IN SELECT tablename FROM pg_tables WHERE schemaname='public'
-    AND tablename <> 'shardline_resource_fences'
+    AND tablename NOT IN ('shardline_resource_fences', 'shardline_task_artifacts_v1')
   LOOP EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO existing_oci_writer', target); END LOOP;
 END \$\$;
 GRANT SELECT, INSERT, UPDATE ON shardline_resource_fences TO existing_oci_writer;
 REVOKE INSERT, UPDATE ON shardline_oci_object_tombstones FROM existing_oci_writer;" > "$fixture/writer-grants.log"
 writer_url="postgres://existing_oci_writer:owned_fixture_password@127.0.0.1:$pg_port/shardline"
+legacy_tables=$(sql "SELECT string_agg(quote_literal(tablename), ',') FROM pg_tables WHERE schemaname='public'")
 sql "SELECT tablename, tableowner, coalesce(relacl::text,'') FROM pg_tables
 JOIN pg_class ON pg_class.oid=format('%I.%I',schemaname,tablename)::regclass
-WHERE schemaname='public' AND tablename <> 'shardline_task_artifacts_v1'
+WHERE schemaname='public' AND tablename IN ($legacy_tables) AND tablename <> 'shardline_task_artifacts_v1'
 ORDER BY tablename" > "$fixture/grants-before"
 check_writer_privileges() {
     test "$(sql "SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreatedb AND NOT rolcreaterole
@@ -83,7 +85,7 @@ assert_no_server_children() {
     ps -eo pid=,ppid=,comm= | awk -v owner="$owner" '$2 == owner { print }' > "$snapshot"
     test ! -s "$snapshot"
 }
-start_server() {
+spawn_server() {
     local binary=$1 node=$2
     env SHARDLINE_ROOT_DIR="$fixture/root" SHARDLINE_BIND_ADDR="127.0.0.1:${ports[$node]}" \
         SHARDLINE_PUBLIC_BASE_URL="http://127.0.0.1:${ports[$node]}" \
@@ -93,6 +95,10 @@ start_server() {
         SHARDLINE_ADMIN_READ_TOKEN="$admin_token" \
         "$binary" serve > "$fixture/server-$node.log" 2>&1 &
     server_pids[$node]=$!
+}
+start_server() {
+    local binary=$1 node=$2
+    spawn_server "$binary" "$node"
     for attempt in $(seq 1 40); do
         kill -0 "${server_pids[$node]}"
         if curl -fsS --max-time 2 -H "Authorization: Bearer $token" \
@@ -151,24 +157,26 @@ start_server "$released" 0
 test "$(s3_request 0 PUT s3-owner-loss --data-binary before)" = 200
 test "$(request 0 PUT latest --data-binary "@$fixture/published.json")" = 201
 read_manifest 0 "sha256:$published_digest" 200
-# Starting the new binary before the optional owner upgrade must preserve the
-# existing reader/writer experience without putting tracker data into payload.
-start_server "$current" 1
-inspect_task_history preupgrade legacy true
-read_manifest 1 "sha256:$published_digest" 200
-cmp "$fixture/published.json" "$fixture/response-1.body"
-test "$(s3_request 1 PUT preupgrade-current --data-binary before-upgrade)" = 200
-test "$(s3_request 0 GET preupgrade-current)" = 200
-test "$(cat "$fixture/s3-response-0.body")" = before-upgrade
-test "$(request 1 PUT preupgrade-current --data-binary "@$fixture/published.json")" = 201
-read_manifest 0 preupgrade-current 200
+# The candidate requires additive frontend migrations. Before installation it
+# must reject startup clearly, leaving the released process and data untouched.
+spawn_server "$current" 1
+for attempt in $(seq 1 40); do
+    if ! kill -0 "${server_pids[1]}" 2>/dev/null; then break; fi
+    sleep 1
+done
+if kill -0 "${server_pids[1]}" 2>/dev/null; then
+    echo 'FAIL: unmigrated candidate did not exit' >&2
+    exit 1
+fi
+if wait "${server_pids[1]}"; then
+    echo 'FAIL: unmigrated candidate exited successfully' >&2
+    exit 1
+fi
+rg -q 'frontend schema is incompatible' "$fixture/server-1.log"
 test ! -e "$fixture/root/chunks/_shardline_tasks"
 sql 'SELECT * FROM shardline_schema_migrations ORDER BY version' > "$fixture/ledger-preupgrade-current"
 cmp "$fixture/ledger-before" "$fixture/ledger-preupgrade-current"
-test "$(sql "SELECT to_regprocedure('public.shardline_task_artifact_read_v1(text,text,bigint)') IS NULL")" = t
-assert_no_server_children 1 preupgrade
-kill "${server_pids[1]}"
-wait "${server_pids[1]}" || true
+test "$(sql "SELECT to_regprocedure('public.shardline_task_artifact_read_v1(text,text,bigint)') IS NULL")" = "$task_reader_before"
 server_pids[1]=''
 mv "$fixture/server-1.log" "$fixture/server-preupgrade-current.log"
 # A released native writer already holds the shared maintenance barrier.
@@ -204,11 +212,19 @@ wait "$upgrade_pid"
 upgrade_pid=''
 sql 'DROP TRIGGER fixture_pause_upgrade_writer ON shardline_oci_tags; DROP FUNCTION fixture_pause_upgrade_writer();' > "$fixture/upgrade-writer-remove.log"
 "$released" db migrate verify --database-url "$database_url" > "$fixture/released-verify.log" 2>&1
+sql 'SELECT version,name,checksum FROM shardline_frontend_schema_v1 ORDER BY version' > "$fixture/frontend-ledger-after"
+test "$(sql "SELECT count(*)=7 AND count(DISTINCT name)=7
+    AND bool_and(checksum ~ '^[0-9a-f]{64}$') FROM shardline_frontend_schema_v1")" = t
+test "$(sql "SELECT to_regclass('public.shardline_hub_object_locations') IS NOT NULL
+    AND to_regclass('public.shardline_xet_file_aliases') IS NOT NULL
+    AND to_regclass('public.shardline_record_membership') IS NOT NULL
+    AND to_regclass('public.shardline_xet_xorbs') IS NOT NULL
+    AND to_regclass('public.shardline_xet_chunks') IS NOT NULL")" = t
 sql 'SELECT * FROM shardline_schema_migrations ORDER BY version' > "$fixture/ledger-after"
 cmp "$fixture/ledger-before" "$fixture/ledger-after"
 sql "SELECT tablename, tableowner, coalesce(relacl::text,'') FROM pg_tables
 JOIN pg_class ON pg_class.oid=format('%I.%I',schemaname,tablename)::regclass
-WHERE schemaname='public' AND tablename <> 'shardline_task_artifacts_v1'
+WHERE schemaname='public' AND tablename IN ($legacy_tables) AND tablename <> 'shardline_task_artifacts_v1'
 ORDER BY tablename" > "$fixture/grants-after"
 cmp "$fixture/grants-before" "$fixture/grants-after"
 check_writer_privileges
@@ -228,7 +244,9 @@ sql "INSERT INTO shardline_resource_fences(domain,resource,epoch)
 VALUES ('maintenance-remote-delete-sequence','global',1),('maintenance-remote-delete','$pending_key',1);" > "$fixture/pending-install.log"
 test "$(request 1 PUT latest --data-binary "@$fixture/published.json")" = 503
 rg -q 'unresolved remote delete; retry after reconciliation' "$fixture/response-1.body"
-test "$(request 0 PUT latest --data-binary "@$fixture/published.json")" = 500
+released_pending_status=$(request 0 PUT latest --data-binary "@$fixture/published.json")
+# Older predecessors map this rejection to 500; 1.12.1 already returns 503.
+[[ "$released_pending_status" = 500 || "$released_pending_status" = 503 ]]
 for node in 0 1; do
     read_manifest "$node" latest 200
     cmp "$fixture/published.json" "$fixture/response-$node.body"

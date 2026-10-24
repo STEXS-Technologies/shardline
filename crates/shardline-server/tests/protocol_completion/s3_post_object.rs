@@ -42,6 +42,7 @@ post = client.generate_presigned_post(
     Fields={'success_action_status': '201', 'Content-Type': 'application/x-shardline-model',
         'x-amz-meta-model': 'release-1',
         'x-amz-tagging': 'channel=stable&model=weights',
+        'acl': 'bucket-owner-full-control',
         'x-amz-storage-class': 'STANDARD',
         'x-amz-checksum-sha256': checksum, 'x-ignore-client-note': 'ignored'},
     Conditions=[
@@ -49,6 +50,7 @@ post = client.generate_presigned_post(
         {'success_action_status': '201'}, {'Content-Type': 'application/x-shardline-model'},
         {'x-amz-meta-model': 'release-1'},
         {'x-amz-tagging': 'channel=stable&model=weights'},
+        {'acl': 'bucket-owner-full-control'},
         {'x-amz-storage-class': 'STANDARD'},
         {'x-amz-checksum-sha256': checksum},
         ['content-length-range', 1, 1024],
@@ -71,6 +73,27 @@ assert client.get_object(Bucket=bucket, Key='uploads/weights.bin')['Body'].read(
 assert client.head_object(Bucket=bucket, Key='uploads/weights.bin')['ContentType'] == 'application/x-shardline-model'
 assert client.get_object_tagging(Bucket=bucket, Key='uploads/weights.bin')['TagSet'] == [
     {'Key': 'channel', 'Value': 'stable'}, {'Key': 'model', 'Value': 'weights'}]
+
+# The ACL-disabled bucket accepts its owner-only canned ACL but refuses public
+# grants with S3's specific error before publishing an object.
+public_post = client.generate_presigned_post(
+    Bucket=bucket, Key='uploads/public.bin', Fields={'acl': 'public-read'},
+    Conditions=[{'bucket': bucket}, {'key': 'uploads/public.bin'},
+        {'acl': 'public-read'}, ['content-length-range', 1, 1024]],
+    ExpiresIn=300)
+boundary = 'shardline-boto3-public-acl-boundary'
+body = bytearray()
+for name, value in public_post['fields'].items():
+    body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="public.bin"\r\n\r\npublic\r\n--{boundary}--\r\n'.encode())
+request = urllib.request.Request(public_post['url'], data=bytes(body), method='POST',
+    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+try:
+    urllib.request.urlopen(request)
+    raise AssertionError('public ACL form was accepted')
+except urllib.error.HTTPError as response:
+    assert response.code == 400, (response.code, response.read())
+    assert b'<Code>AccessControlListNotSupported</Code>' in response.read()
 
 # STANDARD is the default storage class and is safe to accept as an explicit
 # browser-form option; a non-default class must fail rather than be ignored.

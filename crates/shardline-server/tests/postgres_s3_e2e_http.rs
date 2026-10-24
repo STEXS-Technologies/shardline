@@ -237,10 +237,11 @@ impl Drop for TestServer {
 }
 
 fn duckdb_available() -> bool {
-    Command::new("python3")
+    let available = Command::new("python3")
         .args(["-c", "import duckdb, pyarrow"])
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| output.status.success());
+    shardline_test_support::require_native_client("python3 + duckdb + pyarrow", available)
 }
 
 fn run_duckdb_production_shape(

@@ -62,8 +62,22 @@ fn store_simple_xorb(
     object_store: &ServerObjectStore,
     num_chunks: u32,
     chunk_size: u32,
-) -> shardline_xet_core::merklehash::MerkleHash {
-    let raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(chunk_size));
+) -> MDBXorbInfo {
+    let mut raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(chunk_size));
+    for (index, data) in raw.data.iter_mut().enumerate() {
+        data.to_mut().fill(u8::try_from(index % 251).unwrap());
+    }
+    let mut offset = 0_u64;
+    let chunks = raw
+        .data
+        .iter()
+        .map(|data| {
+            let length = data.len() as u64;
+            let entry = XorbChunkSequenceEntry::new(compute_data_hash(data), length, offset);
+            offset += length;
+            entry
+        })
+        .collect();
     let serialized =
         SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
             .expect("xorb serialization");
@@ -75,7 +89,10 @@ fn store_simple_xorb(
         &serialized.serialized_data,
     ))
     .expect("store xorb for shard test");
-    serialized.hash
+    MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(serialized.hash, u64::from(num_chunks), offset),
+        chunks,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -89,22 +106,20 @@ fn shard_upload_round_trip() {
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
     // 1. Store a xorb so the shard parser can look up chunk range info.
-    let xorb_hash = store_simple_xorb(&object_store, 2, 512);
+    let xorb_info = store_simple_xorb(&object_store, 2, 512);
+    let xorb_hash = xorb_info.metadata.xorb_hash;
 
     // 2. Build a single-file shard referencing that xorb.
-    let chunk_hash = compute_data_hash(b"test-chunk-data");
-    let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+    let chunk_hash = xorb_info.chunks[0].chunk_hash;
+    let file_hash = file_hash(&[(chunk_hash, 512_u64)]);
     let shard_bytes = serialize_shard(
         vec![MDBFileInfo {
             metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-            segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+            segments: vec![FileDataSequenceEntry::new(xorb_hash, 512_u64, 0_u64, 1_u64)],
             verification: Vec::new(),
             metadata_ext: None,
         }],
-        vec![MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-            chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
-        }],
+        vec![xorb_info],
     );
 
     // 3. Register the shard.
@@ -167,38 +182,33 @@ fn shard_upload_multi_file() {
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
     // Store one xorb that both files will reference.
-    let xorb_hash = store_simple_xorb(&object_store, 3, 256);
+    let xorb_info = store_simple_xorb(&object_store, 3, 256);
+    let xorb_hash = xorb_info.metadata.xorb_hash;
 
-    let chunk_a_hash = compute_data_hash(b"file-a-data");
-    let chunk_b_hash = compute_data_hash(b"file-b-data");
+    let chunk_a_hash = xorb_info.chunks[0].chunk_hash;
+    let chunk_b_hash = xorb_info.chunks[1].chunk_hash;
 
-    let file_a_hash = file_hash(&[(chunk_a_hash, 1_u64)]);
-    let file_b_hash = file_hash(&[(chunk_b_hash, 1_u64)]);
+    let file_a_hash = file_hash(&[(chunk_a_hash, 256_u64)]);
+    let file_b_hash = file_hash(&[(chunk_b_hash, 256_u64)]);
 
     let shard_bytes = serialize_shard(
         vec![
             // File A references chunk index [0, 1) → chunk 0
             MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_a_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             },
             // File B references chunk index [1, 2) → chunk 1
             MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_b_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 1_u64, 2_u64)],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 1_u64, 2_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             },
         ],
-        vec![MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 2_u64, 2_u64),
-            chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_a_hash, 1_u64, 0_u64),
-                XorbChunkSequenceEntry::new(chunk_b_hash, 1_u64, 0_u64),
-            ],
-        }],
+        vec![xorb_info],
     );
 
     let mut file_count = 0_usize;
@@ -222,7 +232,11 @@ fn shard_upload_multi_file() {
     let retained = retained_shard_chunk_hashes(&shard_bytes, DEFAULT_SHARD_METADATA_LIMITS)
         .expect("retained hashes");
     // Both chunks are file-start chunks (different chunk_index_start).
-    assert_eq!(retained.len(), 2, "both chunks should be retained");
+    assert_eq!(
+        retained.len(),
+        2,
+        "both file-start chunks should be retained"
+    );
     assert!(retained.contains(&chunk_a_hash.hex()));
     assert!(retained.contains(&chunk_b_hash.hex()));
 }
@@ -237,21 +251,19 @@ fn shard_upload_with_repository_scope() {
     let object_store =
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
-    let xorb_hash = store_simple_xorb(&object_store, 1, 256);
+    let xorb_info = store_simple_xorb(&object_store, 1, 256);
+    let xorb_hash = xorb_info.metadata.xorb_hash;
 
-    let chunk_hash = compute_data_hash(b"scoped-data");
-    let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+    let chunk_hash = xorb_info.chunks[0].chunk_hash;
+    let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
     let shard_bytes = serialize_shard(
         vec![MDBFileInfo {
             metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-            segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+            segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
             verification: Vec::new(),
             metadata_ext: None,
         }],
-        vec![MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-            chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
-        }],
+        vec![xorb_info],
     );
 
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", None)
@@ -355,21 +367,19 @@ fn shard_upload_is_idempotent() {
     let object_store =
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
-    let xorb_hash = store_simple_xorb(&object_store, 1, 256);
+    let xorb_info = store_simple_xorb(&object_store, 1, 256);
+    let xorb_hash = xorb_info.metadata.xorb_hash;
 
-    let chunk_hash = compute_data_hash(b"idempotent-test");
-    let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+    let chunk_hash = xorb_info.chunks[0].chunk_hash;
+    let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
     let shard_bytes = serialize_shard(
         vec![MDBFileInfo {
             metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-            segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+            segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
             verification: Vec::new(),
             metadata_ext: None,
         }],
-        vec![MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-            chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
-        }],
+        vec![xorb_info],
     );
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");

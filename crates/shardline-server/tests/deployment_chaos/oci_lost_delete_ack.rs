@@ -57,7 +57,14 @@ async fn drill_deploy_oci_gc_lost_delete_ack_stays_pending_and_blocks_republish(
         .send()
         .await
         .expect("publish OCI manifest");
-    assert_eq!(published.status().as_u16(), 201, "manifest published");
+    if published.status().as_u16() != 201 {
+        let status = published.status();
+        let body = published
+            .text()
+            .await
+            .expect("read failed publication response");
+        panic!("manifest publication failed before delete fault injection: {status}; {body}");
+    }
     assert_eq!(
         published
             .headers()

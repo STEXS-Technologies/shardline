@@ -826,6 +826,58 @@ fn materialize_bounded_s3_object_spills_large_response_in_the_same_get() {
 }
 
 #[test]
+fn materialize_bounded_s3_cancellation_discards_partial_output() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // A response larger than one HTTP frame ensures cancellation occurs while
+    // consuming the body, rather than only before the GET or after completion.
+    let body = vec![b'x'; 2 * 1024 * 1024];
+    let (store, server) = full_object_get_fixture(Some(body));
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let checks = AtomicUsize::new(0);
+    let result = store.materialize_bounded_object_if_present_with_checkpoint(&key, 0, &|| {
+        if checks.fetch_add(1, Ordering::SeqCst) >= 2 {
+            Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        } else {
+            Ok(())
+        }
+    });
+    server.join().unwrap();
+    assert!(matches!(result, Err(ServerObjectStoreError::Io(ref error))
+        if error.kind() == std::io::ErrorKind::Interrupted));
+    assert_eq!(
+        checks.load(Ordering::SeqCst),
+        4,
+        "check before GET, accept first frame, abort second, preserve cancellation"
+    );
+}
+
+#[test]
+fn materialize_bounded_s3_precancelled_request_does_not_contact_provider() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let config = S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
+        .with_endpoint(Some(format!("http://{}", listener.local_addr().unwrap())))
+        .with_allow_http(true)
+        .with_credentials(
+            Some(shardline_protocol::SecretString::from_secret("fixture")),
+            Some(shardline_protocol::SecretString::from_secret("fixture")),
+            None,
+        );
+    let store = ServerObjectStore::s3(config).unwrap();
+    let key = ObjectKey::parse("aa/materialize").unwrap();
+    let result = store.materialize_bounded_object_if_present_with_checkpoint(&key, 0, &|| {
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    });
+    assert!(matches!(result, Err(ServerObjectStoreError::Io(ref error))
+        if error.kind() == std::io::ErrorKind::Interrupted));
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
 fn read_s3_if_present_uses_one_full_get_and_returns_observed_length() {
     let body = b"bounded one-request read".to_vec();
     let (store, server) = full_object_get_fixture(Some(body.clone()));

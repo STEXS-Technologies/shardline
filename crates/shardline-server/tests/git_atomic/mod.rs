@@ -77,6 +77,38 @@ async fn native_atomic_git_on_postgres_and_minio_survives_server_restart() {
     exercise(Some(&database), Some(storage)).await;
 }
 
+#[cfg(feature = "docker")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker and stock Git"]
+async fn native_atomic_git_with_owned_postgres_and_minio() {
+    let services = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .with_minio()
+        .start()
+        .expect("start disposable Git backends")
+        .expect("Docker is required for remote Git qualification");
+    let database = services.postgres_url().expect("PostgreSQL fixture");
+    let pool = sqlx::PgPool::connect(&database).await.unwrap();
+    shardline_server::apply_database_migrations(&pool)
+        .await
+        .unwrap();
+    let prefix = services.unique_s3_key_prefix("git-atomic");
+    let raw = services
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO fixture");
+    let storage = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_allow_http(true)
+        .with_key_prefix(Some(&prefix))
+        .with_credentials(
+            raw.access_key.map(shardline_protocol::SecretString::new),
+            raw.secret_key.map(shardline_protocol::SecretString::new),
+            None,
+        );
+    exercise(Some(&database), Some(storage)).await;
+    pool.close().await;
+}
+
 async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) {
     let root = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();

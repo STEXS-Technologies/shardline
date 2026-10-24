@@ -54,6 +54,12 @@ cargo test --locked -p shardline-server --test protocol_completion \
 cargo test --locked -p shardline-server --test protocol_completion -- \
   --include-ignored --skip postgres --skip minio_ --nocapture
 
+# Own disposable backends; unlike optional developer fixtures, missing Docker
+# or a failed database/object-store startup must fail this required gate.
+cargo nextest run --locked -p shardline-server --features docker \
+  --test protocol_completion --run-ignored only \
+  -E 'test(official_oci_distribution_on_postgres_and_minio) | test(native_atomic_git_with_owned_postgres_and_minio)'
+
 if [[ -n "${DATABASE_URL:-}" ]]; then
   cargo test --locked -p shardline-server --lib \
     database_migration::frontend_schema::tests:: -- --ignored --nocapture

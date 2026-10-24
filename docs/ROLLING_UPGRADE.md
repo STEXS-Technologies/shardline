@@ -19,8 +19,9 @@ runtime a longer grace period so the server's deadline runs before SIGKILL.
 
 ## Protocol frontend upgrade from 1.12.1
 
-The unreleased frontend changes add durable Xet file identities, LFS locks,
-and S3 multipart part counts. An owner-run command installs these additive
+The unreleased frontend changes add durable Xet file identities and aliases,
+LFS locks, S3 multipart part counts, record membership, verified Xorb descriptors,
+and Hub object locations. An owner-run command installs these additive
 tables in a separate frontend schema registry. The released core migration
 ledger remains compatible with 1.12.1; unknown core migrations still cause
 startup to fail. Existing object records are not rewritten. Part counts are
@@ -39,6 +40,12 @@ upgrade; this deployment needs a policy-aware migration before rollout. Startup
 also fails closed if source-table row security is enabled after installation.
 Then replace processes one at a time, draining each process and checking readiness.
 
+PostgreSQL frontend installation takes the existing exclusive maintenance write
+barrier before changing tables or triggers. Active protected writes finish first;
+later protected writes wait until the schema transaction commits or rolls back.
+Allow for this pause in request timeout budgets. Do not run schema installation
+as if it were a background operation with no effect on write latency.
+
 Real 1.12.1/new-binary drills cover live S3-frontend writes during installation,
 cross-version reads, new-version writes, and restarting 1.12.1 against the
 upgraded metadata. These checks pass with SQLite and PostgreSQL. Database
@@ -51,6 +58,32 @@ identity behavior only to upgraded replicas. If the load balancer cannot route
 those requests, hold them until every replica is upgraded. A 1.12.1 replica can
 still read and write the tested object data, but it does not understand the new
 lock or identity records.
+
+Immutable Hub/Xet read credentials and their signed range URLs also require
+upgraded API and transfer replicas. Keep those requests on upgraded replicas
+until the rollout is complete. The latest predecessor drills install all seven
+frontend migrations, preserve the released core ledger, and verify old/new
+OCI and S3 access on PostgreSQL. Local drills migrate release-created SQLite
+data and compare clean FSCK results from both binaries at concurrency 1, 32 and
+128. These checks cover installation and existing storage compatibility; they
+do not yet qualify native Hub/Xet identity replacement through mixed-version
+clients or every deployment's grants and security policies.
+
+A separate local native-CAS drill uploads a multi-container file with the actual
+1.12.1 binary, migrates it, and verifies its reconstruction and bytes with the
+candidate. It then uploads another file with the candidate and verifies both
+files after rollback to 1.12.1 and another candidate restart. The candidate also
+publishes the original bytes with two different chunk layouts and a verified
+SHA-256 identity. Both file IDs remain readable; replaying the original upload
+with 1.12.1 preserves the candidate's current mapping and historical alias.
+The candidate's SHA-256 download returns the original bytes after restart and
+denies another repository. The same drill also passes with disposable PostgreSQL
+and MinIO, retaining the database and object prefix across each binary switch.
+Full Hub commit history, mixed-version official clients and signed URL rollout
+still require separate qualification.
+
+The alias migration preserves current mappings and future replacements. It
+cannot recover mappings already overwritten before the upgrade.
 
 S3 checksum and standard object HTTP metadata writes need the same routing care.
 Their records are stored in the S3 object's private metadata. A 1.12.1 replica

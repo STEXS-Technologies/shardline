@@ -740,6 +740,23 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
     let missing = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(missing, Ok(None)));
 
+    // Recover locations from source bytes, not from surviving descriptor rows
+    // or standalone decoded chunk copies.
+    let database = Connection::open(storage.path().join("metadata.sqlite3")).unwrap();
+    database
+        .execute(
+            "DELETE FROM shardline_xet_xorbs WHERE xorb_hash=?1",
+            [&xorb_hash],
+        )
+        .unwrap();
+    let member = shardline_xet_core::merklehash::compute_data_hash(b"aaaa").hex();
+    shardline_storage::AsyncObjectStore::delete_if_present(
+        &backend.object_store(),
+        &crate::chunk_store::chunk_object_key(&member).unwrap(),
+    )
+    .await
+    .unwrap();
+
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
     assert!(report.is_ok());
     let Ok(report) = report else {
@@ -755,6 +772,7 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
     let shard_workspace_exists = storage.path().join("shards").try_exists();
     assert!(matches!(shard_workspace_exists, Ok(false)));
     assert!(report.is_clean());
+    assert_eq!(backend.read_chunk(&member).await.unwrap(), b"aaaa");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

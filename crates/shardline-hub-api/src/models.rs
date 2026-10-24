@@ -3,9 +3,10 @@ use shardline_index::hub::HubRepoType;
 use shardline_protocol::SecretString;
 
 /// Repository type (model, dataset, space).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepoType {
+    #[default]
     Model,
     Dataset,
     Space,
@@ -61,8 +62,8 @@ impl From<RepoType> for HubRepoType {
 /// Repository creation request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoCreateRequest {
-    /// Repository type.
-    #[serde(rename = "type")]
+    /// Repository type; official clients omit this for model repositories.
+    #[serde(rename = "type", default)]
     pub repo_type: RepoType,
     /// Repository owner or namespace.
     pub name: String,
@@ -300,6 +301,12 @@ pub struct CommitResponse {
 pub struct WhoamiResponse {
     /// User name.
     pub name: String,
+    /// Organization memberships known to this Hub deployment.
+    ///
+    /// Shardline currently has no organization-membership source, so handlers
+    /// return an empty list rather than omitting the field or inventing roles.
+    #[serde(default)]
+    pub orgs: Vec<serde_json::Value>,
     /// Whether the user is an admin.
     #[serde(default)]
     pub is_admin: bool,
@@ -939,6 +946,20 @@ mod tests {
         assert!(deserialized.private);
     }
 
+    #[test]
+    fn repo_create_without_type_defaults_to_model_but_rejects_invalid_types() {
+        let request: RepoCreateRequest =
+            serde_json::from_str(r#"{"name":"repo","organization":"org","visibility":"private"}"#)
+                .unwrap();
+        assert_eq!(request.repo_type, RepoType::Model);
+        for invalid in [
+            r#"{"name":"org/repo","type":null}"#,
+            r#"{"name":"org/repo","type":"unknown"}"#,
+        ] {
+            assert!(serde_json::from_str::<RepoCreateRequest>(invalid).is_err());
+        }
+    }
+
     // -----------------------------------------------------------------------
     // RepoResponse serialization
     // -----------------------------------------------------------------------
@@ -1027,6 +1048,9 @@ mod tests {
         assert!(!resp.is_admin);
         assert_eq!(resp.user_type, "user");
         assert_eq!(resp.auth.auth_type, "token");
+        assert!(resp.orgs.is_empty());
+        let encoded = serde_json::to_value(resp).unwrap();
+        assert_eq!(encoded["orgs"], serde_json::json!([]));
     }
 
     // -----------------------------------------------------------------------

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+mod file_write;
+mod object_location;
 mod ref_batch;
 
 use futures_util::TryStreamExt;
@@ -248,6 +250,31 @@ where
 }
 
 impl HubStore for PostgresIndexStore {
+    fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: crate::hub::HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<crate::hub::HubObjectLocation>, Self::Error> {
+        object_location::lookup(self, scope, kind, object_id)
+    }
+    fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: crate::hub::HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Self::Error> {
+        object_location::remember(self, scope, kind, object_id)
+    }
+    fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Self::Error> {
+        block_on_async(
+            crate::PostgresRecordStore::new(self.pool().clone()).xet_file_identity(scope, sha256),
+        )
+    }
     fn supports_atomic_ref_updates(&self) -> bool {
         true
     }
@@ -276,8 +303,7 @@ impl HubStore for PostgresIndexStore {
 
             sqlx::query(
                 "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
-                 VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint)
-                 ON CONFLICT (repo_id) DO NOTHING",
+                 VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint)",
             )
             .bind(&name)
             .bind(repo_type_str)
@@ -513,6 +539,25 @@ impl HubStore for PostgresIndexStore {
             }
         }
     }
+    fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        match self.publish_hub_revision_at(
+            &revision.repo_id,
+            revision.parent_sha.as_deref(),
+            &revision.sha,
+            &revision.ref_name,
+            revision.message.as_deref().unwrap_or(""),
+            HubRefPublicationMode::UpdateOnly,
+            Some(revision),
+        )? {
+            HubRefCreateOutcome::Created(stored) => Ok(HubRefUpdateOutcome::Updated(stored)),
+            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
+            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
+        }
+    }
+
     fn update_revision_if_current(
         &self,
         repo_id: &str,
@@ -792,24 +837,7 @@ impl HubStore for PostgresIndexStore {
 
         block_on_async(async {
             let mut tx = pool.begin().await?;
-            for file in &files {
-                sqlx::query(
-                    "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
-                     VALUES ($1, $2, $3, $4, $5)
-                     ON CONFLICT (commit_sha, path)
-                     DO UPDATE SET size = EXCLUDED.size, sha = EXCLUDED.sha, is_lfs = EXCLUDED.is_lfs
-                     WHERE shardline_hub_file_entries.size IS DISTINCT FROM EXCLUDED.size
-                        OR shardline_hub_file_entries.sha IS DISTINCT FROM EXCLUDED.sha
-                        OR shardline_hub_file_entries.is_lfs IS DISTINCT FROM EXCLUDED.is_lfs",
-                )
-                .bind(&commit_sha)
-                .bind(&file.path)
-                .bind(u64_to_i64(file.size)?)
-                .bind(&file.sha)
-                .bind(file.is_lfs)
-                .execute(&mut *tx)
-                .await?;
-            }
+            file_write::store(&mut tx, &commit_sha, &files).await?;
             tx.commit().await?;
             Ok(())
         })
@@ -913,42 +941,36 @@ impl HubStore for PostgresIndexStore {
                 i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
             let mut entries = Vec::new();
             if options.recursive {
-                let cursor = options
-                    .cursor
-                    .as_ref()
-                    .map(|cursor| format!("{prefix}{cursor}"));
-                let lower = cursor.as_ref().unwrap_or(&prefix);
-                let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                    "SELECT path,size,sha,is_lfs FROM shardline_hub_file_entries WHERE commit_sha=",
-                );
-                query.push_bind(&commit_sha).push(" AND path COLLATE \"C\"");
-                query
-                    .push(if cursor.is_some() { ">" } else { ">=" })
-                    .push_bind(lower);
-                query.push(" AND path COLLATE \"C\"<>").push_bind(&prefix);
-                if let Some(upper) = &upper {
-                    query.push(" AND path COLLATE \"C\"<").push_bind(upper);
-                }
-                if let Some(cursor) = &cursor {
-                    query.push(" AND EXISTS(SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=")
-                        .push_bind(&commit_sha).push(" AND path COLLATE \"C\"=").push_bind(cursor)
-                        .push(" AND path COLLATE \"C\"<>").push_bind(&prefix).push(")");
-                }
-                query
-                    .push(" ORDER BY path COLLATE \"C\" LIMIT ")
-                    .push_bind(query_limit);
-                let mut rows = query.build().fetch(&mut *transaction);
+                let prefix_start =
+                    i32::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i32::MAX);
+                let mut rows = sqlx::query(
+                    "WITH filtered AS (
+                       SELECT substring(path FROM $4) COLLATE \"C\" AS relative,size,sha,is_lfs
+                       FROM shardline_hub_file_entries WHERE commit_sha=$1 AND path COLLATE \"C\">=$2
+                       AND ($3::text IS NULL OR path COLLATE \"C\"<$3) AND path COLLATE \"C\"<>$2),
+                     directories AS (
+                       SELECT DISTINCT array_to_string(parts[1:level],'/') COLLATE \"C\" AS path
+                       FROM (SELECT string_to_array(relative,'/') AS parts FROM filtered) split
+                       CROSS JOIN LATERAL generate_series(1,cardinality(parts)-1) level),
+                     entries AS (
+                       SELECT 0 AS kind,path,NULL::bigint AS size,NULL::text AS sha,NULL::boolean AS is_lfs FROM directories
+                       UNION ALL SELECT 1,relative,size,sha,is_lfs FROM filtered)
+                     SELECT kind,path,size,sha,is_lfs FROM entries
+                     WHERE $5::text IS NULL OR (path>$5 AND EXISTS(SELECT 1 FROM entries WHERE path=$5))
+                     ORDER BY path LIMIT $6")
+                    .bind(&commit_sha).bind(&prefix).bind(&upper).bind(prefix_start).bind(&options.cursor).bind(query_limit).fetch(&mut *transaction);
                 while let Some(row) = rows.try_next().await? {
-                    let full_path: String = row.try_get("path")?;
-                    entries.push(HubTreePageEntry::File(HubFileEntry {
-                        path: full_path
-                            .strip_prefix(&prefix)
-                            .unwrap_or(&full_path)
-                            .to_owned(),
-                        size: i64_to_u64(row.try_get("size")?)?,
-                        sha: row.try_get("sha")?,
-                        is_lfs: row.try_get("is_lfs")?,
-                    }));
+                    let path: String = row.try_get("path")?;
+                    entries.push(if row.try_get::<i32, _>("kind")? == 0 {
+                        HubTreePageEntry::Directory { path }
+                    } else {
+                        HubTreePageEntry::File(HubFileEntry {
+                            path,
+                            size: i64_to_u64(row.try_get("size")?)?,
+                            sha: row.try_get("sha")?,
+                            is_lfs: row.try_get("is_lfs")?,
+                        })
+                    });
                 }
             } else {
                 let prefix_start =
@@ -1323,12 +1345,32 @@ impl PostgresIndexStore {
         message: &str,
         mode: HubRefPublicationMode,
     ) -> Result<HubRefCreateOutcome, PostgresMetadataStoreError> {
+        self.publish_hub_revision_at(repo_id, parent_sha, new_sha, ref_name, message, mode, None)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "shared transactional legacy and prepared publication"
+    )]
+    fn publish_hub_revision_at(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+        mode: HubRefPublicationMode,
+        prepared: Option<&HubRevision>,
+    ) -> Result<HubRefCreateOutcome, PostgresMetadataStoreError> {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
         let new_sha = new_sha.to_owned();
         let ref_name = canonical_ref_name(ref_name).to_owned();
         let message = message.to_owned();
         let parent_sha = parent_sha.map(ToOwned::to_owned);
+        let prepared_timestamp = prepared
+            .map(|r| u64_to_i64(r.created_at_unix_seconds))
+            .transpose()?;
 
         block_on_async(async {
             let mut tx = pool.begin().await?;
@@ -1402,7 +1444,7 @@ impl PostgresIndexStore {
 
             sqlx::query(
                 "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM now())::bigint)
+                 VALUES ($1, $2, $3, $4, $5, COALESCE($6, EXTRACT(EPOCH FROM now())::bigint))
                  ON CONFLICT (repo_id, sha) DO NOTHING",
             )
             .bind(&repo_id)
@@ -1410,6 +1452,7 @@ impl PostgresIndexStore {
             .bind(&new_sha)
             .bind(parent_sha.as_deref())
             .bind(&message)
+            .bind(prepared_timestamp)
             .execute(&mut *tx)
             .await?;
 
@@ -1442,9 +1485,7 @@ impl PostgresIndexStore {
             .fetch_one(&mut *tx)
             .await?;
 
-            tx.commit().await?;
-
-            Ok(HubRefCreateOutcome::Created(HubRevision {
+            let revision = HubRevision {
                 repo_id: row.try_get("repo_id")?,
                 ref_name: row.try_get("ref_name")?,
                 sha: row.try_get("sha")?,
@@ -1453,7 +1494,12 @@ impl PostgresIndexStore {
                 created_at_unix_seconds: i64_to_u64(
                     row.try_get::<i64, _>("created_at_unix_seconds")?,
                 )?,
-            }))
+            };
+            if prepared.is_some_and(|expected| !revision.matches_prepared(expected)) {
+                return Err(PostgresMetadataStoreError::RecordNotFound);
+            }
+            tx.commit().await?;
+            Ok(HubRefCreateOutcome::Created(revision))
         })
     }
 }
@@ -1708,7 +1754,65 @@ mod tests {
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().repo_id, "pg-create-get");
 
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            store
+                .create_repo(HubRepoType::Dataset, "pg-create-get", true)
+                .is_err()
+        );
+        let preserved = store.get_repo("pg-create-get").unwrap().unwrap();
+        assert_eq!(preserved.repo_type, HubRepoType::Model);
+        assert!(!preserved.private);
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "duplicate creation must not append ref evidence"
+        );
+
         cleanup_repo(&store, "pg-create-get").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_concurrent_repository_creators_have_one_winner() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("SKIPPED: PostgreSQL creation race requires DATABASE_URL");
+            return;
+        };
+        let store = make_store(pool);
+        let repo = "pg-create-race";
+        cleanup_repo(&store, repo).await;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut creators = Vec::new();
+        for attempt in 0..8 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            creators.push(tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                let private = attempt % 2 == 0;
+                (
+                    private,
+                    store.create_repo(HubRepoType::Model, repo, private),
+                )
+            }));
+        }
+        let mut winner = None;
+        for creator in creators {
+            let (private, result) = creator.await.unwrap();
+            if result.is_ok() {
+                assert!(winner.replace(private).is_none());
+            }
+        }
+        assert_eq!(
+            store.get_repo(repo).unwrap().unwrap().private,
+            winner.unwrap()
+        );
+        cleanup_repo(&store, repo).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

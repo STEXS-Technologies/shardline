@@ -136,7 +136,8 @@ pub(super) async fn load_reconstruction_response(
     requested_range: Option<ByteRange>,
     auth: &AuthorizedRepository,
 ) -> Result<FileReconstructionResponse, ServerError> {
-    let repository_scope = auth.namespace();
+    let hub_scope = hub_storage_scope(state, file_id, auth).await?;
+    let repository_scope = hub_scope.as_ref().or_else(|| auth.namespace());
     if let Some(requested_range) = requested_range {
         return state
             .backend
@@ -169,6 +170,25 @@ pub(super) async fn load_reconstruction_response(
         .await
 }
 
+pub(super) async fn hub_storage_scope(
+    state: &AppState,
+    file_id: &str,
+    auth: &AuthorizedRepository,
+) -> Result<Option<shardline_protocol::RepositoryScope>, ServerError> {
+    if auth
+        .claims()
+        .is_some_and(|claims| claims.issuer() == shardline_protocol::HUB_XET_READ_TOKEN_ISSUER)
+    {
+        let scope = auth.namespace().ok_or(ServerError::NotFound)?;
+        return state
+            .backend
+            .hub_native_read_scope(scope, file_id)
+            .await
+            .map(Some);
+    }
+    Ok(None)
+}
+
 /// Read a singleton range field without silently choosing one conflicting value.
 pub(super) fn single_range_header(
     headers: &HeaderMap,
@@ -195,9 +215,15 @@ pub(super) async fn load_reconstruction_range_response(
     let header_value = header_value
         .to_str()
         .map_err(|_error| ServerError::InvalidRangeHeader)?;
+    let hub_scope = hub_storage_scope(state, file_id, auth).await?;
     let response = state
         .backend
-        .reconstruction_http_range(file_id, content_hash, header_value, auth.namespace())
+        .reconstruction_http_range(
+            file_id,
+            content_hash,
+            header_value,
+            hub_scope.as_ref().or_else(|| auth.namespace()),
+        )
         .await?;
     Ok(Some(response))
 }

@@ -260,6 +260,12 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
             .find(|(field, _)| field.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     };
+    if fields.iter().any(|(field, value)| {
+        (field.eq_ignore_ascii_case("acl") || field.eq_ignore_ascii_case("x-amz-acl"))
+            && !value.eq_ignore_ascii_case("bucket-owner-full-control")
+    }) {
+        return Err(S3Error::acl_not_supported());
+    }
     let key = get("key")
         .filter(|key| !key.is_empty())
         .ok_or_else(S3Error::access_denied)?
@@ -351,6 +357,8 @@ fn supported_field(name: &str) -> bool {
                 | "x-amz-checksum-sha256"
                 | "x-amz-tagging"
                 | "x-amz-storage-class"
+                | "acl"
+                | "x-amz-acl"
         )
         || name.to_ascii_lowercase().starts_with("x-amz-meta-")
 }
