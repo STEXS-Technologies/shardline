@@ -37,6 +37,26 @@ cargo check -p shardline
 3. Run contributor quality gates locally.
 4. Open a PR with a clear summary, risk notes, and test evidence.
 
+### PostgreSQL qualification
+
+Use a disposable database and export its connection string as `DATABASE_URL`.
+Apply the candidate's migrations before running the gate; a database migrated
+only by the preceding release is missing the candidate's frontend tables.
+
+```bash
+cargo run --locked --all-features -p shardline -- db migrate up --database-url "$DATABASE_URL"
+cargo make test-postgres
+```
+
+The gate checks both v1.12.1 recovery and v1.11.3 preservation of newer evidence.
+It fetches checksum-pinned Linux x86_64 binaries when they are not supplied.
+To reuse local binaries or run on another platform, set
+`SHARDLINE_N_MINUS_ONE_BINARY` to a native v1.12.1 executable and
+`SHARDLINE_LEGACY_RECOVERY_BINARY` to a native v1.11.3 executable. These are
+distinct compatibility contracts; the historical binary does not replace the
+adjacent release. Remote object-store and stock-client qualification require
+their separately provisioned gates as well.
+
 ## Git commits and pull requests
 
 ### Philosophy
