@@ -26,8 +26,19 @@ use super::*;
 
 #[test]
 fn packed_reachability_reuses_verified_get_and_preserves_missing_and_error_results() {
+    assert_verified_reachability(3, 256);
+}
+
+#[test]
+fn spilled_packed_reachability_rejects_corruption_before_exposing_members() {
+    // Exceed the fixed in-memory verification budget, exercising the same
+    // source checks after the remote body spills to private scratch storage.
+    assert_verified_reachability(48, 64 * 1024);
+}
+
+fn assert_verified_reachability(num_chunks: u32, chunk_size: u32) {
     let serialized = SerializedXorbObject::from_xorb_with_compression(
-        build_raw_xorb(3, ChunkSize::Fixed(256)),
+        build_raw_xorb(num_chunks, ChunkSize::Fixed(chunk_size)),
         CompressionScheme::None,
         true,
     )
@@ -64,13 +75,16 @@ fn packed_reachability_reuses_verified_get_and_preserves_missing_and_error_resul
         let source_path = format!("/assets/{}", key.as_str());
         let mut body = serialized.serialized_data.clone();
         if damaged {
-            *body.get_mut(8).unwrap() ^= 1;
+            // Damage the final member so an implementation cannot publish
+            // earlier members before it discovers a late validation failure.
+            let payload_end = usize::try_from(serialized.footer_start.unwrap()).unwrap();
+            *body.get_mut(payload_end.checked_sub(1).unwrap()).unwrap() ^= 1;
         }
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut source_heads = 0;
-            let mut source_gets = 0;
-            let mut sidecar_heads = 0;
+            let deadline = Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+            let mut source_heads = 0_usize;
+            let mut source_gets = 0_usize;
+            let mut sidecar_heads = 0_usize;
             while !server_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                 let mut stream = match listener.accept() {
                     Ok((stream, _)) => stream,
@@ -101,9 +115,11 @@ fn packed_reachability_reuses_verified_get_and_preserves_missing_and_error_resul
                     source_get || source_head || sidecar_head,
                     "unexpected storage request"
                 );
-                source_gets += usize::from(source_get);
-                source_heads += usize::from(source_head);
-                sidecar_heads += usize::from(sidecar_head);
+                source_gets = source_gets.checked_add(usize::from(source_get)).unwrap();
+                source_heads = source_heads.checked_add(usize::from(source_head)).unwrap();
+                sidecar_heads = sidecar_heads
+                    .checked_add(usize::from(sidecar_head))
+                    .unwrap();
                 if source_get && status == 200 {
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Mon, 12 Oct 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n", body.len()).unwrap();
                     stream.write_all(&body).unwrap();

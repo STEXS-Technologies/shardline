@@ -234,7 +234,9 @@ Postgres/S3 commands without writable temporary storage and local deployments
 whose database, SQLite sidecars and object directories remain writable under a
 non-writable root. It creates no new root entries or mount requirement. Its
 signing key stays in memory; interrupted history cannot authorize a restart.
-Read-only GC and migration scans write no task history or scratch files.
+Read-only GC and migration scans write no task history or task-tracking scratch
+files. Container verification can still require temporary payload storage: GC
+keeps S3 snapshots up to 2 MiB in memory and spills larger sources to disk.
 If shared observation is unavailable in a deployment with no writable local
 storage, the command preserves its application result and explicitly warns that
 no verified outcome is available. This preserves existing availability and

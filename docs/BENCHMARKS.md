@@ -648,6 +648,40 @@ These results leave the latest-stable throughput gate open. The latency rows
 are medians of each phase's p99, not pooled p99 values for the complete run.
 They do not qualify production scaling, native Xet throughput or disk endurance.
 
+A subsequent GC profile of the complete CLI scan recorded 953 cycle samples
+with no lost samples. Approximately 14% of inclusive sampled cycles passed
+through temporary-file writes (`shmem_file_write_iter`), and approximately 4%
+through temporary-file eviction. This includes CLI startup and is a diagnostic
+profile, not a timing comparison. It motivated using the existing bounded
+materialization path with a fixed 2 MiB memory allowance for GC verification.
+Every source is still fetched and fully validated before members are exposed;
+larger sources spill to disk, and no source-health cache is introduced.
+
+Four uninstrumented before/after/after/before runs of the same twenty-phase
+fixture measured median GC CPU of 0.310 seconds before versus 0.250 after
+(19% less). Peak GC process RSS increased from 31.00–31.22 to 33.76–33.79 MiB.
+Mixed throughput changed from 281.78 to 291.55 MiB/s in the first pair, but from
+282.65 to 251.29 MiB/s in the reverse-order pair. GC elapsed time stayed around
+0.62 seconds. These inconsistent throughput results do not close the regression
+against v1.12.1 or establish better tail latency. Other host activity was not
+excluded; generating the earlier flamegraph overlapped the start of the first
+baseline run.
+
+Separate syscall-traced settling scans show read calls falling from 17,266 to
+14,834, writes from 2,248 to 1,783, seeks from 1,228 to 76, and unlinks from 132
+to four: the 128 small source snapshots no longer require scratch files. Both
+scans still use 286 S3 attempts and transfer exactly 134,435,501 traced response
+bytes. All six runs reconcile MinIO traces and pass 2,304 post-GC byte checks.
+The scratch filesystem was tmpfs, so these syscall counts do not establish
+physical NVMe writes or service life. The improvement trades a small fixed
+memory allowance for fewer temporary-file operations and lower measured GC CPU;
+local filesystem sources continue to be read directly.
+All 938 server-core, adapter and GC tests pass, as do strict adapter/GC Clippy
+checks and five actual v1.12.1 upgrade/rollback cases, including native local
+and PostgreSQL/MinIO reads by the predecessor after candidate GC. A regression
+case verifies that corruption in the final member of a source larger than the
+memory allowance stops collection before any member is exposed.
+
 #### Native Hugging Face/Xet transfers
 
 An October 24, 2026 measurement used production binary `d61d7342`,

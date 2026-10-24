@@ -64,6 +64,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Avoid scratch files when GC verifies S3 containers up to 2 MiB, using a fixed
+  memory allowance and retaining full content verification and disk spill for
+  larger containers.
 - Reuse native Xorb sources during shard validation and file hashing to avoid
   repeated object-store reads and temporary copies for sequential file terms.
 - Reject S3 ACL grants and ACL updates with `AccessControlListNotSupported`;

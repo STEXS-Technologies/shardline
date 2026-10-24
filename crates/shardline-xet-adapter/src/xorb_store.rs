@@ -141,8 +141,12 @@ where
     // Persisted member sidecars are derived data without an authenticated leaf
     // structure. Always validate the source container before exposing members.
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let Some((cursor, _length)) =
-        object_store.materialize_bounded_object_if_present(object_key, 0)?
+    // Keep small verification snapshots in a fixed budget instead of writing
+    // every remote container to scratch. Larger sources still spill to disk;
+    // this is request-local buffering, never a cache of source health.
+    const MAX_VERIFICATION_MEMORY_BYTES: u64 = 2 * 1024 * 1024;
+    let Some((cursor, _length)) = object_store
+        .materialize_bounded_object_if_present(object_key, MAX_VERIFICATION_MEMORY_BYTES)?
     else {
         return Ok(false);
     };
