@@ -15,7 +15,10 @@ case "$version" in
     *) echo "Unsupported compatibility baseline: $version" >&2; exit 2 ;;
 esac
 archive="shardline-$version-x86_64-unknown-linux-gnu.tar.gz"
-curl --fail --silent --show-error --location --retry 3 \
+# Keep a stalled provider or retry sequence from hanging release qualification.
+command -v timeout >/dev/null || { echo 'Missing required tool: timeout' >&2; exit 1; }
+timeout --kill-after=15s 600s curl --fail --silent --show-error --location --retry 3 \
+    --connect-timeout 15 --max-time 300 \
     "https://github.com/STEXS-Technologies/shardline/releases/download/v$version/$archive" \
     --output "$output/$archive"
 printf '%s  %s\n' "$checksum" \
