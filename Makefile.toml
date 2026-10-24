@@ -73,6 +73,7 @@ args = ["nextest", "run", "--workspace", "--lib", "${@}"]
 [tasks.test-integration]
 description = "Run integration tests (requires Docker: Postgres, MinIO, Redis)"
 workspace = false
+dependencies = ["build-reliability-runtime-fixture"]
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "cargo"
