@@ -42,6 +42,8 @@ static PROCESS_CLEANUP_REGISTERED: Once = Once::new();
 static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 mod minio_probe;
+mod tls;
+use tls::TlsMaterial;
 
 /// Containerized service stack for self-contained end-to-end tests.
 #[derive(Debug)]
@@ -57,6 +59,7 @@ pub struct DockerLocalStackBuilder {
     postgres: bool,
     minio: bool,
     minio_tmpfs: bool,
+    minio_tls: bool,
     redis: bool,
     redis_tls: bool,
 }
@@ -71,18 +74,14 @@ struct PostgresService {
 struct MinioService {
     container_name: String,
     host_port: u16,
+    tls_material: Option<TlsMaterial>,
 }
 
 #[derive(Debug)]
 struct RedisService {
     container_name: String,
     host_port: u16,
-    tls_material: Option<RedisTlsMaterial>,
-}
-
-#[derive(Debug)]
-struct RedisTlsMaterial {
-    directory: tempfile::TempDir,
+    tls_material: Option<TlsMaterial>,
 }
 
 impl DockerLocalStack {
@@ -168,13 +167,31 @@ impl DockerLocalStack {
         self.minio.as_ref().map(|service| S3RawConfig {
             bucket: DEFAULT_S3_BUCKET.to_owned(),
             region: "us-east-1".to_owned(),
-            endpoint: Some(format!("http://127.0.0.1:{}", service.host_port)),
+            endpoint: Some(format!(
+                "{}://127.0.0.1:{}",
+                if service.tls_material.is_some() {
+                    "https"
+                } else {
+                    "http"
+                },
+                service.host_port
+            )),
             access_key: Some(MINIO_ROOT_USER.to_owned()),
             secret_key: Some(MINIO_ROOT_PASSWORD.to_owned()),
             session_token: None,
             key_prefix: key_prefix.map(str::to_owned),
-            allow_http: true,
+            allow_http: service.tls_material.is_none(),
         })
+    }
+
+    /// Returns the private fixture CA used by TLS-enabled MinIO.
+    #[must_use]
+    pub fn minio_tls_ca_cert_path(&self) -> Option<PathBuf> {
+        self.minio
+            .as_ref()?
+            .tls_material
+            .as_ref()
+            .map(|material| material.directory.path().join("ca-cert.pem"))
     }
 
     /// Returns a unique test key prefix suitable for isolated object-store runs.
@@ -250,7 +267,7 @@ impl DockerLocalStack {
             .ok_or_else(|| IoError::new(ErrorKind::NotFound, "minio is not configured"))?;
         start_container(&service.container_name)?;
         service.host_port = docker_published_port(&service.container_name, 9000)?;
-        wait_for_minio(service.host_port)?;
+        wait_for_minio_service(service)?;
         Ok(())
     }
 
@@ -333,6 +350,14 @@ impl DockerLocalStackBuilder {
         self
     }
 
+    /// Enables MinIO HTTPS with a disposable private CA and verified preflight.
+    #[must_use]
+    pub const fn with_minio_tls(mut self) -> Self {
+        self.minio = true;
+        self.minio_tls = true;
+        self
+    }
+
     /// Enables Redis for the stack.
     #[must_use]
     pub const fn with_redis(mut self) -> Self {
@@ -381,7 +406,11 @@ impl DockerLocalStackBuilder {
             stack.postgres = Some(start_postgres_service(&run_id)?);
         }
         if self.minio {
-            stack.minio = Some(start_minio_service(&run_id, self.minio_tmpfs)?);
+            stack.minio = Some(start_minio_service(
+                &run_id,
+                self.minio_tmpfs,
+                self.minio_tls,
+            )?);
         }
         if self.redis_tls {
             stack.redis = Some(start_redis_tls_service(&run_id)?);
@@ -435,14 +464,31 @@ fn start_postgres_service(run_id: &str) -> Result<PostgresService, IoError> {
     service
 }
 
-fn start_minio_service(run_id: &str, memory_backed: bool) -> Result<MinioService, IoError> {
+fn start_minio_service(
+    run_id: &str,
+    memory_backed: bool,
+    use_tls: bool,
+) -> Result<MinioService, IoError> {
     let container_name = format!("shardline-test-minio-{run_id}");
+    let tls_material = use_tls.then(|| TlsMaterial::generate(false)).transpose()?;
+    let mut command = Command::new("docker");
+    if let Some(material) = &tls_material {
+        command
+            .args(["run", "-d", "--name", &container_name, "-v"])
+            .arg(format!(
+                "{}:/certs/public.crt:ro",
+                material.directory.path().join("server-cert.pem").display()
+            ))
+            .arg("-v")
+            .arg(format!(
+                "{}:/certs/private.key:ro",
+                material.directory.path().join("server-key.pem").display()
+            ));
+    } else {
+        command.args(["run", "-d", "--name", &container_name]);
+    }
     run_command_checked(
-        Command::new("docker")
-            .arg("run")
-            .arg("-d")
-            .arg("--name")
-            .arg(&container_name)
+        command
             .arg("-e")
             .arg(format!("MINIO_ROOT_USER={MINIO_ROOT_USER}"))
             .arg("-e")
@@ -460,21 +506,32 @@ fn start_minio_service(run_id: &str, memory_backed: bool) -> Result<MinioService
             .arg("server")
             .arg("/data")
             .arg("--console-address")
-            .arg(":9001"),
+            .arg(":9001")
+            .args(if use_tls {
+                &["--certs-dir", "/certs"][..]
+            } else {
+                &[][..]
+            }),
         "start minio container",
     )?;
     let service = (|| {
         let host_port = docker_published_port(&container_name, 9000)?;
-        let mc_host =
-            format!("http://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@127.0.0.1:{host_port}");
-        wait_for_minio(host_port)?;
-        minio_probe::create_bucket(run_id, &mc_host)?;
-        minio_probe::verify_writable(run_id, &mc_host)?;
-
-        Ok(MinioService {
+        let service = MinioService {
             container_name: container_name.clone(),
             host_port,
-        })
+            tls_material,
+        };
+        let protocol = if use_tls { "https" } else { "http" };
+        let mc_host =
+            format!("{protocol}://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@127.0.0.1:{host_port}");
+        let ca = service
+            .tls_material
+            .as_ref()
+            .map(|material| material.directory.path().join("ca-cert.pem"));
+        wait_for_minio_service(&service)?;
+        minio_probe::create_bucket(run_id, &mc_host, ca.as_deref())?;
+        minio_probe::verify_writable(run_id, &mc_host, ca.as_deref())?;
+        Ok(service)
     })();
     remove_container_after_start_failure(&container_name, &service);
     service
@@ -509,7 +566,7 @@ fn start_redis_service(run_id: &str) -> Result<RedisService, IoError> {
 }
 
 fn start_redis_tls_service(run_id: &str) -> Result<RedisService, IoError> {
-    let tls_material = generate_redis_tls_material()?;
+    let tls_material = TlsMaterial::generate(true)?;
     let container_name = format!("shardline-test-redis-tls-{run_id}");
     let mount = format!("{}:/tls:ro", tls_material.directory.path().display());
     run_command_checked(
@@ -644,16 +701,22 @@ fn wait_for_postgres(container_name: &str, host_port: u16) -> Result<(), IoError
     )
 }
 
-fn wait_for_minio(host_port: u16) -> Result<(), IoError> {
+fn wait_for_minio_service(service: &MinioService) -> Result<(), IoError> {
     wait_for(
         || {
-            run_command(
-                Command::new("curl")
-                    .arg("--fail")
-                    .arg("--silent")
-                    .arg(format!("http://127.0.0.1:{host_port}/minio/health/live")),
-            )
-            .is_ok_and(|output| output.status.success())
+            let mut command = Command::new("curl");
+            command.args(["-q", "--fail", "--silent", "--max-time", "5"]);
+            let protocol = service.tls_material.as_ref().map_or("http", |material| {
+                command
+                    .arg("--cacert")
+                    .arg(material.directory.path().join("ca-cert.pem"));
+                "https"
+            });
+            command.arg(format!(
+                "{protocol}://127.0.0.1:{}/minio/health/live",
+                service.host_port
+            ));
+            run_command(&mut command).is_ok_and(|output| output.status.success())
         },
         "minio readiness",
     )
@@ -682,122 +745,6 @@ fn wait_for_redis_service(service: &RedisService) -> Result<(), IoError> {
         },
         "redis readiness",
     )
-}
-
-fn generate_redis_tls_material() -> Result<RedisTlsMaterial, IoError> {
-    let directory = tempfile::tempdir()?;
-    let ca_key = directory.path().join("ca-key.pem");
-    let ca_cert = directory.path().join("ca-cert.pem");
-    generate_redis_tls_ca(&ca_key, &ca_cert)?;
-    generate_redis_tls_identity(directory.path(), "server", &ca_key, &ca_cert, true)?;
-    generate_redis_tls_identity(directory.path(), "client", &ca_key, &ca_cert, false)?;
-    make_redis_tls_material_readable(directory.path())?;
-    Ok(RedisTlsMaterial { directory })
-}
-
-#[cfg(unix)]
-fn make_redis_tls_material_readable(directory: &Path) -> Result<(), IoError> {
-    fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?;
-    for file_name in [
-        "ca-cert.pem",
-        "server-cert.pem",
-        "server-key.pem",
-        "client-cert.pem",
-        "client-key.pem",
-    ] {
-        fs::set_permissions(directory.join(file_name), fs::Permissions::from_mode(0o644))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_redis_tls_material_readable(_directory: &Path) -> Result<(), IoError> {
-    Ok(())
-}
-
-fn generate_redis_tls_ca(ca_key: &Path, ca_cert: &Path) -> Result<(), IoError> {
-    run_command_checked(
-        Command::new("openssl")
-            .arg("req")
-            .arg("-x509")
-            .arg("-newkey")
-            .arg("rsa:2048")
-            .arg("-nodes")
-            .arg("-sha256")
-            .arg("-days")
-            .arg("1")
-            .arg("-subj")
-            .arg("/CN=shardline-redis-test-ca")
-            .arg("-keyout")
-            .arg(ca_key)
-            .arg("-out")
-            .arg(ca_cert),
-        "generate redis TLS certificate authority",
-    )?;
-    Ok(())
-}
-
-fn generate_redis_tls_identity(
-    directory: &Path,
-    identity: &str,
-    ca_key: &Path,
-    ca_cert: &Path,
-    is_server: bool,
-) -> Result<(), IoError> {
-    let key = directory.join(format!("{identity}-key.pem"));
-    let request = directory.join(format!("{identity}.csr"));
-    let cert = directory.join(format!("{identity}-cert.pem"));
-    let subject = format!("/CN=shardline-redis-test-{identity}");
-    let ext_file = directory.join(format!("{identity}.ext"));
-    fs::write(
-        &ext_file,
-        "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n",
-    )?;
-    let mut request_command = Command::new("openssl");
-    request_command
-        .arg("req")
-        .arg("-new")
-        .arg("-newkey")
-        .arg("rsa:2048")
-        .arg("-nodes")
-        .arg("-subj")
-        .arg(subject)
-        .arg("-keyout")
-        .arg(&key)
-        .arg("-out")
-        .arg(&request);
-    if is_server {
-        request_command
-            .arg("-addext")
-            .arg("subjectAltName=DNS:localhost,IP:127.0.0.1");
-    }
-    run_command_checked(
-        &mut request_command,
-        "generate redis TLS certificate request",
-    )?;
-    run_command_checked(
-        Command::new("openssl")
-            .arg("x509")
-            .arg("-req")
-            .arg("-in")
-            .arg(request)
-            .arg("-CA")
-            .arg(ca_cert)
-            .arg("-CAkey")
-            .arg(ca_key)
-            .arg("-CAcreateserial")
-            .arg("-days")
-            .arg("1")
-            .arg("-sha256")
-            .arg("-copy_extensions")
-            .arg("copy")
-            .arg("-extfile")
-            .arg(&ext_file)
-            .arg("-out")
-            .arg(cert),
-        "sign redis TLS certificate",
-    )?;
-    Ok(())
 }
 
 fn remove_container_after_start_failure<T>(container_name: &str, result: &Result<T, IoError>) {
