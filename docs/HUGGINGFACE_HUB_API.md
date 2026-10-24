@@ -339,6 +339,10 @@ The explicit Linux 1 GiB qualification also checks a cold native download and
 plain HTTP readback without whole-file buffering. Use disk-backed scratch
 (`TMPDIR=/var/tmp`, for example) with sufficient quota when running it; free
 space reported by `df` does not establish available per-user tmpfs quota.
+The 1 GiB checks also pass with `huggingface_hub` 1.25.1 and `hf_xet` 1.5.2
+on local storage and PostgreSQL/MinIO. Each verifies the cold native download
+and two concurrent slow plain HTTP readers. These are integrity and memory
+checks on one host, not production throughput or multi-host scaling results.
 
 The same full client flow also passes with PostgreSQL metadata and MinIO object
 storage using `huggingface_hub` 1.25.1 with `hf_xet` 1.5.2, 1.6.0, and 1.7.0.

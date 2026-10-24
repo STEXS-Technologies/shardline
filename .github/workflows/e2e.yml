@@ -200,7 +200,7 @@ jobs:
             --test native_huggingface_cli_e2e --run-ignored all \
             -E 'test(official_huggingface_js_edits_use_native_delta)'
 
-      - name: Qualify hf_xet 1.5 expiry recovery
+      - name: Qualify hf_xet 1.5 large transfers and expiry recovery
         run: |
           client_env="${RUNNER_TEMP}/native-xet-15-qualification"
           python3 -m venv "$client_env"
@@ -208,7 +208,7 @@ jobs:
           export PATH="$client_env/bin:$PATH"
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_huggingface_cli_e2e --run-ignored all \
-            -E 'test(native_huggingface_cli_recovers_after_expired_xorb_url)'
+            -E 'test(native_huggingface_one_gib) or test(native_huggingface_cli_recovers_after_expired_xorb_url)'
 
       - name: Qualify hf_xet 1.7 client compatibility
         run: |
