@@ -1866,7 +1866,7 @@ async fn test_concurrent_upload_and_delete() {
 
 // These additive capabilities intentionally live outside the core migration
 // ledger and survive a core rollback for predecessor-reader compatibility.
-const FRONTEND_CAPABILITY_VERSIONS: [&str; 7] = [
+const FRONTEND_CAPABILITY_VERSIONS: [&str; 8] = [
     "20261021000000",
     "20261022000000",
     "20261023000000",
@@ -1874,6 +1874,7 @@ const FRONTEND_CAPABILITY_VERSIONS: [&str; 7] = [
     "20261023020000",
     "20261023030000",
     "20261023040000",
+    "20261024000000",
 ];
 
 const fn total_schema_entries() -> usize {

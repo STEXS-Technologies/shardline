@@ -38,6 +38,16 @@ test-group = "docker-integration"
 filter = 'binary(s3_integration)'
 test-group = "docker-integration"
 
+# Each deployment drill creates an entire disposable Compose stack and injects
+# backend outages. Match the dedicated distributed gate's inter-test admission;
+# clients and replicas inside each drill still execute concurrently.
+[[profile.default.overrides]]
+filter = 'binary(deployment_chaos) or binary(multinode_chaos)'
+test-group = "deployment-chaos"
+
+[test-groups.deployment-chaos]
+max-threads = 1
+
 [test-groups.docker-integration]
 max-threads = 4
 

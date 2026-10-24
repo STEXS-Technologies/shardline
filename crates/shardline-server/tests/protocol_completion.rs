@@ -277,8 +277,8 @@ assert overridden['ContentType'] == 'text/plain' and overridden['CacheControl'] 
 assert overridden['ContentDisposition'] == 'inline' and overridden['ContentEncoding'] == 'identity' and overridden['ContentLanguage'] == 'en-US', overridden
 assert overridden['Expires'] == datetime.datetime(2015, 10, 21, 7, 28, tzinfo=datetime.timezone.utc), overridden
 assert overridden['Body'].read() == b'header-signed session bytes'
-overridden_head = c.head_object(Bucket='aws-resume.locks', Key='session/header.bin', ResponseContentDisposition='attachment')
-assert overridden_head['ContentDisposition'] == 'attachment', overridden_head
+stored_head = c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')
+assert stored_head['ContentType'] == 'application/x-shardline-test', stored_head
 partial = c.get_object(Bucket='aws-resume.locks', Key='session/header.bin', Range='bytes=0-3', ResponseContentType='text/plain')
 assert partial['ResponseMetadata']['HTTPStatusCode'] == 206 and partial['ContentType'] != 'text/plain', partial
 c.put_object_tagging(Bucket='aws-resume.locks', Key='session/header.bin', Tagging={'TagSet': [
@@ -2673,6 +2673,20 @@ async fn exercise_native_git_lfs(frontend: ServerFrontend, database: Option<&str
     git(worktree.path(), &["push", "origin", "main"]).await;
     std::fs::remove_dir_all(worktree.path().join(".git/lfs/objects")).unwrap();
     std::fs::remove_file(worktree.path().join("model.bin")).unwrap();
+    // Fetch-all names commits from the separate bare Git fixture, whose
+    // history is not published to the Hub. Use repository-wide read access
+    // for that operation; a main-scoped token cannot authorize arbitrary
+    // commit identities from an external Git remote.
+    let download_credential = revision_token("native-client", &repository, TokenScope::Read, None);
+    git(
+        worktree.path(),
+        &[
+            "config",
+            "http.extraHeader",
+            &format!("Authorization: Bearer {download_credential}"),
+        ],
+    )
+    .await;
     git(worktree.path(), &["lfs", "fetch", "--all", "origin"]).await;
     git(worktree.path(), &["lfs", "checkout"]).await;
     assert_eq!(
