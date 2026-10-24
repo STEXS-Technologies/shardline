@@ -269,7 +269,7 @@ try:
 finally:
     for key, upload_id in created:
         c.abort_multipart_upload(Bucket='aws-resume.locks', Key=key, UploadId=upload_id)
-c.put_object(Bucket='aws-resume.locks', Key='session/header.bin', Body=b'header-signed session bytes', ContentType='application/x-shardline-test')
+c.put_object(Bucket='aws-resume.locks', Key='session/header.bin', Body=b'header-signed session bytes', ContentType='application/x-shardline-test', ChecksumAlgorithm='CRC32')
 assert c.get_object(Bucket='aws-resume.locks', Key='session/header.bin')['Body'].read() == b'header-signed session bytes'
 assert c.head_object(Bucket='aws-resume.locks', Key='session/header.bin')['ContentType'] == 'application/x-shardline-test'
 overridden = c.get_object(Bucket='aws-resume.locks', Key='session/header.bin', ResponseContentType='text/plain', ResponseCacheControl='no-cache', ResponseContentDisposition='inline', ResponseContentEncoding='identity', ResponseContentLanguage='en-US', ResponseExpires=datetime.datetime(2015, 10, 21, 7, 28, tzinfo=datetime.timezone.utc))
