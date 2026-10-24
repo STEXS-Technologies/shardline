@@ -18,6 +18,11 @@ use thiserror::Error;
 
 use crate::error::XetAdapterError;
 
+mod authenticated_footer;
+pub use authenticated_footer::{
+    AuthenticatedXorbFooter, decode_authenticated_xorb_chunk, validate_serialized_xorb_footer,
+};
+
 /// Maximum total unpacked (decompressed) bytes accepted for a single serialized
 /// xorb, checked BEFORE any decompression happens.
 ///
