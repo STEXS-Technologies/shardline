@@ -5,7 +5,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 
 use shardline_server_core::AuthorizedRepository;
@@ -33,7 +33,7 @@ pub(crate) async fn repo_create(
     _headers: HeaderMap,
     repo: HubRepository<true>,
     Json(request): Json<RepoCreateRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), HubApiError> {
+) -> Result<Response, HubApiError> {
     let full_name = request.organization.as_deref().map_or_else(
         || request.name.clone(),
         |organization| format!("{organization}/{}", request.name),
@@ -52,7 +52,7 @@ pub(crate) async fn repo_create(
         &full_name,
         super::repo_creation::private_visibility(request.private, request.visibility.as_deref())?,
     )?;
-    shardline_metrics::record_hub_api_request("repo_create", "POST", result.0.as_u16());
+    shardline_metrics::record_hub_api_request("repo_create", "POST", result.status().as_u16());
     Ok(result)
 }
 
@@ -64,7 +64,7 @@ pub(crate) async fn repo_create_type(
     repo: HubRepository<true, false>,
     Path((repo_type, _ns, _repo_name)): Path<(String, String, String)>,
     Json(body): Json<serde_json::Value>,
-) -> Result<(StatusCode, Json<serde_json::Value>), HubApiError> {
+) -> Result<Response, HubApiError> {
     // The path provides the requested identity, so bind it to the exact
     // repository in the write token before reading or creating metadata.
     repo.require_creation_binding(&_ns, &_repo_name)?;
@@ -84,7 +84,7 @@ pub(crate) async fn repo_create_type(
     let private =
         super::repo_creation::private_visibility(options.private, options.visibility.as_deref())?;
     let result = super::repo_creation::create(&state, repo.capability(), rt, &name, private)?;
-    shardline_metrics::record_hub_api_request("repo_create_type", "POST", result.0.as_u16());
+    shardline_metrics::record_hub_api_request("repo_create_type", "POST", result.status().as_u16());
     Ok(result)
 }
 

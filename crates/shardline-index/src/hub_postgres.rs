@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+mod creation;
 mod file_write;
 mod object_location;
 mod ref_batch;
@@ -293,73 +294,29 @@ impl HubStore for PostgresIndexStore {
         name: &str,
         private: bool,
     ) -> Result<HubRepo, Self::Error> {
-        let pool = self.pool().clone();
-        let repo_type_str = repo_type_to_str(repo_type);
-        let name = name.to_owned();
-        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
+        creation::create(self, repo_type, name, private, false, None)
+    }
 
-        block_on_async(async {
-            let mut tx = pool.begin().await?;
-
-            sqlx::query(
-                "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
-                 VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint)",
-            )
-            .bind(&name)
-            .bind(repo_type_str)
-            .bind(private)
-            .bind(&initial_sha)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                 VALUES ($1, 'main', $2, NULL, NULL, EXTRACT(EPOCH FROM now())::bigint)
-                 ON CONFLICT (repo_id, sha) DO NOTHING",
-            )
-            .bind(&name)
-            .bind(&initial_sha)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES ($1, 'main', $2)
-                 ON CONFLICT (repo_id, ref_name) DO NOTHING",
-            )
-            .bind(&name)
-            .bind(&initial_sha)
-            .execute(&mut *tx)
-            .await?;
-            let evidence = HubRefEvidenceLog::baseline(HubRefSnapshot::new(
-                &name,
-                "main",
-                Some(initial_sha.clone()),
-            )?)?;
-            persist_hub_ref_evidence(&mut tx, &evidence).await?;
-
-            let row = sqlx::query(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                 FROM shardline_hub_repos WHERE repo_id = $1",
-            )
-            .bind(&name)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            tx.commit().await?;
-
-            Ok(HubRepo {
-                repo_id: row.try_get("repo_id")?,
-                repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                private: row.try_get::<bool, _>("private")?,
-                default_branch: row.try_get("default_branch")?,
-                created_at_unix_seconds: i64_to_u64(
-                    row.try_get::<i64, _>("created_at_unix_seconds")?,
-                )?,
-                updated_at_unix_seconds: i64_to_u64(
-                    row.try_get::<i64, _>("updated_at_unix_seconds")?,
-                )?,
-            })
-        })
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&crate::hub::HubCreationActor>,
+    ) -> Result<crate::hub::HubCreationOutcome, Self::Error> {
+        use crate::hub::HubCreationOutcome;
+        match creation::create(self, repo_type, name, private, true, actor) {
+            Ok(repo) => Ok(HubCreationOutcome::Created(repo)),
+            Err(PostgresMetadataStoreError::Sqlx(error)) => {
+                match error.as_database_error().and_then(|e| e.code()).as_deref() {
+                    Some("SL403") => Ok(HubCreationOutcome::Denied),
+                    Some("SL409") => Ok(HubCreationOutcome::QuotaExceeded),
+                    Some("SL429") => Ok(HubCreationOutcome::RateLimited),
+                    _ => Err(PostgresMetadataStoreError::Sqlx(error)),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {

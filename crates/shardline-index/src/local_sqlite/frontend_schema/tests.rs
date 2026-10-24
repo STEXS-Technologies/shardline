@@ -4,6 +4,10 @@ use super::*;
 fn fixture() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     super::super::helpers::ensure_local_schema_migrations_table(&connection).unwrap();
+    let (repository_schema, _) = include_str!("../../../migrations/20260629000000_hub_api.up.sql")
+        .split_once(';')
+        .unwrap();
+    connection.execute_batch(repository_schema).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE shardline_file_records (
@@ -45,6 +49,25 @@ fn fresh_install_is_idempotent_and_keeps_core_history_unchanged() {
         )
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn creation_guard_and_authorization_column_tampering_fail_closed() {
+    for mutation in [
+        "DROP TRIGGER shardline_hub_creation_guard",
+        "DROP TRIGGER shardline_hub_creation_record",
+        "ALTER TABLE shardline_hub_repos RENAME COLUMN creation_authorized TO replaced_authorization",
+        "DROP INDEX shardline_hub_creation_events_window",
+        "DROP INDEX shardline_hub_repos_creation_namespace",
+    ] {
+        let mut connection = fixture();
+        install(&mut connection).unwrap();
+        connection.execute_batch(mutation).unwrap();
+        assert!(matches!(
+            check(&connection),
+            Err(LocalIndexStoreError::FrontendSchemaIncompatible(_))
+        ));
+    }
 }
 
 #[test]

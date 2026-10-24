@@ -3,6 +3,7 @@
 use super::*;
 use shardline_index::{LocalRecordStore, XetFileIdentity};
 
+mod creation_policy;
 mod native_xet;
 mod postgres;
 

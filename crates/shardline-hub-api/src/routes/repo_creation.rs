@@ -1,8 +1,9 @@
 //! Common repository creation and conflict handling for both Hub entrypoints.
 use super::HubState;
 use crate::error::HubApiError;
+use axum::response::{IntoResponse, Response};
 use axum::{Json, http::StatusCode};
-use shardline_index::hub::HubRepoType;
+use shardline_index::hub::{HubCreationActor, HubCreationOutcome, HubRepoType};
 use shardline_server_core::AuthorizedRepository;
 
 /// Type-specific creation has its repository identity in the URL.
@@ -35,16 +36,17 @@ pub(super) fn create(
     repo_type: HubRepoType,
     name: &str,
     private: bool,
-) -> Result<(StatusCode, Json<serde_json::Value>), HubApiError> {
-    let existing = state
-        .store
-        .get_repo(name)
-        .map_err(|error| HubApiError::CasError(error.to_string()))?;
-    let existing = if let Some(existing) = existing {
-        existing
-    } else {
-        match state.store.create_repo(repo_type, name, private) {
-            Ok(created) => {
+) -> Result<Response, HubApiError> {
+    let actor = capability.claims().map(|claims| HubCreationActor {
+        issuer: claims.issuer().to_owned(),
+        subject: claims.subject().to_owned(),
+    });
+    let existing =
+        match state
+            .store
+            .create_repo_authorized(repo_type, name, private, actor.as_ref())
+        {
+            Ok(HubCreationOutcome::Created(created)) => {
                 return Ok((
                     StatusCode::CREATED,
                     Json(serde_json::to_value(
@@ -53,7 +55,26 @@ pub(super) fn create(
                             &created,
                         ),
                     )?),
-                ));
+                )
+                    .into_response());
+            }
+            Ok(HubCreationOutcome::Denied) => return Err(HubApiError::Forbidden),
+            Ok(HubCreationOutcome::QuotaExceeded) => {
+                return Ok((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error":"namespace repository capacity reached"
+                    })),
+                )
+                    .into_response());
+            }
+            Ok(HubCreationOutcome::RateLimited) => {
+                return Ok((
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                Json(serde_json::json!({"error":"repository creation rate exceeded; retry later"})),
+            )
+                .into_response());
             }
             Err(error) => {
                 // Another replica may have won after our initial lookup. The
@@ -66,8 +87,7 @@ pub(super) fn create(
                     .map_err(|read_error| HubApiError::CasError(read_error.to_string()))?
                     .ok_or_else(|| HubApiError::CasError(error.to_string()))?
             }
-        }
-    };
+        };
     let owns_target = capability.claims().is_some_and(|claims| {
         let repository = claims.repository();
         name == format!("{}/{}", repository.owner(), repository.name())
@@ -81,5 +101,5 @@ pub(super) fn create(
         // A creation-only grant is not permission to inspect an existing repo.
         serde_json::json!({"name":name,"message":"repository already exists"})
     };
-    Ok((StatusCode::CONFLICT, Json(response)))
+    Ok((StatusCode::CONFLICT, Json(response)).into_response())
 }

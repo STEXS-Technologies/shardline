@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
+- Add optional shared repository-creation limits and creator denials, managed
+  through `admin repository-policy` in the existing metadata database.
+  Creation checks and publication are atomic across replicas; defaults preserve
+  existing behavior, and configured namespaces reject legacy creation writers.
 - Support scoped Xet delta-upload metadata with chunk-aligned edit windows,
   authenticated gap commitments and verified recovery of older source metadata.
 - Support authenticated Xet file HEAD requests with metadata-only length lookup

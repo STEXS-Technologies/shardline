@@ -237,7 +237,7 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 34] = [
 
 // Additive frontend state has separate installation history so released servers
 // can continue validating the unchanged core ledger during a rolling upgrade.
-pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 7] = [
+pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 8] = [
     LocalSqliteMigration {
         version: "20261021000000",
         name: "xet_file_identities",
@@ -279,5 +279,11 @@ pub(super) const FRONTEND_MIGRATIONS: [LocalSqliteMigration; 7] = [
         name: "xet_file_aliases",
         up_sql: include_str!("../../migrations/20261023040000_xet_file_aliases.up.sql"),
         down_sql: include_str!("../../migrations/20261023040000_xet_file_aliases.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20261024000000",
+        name: "hub_creation_policy",
+        up_sql: include_str!("../../migrations/20261024000000_hub_creation_policy.up.sql"),
+        down_sql: include_str!("../../migrations/20261024000000_hub_creation_policy.down.sql"),
     },
 ];

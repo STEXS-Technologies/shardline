@@ -352,6 +352,103 @@ async fn repo_create_cannot_create_outside_the_write_token_repository() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn denied_public_squatting_cannot_expose_a_later_private_upload() {
+    for typed in [false, true] {
+        let (_root, state) = build_state();
+        let app = shardline_hub_api::hub_routes(state.clone(), true);
+        let uri = if typed {
+            "/api/models/bob/private"
+        } else {
+            "/api/repos/create"
+        };
+        let create = |credential: &str, private: bool| {
+            request(
+                "POST",
+                uri,
+                json_headers(credential),
+                Body::from(
+                    serde_json::json!({
+                        "organization":"bob", "name":"private", "private":private
+                    })
+                    .to_string(),
+                ),
+            )
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(create("alice:own:write", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(state.store.get_repo("bob/private").unwrap().is_none());
+        assert_eq!(
+            app.clone()
+                .oneshot(create("bob:private:write", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CREATED
+        );
+        let commit = "{\"header\":{\"message\":\"private upload\"}}\n{\"file\":{\"path\":\"secret.txt\",\"content\":\"aGVsbG8=\"}}\n";
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/models/bob/private/commit/main",
+                ndjson_headers("bob:private:write"),
+                Body::from(commit),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let path = "/bob/private/resolve/main/secret.txt";
+        let response = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                path,
+                auth_header("bob:private:write"),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"hello"
+        );
+        for (headers, expected) in [
+            (HeaderMap::new(), StatusCode::UNAUTHORIZED),
+            (auth_header("alice:own:write"), StatusCode::FORBIDDEN),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request("GET", path, headers, Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(!body.windows(5).any(|window| window == b"hello"));
+        }
+        assert!(
+            state
+                .store
+                .get_repo("bob/private")
+                .unwrap()
+                .unwrap()
+                .private
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_visibility_never_silently_downgrades_to_public() {
     for uri in ["/api/repos/create", "/api/models/alice/visibility"] {
         for visibility in ["protected", "PRIVATE", "", "unknown"] {
@@ -462,6 +559,119 @@ async fn repo_create_allows_exact_scoped_target_and_safe_retry() {
     assert_eq!(retry.status(), StatusCode::CONFLICT);
     let body = axum::body::to_bytes(retry.into_body(), 4096).await.unwrap();
     assert!(String::from_utf8_lossy(&body).contains("alice/new-repo"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_creation_routes_enforce_shared_limits_and_creator_revocation() {
+    use shardline_index::hub::{HubCreationActor, HubCreationPolicy};
+
+    for typed in [false, true] {
+        let (root, state) = build_state();
+        let owner = LocalIndexStore::open(root.path().to_owned());
+        let mut policy = HubCreationPolicy {
+            max_repositories: Some(1),
+            max_creations: Some(1),
+            ..HubCreationPolicy::default()
+        };
+        owner
+            .set_hub_creation_policy("alice", Some(&policy))
+            .unwrap();
+        let app = shardline_hub_api::hub_routes(state.clone(), true);
+        let create = |name: &str, authenticated: bool| {
+            let uri = if typed {
+                format!("/api/models/alice/{name}")
+            } else {
+                "/api/repos/create".to_owned()
+            };
+            let headers = if authenticated {
+                json_headers(&format!("alice:{name}:write"))
+            } else {
+                let mut headers = HeaderMap::new();
+                headers.insert("content-type", HeaderValue::from_static("application/json"));
+                headers
+            };
+            request(
+                "POST",
+                &uri,
+                headers,
+                Body::from(
+                    serde_json::json!({
+                        "organization":"alice", "name":name, "private":true
+                    })
+                    .to_string(),
+                ),
+            )
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(create("one", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(create("one", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(create("one", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(create("two", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        policy.max_repositories = Some(10);
+        owner
+            .set_hub_creation_policy("alice", Some(&policy))
+            .unwrap();
+        let limited = app.clone().oneshot(create("two", true)).await.unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(limited.headers().get("retry-after").unwrap(), "1");
+        policy.denied_creators.push(HubCreationActor {
+            issuer: "test-issuer".to_owned(),
+            subject: "test-subject".to_owned(),
+        });
+        owner
+            .set_hub_creation_policy("alice", Some(&policy))
+            .unwrap();
+        // The same already-issued, otherwise valid credential is denied even
+        // for an existing private identity; it receives no conflict metadata.
+        for name in ["one", "two"] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(create(name, true))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert!(state.store.get_repo("alice/one").unwrap().unwrap().private);
+        assert!(state.store.get_repo("alice/two").unwrap().is_none());
+        let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_hub_creation_events WHERE namespace='alice'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

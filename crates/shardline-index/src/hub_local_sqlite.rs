@@ -1,5 +1,6 @@
 use std::path::Path;
 
+mod creation;
 mod object_location;
 mod ref_batch;
 
@@ -19,9 +20,7 @@ use crate::{
         verify_hub_ref_evidence, verify_hub_ref_evidence_batch,
     },
 };
-use shardline_reliability::{
-    HubRefEvidenceLog, SnapshotEvidence, verify_and_append_snapshot_transition,
-};
+use shardline_reliability::{SnapshotEvidence, verify_and_append_snapshot_transition};
 
 fn sqlite_store_error(error: &LocalIndexStoreError) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(error.to_string())
@@ -130,45 +129,34 @@ impl HubStore for LocalIndexStore {
         name: &str,
         private: bool,
     ) -> Result<HubRepo, Self::Error> {
-        let root = self.root().to_owned();
-        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
-        let now = unix_now_seconds_lossy();
-        retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
-            let tx = conn.transaction()?;
-            tx.execute(
-                "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![name, repo_type_to_str(repo_type), private as i64, initial_sha, u64_to_i64(now)?, u64_to_i64(now)?],
-            )?;
-            tx.execute(
-                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                 VALUES (?1, 'main', ?2, NULL, NULL, ?3)",
-                params![name, initial_sha, u64_to_i64(now)?],
-            )?;
-            tx.execute(
-                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, 'main', ?2)",
-                params![name, initial_sha],
-            )?;
-            let evidence = HubRefEvidenceLog::baseline(hub_ref_snapshot(
-                name,
-                "main",
-                Some(initial_sha.clone()),
-            )?)?;
-            for event in evidence.events() {
-                persist_hub_ref_evidence(&tx, event)?;
+        creation::create(self, repo_type, name, private, false, None)
+    }
+
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&crate::hub::HubCreationActor>,
+    ) -> Result<crate::hub::HubCreationOutcome, Self::Error> {
+        use crate::hub::HubCreationOutcome;
+        match creation::create(self, repo_type, name, private, true, actor) {
+            Ok(repo) => Ok(HubCreationOutcome::Created(repo)),
+            Err(LocalIndexStoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                error,
+                Some(message),
+            ))) if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER => {
+                match message.as_str() {
+                    "shardline_hub_creation_denied" => Ok(HubCreationOutcome::Denied),
+                    "shardline_hub_creation_quota" => Ok(HubCreationOutcome::QuotaExceeded),
+                    "shardline_hub_creation_rate" => Ok(HubCreationOutcome::RateLimited),
+                    _ => Err(LocalIndexStoreError::Sqlite(
+                        rusqlite::Error::SqliteFailure(error, Some(message)),
+                    )),
+                }
             }
-            tx.commit()?;
-            Ok(())
-        })?;
-        Ok(HubRepo {
-            repo_id: name.to_owned(),
-            repo_type,
-            private,
-            default_branch: initial_sha,
-            created_at_unix_seconds: now,
-            updated_at_unix_seconds: now,
-        })
+            Err(error) => Err(error),
+        }
     }
 
     fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {

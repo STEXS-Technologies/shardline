@@ -275,8 +275,8 @@ pub(crate) struct DbMigrateRepairArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    about = "Mint a local administrative token.",
-    long_about = "Create a signed bearer token for self-hosted operations, provider mediation, or debugging workflows."
+    about = "Manage local administrative credentials and repository creation policy.",
+    long_about = "Create signed bearer tokens or manage shared repository creation policy using the deployment's metadata credentials."
 )]
 pub(crate) struct AdminCommandArgs {
     #[command(subcommand)]
@@ -287,6 +287,24 @@ pub(crate) struct AdminCommandArgs {
 pub(crate) enum AdminSubcommand {
     /// Mint a local bearer token for self-hosted operation and testing.
     Token(AdminTokenArgs),
+    /// Inspect, replace or clear shared namespace creation policy.
+    RepositoryPolicy(AdminRepositoryPolicyArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminRepositoryPolicyArgs {
+    /// Namespace whose creation policy is managed.
+    #[arg(long)]
+    pub(crate) namespace: String,
+    /// Optional local deployment root override.
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    /// Replace policy from bounded JSON input; omit to inspect existing policy.
+    #[arg(long, conflicts_with = "clear")]
+    pub(crate) policy_file: Option<PathBuf>,
+    /// Clear configured limits and denials without removing repositories.
+    #[arg(long)]
+    pub(crate) clear: bool,
 }
 
 #[derive(Debug, Args)]

@@ -1,7 +1,11 @@
 use shardline_protocol::SecretString;
 use std::sync::Arc;
 
+mod creation;
 mod object_location;
+pub use creation::{
+    HubCreationActor, HubCreationOutcome, HubCreationPolicy, HubCreationPolicyError,
+};
 pub use object_location::{HubObjectKind, HubObjectLocation};
 
 pub use super::hub_local_sqlite::ensure_hub_tables;
@@ -401,6 +405,22 @@ pub struct HubWebhook {
 /// [`PostgresIndexStore`](crate::PostgresIndexStore) implement this trait to
 /// provide durable storage for Hub API metadata.
 pub trait HubStore: Send + Sync {
+    /// Publishes a repository after route-level scope authorization. Built-in
+    /// stores additionally enforce shared policy in the publication transaction.
+    /// Custom stores retain their existing creation contract by default.
+    /// # Errors
+    /// Returns an error on conflict or storage failure.
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Self::Error> {
+        let _ = actor;
+        self.create_repo(repo_type, name, private)
+            .map(HubCreationOutcome::Created)
+    }
     /// Looks up a derived physical namespace within this exact repository.
     /// Custom stores may retain legacy addressing by returning no location.
     /// # Errors
@@ -852,6 +872,13 @@ impl Clone for BoxedHubStore {
 }
 
 trait ErasedHubStore: Send + Sync {
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Box<dyn std::error::Error + Send + Sync>>;
     fn object_location(
         &self,
         scope: &shardline_protocol::RepositoryScope,
@@ -1045,6 +1072,16 @@ trait ErasedHubStore: Send + Sync {
 }
 
 impl<T: HubStore> ErasedHubStore for T {
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_repo_authorized(self, repo_type, name, private, actor)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
     fn object_location(
         &self,
         scope: &shardline_protocol::RepositoryScope,
@@ -1368,6 +1405,19 @@ impl<T: HubStore> ErasedHubStore for T {
 }
 
 impl BoxedHubStore {
+    /// Applies built-in shared creation policy after route scope authorization.
+    /// # Errors
+    /// Returns an error on repository conflict or storage failure.
+    pub fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .create_repo_authorized(repo_type, name, private, actor)
+    }
     /// Resolves a derived object location for an already authorized repository.
     /// # Errors
     /// Returns an error when metadata cannot be read.
@@ -1846,6 +1896,15 @@ impl<T: HubStore> ErasedHubStore for ErasedAdapter<T>
 where
     T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_repo_authorized(&self.0, repo_type, name, private, actor).map_err(Into::into)
+    }
     fn object_location(
         &self,
         scope: &shardline_protocol::RepositoryScope,

@@ -105,6 +105,9 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
         .await,
         "table catalog",
     );
+    let has_creation_policy = table_names
+        .iter()
+        .any(|name| name == "shardline_hub_creation_policies");
     for table_name in table_names {
         let table_name = quoted_identifier(&table_name);
         fixture_stage(
@@ -143,6 +146,7 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
            ON namespace_entry.oid = table_entry.relnamespace
          WHERE namespace_entry.nspname = 'public'
            AND table_entry.relname LIKE 'shardline_%'
+           AND trigger.tgname NOT LIKE 'shardline_hub_creation_%'
            AND NOT trigger.tgisinternal",
         )
         .fetch_all(&admin_pool)
@@ -178,6 +182,32 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
             .await,
         "isolated connection pool/search path",
     );
+    if has_creation_policy {
+        fixture_stage(
+            query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.shardline_hub_creation_denials ADD FOREIGN KEY(namespace) REFERENCES {schema}.shardline_hub_creation_policies(namespace) ON DELETE CASCADE"
+            )))
+            .execute(&pool)
+            .await,
+            "isolated creation policy foreign key",
+        );
+        let migration =
+            include_str!("../../../../migrations/20261024000000_hub_creation_policy.up.sql");
+        let (_, functions) = fixture_stage(
+            migration
+                .split_once("CREATE FUNCTION shardline_hub_creation_policy_lock()")
+                .ok_or(()),
+            "creation policy function definitions",
+        );
+        let definitions =
+            format!("CREATE FUNCTION shardline_hub_creation_policy_lock(){functions}");
+        fixture_stage(
+            sqlx::raw_sql(sqlx::AssertSqlSafe(definitions))
+                .execute(&pool)
+                .await,
+            "isolated creation policy functions and triggers",
+        );
+    }
     fixture_stage(
         super::PostgresIndexStore::new(pool.clone())
             .initialize_remote_delete_guard()

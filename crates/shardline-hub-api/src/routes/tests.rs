@@ -13,6 +13,16 @@ use crate::error::HubApiError;
 
 use super::*;
 
+async fn decode_creation_response(
+    response: axum::response::Response,
+) -> (StatusCode, serde_json::Value) {
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
 #[test]
 fn parse_csv_line_simple_fields() {
     let result = parse_csv_line("a,b,c");
@@ -1587,14 +1597,17 @@ async fn handler_repo_create_model() {
         private: false,
         visibility: None,
     };
-    let (status, json) = repo_create(
-        State(state.clone()),
-        default_headers(),
-        test_repo(&state, &default_headers()),
-        Json(req),
+    let (status, json) = decode_creation_response(
+        repo_create(
+            State(state.clone()),
+            default_headers(),
+            test_repo(&state, &default_headers()),
+            Json(req),
+        )
+        .await
+        .unwrap(),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(json["id"], "ns/new-repo");
 }
@@ -1625,15 +1638,18 @@ async fn handler_repo_create_type_invalid_type() {
 #[tokio::test]
 async fn handler_repo_create_type_success() {
     let (_td, state) = make_test_state();
-    let (status, json) = repo_create_type(
-        State(state.clone()),
-        default_headers(),
-        test_repo(&state, &default_headers()),
-        Path(("models".into(), "ns".into(), "my-repo".into())),
-        Json(serde_json::json!({})),
+    let (status, json) = decode_creation_response(
+        repo_create_type(
+            State(state.clone()),
+            default_headers(),
+            test_repo(&state, &default_headers()),
+            Path(("models".into(), "ns".into(), "my-repo".into())),
+            Json(serde_json::json!({})),
+        )
+        .await
+        .unwrap(),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(json["id"], "ns/my-repo");
     assert_eq!(json["type"], "model");
@@ -1642,15 +1658,18 @@ async fn handler_repo_create_type_success() {
 #[tokio::test]
 async fn handler_repo_create_type_private() {
     let (_td, state) = make_test_state();
-    let (_, json) = repo_create_type(
-        State(state.clone()),
-        default_headers(),
-        test_repo(&state, &default_headers()),
-        Path(("datasets".into(), "ns".into(), "secret-data".into())),
-        Json(serde_json::json!({"private": true})),
+    let (_, json) = decode_creation_response(
+        repo_create_type(
+            State(state.clone()),
+            default_headers(),
+            test_repo(&state, &default_headers()),
+            Path(("datasets".into(), "ns".into(), "secret-data".into())),
+            Json(serde_json::json!({"private": true})),
+        )
+        .await
+        .unwrap(),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(json["private"], true);
     assert_eq!(json["type"], "dataset");
 }
@@ -4792,14 +4811,17 @@ async fn handler_repo_create_with_organization() {
         private: false,
         visibility: None,
     };
-    let (status, json) = repo_create(
-        State(state.clone()),
-        default_headers(),
-        test_repo(&state, &default_headers()),
-        Json(req),
+    let (status, json) = decode_creation_response(
+        repo_create(
+            State(state.clone()),
+            default_headers(),
+            test_repo(&state, &default_headers()),
+            Json(req),
+        )
+        .await
+        .unwrap(),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(json["id"], "org/my-repo");
 }
@@ -4832,7 +4854,7 @@ async fn handler_repo_create_conflict() {
     )
     .await;
     assert!(result.is_ok());
-    let (status, json) = result.unwrap();
+    let (status, json) = decode_creation_response(result.unwrap()).await;
     assert_eq!(status, StatusCode::CONFLICT);
     // Anonymous (permissive-mode) callers have no identity, so even their
     // conflict body must not disclose the existing repository's metadata.
@@ -4880,14 +4902,17 @@ async fn repo_create_conflict_own_repo_keeps_full_body() {
         private: true,
         visibility: None,
     };
-    let (status, json) = repo_create(
-        State(state.clone()),
-        alice_headers(),
-        test_repo(&state, &alice_headers()),
-        Json(req),
+    let (status, json) = decode_creation_response(
+        repo_create(
+            State(state.clone()),
+            alice_headers(),
+            test_repo(&state, &alice_headers()),
+            Json(req),
+        )
+        .await
+        .unwrap(),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(json["id"], "alice/own");
     assert_eq!(json["private"], true);

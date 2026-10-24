@@ -5,6 +5,101 @@ use shardline_index::{S3ObjectEntry, S3ObjectIndexStore};
 
 #[tokio::test]
 #[ignore = "requires configured disposable PostgreSQL"]
+async fn creation_policy_preserves_restricted_writer_and_rejects_policy_edits() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    let role = quote(&format!("creation_writer_{}", fixture.schema));
+    let schema = quote(&fixture.schema);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role}; GRANT USAGE ON SCHEMA {schema} TO {role};
+         GRANT SELECT,INSERT ON {schema}.shardline_hub_repos TO {role};
+         INSERT INTO {schema}.shardline_hub_creation_policies(namespace,configured,max_repositories)
+         VALUES ('alice',true,1)"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    install(pool).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    query("INSERT INTO shardline_hub_repos(repo_id,repo_type,private,default_branch,created_at_unix_seconds,updated_at_unix_seconds,creation_authorized) VALUES ('alice/one','model',true,'main',0,0,true)")
+        .execute(&mut *connection).await.unwrap();
+    for (statement, expected) in [
+        (
+            "UPDATE shardline_hub_creation_policies SET configured=false WHERE namespace='alice'",
+            "42501",
+        ),
+        (
+            "DELETE FROM shardline_hub_creation_denials WHERE namespace='alice'",
+            "42501",
+        ),
+        (
+            "INSERT INTO shardline_hub_repos(repo_id,repo_type,private,default_branch,created_at_unix_seconds,updated_at_unix_seconds,creation_authorized) VALUES ('alice/two','model',true,'main',0,0,true)",
+            "SL409",
+        ),
+        (
+            "INSERT INTO shardline_hub_repos(repo_id,repo_type,private,default_branch,created_at_unix_seconds,updated_at_unix_seconds) VALUES ('alice/legacy','model',true,'main',0,0)",
+            "SL403",
+        ),
+    ] {
+        let error = query(statement)
+            .execute(&mut *connection)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some(expected)
+        );
+    }
+    let events: i64 =
+        query_scalar("SELECT count(*) FROM shardline_hub_creation_events WHERE namespace='alice'")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+    assert_eq!(events, 1);
+    query("RESET ROLE").execute(&mut *connection).await.unwrap();
+    drop(connection);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn creation_policy_physical_tampering_fails_closed() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    install(pool).await.unwrap();
+    for mutation in [
+        "ALTER TABLE shardline_hub_repos DISABLE TRIGGER shardline_hub_creation_guard",
+        "ALTER TABLE shardline_hub_repos ALTER COLUMN creation_authorized SET DEFAULT true",
+        "ALTER TABLE shardline_hub_creation_policies DROP CONSTRAINT shardline_hub_creation_policies_window_seconds_check",
+        "ALTER TABLE shardline_hub_creation_denials DROP CONSTRAINT shardline_hub_creation_denials_namespace_fkey",
+        "DROP INDEX shardline_hub_creation_events_window",
+        "DROP INDEX shardline_hub_repos_creation_namespace",
+        "ALTER FUNCTION shardline_hub_creation_guard() RESET search_path",
+    ] {
+        let mut transaction = pool.begin().await.unwrap();
+        raw_sql(mutation).execute(&mut *transaction).await.unwrap();
+        assert!(matches!(
+            check_on_connection(&mut transaction).await,
+            Err(DatabaseMigrationError::FrontendSchemaIncompatible(_))
+        ));
+        transaction.rollback().await.unwrap();
+    }
+    check(pool).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
 async fn native_alias_trigger_preserves_update_only_role_and_fails_closed_if_disabled() {
     let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
     let pool = fixture.index().pool();
@@ -64,6 +159,9 @@ async fn native_alias_trigger_preserves_update_only_role_and_fails_closed_if_dis
 }
 
 async fn move_frontend_history_to_prerelease_ledger(pool: &PgPool) {
+    // Simulate an actually installed prerelease, including its triggers, before
+    // moving the ledger. Table-only clones are not an installed schema.
+    install(pool).await.unwrap();
     for migration in FRONTEND_MIGRATIONS {
         query(
             "INSERT INTO shardline_schema_migrations(version,name,checksum,applied_at)

@@ -40,6 +40,53 @@ winner's visibility. A token scoped to the exact repository receives the usual
 repository response for `exist_ok` compatibility; a creation-only namespace
 grant receives a minimal conflict without private repository metadata.
 
+### Optional shared creation limits
+
+Owners can limit repository creation without changing client setup or running
+another service. The policy lives in the existing SQLite or PostgreSQL metadata
+database and is checked in the repository publication transaction.
+
+After migrating and upgrading all servers, save a JSON file such as
+`creation-policy.json`:
+
+```json
+{"max_repositories":100,"max_creations":10,"window_seconds":3600}
+```
+
+Apply it using the deployment's owner database credentials and configuration:
+
+```bash
+shardline admin repository-policy --namespace alice --policy-file creation-policy.json
+shardline admin repository-policy --namespace alice
+shardline admin repository-policy --namespace alice --clear
+```
+
+For a local deployment, add `--root /path/to/data`. With no policy configured,
+existing creation behavior is preserved. Clearing a policy leaves repositories
+and their visibility unchanged.
+
+`max_repositories` limits repositories currently present in the namespace.
+`max_creations` limits successful creations during the trailing `window_seconds`
+(1–86,400 seconds). Deleting a repository does not erase its creation from that
+window. Limits return HTTP 429; rate-limit responses include `Retry-After`.
+Authorized retries of an existing repository still return 409 without consuming
+another creation or changing privacy. Clients should use bounded backoff rather
+than expect a retry to succeed immediately.
+
+Set `enabled` to `false` to stop creation in the namespace. To deny creation by
+an identity with an otherwise valid issued token, add
+`"denied_creators":[{"issuer":"your-issuer","subject":"the-subject"}]`.
+These checks return 403 before conflict metadata is returned. They govern
+repository creation only; they do not revoke existing read or upload access.
+Token permissions remain required even when a shared policy permits creation.
+
+Configure policies only after all writers have upgraded. Older binaries can
+continue reading existing data, but their repository creation is deliberately
+rejected in namespaces with a configured policy. Clear the policy with the
+upgraded owner CLI before rolling back if legacy creation is needed. Custom
+`HubStore` implementations must supply their own shared-policy enforcement;
+these database guarantees cover Shardline's built-in stores.
+
 ## Commit operations
 
 The Hub commit API supports file additions, file deletion and recursive folder

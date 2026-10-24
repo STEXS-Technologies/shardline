@@ -6,6 +6,7 @@ use super::{
 };
 
 const HISTORY: &str = "shardline_frontend_schema_v1";
+mod creation_policy;
 
 fn incompatible(name: &str) -> DatabaseMigrationError {
     DatabaseMigrationError::FrontendSchemaIncompatible(name.to_owned())
@@ -21,6 +22,7 @@ pub(super) async fn install(pool: &PgPool) -> Result<u64, DatabaseMigrationError
         .bind(crate::maintenance_barrier::GC_WRITE_BARRIER_KEY)
         .execute(&mut *transaction)
         .await?;
+    reject_row_security_on_sources(&mut transaction).await?;
     let mut installed_count = 0_u64;
     // The caller holds the existing migration lock for the whole owner command.
     raw_sql(
@@ -70,7 +72,9 @@ pub(super) async fn install(pool: &PgPool) -> Result<u64, DatabaseMigrationError
                 }
             }
         } else {
-            raw_sql(migration.up_sql).execute(&mut *transaction).await?;
+            if legacy.is_none() {
+                raw_sql(migration.up_sql).execute(&mut *transaction).await?;
+            }
             query(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO {HISTORY} (version,name,checksum,applied_at)
                  VALUES ($1,$2,$3,COALESCE((SELECT applied_at FROM {MIGRATION_HISTORY_TABLE} WHERE version=$1),now()))"
@@ -87,9 +91,9 @@ pub(super) async fn install(pool: &PgPool) -> Result<u64, DatabaseMigrationError
             .await?;
         }
     }
-    reject_row_security_on_sources(&mut transaction).await?;
     check_on_connection(&mut transaction).await?;
     // Preserve existing role policy, including PUBLIC and inherited grants.
+    creation_policy::mirror_grants(&mut transaction).await?;
     // The registry exposes only definitions already readable in the core ledger.
     mirror_grants(
         &mut transaction,
@@ -269,6 +273,8 @@ async fn mirror_grants_as(
                 "INSERT" => "INSERT",
                 "UPDATE" => "UPDATE",
                 "DELETE" => "DELETE",
+                "INSERT (namespace)" => "INSERT (namespace)",
+                "UPDATE (namespace)" => "UPDATE (namespace)",
                 _ => continue,
             };
             query(sqlx::AssertSqlSafe(format!(
@@ -300,6 +306,7 @@ async fn check_on_connection(connection: &mut PgConnection) -> Result<(), Databa
     }
     reject_unknown_history(connection).await?;
     reject_row_security_on_sources(connection).await?;
+    creation_policy::check(connection).await?;
     for migration in FRONTEND_MIGRATIONS {
         let row = query(sqlx::AssertSqlSafe(format!(
             "SELECT name,checksum FROM {HISTORY} WHERE version=$1"
@@ -576,6 +583,9 @@ async fn reject_row_security_on_sources(
         "shardline_schema_migrations",
         "shardline_file_records",
         "shardline_hub_repos",
+        "shardline_hub_creation_policies",
+        "shardline_hub_creation_denials",
+        "shardline_hub_creation_events",
         "shardline_xet_file_identities",
     ])
     .fetch_optional(&mut *connection)

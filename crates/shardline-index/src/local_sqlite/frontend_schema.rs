@@ -76,7 +76,12 @@ pub(super) fn install(connection: &mut Connection) -> Result<(), LocalIndexStore
                 return Err(incompatible(migration.name));
             }
         } else {
-            transaction.execute_batch(migration.up_sql)?;
+            // A prerelease ledger entry means its DDL has already run. Do not
+            // repeat ALTER TABLE; check() below verifies every adopted object
+            // before the history transfer can commit.
+            if legacy.is_none() {
+                transaction.execute_batch(migration.up_sql)?;
+            }
             let timestamp = if let Some((_, timestamp)) = legacy.as_ref() {
                 *timestamp
             } else {
@@ -117,6 +122,12 @@ pub(super) fn check(connection: &Connection) -> Result<(), LocalIndexStoreError>
     }
     reject_unknown_history(connection)?;
     let expected = Connection::open_in_memory()?;
+    // Creation policy extends the released repository table. Build that table
+    // from its original definition so comparison covers the added columns too.
+    let (repository_schema, _) = include_str!("../../migrations/20260629000000_hub_api.up.sql")
+        .split_once(';')
+        .ok_or_else(|| incompatible("repository schema definition"))?;
+    expected.execute_batch(repository_schema)?;
     // Source tables belong to the unchanged core ledger. This stub lets the
     // derived frontend index install its triggers in the comparison database.
     expected.execute_batch(
@@ -146,7 +157,7 @@ pub(super) fn check(connection: &Connection) -> Result<(), LocalIndexStoreError>
     }
     let mut statement = expected.prepare(
         "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
-         AND name NOT IN ('shardline_file_records','shardline_hub_file_entries')",
+         AND name NOT IN ('shardline_file_records','shardline_hub_file_entries','shardline_hub_repos')",
     )?;
     let definitions = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -163,6 +174,27 @@ pub(super) fn check(connection: &Connection) -> Result<(), LocalIndexStoreError>
         if actual.as_ref() != Some(&sql) {
             return Err(incompatible(&name));
         }
+    }
+    // Existing core tables can have equivalent legacy formatting. Compare the
+    // new declarations, including their defaults and CHECK, rather than making
+    // their original whitespace a new compatibility requirement.
+    let repository_sql = |database: &Connection| -> Result<String, LocalIndexStoreError> {
+        Ok(database.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='shardline_hub_repos'",
+            [],
+            |row| row.get(0),
+        )?)
+    };
+    let expected_repository = repository_sql(&expected)?;
+    let actual_repository = repository_sql(connection)?;
+    let expected_creation = expected_repository
+        .split_once("creation_authorized")
+        .map(|(_, suffix)| suffix);
+    let actual_creation = actual_repository
+        .split_once("creation_authorized")
+        .map(|(_, suffix)| suffix);
+    if expected_creation.is_none() || actual_creation != expected_creation {
+        return Err(incompatible("repository creation columns"));
     }
     for name in [
         "shardline_s3_multipart_counts_after_insert",

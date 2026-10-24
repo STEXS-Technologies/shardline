@@ -29,6 +29,7 @@ impl PostgresFixture {
         let tables: Vec<String> = sqlx::query_scalar(
             "SELECT tablename FROM pg_tables WHERE schemaname='public'
              AND tablename LIKE 'shardline_%' AND tablename<>'shardline_task_artifacts_v1'
+             AND tablename NOT IN ('shardline_hub_creation_policies','shardline_hub_creation_denials','shardline_hub_creation_events')
              ORDER BY tablename",
         )
         .fetch_all(&admin)
@@ -43,6 +44,17 @@ impl PostgresFixture {
             .await
             .unwrap();
         }
+        // The owner migration installs the policy guard and its tables together.
+        // Do not clone its ALTER TABLE additions without installation history.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE {schema}.shardline_hub_repos
+                 DROP COLUMN IF EXISTS creation_authorized,
+                 DROP COLUMN IF EXISTS creation_issuer,
+                 DROP COLUMN IF EXISTS creation_subject"
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
         // LIKE INCLUDING ALL does not copy foreign keys. Preserve the new
         // descriptor/member relation inside the disposable schema as well.
         let has_xet_chunks: bool = sqlx::query_scalar(
@@ -96,6 +108,22 @@ impl PostgresFixture {
         .await
         .unwrap()
         .with_single_connection_pools(url.as_str())
+        .unwrap();
+        // Reinstall the schema-bound guard rather than copying triggers whose
+        // functions resolve tables in public. Retain its real owner history;
+        // older additive fixtures still exercise their existing adoption path.
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261024000000_hub_creation_policy.up.sql"
+        ))
+        .execute(backend.index_store().pool())
+        .await
+        .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO {schema}.shardline_frontend_schema_v1
+             SELECT * FROM public.shardline_frontend_schema_v1 WHERE version='20261024000000'"
+        )))
+        .execute(&admin)
+        .await
         .unwrap();
         Some(Self {
             _root: root,
