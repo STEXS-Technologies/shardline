@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Accept bounded anonymous model-card validation so stock Hub 2.2 clients can
+  publish cards to their configured endpoint while preserving repository authorization.
 - Fail required deployment qualification when Docker services, binaries or clock
   fixtures are missing; bound Docker probes and deployment subprocesses instead
   of accepting skipped drills as successful execution.

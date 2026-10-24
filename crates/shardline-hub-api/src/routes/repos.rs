@@ -264,14 +264,19 @@ fn repo_visible_to_owner(
     repo.repo_id == caller_repo_id
 }
 
-// ---- Validate YAML (requires Read) ----
+// ---- Stateless, bounded card validation ----
 
 pub(crate) async fn validate_yaml(
     State(state): State<HubState>,
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), HubApiError> {
-    authorize(&state, &headers, TokenScope::Read)?;
+    // Stock ModelCard.validate() does not send credentials. This endpoint only
+    // parses the supplied text; it never reads or publishes repository data.
+    // Preserve rejection of explicitly supplied invalid credentials.
+    if headers.contains_key(axum::http::header::AUTHORIZATION) {
+        authorize(&state, &headers, TokenScope::Read)?;
+    }
     let (status, errors) = match super::yaml_validation::validate(&body) {
         Ok(()) => (StatusCode::OK, Vec::new()),
         Err(message) => (StatusCode::BAD_REQUEST, vec![message]),

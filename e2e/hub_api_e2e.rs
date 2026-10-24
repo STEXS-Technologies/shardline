@@ -1218,21 +1218,38 @@ async fn hub_card_validation_rejects_invalid_yaml_and_preserves_authentication()
         .send()
         .await
         .unwrap();
+    assert_eq!(response.status(), 200);
+    let response = client
+        .post(&url)
+        .bearer_auth("invalid-card-validation-token")
+        .json(&serde_json::json!({"content":valid}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 401);
     for body in [
         serde_json::json!({}),
         serde_json::json!({"content":valid,"repoType":"invalid"}),
         serde_json::json!({"content":"x".repeat(256*1024+1)}),
     ] {
-        let response = client
-            .post(&url)
-            .bearer_auth(srv.token())
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 400);
+        for authenticated in [false, true] {
+            let mut request = client.post(&url).json(&body);
+            if authenticated {
+                request = request.bearer_auth(srv.token());
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), 400);
+        }
     }
+    let oversized_body = format!("{{\"content\":\"{}\"}}", "x".repeat(2 * 1024 * 1024));
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(oversized_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 413);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

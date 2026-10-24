@@ -77,7 +77,7 @@ test matrix, not a claim that the current branch has passed release CI.
 | 1.25.1 | 1.5.2 | Expired download URL and refresh |
 | 1.25.1 | 1.6.0 | Large transfers, interrupted uploads, URL refresh and identity checks |
 | 1.25.1 | 1.7.0 | Model/dataset upload and download on local and PostgreSQL/MinIO storage, URL refresh and interrupted uploads |
-| 2.2.0 | 1.7.0 | Model/dataset upload and download on SQLite/filesystem, PostgreSQL/filesystem and PostgreSQL/MinIO storage; URL refresh with combined and split API/transfer roles |
+| 2.2.0 | 1.7.0 | Model/dataset upload and download on SQLite/filesystem, PostgreSQL/filesystem and PostgreSQL/MinIO storage; URL refresh with combined and split API/transfer roles; endpoint-local stock `ModelCard.push_to_hub()` on local and PostgreSQL/MinIO storage |
 
 Versions outside this matrix require qualification before support is claimed.
 The narrower 1.5.2 refresh test does not establish all workflows for that version.

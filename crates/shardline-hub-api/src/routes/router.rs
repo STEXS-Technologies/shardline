@@ -69,7 +69,10 @@ pub fn router_with_dataset_query(
             "/api/{type}/{ns}/{repo}/modelcard",
             get(super::repo_modelcard),
         )
-        .route("/api/validate-yaml", post(super::validate_yaml))
+        .route(
+            "/api/validate-yaml",
+            post(super::validate_yaml).layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         .route(
             "/api/{type}/{ns}/{repo}/revisions",
             get(super::repo_revisions),

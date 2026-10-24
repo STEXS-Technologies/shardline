@@ -232,17 +232,27 @@ these checks do not establish every credential/revision combination.
 `POST /api/validate-yaml` checks README YAML front matter. Valid cards return
 HTTP 200; malformed YAML, an unclosed metadata block, a non-mapping root, invalid
 request fields, or a resource-limit violation return HTTP 400. Both responses
-include `warnings` and `errors` arrays. Existing authentication requirements apply.
+include `warnings` and `errors` arrays. This stateless endpoint accepts anonymous
+requests, as required by the stock model-card client. Configured authentication
+still rejects explicit invalid credentials. Repository reads and publication
+retain their usual authorization.
 
 Validation accepts nested metadata and bounded YAML aliases. Cards are limited
 to 256 KiB, with separate depth, node and alias-expansion limits. A README without
 front matter is valid. This checks syntax and structure; it does not certify
 licenses, dataset identifiers or other Hugging Face catalog entries.
+The JSON request body is capped at 2 MiB; larger bodies return HTTP 413.
 
 Repository info and revision info use the same parser for README metadata,
 including nested arrays and mappings. Invalid metadata is omitted; the README
 remains downloadable and historical revisions retain their own metadata. These
 reads inspect at most 256 KiB plus delimiter space, matching the validation budget.
+
+With `huggingface_hub` 2.2.0, set `HF_ENDPOINT` before starting Python and use
+`ModelCard.push_to_hub()` normally. Validation stays on Shardline, and publication
+uses the repository token. Stock-client tests cover local and PostgreSQL/MinIO
+storage, rejected excessive YAML nesting, private repository access and historical
+card metadata after replacement.
 
 In `huggingface_hub` 1.25.1, `ModelCard.validate()` sends its request directly to
 `https://huggingface.co/api/validate-yaml`, even when `HF_ENDPOINT` points elsewhere.
