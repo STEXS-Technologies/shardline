@@ -622,6 +622,32 @@ a general p99 improvement, or a new paired throughput qualification against
 released v1.12.1. Full source verification and existing ownership/deletion
 barriers remain mandatory.
 
+An additional paired comparison tests production code `7b540c35` against the
+actual released v1.12.1 binary, using that same fixed-record contention fixture.
+Four uninstrumented runs use released/candidate/candidate/released order, each
+with twenty mixed-traffic phases and continuous GC. No build or profiler ran
+alongside these measurements; unrelated host activity was not excluded.
+
+| Per-run median | Released, first | Candidate, first | Candidate, second | Released, second |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed throughput (MiB/s) | 297.69 | 280.31 | 266.09 | 295.09 |
+| PUT p99 (ms) | 159.76 | 205.64 | 216.52 | 141.88 |
+| GET p99 (ms) | 62.15 | 63.53 | 63.98 | 63.31 |
+| GC CPU (seconds) | 0.180 | 0.300 | 0.300 | 0.175 |
+| GC peak process RSS (MiB) | 28.01 | 31.18 | 31.10 | 28.09 |
+
+The two pairs retain a 5.8% and 9.8% throughput deficit against v1.12.1.
+PUT p99 remains higher. The candidate's settling scan uses 286 S3 attempts
+versus 798 for the released binary, but source GET counts remain 128 and traced
+response bytes remain approximately 134.4–134.5 MB. This small generic-upload
+fixture does not reproduce the transfer-byte increase of the earlier fixture.
+Full payload verification still costs more GC CPU than the released path;
+lower request counts do not resolve that contention cost. Every run reconciles
+its MinIO traces and passes 384 post-GC byte comparisons (1,536 total).
+These results leave the latest-stable throughput gate open. The latency rows
+are medians of each phase's p99, not pooled p99 values for the complete run.
+They do not qualify production scaling, native Xet throughput or disk endurance.
+
 #### Native Hugging Face/Xet transfers
 
 An October 24, 2026 measurement used production binary `d61d7342`,
