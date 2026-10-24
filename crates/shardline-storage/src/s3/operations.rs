@@ -36,6 +36,7 @@ mod copy_compare;
 mod file_compare;
 mod file_upload;
 mod full_read;
+mod suffix;
 pub(super) mod temp_cleanup;
 
 #[cfg(test)]
@@ -1171,6 +1172,14 @@ impl AsyncObjectStore for S3ObjectStore {
             return Err(S3ObjectStoreError::RangeOutOfBounds);
         }
         Ok(acc)
+    }
+
+    async fn read_suffix(
+        &self,
+        key: &ObjectKey,
+        length: u64,
+    ) -> Result<Option<(Vec<u8>, u64)>, Self::Error> {
+        self.read_suffix_bytes(key, length).await
     }
 
     async fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
