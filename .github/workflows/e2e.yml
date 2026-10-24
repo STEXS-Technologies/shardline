@@ -239,6 +239,12 @@ jobs:
             --test native_huggingface_cli_e2e --run-ignored all --test-threads 1 \
             -E 'test(native_huggingface_http_analytics::)'
 
+      - name: Qualify stock Git LFS transfers with MinIO
+        run: >-
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml
+          --test native_protocol_frontends_e2e --run-ignored all
+          -E 'test(native_git_lfs)'
+
       - name: Run native Bazel client flows
         env:
           USE_BAZEL_VERSION: "8.7.0"
@@ -271,7 +277,7 @@ jobs:
           git-lfs version
           bash scripts/verify-protocol-conformance.sh
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
-            --test native_protocol_frontends_e2e \
+            --test native_protocol_frontends_e2e --run-ignored all \
             -E 'test(native_git_lfs)'
           USE_BAZEL_VERSION=9.2.0 cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_protocol_frontends_e2e \

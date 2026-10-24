@@ -69,6 +69,14 @@ storage or provider-billing saving.
 
 ### Client Test Execution
 
+Targeted stock Git LFS 3.7.1 and 3.6.1 checks pass push/pull, fetch-all and
+byte-exact downloads with local storage, plus a dedicated MinIO-backed transfer.
+Both versions also pass lock creation/listing/verification, competing owners,
+forced unlock and server/backend reopen checks across SQLite and PostgreSQL
+HTTP server instances. These instances share one test host; process-kill recovery
+and the remaining transfer-failure scenarios have separate qualification.
+The dedicated MinIO transfer runs explicitly for both versions in E2E CI.
+
 The E2E workflow pins these Hub/Xet client combinations. This is the required
 test matrix, not a claim that the current branch has passed release CI.
 

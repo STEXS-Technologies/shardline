@@ -86,6 +86,25 @@ async fn native_git_lfs_pull_and_fetch_all_work_against_shardline_lfs_frontend()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires stock Git LFS and disposable Docker MinIO"]
+async fn native_git_lfs_push_and_pull_with_minio() {
+    if !(command_available("git") && command_available("git-lfs")) {
+        return;
+    }
+    let runtime = start_runtime_with_s3(&[ServerFrontend::Lfs]).await;
+    assert!(runtime.is_ok(), "MinIO LFS fixture must start");
+    let runtime = runtime
+        .unwrap()
+        .expect("Docker MinIO is required for remote LFS qualification");
+    assert!(
+        exercise_native_git_lfs_flow_on_runtime(runtime)
+            .await
+            .is_ok(),
+        "stock Git LFS must upload and reconstruct exact bytes with MinIO storage"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires external bazel binary and cache infrastructure"]
 async fn native_bazel_remote_cache_flow_works_against_shardline_http_cache_frontend() {
     if bazel_program().is_none() {
