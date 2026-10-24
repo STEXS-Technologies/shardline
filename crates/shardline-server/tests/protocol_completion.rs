@@ -1787,17 +1787,32 @@ async fn start_configured(
     storage: Option<S3ObjectStoreConfig>,
     signing: Option<shardline_server::S3SigningIdentity>,
 ) -> Runtime {
+    start_routed(root, frontend, auth, database, storage, signing, None).await
+}
+
+async fn start_routed(
+    root: &Path,
+    frontend: ServerFrontend,
+    auth: bool,
+    database: Option<&str>,
+    storage: Option<S3ObjectStoreConfig>,
+    signing: Option<shardline_server::S3SigningIdentity>,
+    routing: Option<(shardline_server::ServerRole, &str)>,
+) -> Runtime {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let mut config = ServerConfig::new(
         listener.local_addr().unwrap(),
-        base.clone(),
+        routing.map_or_else(|| base.clone(), |(_, public)| public.to_owned()),
         root.to_owned(),
         NonZeroUsize::new(65536).unwrap(),
     )
     .with_server_frontends(vec![frontend])
     .unwrap()
     .with_reconstruction_cache_disabled();
+    if let Some((role, _)) = routing {
+        config = config.with_server_role(role);
+    }
     if let Some(storage) = storage {
         config = config.with_object_storage(ObjectStorageAdapter::S3, Some(storage));
     }

@@ -4,6 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(unix)]
 mod process;
+mod split_roles;
 
 fn boundary_body(chunk: bytes::Bytes, extra: bool) -> reqwest::Body {
     let frames = (0..64).map(move |_| Ok::<_, std::io::Error>(chunk.clone()));
@@ -236,5 +237,6 @@ async fn lfs_upload_safety_postgres_minio() {
             None,
         );
     exercise_disconnect(Some(&database), Some(storage.clone())).await;
+    split_roles::exercise(Some(&database), Some(storage.clone())).await;
     exercise_size_boundary(Some(&database), Some(storage)).await;
 }
