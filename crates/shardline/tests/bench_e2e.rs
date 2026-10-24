@@ -322,18 +322,9 @@ async fn exercise_focused_bench() -> Result<(), Box<dyn Error>> {
 }
 
 fn shardline_binary() -> Result<PathBuf, Box<dyn Error>> {
-    if let Ok(path) = var("CARGO_BIN_EXE_shardline") {
-        return Ok(PathBuf::from(path));
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let Some(workspace_root) = manifest_dir.ancestors().nth(2) else {
-        return Err(CliE2eInvariantError::new("workspace root could not be resolved").into());
-    };
-    let binary = workspace_root
-        .join("target")
-        .join("debug")
-        .join("shardline");
+    let binary = var("CARGO_BIN_EXE_shardline")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_BIN_EXE_shardline")));
     if !binary.is_file() {
         return Err(CliE2eInvariantError::new(format!(
             "shardline binary was not built at {}",
@@ -341,6 +332,5 @@ fn shardline_binary() -> Result<PathBuf, Box<dyn Error>> {
         ))
         .into());
     }
-
     Ok(binary)
 }
