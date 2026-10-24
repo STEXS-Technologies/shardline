@@ -2716,6 +2716,10 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
 async fn chaos_workload_against_deployment() {
     let drill = "chaos_workload_against_deployment";
     if std::env::var("SHARDLINE_CHAOS_DEPLOYMENT").as_deref() != Ok("1") {
+        assert!(
+            !shardline_test_support::native_clients_required(),
+            "required deployment workload needs SHARDLINE_CHAOS_DEPLOYMENT=1"
+        );
         eprintln!("SKIP: {drill} — set SHARDLINE_CHAOS_DEPLOYMENT=1 to run the workload burst");
         return;
     }

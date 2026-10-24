@@ -3,6 +3,14 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 fn run(required: bool, script: Option<&str>) -> std::process::Output {
+    run_drill(
+        required,
+        script,
+        "drill_deploy_a_postgres_kill_mid_upload_no_lost_commits",
+    )
+}
+
+fn run_drill(required: bool, script: Option<&str>, drill: &str) -> std::process::Output {
     let directory = tempfile::tempdir().unwrap();
     if let Some(script) = script {
         let executable = directory.path().join("docker");
@@ -11,11 +19,7 @@ fn run(required: bool, script: Option<&str>) -> std::process::Output {
     }
     shardline_test_support::native_client_output(
         Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "drill_deploy_a_postgres_kill_mid_upload_no_lost_commits",
-                "--nocapture",
-            ])
+            .args(["--exact", drill, "--nocapture"])
             .env_clear()
             .env("PATH", directory.path())
             .env(
@@ -25,6 +29,18 @@ fn run(required: bool, script: Option<&str>) -> std::process::Output {
         Duration::from_secs(20),
     )
     .unwrap()
+}
+
+#[test]
+fn missing_workload_opt_in_cannot_pass_required_qualification() {
+    let drill = "chaos_workload_against_deployment";
+    assert!(run_drill(false, None, drill).status.success());
+    let required = run_drill(true, None, drill);
+    assert!(!required.status.success());
+    assert!(
+        String::from_utf8_lossy(&required.stderr)
+            .contains("required deployment workload needs SHARDLINE_CHAOS_DEPLOYMENT=1")
+    );
 }
 
 #[test]
