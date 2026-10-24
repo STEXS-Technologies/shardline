@@ -2556,6 +2556,11 @@ async fn native_hub_git_lfs_on_postgres() {
 async fn exercise_native_git_lfs(frontend: ServerFrontend, database: Option<&str>) {
     let root = tempfile::tempdir().unwrap();
     let server = start(root.path(), frontend, true, database).await;
+    exercise_native_git_lfs_at(&server.base, frontend, b"native locking fixture").await;
+    server.stop().await;
+}
+
+async fn exercise_native_git_lfs_at(base: &str, frontend: ServerFrontend, payload: &[u8]) {
     let worktree = tempfile::tempdir().unwrap();
     let repository = format!(
         "native-lfs-{}",
@@ -2625,7 +2630,7 @@ async fn exercise_native_git_lfs(frontend: ServerFrontend, database: Option<&str
     };
     git(
         worktree.path(),
-        &["config", "lfs.url", &format!("{}{lfs_path}", server.base)],
+        &["config", "lfs.url", &format!("{base}{lfs_path}")],
     )
     .await;
     git(
@@ -2669,6 +2674,7 @@ async fn exercise_native_git_lfs(frontend: ServerFrontend, database: Option<&str
     .await;
     git(worktree.path(), &["lfs", "install", "--local"]).await;
     git(worktree.path(), &["lfs", "track", "*.bin"]).await;
+    std::fs::write(worktree.path().join("model.bin"), payload).unwrap();
     git(worktree.path(), &["add", ".gitattributes", "model.bin"]).await;
     git(
         worktree.path(),
@@ -2710,7 +2716,6 @@ async fn exercise_native_git_lfs(frontend: ServerFrontend, database: Option<&str
     git(worktree.path(), &["lfs", "checkout"]).await;
     assert_eq!(
         std::fs::read(worktree.path().join("model.bin")).unwrap(),
-        b"native locking fixture"
+        payload
     );
-    server.stop().await;
 }

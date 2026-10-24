@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 mod process;
 mod split_roles;
+mod stock_split;
 
 fn boundary_body(chunk: bytes::Bytes, extra: bool) -> reqwest::Body {
     let frames = (0..64).map(move |_| Ok::<_, std::io::Error>(chunk.clone()));
