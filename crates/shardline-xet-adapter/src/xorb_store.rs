@@ -33,7 +33,7 @@ use crate::{
 
 use super::{
     ValidatedXorb, map_xorb_visit_error, try_for_each_serialized_xorb_chunk_async_trusted,
-    try_for_each_serialized_xorb_chunk_trusted, validate_serialized_xorb,
+    validate_serialized_xorb,
 };
 
 mod blocking;
@@ -128,13 +128,12 @@ where
     };
     let validated = validate_serialized_xorb(&mut cursor, expected_hash)?;
 
-    // Visit only fully validated container members.
-    try_for_each_serialized_xorb_chunk_trusted(&mut cursor, &validated, |decoded_chunk| {
-        let hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
-        visitor(hash_hex)?;
-        Ok(())
-    })
-    .map_err(map_xorb_visit_error)?;
+    // Validation has already decoded and authenticated every member against
+    // the expected container root. Reachability needs only those hashes, not
+    // a second decompression/allocation pass over the same private snapshot.
+    for chunk in validated.chunks() {
+        visitor(xet_hash_hex_string(chunk.hash()))?;
+    }
 
     Ok(())
 }

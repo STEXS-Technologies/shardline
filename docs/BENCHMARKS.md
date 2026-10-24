@@ -514,6 +514,58 @@ No application-throughput improvement has been
 measured for this separate change. Local object reads retain their existing
 path, and no disk staging or additional payload copy is introduced.
 
+#### Protocol integration comparison with v1.12.1
+
+An October 24, 2026 shared-host comparison used released v1.12.1
+(`3a68b53d`) and candidate production code `fd6956a6`, with harness `d21ce4b9`.
+Three paired runs alternated binary order. Each used one API replica limited to
+one CPU and 1 GiB, disposable PostgreSQL/MinIO, 16 clients, and 128 × 1 MiB
+objects. Repeated-data lanes used four copies of each unique object.
+
+Median complete-response throughput in MiB/s:
+
+| Workload | v1.12.1 | Candidate | Change |
+| --- | ---: | ---: | ---: |
+| Unique uploads | 202.37 | 210.93 | +4.2% |
+| Repeated uploads | 237.43 | 236.54 | -0.4% |
+| Unique mixed upload/download | 355.74 | 362.25 | +1.8% |
+| Repeated mixed upload/download | 365.86 | 352.45 | -3.7% |
+| Unique mixed traffic with GC | 265.57 | 238.02 | -10.4% |
+| Repeated mixed traffic with GC | 309.69 | 291.97 | -5.7% |
+
+All twelve lanes passed byte comparisons, including 4,608 post-GC reads across
+both binaries, and reconciled MinIO trace counters. Median unique-lane GC PUT
+p99 increased from 319 to 465 ms. API CPU and lifetime cgroup peak memory were
+similar; PostgreSQL aggregate execution time increased, with shared maintenance
+lock acquisition dominating the recorded query time. Aggregate query time
+includes concurrent waits and nested statements; it is not elapsed wall time.
+
+In the first unique-data GC lane, backend attempts fell from 1,062 to 930,
+while traced response bytes rose from approximately 269 to 403 MB. The candidate
+verifies container payloads instead of accepting unauthenticated member-cache
+sidecars. Fewer requests therefore do not establish lower backend transfer cost
+or faster GC. Restoring trust in those sidecars would sacrifice the integrity
+property this candidate is intended to preserve.
+
+These approximately one-second phases identify a regression to investigate,
+not a sustained performance qualification. Other host activity was not excluded.
+Cgroup memory includes page cache and is not process RSS. This comparison does
+not measure native Xet, cloud cost, multi-host scaling, or the external report's
+18 MB/s upload and 60 MB/s download. A throughput fix is not established by these
+results. Repeat with longer contention workloads and profile before changing
+publication or maintenance safety checks.
+
+A follow-up removes a second decompression pass when GC only needs the member
+hashes already produced by full container validation. A separate diagnostic
+repeated the same 128-object mixed workload twenty times with continuous GC,
+in before/after and after/before order. Per-run median GC CPU was 0.360 seconds
+before and 0.350–0.355 seconds after; median GC peak process RSS was
+32.7–32.8 MiB before and 31.3 MiB after. GC elapsed time was effectively unchanged.
+Throughput changes had opposite signs across the two pairs, so these shared-host
+results do not establish an overall speedup. All four runs verified their
+responses, including 1,536 post-GC reads. Full payload verification remains
+mandatory; neither S3 transfer reduction nor increased NVMe lifetime is claimed.
+
 #### PostgreSQL publication
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
