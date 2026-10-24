@@ -286,11 +286,11 @@ jobs:
       - name: Run S3 real-client e2e tests
         run: cargo nextest run --locked -p shardline-server --test s3_real_client_e2e
 
-      - name: Qualify stock Git LFS locks across replicas and restart
+      - name: Qualify LFS locks and upload safety with remote storage
         run: >-
           cargo nextest run --locked -p shardline-server --features docker
           --test protocol_completion --run-ignored all
-          -E 'test(stock_git_lfs_locks_across)'
+          -E 'test(stock_git_lfs_locks_across) | test(lfs_upload_safety)'
 
       - name: Run DuckDB against Postgres + MinIO deployment shape
         run: >-

@@ -10,6 +10,10 @@ fn boundary_body(chunk: bytes::Bytes, extra: bool) -> reqwest::Body {
 
 #[tokio::test]
 async fn streamed_lfs_size_boundary_preserves_published_objects() {
+    exercise_size_boundary(None, None).await;
+}
+
+async fn exercise_size_boundary(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) {
     use futures_util::StreamExt;
 
     let chunk = bytes::Bytes::from(vec![73_u8; 1024 * 1024]);
@@ -29,7 +33,8 @@ async fn streamed_lfs_size_boundary_preserves_published_objects() {
         (ServerFrontend::Hub, "/lfs/objects", StatusCode::BAD_REQUEST),
     ] {
         let root = tempfile::tempdir().unwrap();
-        let server = start(root.path(), frontend, true, None).await;
+        let server =
+            start_with_storage(root.path(), frontend, true, database, storage.clone()).await;
         let credential = token("writer", "size-safety", TokenScope::Write);
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(60))
@@ -76,10 +81,12 @@ async fn streamed_lfs_size_boundary_preserves_published_objects() {
         assert_eq!(response.status(), StatusCode::OK);
         let mut stream = response.bytes_stream();
         let mut actual = Sha256::new();
-        let mut length = 0;
+        let mut length = 0_usize;
         while let Some(frame) = stream.next().await {
             let frame = frame.unwrap();
-            length += frame.len();
+            length = length
+                .checked_add(frame.len())
+                .expect("download length overflow");
             actual.update(frame);
         }
         assert_eq!(length, 64 * 1024 * 1024);
@@ -90,12 +97,17 @@ async fn streamed_lfs_size_boundary_preserves_published_objects() {
 
 #[tokio::test]
 async fn disconnected_lfs_upload_can_retry_without_corrupting_published_bytes() {
+    exercise_disconnect(None, None).await;
+}
+
+async fn exercise_disconnect(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) {
     for (frontend, prefix) in [
         (ServerFrontend::Lfs, "/v1/lfs/objects"),
         (ServerFrontend::Hub, "/lfs/objects"),
     ] {
         let root = tempfile::tempdir().unwrap();
-        let server = start(root.path(), frontend, true, None).await;
+        let server =
+            start_with_storage(root.path(), frontend, true, database, storage.clone()).await;
         let credential = token("writer", "upload-safety", TokenScope::Write);
         let payload: Vec<u8> = (0..131_072).map(|offset| (offset % 251) as u8).collect();
         let oid = hex::encode(Sha256::digest(&payload));
@@ -164,7 +176,8 @@ async fn disconnected_lfs_upload_can_retry_without_corrupting_published_bytes() 
                 .is_success()
         );
         server.stop().await;
-        let restarted = start(root.path(), frontend, true, None).await;
+        let restarted =
+            start_with_storage(root.path(), frontend, true, database, storage.clone()).await;
         let downloaded = client
             .get(format!("{}{path}", restarted.base))
             .bearer_auth(&credential)
@@ -189,4 +202,36 @@ async fn disconnected_lfs_upload_can_retry_without_corrupting_published_bytes() 
         );
         restarted.stop().await;
     }
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires disposable Docker PostgreSQL and MinIO"]
+async fn lfs_upload_safety_postgres_minio() {
+    let services = tokio::task::spawn_blocking(|| {
+        shardline_test_support::DockerLocalStack::builder()
+            .with_postgres()
+            .with_minio()
+            .start()
+            .expect("start disposable LFS backends")
+            .expect("Docker is required for remote LFS qualification")
+    })
+    .await
+    .unwrap();
+    let database = services.postgres_url().expect("PostgreSQL fixture");
+    let prefix = services.unique_s3_key_prefix("lfs-upload-safety");
+    let raw = services
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO fixture");
+    let storage = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_allow_http(true)
+        .with_key_prefix(Some(&prefix))
+        .with_credentials(
+            raw.access_key.map(shardline_protocol::SecretString::new),
+            raw.secret_key.map(shardline_protocol::SecretString::new),
+            None,
+        );
+    exercise_disconnect(Some(&database), Some(storage.clone())).await;
+    exercise_size_boundary(Some(&database), Some(storage)).await;
 }
