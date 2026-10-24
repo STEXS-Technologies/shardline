@@ -1392,12 +1392,12 @@ async fn matrix_hub_git_smart_http_receive_pack_cross_tenant() {
     );
 
     // (e) control: repo A's own Write token reaches the handler (200 report;
-    // an empty update set is a benign no-op push).
+    // a flush packet encodes an empty update set).
     let resp = client
         .post(&receive_url)
         .header("Authorization", bearer(&token_a_write))
         .header("Content-Type", "application/x-git-receive-pack-request")
-        .body(Vec::new())
+        .body(b"0000".to_vec())
         .send()
         .await
         .unwrap();

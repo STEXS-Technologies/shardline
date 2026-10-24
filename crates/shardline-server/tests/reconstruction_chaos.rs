@@ -509,13 +509,13 @@ async fn reconstruction_corrupt_xorb_clean_error_and_reupload_restores() {
         .get("url")
         .and_then(serde_json::Value::as_str)
         .expect("fetch url");
-    assert!(
-        fetch_url.starts_with(&harness.base_url)
-            && fetch_url.ends_with(&format!("/transfer/xorb/default/{first_hash}")),
-        "fetch_info URL must resolve to the live listener's transfer route: {fetch_url}"
-    );
-    eprintln!(
-        "recon-chaos: reconstruction 200 — metadata path blind to corruption, fetch_info[0].url={fetch_url}"
+    let parsed_fetch_url = reqwest::Url::parse(fetch_url).expect("valid fetch URL");
+    let listener_url = reqwest::Url::parse(&harness.base_url).expect("valid listener URL");
+    assert_eq!(parsed_fetch_url.origin(), listener_url.origin());
+    assert_eq!(
+        parsed_fetch_url.path(),
+        format!("/transfer/xorb/default/{first_hash}"),
+        "fetch_info must target the live transfer route"
     );
 
     // 5. Two legs hitting the corrupt bytes.
