@@ -171,6 +171,36 @@ async fn snapshot_contract(
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{refs}");
+    for revision in [None, Some("refs/tags/release"), Some(head.as_str())] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/models/alice/assets/info/refs?service=git-upload-pack")
+                    .header("Git-Protocol", "version=2")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("assets", revision)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let discovery = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        assert_eq!(
+            discovery.starts_with(b"000eversion 2\n"),
+            revision.is_none(),
+            "only restricted snapshots require legacy negotiation"
+        );
+        if revision.is_some() {
+            assert!(discovery.starts_with(b"001e# service=git-upload-pack\n"));
+            assert!(!String::from_utf8_lossy(&discovery).contains("refs/heads/older"));
+        }
+    }
     let at = refs.find(" refs/heads/older").unwrap();
     let oid = &refs[at.checked_sub(40).unwrap()..at];
     for (scope, revision) in [

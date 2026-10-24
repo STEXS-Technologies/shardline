@@ -159,6 +159,11 @@ checks the tip with promisor fetching enabled before the response pack has
 been consumed. Snapshot client contracts have per-command deadlines and, on
 Unix, terminate the client's subprocess group on timeout. A timed-out client
 fails qualification.
+Git 2.52.0 also reproduces the filtered-v2 timeout against Git's own
+`upload-pack` serving a depth-one repository over `file://`; unfiltered v2 and
+explicit `--depth=1 --filter=blob:none` clones succeed in that fixture. This
+isolates a client/server-shallow interaction beyond Shardline's HTTP framing;
+it does not qualify native v2 snapshots or all Git versions.
 
 Ref listings show only refs allowed by the credential. The legacy revision
 listing returns reachable history for a branch token and the selected commit
