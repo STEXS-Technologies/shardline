@@ -19,6 +19,7 @@ use thiserror::Error;
 use crate::error::XetAdapterError;
 
 mod authenticated_footer;
+mod legacy_footer;
 pub use authenticated_footer::{
     AuthenticatedXorbFooter, decode_authenticated_xorb_chunk, validate_serialized_xorb_footer,
 };
@@ -279,10 +280,11 @@ pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
         .seek(SeekFrom::Start(0))
         .map_err(XorbParseError::from)?;
     let expected_merkle_hash = shardline_hash_to_merkle_hash(expected_hash)?;
-    let parsed = XorbObject::deserialize(reader).map_err(|error| map_core_error(&error))?;
+    let mut parsed = XorbObject::deserialize(reader).map_err(|error| map_core_error(&error))?;
     if parsed.info.xorb_hash != expected_merkle_hash {
         return Err(XorbParseError::HashMismatch);
     }
+    legacy_footer::populate_decoded_offsets(reader, &mut parsed)?;
     // Bound the total declared unpacked bytes BEFORE any decompression: the
     // footer has been parsed but no chunk payload has been decompressed yet, so
     // a multi-chunk decompression bomb is rejected here rather than during

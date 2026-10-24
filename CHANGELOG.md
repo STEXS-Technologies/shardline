@@ -91,6 +91,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Read older v0 Xorb footers through full payload verification, deriving missing
+  decoded offsets without rewriting objects or relaxing decompression limits.
 - Reject truncated or oversized S3 backend range responses instead of returning
   them as successful reads, enforcing the requested byte limit while receiving data.
 - Upgrade the internal Arrow/Parquet preview reader to remove the unmaintained

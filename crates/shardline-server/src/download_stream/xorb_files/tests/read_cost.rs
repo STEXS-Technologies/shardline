@@ -186,6 +186,58 @@ async fn large_packed_ranges_authenticate_members_without_fetching_unselected_pa
         assert!(state.transferred < encoded.len() / 2);
     }
     // Unselected corruption is outside this range proof; a full scrub still fails.
+    #[allow(deprecated)] // Exercise the older footer bytes, without rewriting storage.
+    {
+        use shardline_xet_core::xorb_object::{XorbObject, XorbObjectInfoV0};
+        let parsed = XorbObject::deserialize(&mut std::io::Cursor::new(&encoded)).unwrap();
+        let mut legacy = XorbObjectInfoV0::default();
+        legacy.xorb_hash = parsed.info.xorb_hash;
+        legacy.num_chunks = u32::try_from(parsed.info.num_chunks).unwrap();
+        legacy.chunk_hashes = parsed.info.chunk_hashes;
+        legacy.chunk_boundary_offsets = parsed
+            .info
+            .chunk_boundary_offsets
+            .iter()
+            .map(|value| u32::try_from(*value).unwrap())
+            .collect();
+        let mut old_footer = Vec::new();
+        legacy.serialize(&mut old_footer).unwrap();
+        let footer_length = old_footer.len() as u64;
+        old_footer.extend_from_slice(&footer_length.to_le_bytes());
+        let payload_end = usize::try_from(chunks.last().unwrap().packed_end).unwrap();
+        let mut old_bytes = encoded[..payload_end].to_vec();
+        old_bytes.extend_from_slice(&old_footer);
+        {
+            let mut state = provider.lock().unwrap();
+            state
+                .objects
+                .insert(path.clone(), Bytes::copy_from_slice(&old_bytes));
+            state.requests.clear();
+        }
+        assert_eq!(
+            super::collect(&store, &record, range).await.unwrap(),
+            payload[..4096]
+        );
+        assert_eq!(
+            provider.lock().unwrap().requests.len(),
+            3,
+            "legacy footer discovery falls back to a complete-container GET"
+        );
+        assert_eq!(
+            super::collect(&store, &record, None).await.unwrap(),
+            payload
+        );
+        old_bytes[usize::try_from(chunks[2].packed_end - 1).unwrap()] ^= 0x40;
+        provider
+            .lock()
+            .unwrap()
+            .objects
+            .insert(path.clone(), Bytes::from(old_bytes));
+        assert!(
+            super::collect(&store, &record, range).await.is_err(),
+            "legacy fallback still validates unselected content"
+        );
+    }
     let mut damaged = encoded.clone();
     damaged[usize::try_from(chunks[2].packed_end - 1).unwrap()] ^= 0x40;
     provider
