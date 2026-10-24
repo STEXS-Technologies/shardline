@@ -16,6 +16,22 @@ struct Upstreams {
     client: Client,
 }
 
+pub(super) fn start_proxy(
+    listener: tokio::net::TcpListener,
+    api: &str,
+    transfer: &str,
+) -> tokio::task::JoinHandle<Result<(), std::io::Error>> {
+    let router = Router::new().fallback(any(forward)).with_state(Upstreams {
+        api: api.to_owned(),
+        transfer: transfer.to_owned(),
+        client: Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap(),
+    });
+    tokio::spawn(async move { axum::serve(listener, router).await })
+}
+
 async fn forward(State(state): State<Upstreams>, request: Request) -> Result<Response, StatusCode> {
     let path = request.uri().path();
     let transfer = path.starts_with("/lfs/objects/")
@@ -109,12 +125,7 @@ async fn exercise_bytes(
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap();
-        let router = Router::new().fallback(any(forward)).with_state(Upstreams {
-            api: api.base.clone(),
-            transfer: transfer.base.clone(),
-            client: client.clone(),
-        });
-        let proxy = tokio::spawn(async move { axum::serve(listener, router).await });
+        let proxy = start_proxy(listener, &api.base, &transfer.base);
         let credential = token("writer", "split-safety", TokenScope::Write);
         let payload = bytes::Bytes::from((0..length).map(|n| (n % 251) as u8).collect::<Vec<_>>());
         let oid = hex::encode(Sha256::digest(&payload));

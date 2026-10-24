@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 const CHILD: &str = "lfs_upload_safety::process::lfs_process_child";
+mod split;
 
 struct OwnedProcess(Child);
 
@@ -43,12 +44,23 @@ async fn lfs_process_child() {
             None,
         )
     });
-    let server = start_with_storage(
+    let public = std::env::var("LFS_PROCESS_PUBLIC").ok();
+    let role = std::env::var("LFS_PROCESS_ROLE")
+        .ok()
+        .map(|value| match value.as_str() {
+            "api" => shardline_server::ServerRole::Api,
+            "transfer" => shardline_server::ServerRole::Transfer,
+            _ => panic!("invalid parent role"),
+        });
+    let routing = role.map(|role| (role, public.as_deref().expect("split public URL")));
+    let server = start_routed(
         Path::new(&root),
         frontend,
         true,
         database.as_deref(),
         storage,
+        None,
+        routing,
     )
     .await;
     let temporary = Path::new(&root).join("process-ready.tmp");
@@ -209,4 +221,5 @@ async fn lfs_process_kill_postgres_minio() {
         ("LFS_PROCESS_SECRET", raw.secret_key.unwrap()),
     ];
     exercise(&environment).await;
+    split::exercise(&environment).await;
 }
