@@ -56,7 +56,23 @@ async fn split_lfs_disconnect_retry_preserves_bytes_and_scope() {
     exercise(None, None).await;
 }
 
+#[tokio::test]
+async fn split_lfs_maximum_basic_upload_recovers_after_disconnect() {
+    exercise_bytes(None, None, 64 * 1024 * 1024).await;
+}
+
 pub(super) async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) {
+    exercise_bytes(database, storage.clone(), 131_072).await;
+    if database.is_some() {
+        exercise_bytes(database, storage, 64 * 1024 * 1024).await;
+    }
+}
+
+async fn exercise_bytes(
+    database: Option<&str>,
+    storage: Option<S3ObjectStoreConfig>,
+    length: usize,
+) {
     for (frontend, prefix) in [
         (ServerFrontend::Lfs, "/v1/lfs/objects"),
         (ServerFrontend::Hub, "/lfs/objects"),
@@ -100,7 +116,7 @@ pub(super) async fn exercise(database: Option<&str>, storage: Option<S3ObjectSto
         });
         let proxy = tokio::spawn(async move { axum::serve(listener, router).await });
         let credential = token("writer", "split-safety", TokenScope::Write);
-        let payload: Vec<u8> = (0..131_072).map(|n| (n % 251) as u8).collect();
+        let payload = bytes::Bytes::from((0..length).map(|n| (n % 251) as u8).collect::<Vec<_>>());
         let oid = hex::encode(Sha256::digest(&payload));
         let batch_path = if frontend == ServerFrontend::Hub {
             "/split-safety/locks.git/info/lfs/objects/batch"
@@ -121,7 +137,10 @@ pub(super) async fn exercise(database: Option<&str>, storage: Option<S3ObjectSto
         let address = public.strip_prefix("http://").unwrap();
         let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
         socket.write_all(format!("PUT {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {credential}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload.len()).as_bytes()).await.unwrap();
-        socket.write_all(&payload[..65_536]).await.unwrap();
+        socket
+            .write_all(&payload[..payload.len() / 2])
+            .await
+            .unwrap();
         socket.shutdown().await.unwrap();
         let mut response = Vec::new();
         tokio::time::timeout(
@@ -160,10 +179,17 @@ pub(super) async fn exercise(database: Option<&str>, storage: Option<S3ObjectSto
             .await
             .unwrap();
         assert_eq!(downloaded.status(), StatusCode::OK);
-        assert_eq!(
-            downloaded.bytes().await.unwrap().as_ref(),
-            payload.as_slice()
-        );
+        use futures_util::StreamExt;
+        let mut frames = downloaded.bytes_stream();
+        let mut actual = Sha256::new();
+        let mut received = 0_usize;
+        while let Some(frame) = frames.next().await {
+            let frame = frame.unwrap();
+            received = received.checked_add(frame.len()).unwrap();
+            actual.update(frame);
+        }
+        assert_eq!(received, payload.len());
+        assert_eq!(hex::encode(actual.finalize()), oid);
         let other = token("other", "other-split", TokenScope::Read);
         assert!(
             !client
