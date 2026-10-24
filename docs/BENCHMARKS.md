@@ -566,6 +566,34 @@ results do not establish an overall speedup. All four runs verified their
 responses, including 1,536 post-GC reads. Full payload verification remains
 mandatory; neither S3 transfer reduction nor increased NVMe lifetime is claimed.
 
+A further follow-up validates contiguous container members sequentially and
+uses a fixed 64 KiB read buffer when GC scans their materialized source. It still
+decodes and hashes every member, checks the footer boundaries and verifies the
+container commitment. No persisted format or metadata migration changes.
+
+Summary-only `strace` measurements of the same preloaded PostgreSQL/MinIO GC
+scan, before concurrent traffic, recorded:
+
+| GC process syscalls | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| `read` | 42,944 | 17,266 | 59.8% |
+| `lseek` | 3,332 | 1,228 | 63.1% |
+
+Both instrumented runs passed 384 post-GC byte comparisons. Separate,
+uninstrumented twenty-iteration runs used before/after and after/before order;
+all four passed another 1,536 post-GC comparisons. Per-run median GC CPU was
+0.340–0.350 seconds before and 0.330–0.345 seconds after. GC peak process RSS
+remained approximately 31–31.5 MiB. Mixed throughput was 258–261 MiB/s before
+and 233–260 MiB/s after, with no consistent improvement across pairs. These
+shared-host results establish fewer local read/seek calls, not a throughput fix.
+The buffer adds at most 64 KiB per active scan; this change does not remove
+source verification reads, S3 requests or scratch-file writes. Syscall counts
+are not physical device writes or a measurement of NVMe lifetime.
+The optimized candidate also passed five actual v1.12.1 upgrade/rollback tests
+on local and PostgreSQL/MinIO storage, and a stock Hub 2.2.0 / hf_xet 1.7.0
+1 GiB native upload/download with complete SHA-256 verification. These are
+compatibility checks, not additional paired performance measurements.
+
 #### Native Hugging Face/Xet transfers
 
 An October 24, 2026 measurement used production binary `d61d7342`,

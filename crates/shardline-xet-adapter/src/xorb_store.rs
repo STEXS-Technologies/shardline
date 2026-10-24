@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     fs::File,
-    io::Cursor,
+    io::{BufReader, Cursor},
     path::Path,
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
@@ -121,11 +121,14 @@ where
     // Persisted member sidecars are derived data without an authenticated leaf
     // structure. Always validate the source container before exposing members.
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let Some((mut cursor, _length)) =
+    let Some((cursor, _length)) =
         object_store.materialize_bounded_object_if_present(object_key, 0)?
     else {
         return Ok(());
     };
+    // Bound scratch-read buffering independently of container size. Validation
+    // still reads and authenticates every payload and footer from this snapshot.
+    let mut cursor = BufReader::with_capacity(65536, cursor);
     let validated = validate_serialized_xorb(&mut cursor, expected_hash)?;
 
     // Validation has already decoded and authenticated every member against
