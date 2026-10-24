@@ -18,6 +18,7 @@ impl S3ObjectStore {
         self.block_on_result(async {
             // Do not create remote state if the source cannot be opened.
             let mut file = File::open(path).await?;
+            let conditional_completion = self.conditional_completion_inner.get().await?;
             let upload_id = self.inner.create_multipart(location).await?;
             let result = async {
                 let mut pending = FuturesOrdered::new();
@@ -71,7 +72,7 @@ impl S3ObjectStore {
                 while let Some(part) = pending.try_next().await? {
                     parts.push(part);
                 }
-                self.conditional_completion_inner
+                conditional_completion
                     .complete_multipart(location, &upload_id, parts)
                     .await?;
                 Ok(())

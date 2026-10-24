@@ -88,6 +88,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Initialize the dedicated S3 multipart-completion client only when needed,
+  avoiding an unused HTTP pool and TLS-root loading during reads and GC.
+  Store clones share initialization; conditional publication remains unchanged.
 - Bound the SDK's shared download runtime to reduce per-core worker and allocator
   memory overhead while preserving transfer admission and content verification.
 - Acquire PostgreSQL native-Xet descriptor locks in a consistent order so

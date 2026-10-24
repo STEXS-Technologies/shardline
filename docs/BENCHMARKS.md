@@ -682,6 +682,30 @@ and PostgreSQL/MinIO reads by the predecessor after candidate GC. A regression
 case verifies that corruption in the final member of a source larger than the
 memory allowance stops collection before any member is exposed.
 
+A fresh profile of `615b4fd1` records 834 GC cycle samples with no lost samples.
+About 13.3% of self samples fall in certificate PEM/base64 decoding. This scan
+includes CLI startup. The adapter eagerly constructed a separate HTTP client
+for multipart completion even when a read or GC never used it. That client now
+initializes on first use, shared across adapter clones, before creating remote
+multipart state. TLS verification, conditional completion headers and retry
+policies remain unchanged. A separate API profile identifies MD5 compression
+as its largest CPU consumer (28.4% of self samples); required S3 checksums and
+ETags are retained. These profiles identify costs, not predicted speedups.
+
+Six twenty-phase before/after runs measure median GC CPU falling from 0.260 to
+0.240 seconds (about 8% less), with GC wall time effectively unchanged at
+0.617–0.620 seconds. Peak GC RSS ranges from 33.28–33.53 MiB before and
+33.06–33.39 MiB after. Mixed throughput varies from 273.80–286.95 MiB/s before
+and 248.14–288.41 MiB/s after, so this does not establish a throughput or tail
+latency improvement, or close the v1.12.1 regression. A formatting check overlapped
+the first baseline; the final four ran in after/before/before/after order after
+all task builds, tests and profilers stopped. Other host activity was not excluded.
+Every settling scan retains 286 S3 attempts and exactly 134,435,501 traced
+response bytes. All six reconcile their request traces and pass 2,304 post-GC
+byte comparisons. All 515 storage tests and six actual v1.12.1 upgrade/rollback
+cases pass, together with strict storage Clippy. This is a startup CPU reduction;
+it does not reduce S3 request charges or establish physical disk savings.
+
 #### Native Hugging Face/Xet transfers
 
 An October 24, 2026 measurement used production binary `d61d7342`,

@@ -49,7 +49,7 @@ mod temp_cleanup_tests;
 pub struct S3ObjectStore {
     pub(crate) inner: AmazonS3,
     pub(super) single_attempt_inner: AmazonS3,
-    conditional_completion_inner: AmazonS3,
+    conditional_completion_inner: Arc<super::client::ConditionalCompletionClient>,
     existence_hints: Arc<super::existence_hints::ExistenceHints>,
     write_coordination: Arc<super::write_coordination::WriteCoordination>,
     pub(crate) runtime: Arc<Runtime>,
@@ -121,8 +121,9 @@ impl S3ObjectStore {
         super::credentials::validate_s3_config(&config)?;
         let inner = super::client::build_amazon_s3_client(&config)?;
         let single_attempt_inner = super::client::build_single_attempt_client(&config)?;
-        let conditional_completion_inner =
-            super::client::build_conditional_completion_client(&config)?;
+        let conditional_completion_inner = Arc::new(
+            super::client::ConditionalCompletionClient::new(config.clone()),
+        );
 
         // Process-wide ownership keeps the bridge independent of the runtime in
         // which an adapter was constructed and avoids dropping a Tokio runtime
@@ -839,6 +840,10 @@ impl S3ObjectStore {
         let dst = destination_location.clone();
         let len = source_len;
 
+        // Initialize before creating remote state so a local client-construction
+        // failure cannot leave an unpublished multipart upload behind.
+        let conditional_completion = self.conditional_completion_inner.get().await?;
+
         let upload_id = store
             .create_multipart(&dst)
             .await
@@ -874,8 +879,7 @@ impl S3ObjectStore {
                 // Another HEAD here cannot fence a competing node's later PUT.
                 // This dedicated client adds If-None-Match only to completion,
                 // retaining the dependency's signing, XML parsing and retries.
-                match self
-                    .conditional_completion_inner
+                match conditional_completion
                     .complete_multipart(&dst, &upload_id, part_ids)
                     .await
                 {

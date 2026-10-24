@@ -28,7 +28,7 @@ libc.workspace = true
 object_store = { workspace = true, default-features = false }
 shardline-protocol.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 
 [dev-dependencies]
 chrono.workspace = true

@@ -3,6 +3,34 @@ use object_store::aws::{AmazonS3, AmazonS3Builder, S3ConditionalPut, S3CopyIfNot
 
 use super::{S3ObjectStoreConfig, S3ObjectStoreError};
 
+/// Multipart completion needs different default headers, but read-only stores
+/// should not pay for another HTTP pool and another load of the TLS trust roots.
+/// Share successful initialization across store clones; failures remain retryable.
+pub(super) struct ConditionalCompletionClient {
+    config: S3ObjectStoreConfig,
+    inner: tokio::sync::OnceCell<AmazonS3>,
+}
+
+impl ConditionalCompletionClient {
+    pub(super) fn new(config: S3ObjectStoreConfig) -> Self {
+        Self {
+            config,
+            inner: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    pub(super) async fn get(&self) -> Result<&AmazonS3, S3ObjectStoreError> {
+        self.inner
+            .get_or_try_init(|| async { build_conditional_completion_client(&self.config) })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_initialized(&self) -> bool {
+        self.inner.initialized()
+    }
+}
+
 /// Builds an S3-compatible [`AmazonS3`] client from the given configuration.
 ///
 /// This is called by [`S3ObjectStore::new`] and is extracted here to keep
@@ -85,4 +113,28 @@ fn build_client(
     }
 
     builder.build().map_err(S3ObjectStoreError::External)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shardline_protocol::SecretString;
+
+    #[tokio::test]
+    async fn failed_completion_client_initialization_does_not_cache_a_failure() {
+        let config = S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
+            .with_credentials(
+                Some(SecretString::from_secret("fixture-access")),
+                None,
+                None,
+            );
+        let client = ConditionalCompletionClient::new(config);
+        for _ in 0..2 {
+            assert!(matches!(
+                client.get().await,
+                Err(S3ObjectStoreError::IncompleteCredentials)
+            ));
+            assert!(!client.is_initialized());
+        }
+    }
 }

@@ -260,6 +260,80 @@ fn large_copy_preserves_a_conflicting_concurrent_destination() {
 }
 
 #[test]
+fn read_only_store_does_not_initialize_multipart_completion_client() {
+    let provider = Provider::new(None);
+    provider.state.lock().unwrap().destination = Some(SOURCE.to_vec());
+    let store = provider.store().unwrap();
+    let source = ObjectKey::parse("destination").unwrap();
+    assert!(store.metadata(&source).unwrap().is_some());
+    assert!(!store.conditional_completion_inner.is_initialized());
+    assert_eq!(provider.state.lock().unwrap().creates, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multipart_completion_client_is_shared_across_concurrent_store_clones() {
+    let provider = Provider::new(None);
+    let store = provider.store().unwrap();
+    let clones: Vec<_> = (0..16).map(|_| store.clone()).collect();
+    let clients = futures_util::future::join_all(
+        clones
+            .iter()
+            .map(|store| store.conditional_completion_inner.get()),
+    )
+    .await;
+    let expected = store.conditional_completion_inner.get().await.unwrap();
+    for client in clients {
+        assert!(std::ptr::eq(expected, client.unwrap()));
+    }
+    assert_eq!(provider.state.lock().unwrap().requests, 0);
+}
+
+#[test]
+fn completion_client_failure_precedes_remote_multipart_creation() {
+    for file_upload in [false, true] {
+        let provider = Provider::new(None);
+        let mut store = provider.store().unwrap();
+        let invalid = S3ObjectStoreConfig::new("fixture".to_owned(), "us-east-1".to_owned())
+            .with_credentials(
+                Some(SecretString::from_secret("fixture-access")),
+                None,
+                None,
+            );
+        store.conditional_completion_inner = Arc::new(
+            super::super::client::ConditionalCompletionClient::new(invalid),
+        );
+        let source = ObjectKey::parse("source").unwrap();
+        let destination = ObjectKey::parse("destination").unwrap();
+        let result = if file_upload {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), SOURCE).unwrap();
+            let integrity = ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*blake3::hash(SOURCE).as_bytes()),
+                SOURCE.len() as u64,
+            );
+            store.put_file_if_absent(&destination, file.path(), &integrity)
+        } else {
+            store.block_on_result(store.streaming_large_copy(
+                &store.location_for_key(&source).unwrap(),
+                &store.location_for_key(&destination).unwrap(),
+                &source,
+                &destination,
+                SOURCE.len() as u64,
+            ))
+        };
+        assert!(matches!(
+            result,
+            Err(S3ObjectStoreError::IncompleteCredentials)
+        ));
+        let state = provider.state.lock().unwrap();
+        assert_eq!(state.creates, 0);
+        assert_eq!(state.part_puts, 0);
+        assert_eq!(state.completion_requests, 0);
+        assert!(state.destination.is_none());
+    }
+}
+
+#[test]
 fn direct_file_upload_uses_four_requests_and_no_temporary_object() {
     let provider = Provider::new(None);
     let store = provider.store().unwrap();
@@ -276,6 +350,7 @@ fn direct_file_upload_uses_four_requests_and_no_temporary_object() {
             .unwrap(),
         PutOutcome::Inserted
     );
+    assert!(store.conditional_completion_inner.is_initialized());
     let state = provider.state.lock().unwrap();
     assert_eq!(state.destination.as_deref(), Some(SOURCE));
     assert_eq!(state.requests, 4);
@@ -493,6 +568,9 @@ async fn minio_large_copy_completion_is_conditional_and_signed() {
         .unwrap();
     let completion = store
         .conditional_completion_inner
+        .get()
+        .await
+        .unwrap()
         .complete_multipart(&race_location, &upload_id, vec![part])
         .await;
     assert!(matches!(
