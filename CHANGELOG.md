@@ -88,6 +88,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Keep webhook credentials, path tokens and query secrets out of delivery logs.
 - Validate outbound Hub webhook DNS results at connection time, rejecting private
   addresses and proxy-based resolution bypasses while keeping redirects disabled.
 - Accept bounded anonymous model-card validation so stock Hub 2.2 clients can

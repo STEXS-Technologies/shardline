@@ -213,12 +213,11 @@ fn repo_type_path_space() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn sanitize_log_url_truncates_long() {
+fn sanitize_log_url_omits_long_private_paths() {
     let base = "https://example.com/";
     let long = format!("{}{}", base, "a".repeat(300));
     let result = sanitize_log_url(&long);
-    assert!(result.len() <= 204); // 200 chars + "..."
-    assert!(result.ends_with("..."));
+    assert_eq!(result, "https://example.com");
 }
 
 // -----------------------------------------------------------------------

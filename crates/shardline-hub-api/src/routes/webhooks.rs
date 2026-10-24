@@ -185,19 +185,24 @@ fn resolve_webhook_secret(
 
 /// Sanitizes a URL for safe inclusion in log messages.
 ///
-/// Replaces control characters (newlines, tabs, etc.) and truncates to a
-/// reasonable length to prevent log injection via user-supplied URLs.
+/// Logs only the origin: credentials, paths, query strings and fragments can
+/// all contain webhook secrets. Invalid URLs are never echoed into logs.
 pub(crate) fn sanitize_log_url(url: &str) -> String {
     const MAX_LOG_URL_LEN: usize = 200;
-    let sanitized: String = url
-        .chars()
-        .map(|c| if c.is_control() { '?' } else { c })
-        .take(MAX_LOG_URL_LEN)
-        .collect();
-    if url.len() > MAX_LOG_URL_LEN {
-        format!("{sanitized}...")
+    let Ok(parsed) = url::Url::parse(url) else {
+        return "<invalid webhook URL>".to_owned();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return "<invalid webhook URL>".to_owned();
+    }
+    let origin = parsed.origin().ascii_serialization();
+    if origin.len() > MAX_LOG_URL_LEN {
+        format!(
+            "{}...",
+            origin.chars().take(MAX_LOG_URL_LEN).collect::<String>()
+        )
     } else {
-        sanitized
+        origin
     }
 }
 
@@ -256,7 +261,11 @@ async fn deliver_one_webhook(
             );
         }
     }
-    let response = request.body(body.to_vec()).send().await?;
+    let response = request
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?;
     if !response.status().is_success() {
         return Err(format!("webhook returned {}", response.status()).into());
     }
@@ -635,19 +644,19 @@ mod tests {
     #[test]
     fn sanitize_log_url_normal() {
         let url = "https://example.com/webhook";
-        assert_eq!(sanitize_log_url(url), url);
+        assert_eq!(sanitize_log_url(url), "https://example.com");
     }
 
     #[test]
     fn sanitize_log_url_replaces_control_chars() {
         let url = "https://example.com/new\nline";
-        assert_eq!(sanitize_log_url(url), "https://example.com/new?line");
+        assert_eq!(sanitize_log_url(url), "https://example.com");
     }
 
     #[test]
     fn sanitize_log_url_truncates_long() {
-        let base = "https://example.com/";
-        let long = format!("{}{}", base, "a".repeat(300));
+        let labels = vec!["a".repeat(60); 4].join(".");
+        let long = format!("https://{labels}/private");
         let result = sanitize_log_url(&long);
         assert!(result.len() <= 204); // 200 chars + "..."
         assert!(result.ends_with("..."));
@@ -656,7 +665,7 @@ mod tests {
     #[test]
     fn sanitize_log_url_replaces_tab() {
         let url = "https://example.com/\tpath";
-        assert_eq!(sanitize_log_url(url), "https://example.com/?path");
+        assert_eq!(sanitize_log_url(url), "https://example.com");
     }
 
     #[test]
@@ -664,6 +673,20 @@ mod tests {
         let url = "http://a.b";
         assert_eq!(sanitize_log_url(url), url);
         assert!(!url.ends_with("..."));
+    }
+
+    #[test]
+    fn webhook_logs_redact_credentials_and_path_tokens() {
+        let url = "https://user:password@example.com:8443/services/private-token?key=query-secret#fragment-secret";
+        assert_eq!(sanitize_log_url(url), "https://example.com:8443");
+        assert_eq!(
+            sanitize_log_url("invalid private-token"),
+            "<invalid webhook URL>"
+        );
+        assert_eq!(
+            sanitize_log_url("data:text/plain,private-token"),
+            "<invalid webhook URL>"
+        );
     }
 
     #[test]

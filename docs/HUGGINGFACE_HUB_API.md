@@ -139,6 +139,8 @@ DNS addresses at connection time and rejects private destinations and redirects.
 The webhook client ignores proxy environment variables so a proxy cannot bypass
 these destination checks. Applications supplying a custom `HubState` HTTP client
 must also install `PublicWebhookDnsResolver`, disable proxies and disable redirects.
+Delivery logs identify the destination origin; URL credentials, paths, query
+strings and fragments are omitted because they can contain webhook tokens.
 
 An LFS batch with an explicit `ref` must also fit the credential's revision
 scope. Unauthorized requests return 403 before transfer actions are issued.
