@@ -1,4 +1,5 @@
 use bytes::Bytes;
+mod range_bounds;
 use futures_util::StreamExt;
 use object_store::{
     GetOptions, ObjectStore as ExternalObjectStore, ObjectStoreExt, memory::InMemory,

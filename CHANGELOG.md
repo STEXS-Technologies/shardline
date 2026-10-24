@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Reject truncated or oversized S3 backend range responses instead of returning
+  them as successful reads, enforcing the requested byte limit while receiving data.
 - Upgrade the internal Arrow/Parquet preview reader to remove the unmaintained
   `paste` dependency and its dependency-policy exception.
 - Keep webhook credentials, path tokens and query secrets out of delivery logs.

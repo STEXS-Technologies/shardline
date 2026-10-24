@@ -1147,11 +1147,28 @@ impl AsyncObjectStore for S3ObjectStore {
         if result.range != external_range {
             return Err(S3ObjectStoreError::RangeOutOfBounds);
         }
+        let expected_length = external_range
+            .end
+            .checked_sub(external_range.start)
+            .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
         let mut acc = Vec::new();
         let mut stream = result.into_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(S3ObjectStoreError::External)?;
+            let next_length = acc
+                .len()
+                .checked_add(chunk.len())
+                .and_then(|length| u64::try_from(length).ok())
+                .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
+            if next_length > expected_length {
+                return Err(S3ObjectStoreError::RangeOutOfBounds);
+            }
             acc.extend_from_slice(&chunk);
+        }
+        if u64::try_from(acc.len()).map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?
+            != expected_length
+        {
+            return Err(S3ObjectStoreError::RangeOutOfBounds);
         }
         Ok(acc)
     }
