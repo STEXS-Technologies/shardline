@@ -172,6 +172,12 @@ jobs:
           --test transfer_http --run-ignored only
           -E 'test(native_dedup_delete_fencing_survives_replica_restart) or test(native_delta_delete_fencing_survives_replica_restart)'
 
+      - name: Qualify bounded SDK memory and byte identity at 256 MiB and 1 GiB
+        run: >-
+          cargo nextest run --locked -p sdx --all-features --test e2e
+          --run-ignored all
+          -E 'test(stream_large_file_memory_bounded_cat) or test(stream_gib_file_memory_bounded_cat)'
+
       - name: Qualify large native Xet transfers and process recovery
         run: |
           client_env="${RUNNER_TEMP}/native-xet-qualification"

@@ -663,7 +663,16 @@ async fn download_stream_byte_range_matches_uploaded_bytes() {
 /// decoded-byte and queued-term caps are also tested deterministically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stream_large_file_memory_bounded_cat() {
-    let file_size = 256 * 1024 * 1024;
+    measure_stream_memory(256 * 1024 * 1024, "stream_large_file_memory_bounded_cat").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "1 GiB RSS qualification; run explicitly"]
+async fn stream_gib_file_memory_bounded_cat() {
+    measure_stream_memory(1024 * 1024 * 1024, "stream_gib_file_memory_bounded_cat").await;
+}
+
+async fn measure_stream_memory(file_size: usize, test_name: &'static str) {
     let file_id = hex_id(MEMORY_ID);
     let Ok(base_url) = std::env::var(MEMORY_MEASUREMENT_CHILD_ENV) else {
         let server = TestServer::start_with_chunk_size(NonZeroUsize::new(65_536).unwrap()).await;
@@ -672,13 +681,34 @@ async fn stream_large_file_memory_bounded_cat() {
         drop(data);
         let current_exe = std::env::current_exe().unwrap();
         let status = tokio::task::spawn_blocking(move || {
-            Command::new(current_exe)
+            let mut child = Command::new(current_exe)
                 .arg("--exact")
-                .arg("stream_large_file_memory_bounded_cat")
+                .arg(test_name)
+                .arg("--include-ignored")
                 .arg("--nocapture")
                 .env(MEMORY_MEASUREMENT_CHILD_ENV, &server.base_url)
                 .env("RUST_TEST_THREADS", "1")
-                .status()
+                .spawn()?;
+            let started = Instant::now();
+            loop {
+                let status = child.try_wait();
+                if status.is_err() {
+                    let _kill = child.kill();
+                    let _wait = child.wait();
+                }
+                if let Some(status) = status? {
+                    break Ok::<_, std::io::Error>(status);
+                }
+                if started.elapsed() >= Duration::from_secs(180) {
+                    let _kill = child.kill();
+                    let _wait = child.wait();
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "isolated RSS measurement exceeded its deadline",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         })
         .await
         .unwrap()
@@ -718,14 +748,26 @@ async fn stream_large_file_memory_bounded_cat() {
         .build()
         .unwrap();
     let baseline_kib = current_rss_kib();
+    let transfer_started = Instant::now();
     let mut stream = client.download_stream(&file_id, None).await.unwrap();
     let handle = std::thread::spawn(move || {
         let mut peak_rss_kib = current_rss_kib();
         let mut total: u64 = 0;
+        let mut expected_state = 0xb00b5e_u64;
         loop {
             peak_rss_kib = peak_rss_kib.max(current_rss_kib());
             match stream.blocking_next() {
                 Ok(Some(chunk)) => {
+                    for byte in &chunk {
+                        expected_state = expected_state
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1442695040888963407);
+                        assert_eq!(
+                            *byte,
+                            (expected_state >> 33) as u8,
+                            "streamed byte identity"
+                        );
+                    }
                     total = total.saturating_add(u64::try_from(chunk.len()).unwrap())
                 }
                 Ok(None) => break,
@@ -739,8 +781,9 @@ async fn stream_large_file_memory_bounded_cat() {
     assert_eq!(total, u64::try_from(file_size).unwrap(), "streamed length");
     let bound_kib = 64 * 1024;
     let streaming_delta_kib = peak_rss_kib.saturating_sub(baseline_kib);
+    let transfer_millis = transfer_started.elapsed().as_millis();
     eprintln!(
-        "client-only cat: file {file_size} bytes, buffer cap 64 MiB, baseline RSS {baseline_kib} KiB, peak VmHWM {peak_rss_kib} KiB (streaming delta {streaming_delta_kib} KiB)"
+        "client-only cat: file {file_size} bytes, buffer cap 64 MiB, baseline RSS {baseline_kib} KiB, peak VmHWM {peak_rss_kib} KiB (streaming delta {streaming_delta_kib} KiB), transfer {transfer_millis} ms"
     );
     assert!(
         streaming_delta_kib < bound_kib,

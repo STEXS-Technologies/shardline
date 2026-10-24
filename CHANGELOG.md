@@ -81,6 +81,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Bound the SDK's shared download runtime to reduce per-core worker and allocator
+  memory overhead while preserving transfer admission and content verification.
 - Acquire PostgreSQL native-Xet descriptor locks in a consistent order so
   overlapping staging and member-index repair batches avoid lock-order deadlocks.
 - Preserve retryable native-reader overload responses and `Retry-After` through
