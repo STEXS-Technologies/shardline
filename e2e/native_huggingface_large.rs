@@ -108,6 +108,7 @@ async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
     let shards = read_metric_counter(&runtime, "shardline_shards_total").await?;
     let xorbs = read_metric_counter(&runtime, "shardline_xorbs_total").await?;
     let basic = read_metric_counter(&runtime, "shardline_hub_api_file_uploads_total").await?;
+    let upload_started = std::time::Instant::now();
     run_hf(
         &runtime,
         home.path(),
@@ -120,6 +121,11 @@ async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
             &runtime.model_token,
         ],
     )?;
+    let upload_seconds = upload_started.elapsed().as_secs_f64();
+    eprintln!(
+        "1 GiB stock-client upload: {upload_seconds:.3} s, {:.3} MiB/s; includes client processing and Hub commit completion",
+        1024.0 / upload_seconds
+    );
     eprintln!("1 GiB upload peak RSS: {} KiB", peak_rss_kib()?);
     let uploaded_io = ProcessIo::read()?;
     uploaded_io.report_since(before_io, "1 GiB upload");
@@ -132,6 +138,7 @@ async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
     let download = working.path().join("download");
     let cold_home = tempfile::tempdir()?;
     let native_reads = read_metric_counter(&runtime, "shardline_xet_xorb_downloads_total").await?;
+    let download_started = std::time::Instant::now();
     run_hf(
         &runtime,
         cold_home.path(),
@@ -146,6 +153,11 @@ async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
             &runtime.model_token,
         ],
     )?;
+    let download_seconds = download_started.elapsed().as_secs_f64();
+    eprintln!(
+        "1 GiB cold stock-client download: {download_seconds:.3} s, {:.3} MiB/s; includes client reconstruction and completed file output",
+        1024.0 / download_seconds
+    );
     assert!(
         read_metric_counter(&runtime, "shardline_xet_xorb_downloads_total").await? > native_reads,
         "cold stock-client download must use the native Xorb transfer path"

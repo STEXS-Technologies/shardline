@@ -51,8 +51,8 @@ cargo test --locked -p shardline-server --test credential_header_ambiguity -- --
 cargo test --locked -p shardline-server --lib subject_index -- --nocapture
 cargo test --locked -p shardline-server --test protocol_completion \
   native_minio_signed_streaming -- --ignored --skip postgres --nocapture
-cargo test --locked -p shardline-server --test protocol_completion -- \
-  --include-ignored --skip postgres --skip minio_ --skip lfs_process_child --nocapture
+cargo nextest run --locked -p shardline-server --test protocol_completion \
+  --run-ignored all -E '!test(/postgres|minio_|lfs_process_child/)'
 
 # Own disposable backends; unlike optional developer fixtures, missing Docker
 # or a failed database/object-store startup must fail this required gate.

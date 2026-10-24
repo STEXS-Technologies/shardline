@@ -2677,7 +2677,11 @@ async fn exercise_native_git_lfs(frontend: ServerFrontend, database: Option<&str
     // history is not published to the Hub. Use repository-wide read access
     // for that operation; a main-scoped token cannot authorize arbitrary
     // commit identities from an external Git remote.
-    let download_credential = revision_token("native-client", &repository, TokenScope::Read, None);
+    let download_credential = if frontend == ServerFrontend::Hub {
+        revision_token("native-client", &repository, TokenScope::Read, None)
+    } else {
+        credential.clone()
+    };
     git(
         worktree.path(),
         &[
