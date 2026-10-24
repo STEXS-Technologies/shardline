@@ -566,6 +566,43 @@ results do not establish an overall speedup. All four runs verified their
 responses, including 1,536 post-GC reads. Full payload verification remains
 mandatory; neither S3 transfer reduction nor increased NVMe lifetime is claimed.
 
+#### Native Hugging Face/Xet transfers
+
+An October 24, 2026 measurement used production binary `d61d7342`,
+`huggingface_hub` 2.2.0 and `hf_xet` 1.7.0, authenticated Hub/Xet frontends,
+and disposable PostgreSQL/MinIO. One server process was limited to four CPUs
+and 1 GiB on a shared host. Deterministic incompressible files were generated
+before timing. Each client started with an empty client cache; backend and OS
+caches were not cold. Times include client startup and full transfer completion.
+
+| Logical file | Upload MiB/s | Download MiB/s | Upload backend attempts | Download backend attempts |
+| --- | ---: | ---: | ---: | ---: |
+| 512 MiB, three runs | 59.70–71.88 | 530.36–559.53 | 8,636 each | 22 each |
+| 1 GiB, one run | 55.53 | 483.54 | 17,030 | 42 |
+
+The 512 MiB medians were 68.50 MiB/s upload and 559.47 MiB/s download.
+Every upload increased native Xorb and shard counters without using the basic
+Hub body-upload path. Downloads used native Xorb transfers and matched the
+original size and SHA-256. Request totals reconciled with MinIO traces.
+
+The 1 GiB run reached 158.9 MiB server process peak RSS. Client peaks were
+796 MiB during upload and 648 MiB during download; these are separate processes.
+Server process-accounted writes increased by approximately 3.23 GB during upload
+and 1.28 GB during download. Those Linux I/O counters do not isolate scratch
+writes, PostgreSQL/MinIO writes, physical device writes or NVMe wear.
+
+Native ingestion still retained approximately 2.002 times the logical payload:
+the 1 GiB fixture produced 16,736 standalone chunks and 17 Xorbs, plus shard
+metadata. Upload traces received 2.15 GB and returned 1.07 GB; download traces
+returned 1.28 GB. This independently confirms redundant native chunk storage
+and read amplification remain optimization targets. Generic direct-packing
+savings do not establish equivalent native-Xet savings.
+
+These loopback measurements are not a paired v1.12.1 speedup, a reproduction of
+the external 18/60 MB/s report, sustained concurrency qualification, or evidence
+of multi-host scaling. They establish successful large native transfers under
+this configuration, rather than resolution of the overall throughput issue.
+
 #### PostgreSQL publication
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at

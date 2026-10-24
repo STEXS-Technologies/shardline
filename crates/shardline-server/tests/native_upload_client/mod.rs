@@ -153,9 +153,11 @@ where
     let interrupted = tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             if let Some(status) = uploading.0.try_wait()? {
-                let error =
-                    std::fs::read_to_string(working.path().join("interrupted/client.stderr"))?;
-                return Err(format!("client exited before interruption: {status}: {error}").into());
+                // Upstream diagnostics can contain bearer credentials or signed URLs.
+                return Err(format!(
+                    "client exited before interruption: {status}; client output omitted because it can contain transfer credentials"
+                )
+                .into());
             }
             if let Some(intent) = index
                 .intents_by_state(UploadIntentState::Storing)
@@ -211,8 +213,7 @@ where
     .await??;
     assert!(
         status.success(),
-        "stock retry failed: {}",
-        std::fs::read_to_string(retry_home.join("client.stderr"))?
+        "stock retry failed: {status}; client output omitted because it can contain transfer credentials"
     );
     let result: serde_json::Value =
         serde_json::from_slice(&std::fs::read(retry_home.join("result.json"))?)?;
