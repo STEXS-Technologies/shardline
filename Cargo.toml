@@ -19,9 +19,9 @@ documentation = "https://docs.rs/shardline"
 
 [workspace.dependencies]
 aes-gcm = "0.10"
-arrow-array = "57.3.0"
-arrow-json = "57.3.0"
-arrow-schema = "57.3.0"
+arrow-array = "60.0.0"
+arrow-json = "60.0.0"
+arrow-schema = "60.0.0"
 async-trait = "0.1.92"
 dotenvy = "0.15"
 toml = "0.8"
@@ -50,7 +50,7 @@ jsonwebtoken = "9"
 libc = "0.2.177"
 libfuzzer-sys = "0.4"
 object_store = { version = "0.14.2", default-features = false }
-parquet = { version = "57.3.0", default-features = false, features = [
+parquet = { version = "60.0.0", default-features = false, features = [
     "arrow",
     "snap",
     "brotli",

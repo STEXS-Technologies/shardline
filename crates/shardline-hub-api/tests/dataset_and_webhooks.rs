@@ -186,7 +186,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     {
         let cursor = std::io::Cursor::new(&mut parquet);
         let properties = WriterProperties::builder()
-            .set_max_row_group_size(100)
+            .set_max_row_group_row_count(Some(100))
             .build();
         let mut writer = ArrowWriter::try_new(cursor, schema, Some(properties)).unwrap();
         writer.write(&batch).unwrap();
@@ -511,7 +511,7 @@ async fn dataset_query_http_e2e_reads_compressed_multiple_row_groups() {
     {
         let cursor = std::io::Cursor::new(&mut parquet);
         let properties = WriterProperties::builder()
-            .set_max_row_group_size(10)
+            .set_max_row_group_row_count(Some(10))
             .build();
         let mut writer = ArrowWriter::try_new(cursor, schema, Some(properties)).unwrap();
         writer.write(&batch).unwrap();

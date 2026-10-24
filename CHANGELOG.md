@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Upgrade the internal Arrow/Parquet preview reader to remove the unmaintained
+  `paste` dependency and its dependency-policy exception.
 - Keep webhook credentials, path tokens and query secrets out of delivery logs.
 - Validate outbound Hub webhook DNS results at connection time, rejecting private
   addresses and proxy-based resolution bypasses while keeping redirects disabled.

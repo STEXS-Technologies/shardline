@@ -2,12 +2,7 @@
 all-features = true
 
 [advisories]
-ignore = [
-    # parquet/arrow currently depend on paste for generated code; no safe
-    # upgrade is available upstream. Re-check when parquet removes it.
-    # Owner: shardline. Expiry: 2026-10-25.
-    { id = "RUSTSEC-2024-0436", reason = "parquet 57 transitively uses paste; no safe upgrade is available. Re-check on parquet upgrade. Owner: shardline. Expiry: 2026-10-25." },
-]
+ignore = []
 
 [licenses]
 allow = [
