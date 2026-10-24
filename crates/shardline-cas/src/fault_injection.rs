@@ -38,6 +38,7 @@ pub(crate) fn upload_lifecycle_failpoint(
 #[cfg(any(test, feature = "test-fault-injection"))]
 pub use enabled::{
     UploadLifecycleFailpointGuard, arm_upload_interruption, arm_upload_process_pause,
+    arm_upload_process_pause_for_prefix,
 };
 
 #[cfg(any(test, feature = "test-fault-injection"))]
@@ -54,6 +55,7 @@ mod enabled {
         boundary: UploadLifecycleBoundary,
         registration_id: u64,
         pause_marker: Option<std::path::PathBuf>,
+        match_prefix: bool,
     }
 
     static NEXT_REGISTRATION_ID: std::sync::atomic::AtomicU64 =
@@ -96,6 +98,7 @@ mod enabled {
                     boundary,
                     registration_id,
                     pause_marker: None,
+                    match_prefix: false,
                 },
             );
         UploadLifecycleFailpointGuard {
@@ -124,19 +127,52 @@ mod enabled {
         guard
     }
 
+    /// Pauses a matching upload whose exact identity is chosen by a stock client.
+    /// Only explicit test-fault-injection builds expose this process-kill hook.
+    /// The marker records the actual matched intent, never a client credential.
+    ///
+    /// # Panics
+    /// Panics if `prefix` is empty, preventing an accidental match of all uploads.
+    #[must_use]
+    pub fn arm_upload_process_pause_for_prefix(
+        prefix: String,
+        boundary: UploadLifecycleBoundary,
+        marker: std::path::PathBuf,
+    ) -> UploadLifecycleFailpointGuard {
+        assert!(!prefix.is_empty(), "upload fault prefix must be nonempty");
+        let guard = arm_upload_process_pause(prefix, boundary, marker);
+        if let Some(fault) = FAILPOINTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(&guard.intent_id)
+        {
+            fault.match_prefix = true;
+        }
+        guard
+    }
+
     pub(super) fn hit(
         intent_id: &str,
         boundary: UploadLifecycleBoundary,
     ) -> Result<(), crate::CasError> {
-        let fault = FAILPOINTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(intent_id)
-            .filter(|armed| armed.boundary == boundary)
-            .cloned();
+        let fault = {
+            let failpoints = FAILPOINTS.lock().unwrap_or_else(|error| error.into_inner());
+            failpoints
+                .get(intent_id)
+                .filter(|armed| armed.boundary == boundary)
+                .or_else(|| {
+                    failpoints.iter().find_map(|(prefix, armed)| {
+                        (armed.match_prefix
+                            && armed.boundary == boundary
+                            && intent_id.starts_with(prefix))
+                        .then_some(armed)
+                    })
+                })
+                .cloned()
+        };
         if let Some(fault) = fault {
             if let Some(marker) = fault.pause_marker {
-                std::fs::write(marker, b"durable boundary reached")
+                std::fs::write(marker, intent_id.as_bytes())
                     .map_err(|error| crate::CasError::ObjectStore(error.to_string()))?;
                 loop {
                     std::thread::park();

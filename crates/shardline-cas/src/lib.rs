@@ -79,6 +79,7 @@ pub use fault_injection::UploadLifecycleBoundary;
 #[cfg(any(test, feature = "test-fault-injection"))]
 pub use fault_injection::{
     UploadLifecycleFailpointGuard, arm_upload_interruption, arm_upload_process_pause,
+    arm_upload_process_pause_for_prefix,
 };
 pub use limits::CasLimits;
 pub use reachability::ObjectReachability;

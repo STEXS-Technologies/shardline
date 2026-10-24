@@ -84,11 +84,16 @@ async fn native_upload_child() -> Result {
             "visible" => UploadLifecycleBoundary::AfterVisible,
             _ => return Err("invalid process cut".into()),
         };
-        Some(shardline_cas::arm_upload_process_pause(
-            std::env::var("SHARDLINE_TEST_NATIVE_PROCESS_INTENT")?,
-            boundary,
-            root.join("reached"),
-        ))
+        let intent = std::env::var("SHARDLINE_TEST_NATIVE_PROCESS_INTENT")?;
+        Some(if intent == "stock-client-xorb" {
+            shardline_cas::arm_upload_process_pause_for_prefix(
+                "xorb-v2-".to_owned(),
+                boundary,
+                root.join("reached"),
+            )
+        } else {
+            shardline_cas::arm_upload_process_pause(intent, boundary, root.join("reached"))
+        })
     } else {
         None
     };

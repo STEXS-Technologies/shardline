@@ -115,20 +115,29 @@ See [deployment limits](DEPLOYMENT.md) before placing a proxy in front of CAS.
 
 ## Interrupted uploads
 
-For process-interruption qualification with stock `hf_xet` 1.6.0 and Docker:
+For process-interruption qualification with stock `hf_xet` and Docker:
 
 ```bash
 cargo test -p shardline-server --features docker --test native_upload_process \
   stock_xet_large_upload_recovers -- --ignored --nocapture --test-threads=1
 ```
 
-These explicit tests upload 512 MiB through the stock native session API, observe
-an actively storing upload intent, and SIGKILL the server. A cold client retries
-and verifies its downloaded SHA-256. Local storage restarts against its retained
+These explicit tests upload 512 MiB through the stock native session API and
+SIGKILL the server at each of six durable boundaries: intent creation, storing,
+successful object-store work, stored, metadata committed and visible. A test-only
+pause records the client-selected Xorb intent and the parent checks its durable
+state before killing the process. Normal production builds do not expose this
+fault-injection hook. A cold client retries and verifies its downloaded SHA-256.
+Local storage restarts against its retained
 directory; PostgreSQL/MinIO retries through a new process, address and empty local
 directory. The exact interrupted immutable object must become visible, with its
 prior intent history retained. This qualifies those CAS recovery scenarios;
 it does not establish every Hub workflow or every possible crash timing.
+The six-boundary matrix passed on October 24, 2026 with `hf_xet` 1.7.0,
+covering six local-storage and six PostgreSQL/MinIO interruptions. Concurrent
+mixed-client retries and the external report's precise failure sequence remain
+separate qualification requirements. This is recovery evidence, not a recovery
+latency or normal-transfer throughput benchmark.
 
 Cancelling the upload future also cancels a final file write still queued on
 the blocking pool. A synchronous write that has already started can still

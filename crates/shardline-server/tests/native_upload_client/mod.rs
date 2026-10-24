@@ -97,28 +97,54 @@ fn client(source: &Path, base: &str, token: &str, home: &Path) -> Result<Process
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit 512 MiB real hf_xet process interruption qualification"]
 async fn stock_xet_large_upload_recovers_after_server_sigkill() -> Result {
-    let root = tempfile::tempdir()?;
-    let index = shardline_index::LocalIndexStore::new(root.path().to_owned())?;
-    interrupted_client(root.path(), index, &[]).await
+    for cut in [
+        "created",
+        "storing",
+        "object",
+        "stored",
+        "committed",
+        "visible",
+    ] {
+        let root = tempfile::tempdir()?;
+        let index = shardline_index::LocalIndexStore::new(root.path().to_owned())?;
+        interrupted_client(root.path(), index, &[], cut).await?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "docker")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit 512 MiB stock-client SIGKILL qualification with PostgreSQL and MinIO"]
 async fn stock_xet_large_upload_recovers_with_postgres_and_minio() -> Result {
-    let remote = super::native_upload_remote::RemoteFixture::start().await?;
-    let root = tempfile::tempdir()?;
-    let result = interrupted_client(
-        root.path(),
-        shardline_index::PostgresIndexStore::new(remote.pool.clone()),
-        &remote.environment,
-    )
-    .await;
-    remote.pool.close().await;
-    result
+    for cut in [
+        "created",
+        "storing",
+        "object",
+        "stored",
+        "committed",
+        "visible",
+    ] {
+        let remote = super::native_upload_remote::RemoteFixture::start().await?;
+        let root = tempfile::tempdir()?;
+        let result = interrupted_client(
+            root.path(),
+            shardline_index::PostgresIndexStore::new(remote.pool.clone()),
+            &remote.environment,
+            cut,
+        )
+        .await;
+        remote.pool.close().await;
+        result?;
+    }
+    Ok(())
 }
 
-async fn interrupted_client<I>(root: &Path, index: I, environment: &[(&str, String)]) -> Result
+async fn interrupted_client<I>(
+    root: &Path,
+    index: I,
+    environment: &[(&str, String)],
+    cut: &str,
+) -> Result
 where
     I: UploadIntentStore,
     I::Error: std::error::Error + 'static,
@@ -147,7 +173,8 @@ where
         u64::MAX,
     )?)?;
     let http = reqwest::Client::new();
-    let mut server = start_with_environment(root, address, None, environment)?;
+    let mut server =
+        start_with_environment(root, address, Some((cut, "stock-client-xorb")), environment)?;
     ready(&http, &base, &mut server).await?;
     let mut uploading = client(&source, &base, &token, &working.path().join("interrupted"))?;
     let interrupted = tokio::time::timeout(Duration::from_secs(90), async {
@@ -159,12 +186,19 @@ where
                 )
                 .into());
             }
-            if let Some(intent) = index
-                .intents_by_state(UploadIntentState::Storing)
-                .await?
-                .into_iter()
-                .find(|intent| intent.intent_id().starts_with("xorb-v2-"))
+            if let Ok(intent_id) = std::fs::read_to_string(root.join("reached"))
+                && intent_id.starts_with("xorb-v2-")
+                && let Some(intent) = index.intent_by_id(&intent_id).await?
             {
+                let expected = match cut {
+                    "created" => UploadIntentState::Created,
+                    "storing" | "object" => UploadIntentState::Storing,
+                    "stored" => UploadIntentState::Stored,
+                    "committed" => UploadIntentState::MetadataCommitted,
+                    "visible" => UploadIntentState::Visible,
+                    _ => return Err("invalid stock-client interruption boundary".into()),
+                };
+                assert_eq!(intent.state(), expected, "durable state at {cut}");
                 return Ok::<_, Box<dyn std::error::Error>>(intent);
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -239,5 +273,6 @@ where
                 && intent.object_length() == interrupted.object_length()),
         "the exact interrupted immutable object must become visible on retry"
     );
+    eprintln!("stock 512 MiB client recovered after SIGKILL at {cut}");
     Ok(())
 }
