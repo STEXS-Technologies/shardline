@@ -97,6 +97,21 @@ async fn released_remote_packed_ranges_survive_upgrade_and_rollback() {
         if write_key != Some("released-packed") {
             verify(&server, &token, "candidate-packed", &candidate_payload).await;
         }
+        if write_key == Some("candidate-packed") {
+            tokio::join!(
+                maintenance::gc_before_rollback(
+                    &current,
+                    root.path(),
+                    Some(&postgres),
+                    &storage_env,
+                    "s3"
+                ),
+                verify(&server, &token, "released-packed", &payload),
+                verify(&server, &token, "candidate-packed", &candidate_payload),
+            );
+            verify(&server, &token, "released-packed", &payload).await;
+            verify(&server, &token, "candidate-packed", &candidate_payload).await;
+        }
         drop(server);
     }
 }

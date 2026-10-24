@@ -4,6 +4,7 @@ use super::*;
 use shardline_index::{LocalRecordStore, XetFileIdentity};
 
 mod creation_policy;
+mod maintenance;
 mod native_xet;
 #[cfg(feature = "docker")]
 mod packed_ranges;
