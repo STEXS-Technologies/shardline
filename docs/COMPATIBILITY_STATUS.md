@@ -77,6 +77,14 @@ HTTP server instances. These instances share one test host; process-kill recover
 and the remaining transfer-failure scenarios have separate qualification.
 The dedicated MinIO transfer runs explicitly for both versions in E2E CI.
 
+Separate HTTP failure-injection tests cover local Hub and standalone LFS uploads:
+a disconnected partial body remains unavailable, a complete retry succeeds, and
+a mismatching retry cannot replace valid bytes. Reopening the backend preserves
+the bytes and repository isolation. Streamed basic uploads accept exactly 64 MiB
+and reject one byte more, including retries against an existing object, without
+requiring a Content-Length header. These checks do not qualify process termination
+or remote-storage cancellation.
+
 The E2E workflow pins these Hub/Xet client combinations. This is the required
 test matrix, not a claim that the current branch has passed release CI.
 

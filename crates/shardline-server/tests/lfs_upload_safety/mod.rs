@@ -2,6 +2,92 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+fn boundary_body(chunk: bytes::Bytes, extra: bool) -> reqwest::Body {
+    let frames = (0..64).map(move |_| Ok::<_, std::io::Error>(chunk.clone()));
+    let tail = extra.then(|| Ok(bytes::Bytes::from_static(b"x")));
+    reqwest::Body::wrap_stream(futures_util::stream::iter(frames.chain(tail)))
+}
+
+#[tokio::test]
+async fn streamed_lfs_size_boundary_preserves_published_objects() {
+    use futures_util::StreamExt;
+
+    let chunk = bytes::Bytes::from(vec![73_u8; 1024 * 1024]);
+    let mut digest = Sha256::new();
+    for _ in 0..64 {
+        digest.update(&chunk);
+    }
+    let oid = hex::encode(digest.clone().finalize());
+    digest.update(b"x");
+    let oversized_oid = hex::encode(digest.finalize());
+    for (frontend, prefix, rejected) in [
+        (
+            ServerFrontend::Lfs,
+            "/v1/lfs/objects",
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (ServerFrontend::Hub, "/lfs/objects", StatusCode::BAD_REQUEST),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let server = start(root.path(), frontend, true, None).await;
+        let credential = token("writer", "size-safety", TokenScope::Write);
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let url = format!("{}{prefix}/{oid}", server.base);
+        let oversized_url = format!("{}{prefix}/{oversized_oid}", server.base);
+        let uploaded = client
+            .put(&url)
+            .bearer_auth(&credential)
+            .body(boundary_body(chunk.clone(), false))
+            .send()
+            .await
+            .unwrap();
+        assert!(uploaded.status().is_success());
+        // No Content-Length: the server must enforce the actual streamed bytes,
+        // including on its duplicate-object verification path.
+        for target in [&oversized_url, &url] {
+            let response = client
+                .put(target)
+                .bearer_auth(&credential)
+                .body(boundary_body(chunk.clone(), true))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), rejected);
+        }
+        assert_eq!(
+            client
+                .get(&oversized_url)
+                .bearer_auth(&credential)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let response = client
+            .get(&url)
+            .bearer_auth(&credential)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.bytes_stream();
+        let mut actual = Sha256::new();
+        let mut length = 0;
+        while let Some(frame) = stream.next().await {
+            let frame = frame.unwrap();
+            length += frame.len();
+            actual.update(frame);
+        }
+        assert_eq!(length, 64 * 1024 * 1024);
+        assert_eq!(hex::encode(actual.finalize()), oid);
+        server.stop().await;
+    }
+}
+
 #[tokio::test]
 async fn disconnected_lfs_upload_can_retry_without_corrupting_published_bytes() {
     for (frontend, prefix) in [
