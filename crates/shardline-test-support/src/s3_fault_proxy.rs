@@ -2,7 +2,7 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
@@ -33,9 +33,15 @@ pub struct S3FaultProxy {
     armed: Arc<AtomicBool>,
     injected: Arc<AtomicBool>,
     get_requests: Arc<AtomicUsize>,
-    get_response_bytes: Arc<AtomicUsize>,
+    get_responses: Arc<GetResponses>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct GetResponses {
+    bytes: AtomicUsize,
+    lengths: Mutex<Vec<usize>>,
 }
 
 impl S3FaultProxy {
@@ -78,8 +84,8 @@ impl S3FaultProxy {
         let injected = Arc::new(AtomicBool::new(false));
         let get_requests = Arc::new(AtomicUsize::new(0));
         let worker_get_requests = Arc::clone(&get_requests);
-        let get_response_bytes = Arc::new(AtomicUsize::new(0));
-        let worker_get_response_bytes = Arc::clone(&get_response_bytes);
+        let get_responses = Arc::new(GetResponses::default());
+        let worker_get_response_bytes = Arc::clone(&get_responses);
         let worker_armed = Arc::clone(&armed);
         let worker_injected = Arc::clone(&injected);
         let (stop, stopped) = mpsc::channel();
@@ -113,7 +119,7 @@ impl S3FaultProxy {
             armed,
             injected,
             get_requests,
-            get_response_bytes,
+            get_responses,
             stop: Some(stop),
             thread: Some(thread),
         })
@@ -146,7 +152,17 @@ impl S3FaultProxy {
     /// Excludes headers and failed requests; this is fixture traffic, not billing.
     #[must_use]
     pub fn get_response_bytes(&self) -> usize {
-        self.get_response_bytes.load(Ordering::Acquire)
+        self.get_responses.bytes.load(Ordering::Acquire)
+    }
+
+    /// Successful upstream GET body lengths, in provider response order.
+    #[must_use]
+    pub fn get_response_lengths(&self) -> Vec<usize> {
+        self.get_responses
+            .lengths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -168,7 +184,7 @@ fn proxy_one_s3_request(
     armed: &AtomicBool,
     injected: &AtomicBool,
     get_requests: &AtomicUsize,
-    get_response_bytes: &AtomicUsize,
+    get_response_bytes: &GetResponses,
 ) -> std::io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(10)))?;
     let request = read_http_request(&mut client)?;
@@ -204,7 +220,12 @@ fn proxy_one_s3_request(
             .len()
             .checked_sub(header_end)
             .ok_or_else(invalid_response_offset)?;
-        get_response_bytes.fetch_add(length, Ordering::AcqRel);
+        get_response_bytes.bytes.fetch_add(length, Ordering::AcqRel);
+        get_response_bytes
+            .lengths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(length);
     }
 
     if is_put

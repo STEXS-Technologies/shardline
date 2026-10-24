@@ -15,6 +15,13 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
+mod replacements;
+
+enum Change {
+    Replace(Bytes),
+    Remove,
+    Deny,
+}
 
 #[derive(Default)]
 struct Provider {
@@ -22,6 +29,7 @@ struct Provider {
     requests: Vec<(Method, String)>,
     deny_body: bool,
     transferred: usize,
+    change: Option<(usize, Change)>,
 }
 
 async fn request(
@@ -34,6 +42,26 @@ async fn request(
     provider
         .requests
         .push((method.clone(), uri.path().to_owned()));
+    if provider
+        .change
+        .as_ref()
+        .is_some_and(|(at, _)| *at == provider.requests.len())
+    {
+        match provider.change.take().unwrap().1 {
+            Change::Replace(bytes) => {
+                provider.objects.insert(uri.path().to_owned(), bytes);
+            }
+            Change::Remove => {
+                provider.objects.remove(uri.path());
+            }
+            Change::Deny => {
+                return Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .body(Body::empty())
+                    .unwrap();
+            }
+        }
+    }
     let Some(bytes) = provider.objects.get(uri.path()) else {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)

@@ -1025,6 +1025,13 @@ GET: 98.4% less backend transfer. These are real proxy-observed response-body
 counts; the test also checks exact returned bytes and rejects selected corruption.
 Full downloads still use one GET. This fixture is smaller than the historical
 36 MiB benchmark above and does not establish a latency, RSS or cloud-bill result.
+An additional signed Botocore workflow verifies full and small ranged reads
+against PostgreSQL/MinIO, recreates the server with an empty local root, and
+repeats them. After a separately verified warm-up read, the full GET and three
+4 KiB ranges use ten backend GETs and less than 5 MiB of response bodies.
+This excludes first-request recovery traffic and is a server recreation test,
+not a process-kill recovery measurement. Partial S3 responses omit whole-object
+checksum headers; selected-member verification remains enforced by Shardline.
 Run the mandatory Docker-backed check with:
 
 ```bash

@@ -36,6 +36,7 @@ use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, Token
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tempfile::TempDir;
 use tower::ServiceExt;
+mod range_checksums;
 
 use crate::{
     ServerConfig, ServerFrontend, ServerRole,

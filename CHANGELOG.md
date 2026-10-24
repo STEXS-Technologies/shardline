@@ -91,6 +91,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Omit whole-object checksum headers on partial S3 GET responses so stock SDKs
+  can read verified ranges without comparing them against the full-file digest.
 - Read older v0 Xorb footers through full payload verification, deriving missing
   decoded offsets without rewriting objects or relaxing decompression limits.
 - Reject truncated or oversized S3 backend range responses instead of returning

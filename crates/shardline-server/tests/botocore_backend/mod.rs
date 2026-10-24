@@ -1,9 +1,21 @@
 //! Mandatory checksum/restart qualification owns every remote prerequisite.
 use super::*;
+mod range_restart;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires pinned botocore and disposable Docker PostgreSQL/MinIO"]
 async fn native_botocore_checksum_with_owned_postgres_and_minio() {
+    let (_services, database, storage) = fixture("botocore-checksum").await;
+    exercise_botocore_session_credentials(Some(&database), Some(storage)).await;
+}
+
+async fn fixture(
+    label: &str,
+) -> (
+    shardline_test_support::DockerLocalStack,
+    String,
+    S3ObjectStoreConfig,
+) {
     let services = tokio::task::spawn_blocking(|| {
         shardline_test_support::DockerLocalStack::builder()
             .with_postgres()
@@ -15,7 +27,7 @@ async fn native_botocore_checksum_with_owned_postgres_and_minio() {
     .await
     .unwrap();
     let database = services.postgres_url().unwrap();
-    let prefix = services.unique_s3_key_prefix("botocore-checksum");
+    let prefix = services.unique_s3_key_prefix(label);
     let raw = services.s3_raw_config(Some(&prefix)).unwrap();
     let storage = S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
@@ -26,5 +38,5 @@ async fn native_botocore_checksum_with_owned_postgres_and_minio() {
             raw.secret_key.map(shardline_protocol::SecretString::new),
             None,
         );
-    exercise_botocore_session_credentials(Some(&database), Some(storage)).await;
+    (services, database, storage)
 }

@@ -1397,7 +1397,10 @@ pub(crate) async fn s3_get_object(
         HeaderValue::from_str(&last_modified_from_entry(entry.as_ref()))
             .map_err(|_error| S3Error::internal())?,
     );
-    if checksum_mode {
+    // Stored checksums describe the complete object, not a 206 response body.
+    // Advertising one on a range makes stock SDKs reject otherwise verified
+    // bytes. Full GETs (including an ignored If-Range) retain object checksums.
+    if checksum_mode && range.is_none() {
         let metadata = entry
             .as_ref()
             .map_or(&[][..], |entry| entry.user_metadata.as_slice());

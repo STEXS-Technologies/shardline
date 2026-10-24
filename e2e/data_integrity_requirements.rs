@@ -12,7 +12,7 @@ fn required_missing_docker_fails() {
     assert!(!output.status.success());
     let diagnostic = String::from_utf8_lossy(&output.stdout);
     assert!(
-        diagnostic.contains("required native client Docker data-integrity backend"),
+        diagnostic.contains("required native client Docker daemon is missing or cannot run"),
         "{diagnostic}"
     );
 }
