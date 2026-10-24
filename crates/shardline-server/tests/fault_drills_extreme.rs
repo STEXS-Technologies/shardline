@@ -9,7 +9,7 @@
 //! integration test builds its own crate; duplication keeps `fault_drills.rs`
 //! a frozen regression gate). The harness is extended additively with:
 //!   - a reconstruction-cache mode (default `Disabled`; `with_redis_cache` /
-//!     `with_memory_cache` + `set_redis_cache` for mid-life switches),
+//!     `with_memory_cache`),
 //!   - `s3_delete` (DELETE verb),
 //!   - chunk-set helpers (`chunk_file_paths`, `corrupt_file`,
 //!     `new_chunk_files`, `session_dir_count`), and a seeded LCG for drill 6.
@@ -57,7 +57,7 @@ use std::{
 };
 use tempfile::TempDir;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
 };
@@ -180,12 +180,6 @@ impl DrillHarness {
     fn with_memory_cache(mut self, ttl: NonZeroU64, max_entries: NonZeroUsize) -> Self {
         self.cache_mode = CacheMode::Memory(ttl, max_entries);
         self
-    }
-
-    /// Switch the cache mode mid-life (used by drill 2b to move from a live
-    /// Redis to a dead one across a restart).
-    fn set_redis_cache(&mut self, url: String) {
-        self.cache_mode = CacheMode::Redis(url);
     }
 
     fn build_config(&self, addr: SocketAddr) -> ServerConfig {
@@ -489,15 +483,6 @@ async fn wait_part_evidence(
     }
 }
 
-/// One-shot TCP reachability probe used to SKIP-gate drills needing live
-/// external services (Postgres / Redis).
-async fn require_tcp(host: &str, port: u16) -> bool {
-    matches!(
-        tokio::time::timeout(Duration::from_millis(250), TcpStream::connect((host, port))).await,
-        Ok(Ok(_stream))
-    )
-}
-
 /// Migrate the owned PostgreSQL fixture; the server does not self-migrate.
 async fn ensure_dev_postgres_migrated(url: &str) {
     let mut last = None;
@@ -771,16 +756,17 @@ async fn drill_extreme_2a_dead_redis_boots_and_serves() {
 }
 
 /// 2b: live Redis for the write+first read, then the server is killed and
-/// restarted with a DEAD Redis URL on the SAME root — the object must still
-/// serve byte-exact from the disk fallback (cache lost mid-life).
+/// restarted with the same URL after the owned Redis container stops. Objects
+/// must remain byte-exact. This checks S3 availability with an unavailable cache;
+/// the S3 GET path does not itself use the Xet reconstruction cache.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_extreme_2b_live_redis_then_redis_down() {
-    if !require_tcp("127.0.0.1", 6379).await {
-        eprintln!("SKIP: drill_extreme_2b_live_redis_then_redis_down — 127.0.0.1:6379 unreachable");
-        return;
-    }
-    let mut harness =
-        DrillHarness::new(3600).with_redis_cache("redis://127.0.0.1:6379/0".to_owned());
+    let stack = shardline_test_support::DockerLocalStack::builder()
+        .with_redis()
+        .start()
+        .unwrap()
+        .expect("Redis outage drill requires Docker");
+    let mut harness = DrillHarness::new(3600).with_redis_cache(stack.redis_url().unwrap());
     harness.spawn_server().await;
 
     let key = "redis-down";
@@ -792,10 +778,10 @@ async fn drill_extreme_2b_live_redis_then_redis_down() {
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(sha256_hex(&resp.bytes().await.unwrap()), expected);
 
-    // Redis goes away mid-life: restart on the same root with a dead URL.
+    // Stop the actual configured service; do not substitute an unrelated URL.
     harness.kill_hard().await;
     harness.settle(Duration::from_millis(50)).await;
-    harness.set_redis_cache(DEAD_REDIS_URL.to_owned());
+    stack.stop_redis().unwrap();
     harness.restart().await;
 
     for round in 0..2 {
