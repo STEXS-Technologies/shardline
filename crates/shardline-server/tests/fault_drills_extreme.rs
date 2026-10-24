@@ -17,7 +17,9 @@
 //! Same philosophy as `fault_drills.rs`: every kill is synchronized on
 //! *on-disk evidence* (a new chunk file appearing) or on a body that is
 //! provably not at EOF — never a sleep guess. After each kill the harness
-//! restarts on the SAME root directory, modeling a process crash + restart.
+//! aborts the server task and reopens the SAME root directory. This does not
+//! terminate the OS process or its blocking tasks; deployment chaos tests cover
+//! actual process SIGKILL separately.
 //!
 //! Notes on the reconstruction cache: RedisReconstructionCache::new* only
 //! performs `redis::Client::open` (URL parse, no TCP), and per-op connection
@@ -496,8 +498,7 @@ async fn require_tcp(host: &str, port: u16) -> bool {
     )
 }
 
-/// Migrate the local dev Postgres via the in-process path (the server does not
-/// self-migrate). Reachable-but-unmigratable is a hard failure, not a skip.
+/// Migrate the owned PostgreSQL fixture; the server does not self-migrate.
 async fn ensure_dev_postgres_migrated(url: &str) {
     let mut last = None;
     for _ in 0..5 {
@@ -515,7 +516,7 @@ async fn ensure_dev_postgres_migrated(url: &str) {
             }
         }
     }
-    panic!("failed to connect+migrate PG {url}: {last:?}");
+    panic!("failed to connect+migrate PostgreSQL fixture: {last:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -941,27 +942,23 @@ async fn drill_extreme_3_stale_read_pinned_snapshot() {
 }
 
 // ===========================================================================
-// DRILL 4 — POSTGRES KILL-MID-TRANSACTION (SKIP-gated on live Postgres)
+// DRILL 4 — PostgreSQL-backed upload interruption (owned Docker fixture)
 // ===========================================================================
 
 /// With the Postgres metadata backend, an in-flight overwrite killed after
-/// chunk evidence (provably inside the upload transaction, pre-publish) must
+/// persisted container evidence while EOF is withheld (before publication) must
 /// leave the committed v1 byte-exact; a subsequent full PUT must restore the
 /// metadata path functionality post-crash.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_extreme_4_postgres_kill_mid_transaction() {
-    if !require_tcp("127.0.0.1", 5432).await {
-        eprintln!(
-            "SKIP: drill_extreme_4_postgres_kill_mid_transaction — 127.0.0.1:5432 unreachable"
-        );
-        return;
-    }
-    ensure_dev_postgres_migrated(
-        "postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline",
-    )
-    .await;
-    let mut harness = DrillHarness::new(3600)
-        .with_postgres("postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline");
+    let stack = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .start()
+        .unwrap()
+        .expect("PostgreSQL upload drill requires Docker");
+    let postgres_url = stack.postgres_url().unwrap();
+    ensure_dev_postgres_migrated(&postgres_url).await;
+    let mut harness = DrillHarness::new(3600).with_postgres(&postgres_url);
     harness.spawn_server().await;
 
     let key = "pg-extreme";

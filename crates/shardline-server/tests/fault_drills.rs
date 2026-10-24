@@ -4,11 +4,12 @@
 //! Philosophy: every kill is synchronized on *on-disk evidence* (a chunk file
 //! appearing, a part file growing, a quarantine row existing) so the server is
 //! provably inside the operation when we abort it — never a sleep guess.
-//! After each kill the harness restarts on the SAME root directory, modeling a
-//! process crash + restart.
+//! The harness aborts the server task and reopens the SAME root directory.
+//! This exercises interrupted-request recovery, not OS process termination;
+//! process SIGKILL is qualified separately by the deployment chaos suite.
 //!
 //! These tests are hermetic (SQLite metadata + local object store, no Docker)
-//! except `drill3_*` which is SKIP-gated on a reachable local Postgres.
+//! except `drill3_*`, which owns a disposable PostgreSQL Docker fixture.
 
 #![allow(
     clippy::indexing_slicing,
@@ -36,7 +37,7 @@ use std::{
 };
 use tempfile::TempDir;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
@@ -440,17 +441,7 @@ async fn wait_part_evidence(
     }
 }
 
-/// One-shot TCP reachability probe used to SKIP-gate drills needing live
-/// external services (Postgres / Redis).
-async fn require_tcp(host: &str, port: u16) -> bool {
-    matches!(
-        tokio::time::timeout(Duration::from_millis(250), TcpStream::connect((host, port))).await,
-        Ok(Ok(_stream))
-    )
-}
-
-/// Migrate the local dev Postgres via the in-process path (the server does not
-/// self-migrate). Reachable-but-unmigratable is a hard failure, not a skip.
+/// Migrate the owned PostgreSQL fixture; the server does not self-migrate.
 async fn ensure_dev_postgres_migrated(url: &str) {
     let mut last = None;
     for _ in 0..5 {
@@ -468,7 +459,7 @@ async fn ensure_dev_postgres_migrated(url: &str) {
             }
         }
     }
-    panic!("failed to connect+migrate PG {url}: {last:?}");
+    panic!("failed to connect+migrate PostgreSQL fixture: {last:?}");
 }
 
 // ===========================================================================
@@ -852,21 +843,19 @@ async fn drill2_gc_abort_mid_mark_recovery_and_fixed_point() {
 }
 
 // ===========================================================================
-// DRILL 3 — KILL-POSTGRES (SKIP-gated on a reachable local Postgres)
+// DRILL 3 — PostgreSQL-backed upload interruption (owned Docker fixture)
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill3_postgres_kill_mid_upload_recovery() {
-    if !require_tcp("127.0.0.1", 5432).await {
-        eprintln!("SKIP: drill3_postgres_kill_mid_upload_recovery — 127.0.0.1:5432 unreachable");
-        return;
-    }
-    ensure_dev_postgres_migrated(
-        "postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline",
-    )
-    .await;
-    let mut harness = DrillHarness::new(3600)
-        .with_postgres("postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline");
+    let stack = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .start()
+        .unwrap()
+        .expect("PostgreSQL upload drill requires Docker");
+    let postgres_url = stack.postgres_url().unwrap();
+    ensure_dev_postgres_migrated(&postgres_url).await;
+    let mut harness = DrillHarness::new(3600).with_postgres(&postgres_url);
     harness.spawn_server().await;
 
     let key = "pg-kill";
@@ -889,9 +878,12 @@ async fn drill3_postgres_kill_mid_upload_recovery() {
             .send()
             .await
     });
-    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(512 * 1024, 46))))
-        .await
-        .unwrap();
+    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
+        36 * 1024 * 1024,
+        46,
+    ))))
+    .await
+    .unwrap();
 
     let root = harness.root.clone();
     wait_until(Duration::from_secs(5), "chunk evidence (PG)", || {
