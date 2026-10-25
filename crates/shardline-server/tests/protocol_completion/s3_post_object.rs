@@ -21,7 +21,8 @@ async fn native_boto3_presigned_post_uploads_and_reads_object() {
     let endpoint = server.base.clone();
     let python = std::env::var("BOTOCORE_PYTHON").expect("BOTOCORE_PYTHON must be configured");
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(python)
+        shardline_test_support::native_client_output(
+            std::process::Command::new(python)
             .arg("-c")
             .arg(
                 r#"
@@ -187,16 +188,17 @@ assert client.get_object(Bucket=bucket, Key='redirect/weights.bin')['Body'].read
 assert client.head_object(Bucket=bucket, Key='redirect/weights.bin')['ContentEncoding'] == 'gzip'
 "#,
             )
-            .arg(&endpoint)
-            .output()
-            .unwrap()
+            .arg(&endpoint),
+            std::time::Duration::from_secs(180),
+        )
+        .unwrap()
     })
     .await
     .unwrap();
     assert!(
         output.status.success(),
-        "native boto3 PostObject failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "native boto3 PostObject failed with status {} (client output kept private)",
+        output.status
     );
 }
 

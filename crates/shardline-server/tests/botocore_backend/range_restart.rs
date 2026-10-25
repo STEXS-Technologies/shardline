@@ -57,7 +57,7 @@ async fn native_small_ranges_with_owned_postgres_and_minio_survive_server_restar
         let before_bytes = proxy.get_response_bytes();
         let before_lengths = proxy.get_response_lengths().len();
         let result = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(python).arg("-c").arg(r#"
+            shardline_test_support::native_client_output(std::process::Command::new(python).arg("-c").arg(r#"
 import hashlib, sys
 import botocore.session
 from botocore.config import Config
@@ -84,7 +84,7 @@ try:
     raise AssertionError('unsatisfiable range accepted')
 except ClientError as error:
     assert error.response['ResponseMetadata']['HTTPStatusCode'] == 416
-"#).arg(base).arg(source).arg(if upload { "upload" } else { "read" }).output().unwrap()
+"#).arg(base).arg(source).arg(if upload { "upload" } else { "read" }), std::time::Duration::from_secs(180)).unwrap()
         }).await.unwrap();
         if !result.status.success()
             && let Some(path) = std::env::var_os("SHARDLINE_NATIVE_CLIENT_FAILURE_LOG")
