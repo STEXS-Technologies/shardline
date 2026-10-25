@@ -73,6 +73,68 @@ impl Drop for Stop {
     }
 }
 
+#[tokio::test]
+async fn changed_member_payload_cannot_poison_its_prevalidated_key() {
+    let serialize = |byte: u8| {
+        let data = vec![byte; 4096];
+        let member = Chunk {
+            hash: shardline_xet_core::merklehash::compute_data_hash(&data),
+            data: data.into(),
+        };
+        SerializedXorbObject::from_xorb_with_compression(
+            RawXorbData::from_chunks(&[member], vec![0]),
+            CompressionScheme::None,
+            true,
+        )
+        .unwrap()
+    };
+    let original = serialize(0x41);
+    let replacement = serialize(0x42);
+    assert_eq!(
+        original.serialized_data.len(),
+        replacement.serialized_data.len()
+    );
+    let validated = validate_serialized_xorb(
+        &mut Cursor::new(&original.serialized_data),
+        parse_xet_hash_hex(&original.hash.hex()).unwrap(),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let objects = ServerObjectStore::local(root.path()).unwrap();
+    let result = store(
+        &objects,
+        &mut Cursor::new(replacement.serialized_data),
+        &validated,
+    )
+    .await;
+    let key = chunk_object_key_local(&xet_hash_hex_string(validated.chunks()[0].hash())).unwrap();
+    assert!(
+        shardline_storage::ObjectStore::metadata(&objects, &key)
+            .unwrap()
+            .is_none(),
+        "changed payload was persisted under its earlier member identity"
+    );
+    assert!(matches!(result, Err(XetAdapterError::XorbHashMismatch)));
+    // Rejection must leave the original identity usable by an intact retry.
+    assert_eq!(
+        store(
+            &objects,
+            &mut Cursor::new(original.serialized_data),
+            &validated
+        )
+        .await
+        .unwrap(),
+        4096
+    );
+    let metadata = shardline_storage::ObjectStore::metadata(&objects, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        shardline_server_core::read_full_object(&objects, &key, metadata.length()).unwrap(),
+        vec![0x41; 4096]
+    );
+}
+
 #[test]
 fn conditional_member_writes_bound_concurrency_bytes_and_failed_publication() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {

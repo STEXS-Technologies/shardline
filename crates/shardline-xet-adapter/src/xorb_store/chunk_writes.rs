@@ -60,6 +60,15 @@ pub(super) async fn store<R: Read + Seek>(
         {
             return Err(XetAdapterError::InvalidSerializedXorb);
         }
+        // Validation and persistence are separate reads of a staged source.
+        // Equal lengths/offsets cannot prove that the reread payload is still
+        // the member whose content-addressed key was authenticated earlier.
+        let actual_hash = ShardlineHash::from_bytes(
+            shardline_xet_core::merklehash::compute_data_hash(&data).into(),
+        );
+        if actual_hash != descriptor.hash() {
+            return Err(XetAdapterError::XorbHashMismatch);
+        }
         unpacked = unpacked
             .checked_add(length)
             .ok_or(XetAdapterError::Overflow)?;
