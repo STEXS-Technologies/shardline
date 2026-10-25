@@ -1247,6 +1247,9 @@ async fn rclone_run(endpoint: &str, token: &str, args: &[&str]) -> std::process:
                 .env("RCLONE_CONFIG_REMOTE_ENDPOINT", &endpoint)
                 .env("RCLONE_CONFIG_REMOTE_ACCESS_KEY_ID", &token)
                 .env("RCLONE_CONFIG_REMOTE_SECRET_ACCESS_KEY", "dummy-secret")
+                // Older rclone versions send an explicit ACL by default. Match
+                // Shardline's BucketOwnerEnforced policy instead of enabling ACLs.
+                .env("RCLONE_CONFIG_REMOTE_ACL", "bucket-owner-full-control")
                 .env("RCLONE_CONFIG_REMOTE_NO_CHECK_BUCKET", "true"),
         )
     })

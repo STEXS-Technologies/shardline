@@ -83,7 +83,7 @@ separate tests.
 | MinIO `mc` | RELEASE.2025-08-13T08-35-41Z | Object round trip, listing/stat, multipart upload and recursive mirror/removal |
 | Boto3 | 1.43.95 | Object and multipart SDK round trips |
 | `s3cmd` | 2.4.0 | Upload, download, list and delete |
-| `rclone` | 1.75.0 | Copy, list, read and delete |
+| `rclone` | 1.60.1, 1.75.0 | Copy, list, read and delete with `acl = bucket-owner-full-control` |
 | PyArrow | 25.0.0 | Parquet write, read and metadata inspection |
 | DuckDB with PyArrow | 1.5.5 / 25.0.0 | Parquet glob, filtering, aggregation and write |
 

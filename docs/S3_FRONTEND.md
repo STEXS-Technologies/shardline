@@ -273,6 +273,12 @@ Native Botocore pagination is tested with repeated keys, page sizes of 1, 3 and
 
 ### Authentication (operator)
 
+For rclone S3 remotes, set `acl = bucket-owner-full-control` (or
+`RCLONE_CONFIG_REMOTE_ACL=bucket-owner-full-control` for a remote named `remote`).
+Older clients can otherwise send an ACL that Shardline rejects with
+`400 AccessControlListNotSupported`. Shardline uses `BucketOwnerEnforced` ownership;
+this setting does not grant public access or change repository permissions.
+
 To use real signing keys, set `SHARDLINE_S3_SIGNING_IDENTITIES_FILE` to a secret
 JSON file containing an array like this:
 
