@@ -1235,12 +1235,14 @@ async fn a_completed_scan_with_missing_objects_preserves_failure_exit_status() -
         .await?;
     fs::remove_dir_all(root.join("chunks"))?;
     fs::create_dir(root.join("chunks"))?;
-    let ordinary = Command::new(binary())
-        .env_clear()
-        .current_dir(&root)
-        .args(["fsck", "--root"])
-        .arg(&root)
-        .output()?;
+    let ordinary = shardline_test_support::native_client_output(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(&root)
+            .args(["fsck", "--root"])
+            .arg(&root),
+        Duration::from_secs(60),
+    )?;
     assert_eq!(ordinary.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&ordinary.stdout).contains("maintenance.task:"));
     let config = shardline_server::ServerConfig::new(
@@ -1260,17 +1262,60 @@ async fn a_completed_scan_with_missing_objects_preserves_failure_exit_status() -
         summaries.first().ok_or("missing outcome")?.state,
         shardline_server::task_tracking::TaskRunState::Failed
     );
+    // Ordinary inline execution stores a JSON outcome; supervised workers
+    // retain the existing human-readable FSCK report instead.
+    let database = Connection::open(root.join("metadata.sqlite3"))?;
+    let inline_report: Vec<u8> = database.query_row(
+        "SELECT payload FROM shardline_task_artifacts_v1
+         WHERE artifact_key GLOB '*/artifacts/*'
+           AND CAST(payload AS TEXT) LIKE 'maintenance.success: false%'
+         LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let outcome: serde_json::Value = serde_json::from_slice(
+        inline_report
+            .split(|byte| *byte == b'\n')
+            .nth(1)
+            .ok_or("missing inline FSCK outcome")?,
+    )?;
+    assert_eq!(outcome.get("exit_code"), Some(&serde_json::json!(1)));
+    assert_eq!(outcome.get("schema"), Some(&serde_json::json!(1)));
     let state = sandbox.path().join("maintenance");
-    let result = command(&state, &root, "fsck").output()?;
+    let result = shardline_test_support::native_client_output(
+        &mut command(&state, &root, "fsck"),
+        Duration::from_secs(60),
+    )?;
     assert_eq!(result.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&result.stdout).contains("maintenance.status: completed"),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
+        "completed scan must retain its completion diagnostic"
+    );
+    let directory = journal(&state)
+        .parent()
+        .ok_or("state directory")?
+        .to_path_buf();
+    let proof =
+        MaintenanceArtifactProof::from_json(&fs::read(directory.join("result-proof.json"))?)?;
+    let artifact = directory
+        .join("artifacts")
+        .join(hex::encode(proof.artifact.digest.0));
+    let report = fs::read(&artifact)?;
+    proof.artifact.verify_materialized(report.as_slice())?;
+    assert!(report.starts_with(b"maintenance.success: false\n"));
+    assert_eq!(
+        shardline_test_support::native_client_output(
+            &mut command(&state, &root, "fsck"),
+            Duration::from_secs(60),
+        )?
+        .status
+        .code(),
+        Some(1)
     );
     assert_eq!(
-        command(&state, &root, "fsck").output()?.status.code(),
-        Some(1)
+        fs::read(artifact)?,
+        report,
+        "replay must preserve the failed result"
     );
     Ok(())
 }
