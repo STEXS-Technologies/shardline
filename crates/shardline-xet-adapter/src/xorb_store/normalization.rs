@@ -123,6 +123,14 @@ fn footerless_input(
         expected,
     ) {
         Ok(_) => return Ok(None),
+        // An incomplete canonical footer can be valid footerless input. Reader
+        // failures and cancellation are not format detection: never consume
+        // them and continue work or append to owned staging.
+        Err(crate::XorbParseError::Io(error))
+            if error.kind() != std::io::ErrorKind::UnexpectedEof =>
+        {
+            return Err(XetAdapterError::Io(error));
+        }
         Err(error) => tracing::debug!(%error, "trying bounded footerless Xorb normalization"),
     }
     checkpoint()?;
@@ -203,6 +211,56 @@ mod tests {
         xorb_format_test_utils::{ChunkSize, build_raw_xorb},
     };
     use std::io::{Cursor, Write};
+
+    #[test]
+    fn cancelled_canonical_probe_never_retries_as_footerless_or_mutates_staging() {
+        use std::cell::Cell;
+        for footer in [false, true] {
+            let serialized = SerializedXorbObject::from_xorb_with_compression(
+                build_raw_xorb(2, ChunkSize::Fixed(4096)),
+                CompressionScheme::LZ4,
+                footer,
+            )
+            .unwrap();
+            for owned in [false, true] {
+                let mut source = tempfile::NamedTempFile::new().unwrap();
+                source.write_all(&serialized.serialized_data).unwrap();
+                let calls = Cell::new(0);
+                let checkpoint = || {
+                    let count = calls.get() + 1;
+                    calls.set(count);
+                    if count == 2 {
+                        // A terminal cancellation must not require the caller
+                        // to repeat the same error at another checkpoint.
+                        Err(std::io::ErrorKind::Interrupted.into())
+                    } else {
+                        Ok(())
+                    }
+                };
+                let hash = serialized.hash.hex();
+                let result = if owned {
+                    normalize_owned_with_checkpoint(&hash, source.path(), &checkpoint)
+                } else {
+                    normalize_with_checkpoint(&hash, source.path(), &checkpoint).map(|_| ())
+                };
+                assert!(
+                    matches!(result, Err(XetAdapterError::Io(ref error))
+                    if error.kind() == std::io::ErrorKind::ConnectionAborted),
+                    "cancelled normalization continued or changed the error: {result:?}"
+                );
+                assert_eq!(
+                    calls.get(),
+                    2,
+                    "normalization must stop at its failed checkpoint"
+                );
+                assert_eq!(
+                    std::fs::read(source.path()).unwrap(),
+                    serialized.serialized_data
+                );
+                normalize_owned_with_checkpoint(&hash, source.path(), &|| Ok(())).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn owned_normalization_matches_borrowed_bytes_and_rejects_before_mutation() {

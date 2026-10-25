@@ -101,6 +101,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Stop Xorb normalization immediately on cancellation or reader failures instead
+  of retrying them as footerless input and continuing to modify upload staging.
 - Recognize native Xet storage during Hub-only garbage collection, preserving
   live containers and verified member recovery without requiring a separate
   `xet` frontend setting.
