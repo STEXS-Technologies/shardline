@@ -107,6 +107,15 @@ test matrix, not a claim that the current branch has passed release CI.
 Versions outside this matrix require qualification before support is claimed.
 The 1.5.2 large-file and refresh tests do not establish all workflows for that version.
 
+Additional source-tree qualification with Hub 2.3.0 / `hf_xet` 1.7.0 passes
+model/dataset workflows on SQLite/local, PostgreSQL/local and PostgreSQL/MinIO,
+plus expired-URL recovery with combined and split API/transfer roles. The full
+workflows include competing SDK commits, rejected basic-LFS negotiation without
+publication, a healthy native-Xet retry and byte-exact cold download after the
+branch advances. These selected shared-host checks do not qualify every Hub API,
+multi-host load or the complete failure matrix. They are separate from the
+pinned CI requirements above and do not establish final-head release acceptance.
+
 Cold-cache deduplication after descriptor-index loss and rebuild also passes with
 Hub 1.25.1 / `hf_xet` 1.5.2, 1.6.0 and 1.7.0, and Hub 2.2.0 / `hf_xet` 1.7.0.
 Each combination covers local and PostgreSQL/MinIO storage with combined and
