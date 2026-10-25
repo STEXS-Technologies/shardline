@@ -29,6 +29,13 @@ async fn released_postgres_rolling_upgrade_preserves_live_writes_and_old_restart
             }
             #[cfg(not(feature = "docker"))]
             {
+                assert!(
+                    !shardline_test_support::native_clients_required(),
+                    "required PostgreSQL rolling upgrade needs DATABASE_URL or Docker feature"
+                );
+                // Also honor database-only qualification, even without the
+                // native-client gate. Optional developer runs may still skip.
+                let _ = shardline_test_support::postgres_fixture_url("DATABASE_URL");
                 eprintln!(
                     "SKIPPED: PostgreSQL rolling upgrade requires DATABASE_URL or Docker feature"
                 );

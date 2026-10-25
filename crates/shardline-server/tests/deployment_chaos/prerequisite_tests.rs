@@ -90,6 +90,36 @@ fn missing_workload_opt_in_cannot_pass_required_qualification() {
     );
 }
 
+#[cfg(not(feature = "docker"))]
+#[test]
+fn missing_postgres_cannot_pass_required_rolling_upgrade() {
+    for required in [
+        None,
+        Some("SHARDLINE_REQUIRE_NATIVE_CLIENTS"),
+        Some("SHARDLINE_REQUIRE_POSTGRES_TESTS"),
+    ] {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "local_protocol_upgrade::postgres::released_postgres_rolling_upgrade_preserves_live_writes_and_old_restart",
+            "--nocapture",
+        ]).env_clear();
+        if let Some(variable) = required {
+            command.env(variable, "1");
+        }
+        let output =
+            shardline_test_support::native_client_output(&mut command, Duration::from_secs(20))
+                .unwrap();
+        assert_eq!(output.status.success(), required.is_none());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(match required {
+            None => "SKIPPED: PostgreSQL rolling upgrade requires",
+            Some("SHARDLINE_REQUIRE_NATIVE_CLIENTS") => "required PostgreSQL rolling upgrade needs",
+            Some(_) => "PostgreSQL fixture DATABASE_URL is missing or invalid",
+        }));
+    }
+}
+
 #[test]
 fn missing_docker_cannot_pass_required_deployment_qualification() {
     assert!(run(false, None).status.success());
