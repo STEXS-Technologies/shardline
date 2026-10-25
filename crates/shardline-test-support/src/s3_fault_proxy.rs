@@ -48,13 +48,14 @@ pub struct S3FaultProxy {
 #[derive(Default)]
 struct RequestCounts {
     get: AtomicUsize,
+    xorb_get: AtomicUsize,
     head: AtomicUsize,
 }
 
 #[derive(Default)]
 struct GetResponses {
     bytes: AtomicUsize,
-    lengths: Mutex<Vec<usize>>,
+    lengths: Mutex<Vec<(bool, usize)>>,
 }
 
 impl S3FaultProxy {
@@ -161,6 +162,12 @@ impl S3FaultProxy {
         self.requests.get.load(Ordering::Acquire)
     }
 
+    /// Actual GET attempts for Xorb object paths, excluding startup metadata.
+    #[must_use]
+    pub fn xorb_get_requests(&self) -> usize {
+        self.requests.xorb_get.load(Ordering::Acquire)
+    }
+
     /// Number of actual HTTP HEAD attempts received, including missing objects.
     #[must_use]
     pub fn head_requests(&self) -> usize {
@@ -181,7 +188,22 @@ impl S3FaultProxy {
             .lengths
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .iter()
+            .map(|(_, length)| *length)
+            .collect()
+    }
+
+    /// Successful Xorb GET body lengths, excluding unrelated metadata responses.
+    /// Classification retains no request URLs, query strings or credentials.
+    #[must_use]
+    pub fn xorb_get_response_lengths(&self) -> Vec<usize> {
+        self.get_responses
+            .lengths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter_map(|(xorb, length)| xorb.then_some(*length))
+            .collect()
     }
 }
 
@@ -209,8 +231,22 @@ fn proxy_one_s3_request(
     let request = read_http_request(&mut client)?;
     let is_put = request.starts_with(b"PUT ");
     let is_get = request.starts_with(b"GET ");
+    let is_xorb_get = is_get
+        && request
+            .split(|byte| *byte == b' ')
+            .nth(1)
+            .and_then(|path| path.split(|byte| *byte == b'?').next())
+            .is_some_and(|path| {
+                path.ends_with(b".xorb")
+                    && path
+                        .windows(b"/xorbs/".len())
+                        .any(|part| part == b"/xorbs/")
+            });
     if is_get {
         requests.get.fetch_add(1, Ordering::AcqRel);
+    }
+    if is_xorb_get {
+        requests.xorb_get.fetch_add(1, Ordering::AcqRel);
     }
     if request.starts_with(b"HEAD ") {
         requests.head.fetch_add(1, Ordering::AcqRel);
@@ -247,7 +283,7 @@ fn proxy_one_s3_request(
             .lengths
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(length);
+            .push((is_xorb_get, length));
     }
 
     if is_put

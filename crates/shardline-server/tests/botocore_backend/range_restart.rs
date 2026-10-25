@@ -1,5 +1,6 @@
 //! Stock signed-client reads after recreating API and metadata/storage clients.
 use super::*;
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, S3ObjectStore};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires pinned botocore and disposable Docker PostgreSQL/MinIO"]
@@ -53,9 +54,32 @@ async fn native_small_ranges_with_owned_postgres_and_minio_survive_server_restar
             assert_eq!(warm.status(), StatusCode::OK);
             assert_eq!(warm.bytes().await.unwrap().as_ref(), payload.as_slice());
         }
-        let before = proxy.get_requests();
+        let before = proxy.xorb_get_requests();
+        let before_all = proxy.get_requests();
         let before_bytes = proxy.get_response_bytes();
-        let before_lengths = proxy.get_response_lengths().len();
+        let before_lengths = proxy.xorb_get_response_lengths().len();
+        if !upload {
+            // Make the recovery-traffic accounting race deterministic: a small
+            // non-Xorb object read occurs inside the measurement window. Its
+            // bytes must remain counted without becoming a payload GET.
+            let metadata_storage = storage.clone();
+            tokio::task::spawn_blocking(move || {
+                let store = S3ObjectStore::new(metadata_storage).unwrap();
+                let key = ObjectKey::parse("qualification/recovery-metadata.json").unwrap();
+                let metadata = [7_u8; 317];
+                let integrity = ObjectIntegrity::new(
+                    shardline_server_core::validation::chunk_hash(&metadata),
+                    metadata.len() as u64,
+                );
+                store
+                    .put_if_absent(&key, ObjectBody::from_slice(&metadata), &integrity)
+                    .unwrap();
+                let range = shardline_protocol::ByteRange::new(0, 316).unwrap();
+                assert_eq!(store.read_range(&key, range).unwrap(), metadata);
+            })
+            .await
+            .unwrap();
+        }
         let result = tokio::task::spawn_blocking(move || {
             shardline_test_support::native_client_output(std::process::Command::new(python).arg("-c").arg(r#"
 import hashlib, sys
@@ -96,16 +120,23 @@ except ClientError as error:
             "stock SDK range/restart workflow failed (client output kept private)"
         );
         if !upload {
-            let requests = proxy.get_requests() - before;
+            let requests = proxy.xorb_get_requests() - before;
             let bytes = proxy.get_response_bytes() - before_bytes;
             eprintln!(
-                "backend GET body lengths {:?}",
-                &proxy.get_response_lengths()[before_lengths..]
+                "backend Xorb GET body lengths {:?}",
+                &proxy.xorb_get_response_lengths()[before_lengths..]
             );
             assert_eq!(
                 requests, 10,
                 "one full GET and three authenticated three-GET ranges"
             );
+            assert!(
+                proxy.get_requests() - before_all > requests,
+                "fixture must exercise unrelated metadata GET accounting"
+            );
+            // Recovery can fetch small metadata objects concurrently after the
+            // warm read. Count exact payload requests separately, but keep all
+            // backend bytes in the amplification bound rather than hiding them.
             assert!(
                 bytes < 5 * 1024 * 1024,
                 "range reads must not fetch the full container again"
