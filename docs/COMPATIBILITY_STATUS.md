@@ -205,12 +205,14 @@ omission and lazy checkout of nested files. Protocol-v2 upload-pack now supports
 `ls-refs` and `fetch`, including shallow depth/date/exclusion and the advertised
 `blob:none`, blob-size and tree-depth filters, including bounded combined
 blob-size/tree-depth intersections. `object:type` filters select blobs, trees,
-commits or tags; explicitly wanted objects remain available, and native Git 2.52
+commits or tags; explicitly wanted objects remain available, and native Git
 verifies lazy fetching of an omitted tree during checkout over protocol v0, v1
 and v2. Native Git checks v2 clone, incremental fetch, deepen/unshallow, shallow
 date/exclusion, omitted objects, lazy checkout and strict fsck. Sparse-checkout
 and other unimplemented filters are rejected explicitly. The same native Git
-2.52.0 workflows pass on SQLite/local storage and disposable PostgreSQL/MinIO.
+2.52.0 and 2.55.0 workflows pass on SQLite/local storage and disposable PostgreSQL/MinIO.
+The 2.55.0 qualification uses an upstream-tag source build with curl-backed
+Smart HTTP; optional WebDAV push is disabled. It does not qualify WebDAV.
 For four v2 partial-clone filters, the checks prove a historical blob is absent
 before lazy retrieval, fetch its exact bytes and run full strict fsck. Broader
 shallow-history merge and failure qualification remains open; these checks do not establish full Git
