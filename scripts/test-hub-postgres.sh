@@ -56,3 +56,20 @@ done
 # case owns both services and exercises the same stock-client contract locally.
 cargo nextest run --locked -p shardline-hub-api --test git_suffix \
     --run-ignored only -E 'test(postgres_and_minio_snapshot_tokens_are_confined)'
+
+# Storage protocol and pending-delete contracts must execute against isolated
+# databases too. Missing fixtures are failures in this mandatory gate.
+for entry in \
+    shardline-server:s3_listing_pagination \
+    shardline-server:aws_chunked_ingest \
+    shardline-server:s3_request_integrity \
+    shardline:pending_deletes_e2e; do
+    package=${entry%%:*}
+    target=${entry#*:}
+    docker exec "$container" createdb -h 127.0.0.1 -U postgres "$target"
+    export DATABASE_URL="postgres://postgres:hub-disposable-only@127.0.0.1:$port/$target"
+    "$SHARDLINE_BIN" db migrate up --database-url "$DATABASE_URL"
+    cargo nextest run --locked -p "$package" --test "$target" \
+        -E 'test(postgres_) or test(s3_postgres_) or test(configured_pending_delete_cli_)' \
+        --no-fail-fast
+done

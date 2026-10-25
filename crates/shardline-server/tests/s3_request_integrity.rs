@@ -629,7 +629,7 @@ async fn s3_request_checksums_and_interrupted_part_overwrites_preserve_acknowled
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_request_checksums_preserve_acknowledged_state() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    let Some(url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
     assert_request_integrity(Some(&url)).await;

@@ -432,8 +432,7 @@ async fn sqlite_native_s3_listing_walks_logical_entries() {
 
 #[tokio::test]
 async fn postgres_native_s3_listing_walks_logical_entries() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("skipping PostgreSQL listing test: DATABASE_URL is not set");
+    let Some(url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
     check_listing(Some(&url)).await;

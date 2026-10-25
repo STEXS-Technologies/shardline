@@ -446,8 +446,7 @@ async fn sqlite_aws_chunked_requires_complete_framing_and_declared_length() {
 }
 #[tokio::test]
 async fn postgres_aws_chunked_requires_complete_framing_and_declared_length() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("skipping PostgreSQL: DATABASE_URL unset");
+    let Some(url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
     run_ingest(Some(&url)).await;
