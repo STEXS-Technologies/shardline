@@ -1,3 +1,5 @@
+mod denied_s3;
+
 use std::num::NonZeroUsize;
 
 use proptest::prelude::*;
@@ -1996,11 +1998,11 @@ fn s3_local_root_and_local_path_for_key_return_none() {
 
 #[test]
 fn s3_operations_return_s3_error() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
+    let fixture = denied_s3::DeniedS3::new();
+    let store = &fixture.store;
     let key = ObjectKey::parse("aa/hash").unwrap();
 
-    // put_if_absent — will fail because bucket does not exist
+    // put_if_absent receives an explicit denial from the owned endpoint.
     let body = b"test";
     let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
     let result = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
@@ -2034,8 +2036,8 @@ fn s3_operations_return_s3_error() {
 
 #[test]
 fn s3_put_overwrite_returns_s3_error() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
+    let fixture = denied_s3::DeniedS3::new();
+    let store = &fixture.store;
     let key = ObjectKey::parse("aa/hash").unwrap();
     let body = b"test";
     let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
@@ -2045,8 +2047,8 @@ fn s3_put_overwrite_returns_s3_error() {
 
 #[test]
 fn s3_copy_if_absent_returns_s3_error() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
+    let fixture = denied_s3::DeniedS3::new();
+    let store = &fixture.store;
     let source = ObjectKey::parse("aa/source").unwrap();
     let dest = ObjectKey::parse("bb/dest").unwrap();
     let result = store.copy_if_absent(&source, &dest);
@@ -2055,8 +2057,8 @@ fn s3_copy_if_absent_returns_s3_error() {
 
 #[test]
 fn s3_put_content_addressed_file_returns_s3_error() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
+    let fixture = denied_s3::DeniedS3::new();
+    let store = &fixture.store;
     let key = ObjectKey::parse("aa/hash").unwrap();
     let tmp = shardline_test_support::TempStorage::new();
     let file_path = tmp.path().join("test.bin");
@@ -2068,8 +2070,8 @@ fn s3_put_content_addressed_file_returns_s3_error() {
 
 #[test]
 fn s3_visit_prefix_returns_s3_error() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
+    let fixture = denied_s3::DeniedS3::new();
+    let store = &fixture.store;
     let prefix = ObjectPrefix::parse("aa/").unwrap();
     let result: Result<(), ServerObjectStoreError> = store.visit_prefix(&prefix, |_meta| Ok(()));
     assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
@@ -2077,8 +2079,8 @@ fn s3_visit_prefix_returns_s3_error() {
 
 #[test]
 fn s3_list_flat_namespace_page_returns_s3_error() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
+    let fixture = denied_s3::DeniedS3::new();
+    let store = &fixture.store;
     let prefix = ObjectPrefix::parse("aa/").unwrap();
     let result = store.list_flat_namespace_page(&prefix, None, 10);
     assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
@@ -2086,10 +2088,10 @@ fn s3_list_flat_namespace_page_returns_s3_error() {
 
 #[test]
 fn s3_read_full_object_returns_s3_error() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
+    let fixture = denied_s3::DeniedS3::new();
+    let store = &fixture.store;
     let key = ObjectKey::parse("aa/hash").unwrap();
-    let result = read_full_object(&store, &key, 5);
+    let result = read_full_object(store, &key, 5);
     assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
 }
 
