@@ -1,3 +1,4 @@
+#[cfg(test)]
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -14,6 +15,7 @@ use super::{HubRepository, HubState};
 ///
 /// The native `huggingface_hub` client omits the trailing slash when it lists
 /// every file, so this is deliberately a distinct route from the path variant.
+#[cfg(test)]
 pub(crate) async fn file_tree_at_root(
     State(state): State<HubState>,
     _repo: HubRepository,
@@ -25,6 +27,7 @@ pub(crate) async fn file_tree_at_root(
         .map(|listing| Json(listing.entries))
 }
 
+#[cfg(test)]
 pub(crate) async fn file_tree(
     State(state): State<HubState>,
     _repo: HubRepository,

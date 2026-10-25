@@ -95,6 +95,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Include next-page links for ordinary paginated Hub tree listings, keeping
+  cursors bound to immutable revisions and preserving nested directory paths.
 - Reject oversized Xorb footer lengths without arithmetic overflow or parser
   panics, preserving valid container reads and retries after rejected uploads.
 

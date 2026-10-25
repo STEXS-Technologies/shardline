@@ -50,22 +50,14 @@ pub(crate) async fn tree_root_http(
     Path((kind, ns, name, revision)): Path<(String, String, String, String)>,
     Query(query): Query<TreeHttpQuery>,
 ) -> Result<Response, HubApiError> {
-    if !query.expand {
-        return tree::file_tree_at_root(
-            State(state),
-            repo,
-            Path((kind, ns, name, revision)),
-            Query(query.into_tree()),
-        )
-        .await
-        .map(IntoResponse::into_response);
-    }
-    expanded_tree(
+    let expand = query.expand;
+    tree_response(
         state,
         repo,
         (kind, ns, name, revision),
         String::new(),
         query.into_tree(),
+        expand,
     )
     .await
 }
@@ -77,39 +69,34 @@ pub(crate) async fn tree_path_http(
     Query(query): Query<TreeHttpQuery>,
 ) -> Result<Response, HubApiError> {
     let path = tree::normalize_root_path(path);
-    if !query.expand {
-        return tree::file_tree(
-            State(state),
-            repo,
-            Path((kind, ns, name, revision, path)),
-            Query(query.into_tree()),
-        )
-        .await
-        .map(IntoResponse::into_response);
-    }
-    expanded_tree(
+    let expand = query.expand;
+    tree_response(
         state,
         repo,
         (kind, ns, name, revision),
         path,
         query.into_tree(),
+        expand,
     )
     .await
 }
 
-async fn expanded_tree(
+async fn tree_response(
     state: HubState,
     repo: HubRepository,
     (kind, ns, name, revision): (String, String, String, String),
     path: String,
     mut query: TreeQuery,
+    expand: bool,
 ) -> Result<Response, HubApiError> {
-    query.limit = Some(
-        query
-            .limit
-            .unwrap_or(EXPANDED_PAGE_SIZE)
-            .min(EXPANDED_PAGE_SIZE),
-    );
+    if expand {
+        query.limit = Some(
+            query
+                .limit
+                .unwrap_or(EXPANDED_PAGE_SIZE)
+                .min(EXPANDED_PAGE_SIZE),
+        );
+    }
     let recursive = query.recursive;
     let limit = query.limit.unwrap_or(EXPANDED_PAGE_SIZE);
     let auth = repo.capability().clone();
@@ -127,24 +114,11 @@ async fn expanded_tree(
     if listing.entries.is_empty() {
         return Ok(Json(Vec::<ExpandedTreeEntry>::new()).into_response());
     }
-    let files = state
-        .store
-        .get_files(&listing.revision)
-        .map_err(|error| HubApiError::CasError(error.to_string()))?;
     let paths: Vec<_> = listing
         .entries
         .iter()
         .map(|entry| entry.path.clone())
         .collect();
-    let mut last = super::path_history::last_path_commits(
-        &state,
-        &repo_id,
-        &listing.revision,
-        &files,
-        &paths,
-        &auth,
-    )
-    .await?;
     let mut headers = HeaderMap::new();
     if listing.has_more
         && let Some(cursor) = paths.last()
@@ -169,7 +143,7 @@ async fn expanded_tree(
             }
         }
         url.query_pairs_mut()
-            .append_pair("expand", "true")
+            .append_pair("expand", &expand.to_string())
             .append_pair("recursive", &recursive.to_string())
             .append_pair("limit", &limit.to_string())
             .append_pair("cursor", cursor);
@@ -180,6 +154,22 @@ async fn expanded_tree(
             })?,
         );
     }
+    if !expand {
+        return Ok((headers, Json(listing.entries)).into_response());
+    }
+    let files = state
+        .store
+        .get_files(&listing.revision)
+        .map_err(|error| HubApiError::CasError(error.to_string()))?;
+    let mut last = super::path_history::last_path_commits(
+        &state,
+        &repo_id,
+        &listing.revision,
+        &files,
+        &paths,
+        &auth,
+    )
+    .await?;
     let entries: Vec<_> = listing
         .entries
         .into_iter()

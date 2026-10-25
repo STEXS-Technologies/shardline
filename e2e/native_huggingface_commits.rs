@@ -63,6 +63,26 @@ moved = api.create_commit(repo, revision="commit-operations", parent_commit=copi
     ])
 assert "copied/large.bin" not in api.list_repo_files(repo, revision=moved.oid)
 assert "copied/large.bin" in api.list_repo_files(repo, revision=copied.oid)
+# Force the stock SDK paginator through multiple pages of immutable history.
+# Compare directories as well as files, including repository-relative cursors
+# inside a subtree after its original children have been deleted on a later ref.
+from huggingface_hub.utils import paginate
+for revision, subtree in [(created.oid, ""), (deleted.oid, ""), (moved.oid, ""), (created.oid, "delete-me")]:
+    expected = {entry.path for entry in api.list_repo_tree(repo, path_in_repo=subtree or None,
+        revision=revision, recursive=True)}
+    url = api.endpoint + "/api/models/" + repo + "/tree/" + revision
+    if subtree:
+        url += "/" + subtree
+    headers = {"Authorization": "Bearer " + api.token}
+    request = urllib.request.Request(url + "?recursive=true&limit=1", headers=headers)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        first_page = json.load(response)
+        assert len(first_page) == 1
+        assert 'rel="next"' in response.headers.get("Link", ""), response.headers
+    actual = list(paginate(url, params={"recursive": "true", "limit": 1}, headers=headers, timeout=30))
+    paths = [entry["path"] for entry in actual]
+    assert len(paths) == len(set(paths)), paths
+    assert set(paths) == expected, (revision, subtree, paths, expected)
 # Omitted sizes are derived only for an existing object in the caller's scope.
 # Invalid explicit fields must not be treated as omitted or publish a revision.
 for pointer in [
@@ -119,8 +139,13 @@ assert counter("shardline_xorbs_total") == native_uploads_before
     )?;
     assert!(
         output.status.success(),
-        "stock Hub commit operations failed: {}",
-        output.status
+        "stock Hub commit operations failed: {}; script line: {:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("File \"<string>\", line "))
+            .filter_map(|line| line.split(',').next()?.parse::<usize>().ok())
+            .next_back()
     );
     let basic_script = r#"
 import os, pathlib, urllib.request
