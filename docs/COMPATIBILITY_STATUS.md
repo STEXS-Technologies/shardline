@@ -293,6 +293,13 @@ container transitions recorded in metadata. The checks continue during candidate
 GC, after predecessor rollback and after re-upgrade; a small single-container
 fixture would not establish this boundary coverage.
 
+A separate PostgreSQL/MinIO drill uploads an uncompressed native Xorb through
+the HTTP CAS endpoint, then publishes the same CDC chunks through S3. It checks
+that publication reuses the native identity with the retained encoding's offsets,
+then verifies full and boundary-range reads after GC, actual v1.12.1 rollback and
+candidate restart. This covers matching chunk layouts, not arbitrary cross-protocol
+deduplication or removal of legacy native chunk copies.
+
 The E2E job separately selects the ignored native Xet PostgreSQL/MinIO test and
 the two Bazel flows. Kubernetes and kind tests still require their dedicated
 deployment fixtures. The Kubernetes protocol test uses local Docker services only

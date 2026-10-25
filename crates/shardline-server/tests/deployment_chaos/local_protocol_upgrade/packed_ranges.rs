@@ -1,6 +1,8 @@
 //! Released and candidate processes read both generations of packed S3 data.
 use super::*;
 
+mod native_encoding;
+
 async fn verify(
     server: &LocalServer,
     token: &str,
