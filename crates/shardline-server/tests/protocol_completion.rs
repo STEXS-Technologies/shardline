@@ -50,7 +50,7 @@ async fn native_botocore_unsigned_checksum_trailers() {
     .await;
     let endpoint = server.base.clone();
     let python = std::env::var("BOTOCORE_PYTHON").expect("BOTOCORE_PYTHON must be configured");
-    let output = tokio::task::spawn_blocking(move || std::process::Command::new(python).arg("-c").arg(r#"
+    let output = tokio::task::spawn_blocking(move || shardline_test_support::native_client_output(std::process::Command::new(python).arg("-c").arg(r#"
 import io, sys, urllib.request, urllib.error, urllib.parse
 import botocore.session
 from botocore.config import Config
@@ -101,11 +101,11 @@ for algorithm, checksum in [('crc32', Crc32Checksum), ('sha1', Sha1Checksum), ('
         assert b'<Code>BadDigest</Code>' in error.read()
     client.complete_multipart_upload(Bucket='aws-resume.locks', Key=key, UploadId=upload, MultipartUpload={'Parts':[{'PartNumber':1,'ETag':etag}]})
     assert client.get_object(Bucket='aws-resume.locks', Key=key)['Body'].read() == payload
-"#).arg(endpoint).output()).await.unwrap().unwrap();
+"#).arg(endpoint), std::time::Duration::from_secs(180))).await.unwrap().unwrap();
     assert!(
         output.status.success(),
         "native trailer SDK failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        output.status
     );
     server.stop().await;
 }
@@ -178,7 +178,7 @@ async fn exercise_botocore_session_credentials(
     let endpoint = server.base.clone();
     // Execute the native SDK signer and HTTP client. Python is only the
     // external client under test; Rust owns server setup and assertions.
-    let output = tokio::task::spawn_blocking(move || std::process::Command::new(python)
+    let output = tokio::task::spawn_blocking(move || shardline_test_support::native_client_output(std::process::Command::new(python)
         .arg("-c").arg(r#"
 import base64, datetime, hashlib, json, sys, zlib
 import botocore.session
@@ -379,11 +379,11 @@ for token in (None, 'wrong-session-token'):
         assert error.response['ResponseMetadata']['HTTPStatusCode'] == 403
 params = {'Bucket': 'aws-resume.locks', 'Key': 'session/presigned.bin'}
 print(json.dumps({'put': c.generate_presigned_url('put_object', Params=params, ExpiresIn=60), 'get': c.generate_presigned_url('get_object', Params=params, ExpiresIn=60), 'other': c.generate_presigned_url('put_object', Params={'Bucket': 'other.locks', 'Key': 'session/presigned.bin'}, ExpiresIn=60)}))
-"#).arg(endpoint).output()).await.unwrap().unwrap();
+"#).arg(endpoint), std::time::Duration::from_secs(180))).await.unwrap().unwrap();
     assert!(
         output.status.success(),
         "native botocore failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        output.status
     );
     let urls: Value = serde_json::from_slice(&output.stdout).unwrap();
     let client = Client::new();
@@ -451,7 +451,7 @@ print(json.dumps({'put': c.generate_presigned_url('put_object', Params=params, E
     .await;
     let restart_endpoint = restarted.base.clone();
     let restart_output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(restart_python)
+        shardline_test_support::native_client_output(std::process::Command::new(restart_python)
             .arg("-c")
             .arg(
                 r#"
@@ -488,8 +488,7 @@ for algorithm in ('CRC32C', 'SHA1', 'SHA256'):
     assert response[field] == attributes['Checksum'][field], response
 "#,
             )
-            .arg(&restart_endpoint)
-            .output()
+            .arg(&restart_endpoint), std::time::Duration::from_secs(180))
             .unwrap()
     })
     .await
@@ -497,7 +496,7 @@ for algorithm in ('CRC32C', 'SHA1', 'SHA256'):
     assert!(
         restart_output.status.success(),
         "native botocore checksum reads after restart failed: {}",
-        String::from_utf8_lossy(&restart_output.stderr)
+        restart_output.status
     );
     restarted.stop().await;
 }
