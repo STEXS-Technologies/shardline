@@ -85,6 +85,25 @@ fn git_without_lazy_fetch(args: &[&str]) -> std::process::Output {
     .expect("Git client must complete within its deadline")
 }
 
+fn verify_v2_historical_lazy_read(directory: &str, first_commit: &str) {
+    let object = format!("{first_commit}:nested/hello.txt");
+    assert!(
+        !git_without_lazy_fetch(&["-C", directory, "cat-file", "-e", &object])
+            .status
+            .success(),
+        "historical payload must be absent before lazy retrieval"
+    );
+    let history = git(&["-C", directory, "-c", "protocol.version=2", "show", &object]);
+    assert!(history.status.success());
+    assert_eq!(history.stdout, b"protocol v2 first revision\n");
+    assert!(String::from_utf8_lossy(&history.stderr).contains("command=fetch"));
+    assert!(
+        git(&["-C", directory, "fsck", "--full", "--strict"])
+            .status
+            .success()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_cli_clone_and_fetch_ndjson_revisions() {
     let test = common::setup();
@@ -983,6 +1002,11 @@ async fn git_cli_protocol_v2_clone_and_incremental_fetch() {
         b"protocol v2 first revision\n"
     );
 
+    let first_commit = git(&["-C", clone_dir, "rev-parse", "HEAD"]);
+    assert!(first_commit.status.success());
+    let first_commit = String::from_utf8(first_commit.stdout).unwrap();
+    let first_commit = first_commit.trim();
+
     let object_type_path = work.path().join("object-type-filter-v2");
     let object_type_dir = object_type_path.to_str().unwrap();
     let filtered_clone = git(&[
@@ -1381,6 +1405,7 @@ async fn git_cli_protocol_v2_clone_and_incremental_fetch() {
         std::fs::read(partial_path.join("nested/hello.txt")).unwrap(),
         b"protocol v2 second revision\n"
     );
+    verify_v2_historical_lazy_read(partial_dir, first_commit);
     assert!(
         git(&["-C", partial_dir, "fsck", "--strict"])
             .status
@@ -1462,6 +1487,7 @@ async fn git_cli_protocol_v2_clone_and_incremental_fetch() {
             std::fs::read(filtered_path.join("nested/hello.txt")).unwrap(),
             b"protocol v2 second revision\n"
         );
+        verify_v2_historical_lazy_read(filtered_dir, first_commit);
         assert!(
             git(&["-C", filtered_dir, "fsck", "--strict"])
                 .status
