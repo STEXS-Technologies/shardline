@@ -43,18 +43,20 @@ async fn exercise_index_rebuild() -> Result<(), Box<dyn Error>> {
     )?;
 
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
-        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
-        .args([
-            "index",
-            "rebuild",
-            "--root",
-            storage
-                .path()
-                .to_str()
-                .ok_or("storage path was not valid utf-8")?,
-        ])
-        .output()?;
+    let output = shardline_test_support::native_client_output(
+        Command::new(shardline_bin)
+            .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
+            .args([
+                "index",
+                "rebuild",
+                "--root",
+                storage
+                    .path()
+                    .to_str()
+                    .ok_or("storage path was not valid utf-8")?,
+            ]),
+        Duration::from_secs(120),
+    )?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "index rebuild failed: {}",
