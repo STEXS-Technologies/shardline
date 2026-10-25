@@ -94,6 +94,12 @@ rollback and after re-upgrade, including after the old binary adds a regular
 file commit. The stock clients verify the complete native bytes after each
 candidate-side GC. This does not claim the old Hub download route understands
 the new native identity protocol.
+With each of these client versions, the same local and PostgreSQL/MinIO drills also stop the server
+and run candidate FSCK, index rebuild, and FSCK again before rollback and after
+re-upgrade. Each command inspects native storage records and reports zero
+findings; fresh-client reads then verify the regular history and native bytes.
+This checks healthy-data rebuild preservation, not recovery from corrupted Hub
+metadata or concurrent publication during rebuild.
 
 Hub revision IDs have a rollout boundary: 1.12.1 does not understand the new
 public Git IDs returned in SDK commit fields. It returns 404 for those IDs,

@@ -218,6 +218,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     client(&candidate, &state, &token, "upgraded").await;
     maintenance::gc_before_rollback(&current, root.path(), postgres, storage_env, "hub").await;
     drop(candidate);
+    maintenance::verify_and_rebuild(&current, root.path(), postgres, storage_env).await;
     let mut rollback =
         LocalServer::spawn_with_storage(&old, root.path(), postgres, "hub", storage_env);
     rollback.ready().await;
@@ -228,5 +229,11 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     restart.ready().await;
     client(&restart, &state, &token, "verify").await;
     maintenance::gc_before_rollback(&current, root.path(), postgres, storage_env, "hub").await;
+    client(&restart, &state, &token, "verify").await;
+    drop(restart);
+    maintenance::verify_and_rebuild(&current, root.path(), postgres, storage_env).await;
+    let mut restart =
+        LocalServer::spawn_with_storage(&current, root.path(), postgres, "hub", storage_env);
+    restart.ready().await;
     client(&restart, &state, &token, "verify").await;
 }

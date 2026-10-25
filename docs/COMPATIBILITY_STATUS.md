@@ -362,6 +362,8 @@ reachable record remain protected.
 - Patch releases publish the internal crate graph in dependency order before publishing
   the `shardline` CLI crate.
 DuckDB analytics compatibility and the real-client validation workflow are
-documented in [`DUCKDB.md`](DUCKDB.md). The supported production boundary is
-external DuckDB over the authenticated S3 frontend; no arbitrary SQL endpoint
-is exposed by the Hub API.
+documented in [`DUCKDB.md`](DUCKDB.md). Full SQL runs in external DuckDB over
+the authenticated S3 frontend. The Hub also enables bounded native dataset
+queries by default, using Arrow/Parquet rather than DuckDB; operators can
+disable them with `SHARDLINE_ENABLE_DATASET_QUERY=false`. The Hub API
+does not expose arbitrary SQL.
