@@ -162,7 +162,10 @@ to another revision does not gain access through this location index.
 This adds a frontend metadata migration. PostgreSQL operators must apply the
 pending migrations before starting the new binary.
 
-Native Xet read tokens are pinned to an immutable Hub commit. Before returning
+Native Xet read tokens are pinned to an immutable Hub commit. Resolve responses
+advertise a refresh URL containing that commit ID, so stock clients cache each
+commit's credentials separately when a branch advances. Existing branch-based
+token routes remain available. Before returning
 reconstruction data, Shardline checks that the file's SHA-256 and size occur in
 that repository commit, then finds the original native record. A signed download
 URL permits only its exact serialized range. Commit-scoped CAS credentials

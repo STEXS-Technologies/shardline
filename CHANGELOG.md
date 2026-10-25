@@ -99,6 +99,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Use commit-specific Xet token refresh URLs so cached credentials for an older
+  branch head do not cause reconstruction failures after a new upload.
 - Supply the development Compose Hub webhook encryption key so a fresh stack
   passes configuration validation without disabling production secret protection.
 - Stop development Compose initialization with an actionable error after 60

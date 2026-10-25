@@ -7,7 +7,10 @@ use axum::{
     response::Response,
     routing::any,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 pub(super) type RangeObservations = Arc<Mutex<Vec<(String, StatusCode)>>>;
@@ -18,6 +21,7 @@ struct Upstreams {
     transfer: String,
     client: reqwest::Client,
     ranges: Option<RangeObservations>,
+    rejected_lfs: Option<Arc<AtomicUsize>>,
 }
 
 pub(super) struct Proxy(JoinHandle<Result<(), std::io::Error>>);
@@ -29,7 +33,15 @@ impl Drop for Proxy {
 }
 
 pub(super) fn start(listener: TcpListener, api: &str, transfer: &str) -> Proxy {
-    start_inner(listener, api, transfer, None)
+    start_inner(listener, api, transfer, None, None)
+}
+
+pub(super) fn start_rejecting_lfs(listener: TcpListener, api: &str) -> (Proxy, Arc<AtomicUsize>) {
+    let rejected = Arc::new(AtomicUsize::new(0));
+    (
+        start_inner(listener, api, api, None, Some(rejected.clone())),
+        rejected,
+    )
 }
 
 pub(super) fn start_observing_ranges(
@@ -38,7 +50,7 @@ pub(super) fn start_observing_ranges(
     transfer: &str,
 ) -> (Proxy, RangeObservations) {
     let observations = Arc::new(Mutex::new(Vec::new()));
-    let proxy = start_inner(listener, api, transfer, Some(observations.clone()));
+    let proxy = start_inner(listener, api, transfer, Some(observations.clone()), None);
     (proxy, observations)
 }
 
@@ -47,11 +59,13 @@ fn start_inner(
     api: &str,
     transfer: &str,
     ranges: Option<RangeObservations>,
+    rejected_lfs: Option<Arc<AtomicUsize>>,
 ) -> Proxy {
     let upstreams = Upstreams {
         api: api.to_owned(),
         transfer: transfer.to_owned(),
         ranges,
+        rejected_lfs,
         client: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -65,6 +79,18 @@ fn start_inner(
 
 async fn forward(State(state): State<Upstreams>, request: Request) -> Result<Response, StatusCode> {
     let path = request.uri().path();
+    if path.ends_with("/info/lfs/objects/batch")
+        && let Some(rejected) = &state.rejected_lfs
+    {
+        rejected.fetch_add(1, Ordering::SeqCst);
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+            .body(Body::from(
+                r#"{"message":"injected LFS negotiation rejection"}"#,
+            ))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    }
     let observed_range = request
         .headers()
         .contains_key(header::RANGE)

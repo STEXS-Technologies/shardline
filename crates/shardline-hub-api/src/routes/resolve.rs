@@ -245,7 +245,10 @@ async fn resolve_file_for_repository(
                         &ns,
                         &repo_name,
                         "xet-read-token",
-                        &rev,
+                        // Stock clients cache CAS credentials by refresh URL.
+                        // A read token authorizes this immutable commit, so
+                        // its URL must not alias later versions of a branch.
+                        &commit_sha,
                     ]);
                 let mut reconstruction = url::Url::parse(&state.public_base_url)
                     .map_err(|error| HubApiError::CasError(error.to_string()))?;
