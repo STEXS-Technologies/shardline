@@ -57,6 +57,32 @@ distinct compatibility contracts; the historical binary does not replace the
 adjacent release. Remote object-store and stock-client qualification require
 their separately provisioned gates as well.
 
+### Disk-pressure qualification
+
+On Linux, run the candidate CLI against a disposable 512 MiB ext4 image with
+MinIO. The drill fills only that image, checks that failed uploads remain
+unpublished, frees space, retries the identical content, and restarts Shardline
+before checking every downloaded byte. It exercises both S3 and the stock
+`hf_xet` client, including its normal retry window.
+
+Requires Docker with privileged containers, `mkfs.ext4`, Python 3 with `boto3`,
+and a Python environment exposing `hf_xet.XetSession` (validated with 1.7.0).
+Pass a frozen candidate executable; do not rebuild or replace it during the
+drill. Use a new evidence directory outside the checkout for each run:
+
+```bash
+cargo make test-disk-pressure /path/to/shardline /private/evidence/sqlite \
+  --metadata sqlite --native-python /path/to/xet-environment/bin/python
+cargo make test-disk-pressure /path/to/shardline /private/evidence/postgres \
+  --metadata postgresql --native-python /path/to/xet-environment/bin/python
+```
+
+The runner creates and removes its own database, MinIO containers and loop
+mount. Client logs stay private because upstream errors may contain signed URLs
+or credentials. Missing prerequisites and timeouts fail qualification. This is
+a bounded 1 MiB S3 / 9 MiB native-Xet recovery drill, not a throughput benchmark
+or proof of every client's behavior under disk pressure.
+
 ## Git commits and pull requests
 
 ### Philosophy

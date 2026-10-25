@@ -117,6 +117,12 @@ workspace = false
 command = "bash"
 args = ["scripts/shardline/run_distributed_integrity_gate.sh", "${@}"]
 
+[tasks.test-disk-pressure]
+description = "Verify stock Xet and S3 recovery after real bounded disk exhaustion (Linux/Docker)"
+workspace = false
+command = "python3"
+args = ["scripts/shardline/verify_disk_pressure.py", "${@}"]
+
 [tasks.test-e2e]
 description = "Run e2e integration tests from the e2e/ folder"
 workspace = false
