@@ -558,6 +558,13 @@ container commitment. Per-reference range/length checks and individual member
 object checks remain. Only verified metadata is retained within a record;
 the temporary container file can be removed immediately after validation.
 
+Native-Xet container inspection also avoids a separate container HEAD: one full
+GET supplies presence, length and bytes for the same disk-backed verification.
+An owned MinIO regression with one member observes one GET and one member HEAD,
+versus one GET and two HEADs before this change. A same-length corrupted response
+still produces a container hash finding. This saves one request per fresh native
+container snapshot; it does not reduce payload bytes or establish a throughput gain.
+
 The final binary also passed a PostgreSQL-metadata/local-object drill with
 eight concurrent 36 MiB uploads, identical overwrites, GC and fsck. It retained
 16 containers and no redundant raw objects. All 24 full-body reads passed,

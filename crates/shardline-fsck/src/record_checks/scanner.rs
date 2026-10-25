@@ -25,6 +25,8 @@ struct XorbSnapshot {
 }
 
 #[cfg(test)]
+mod remote_snapshot_tests;
+#[cfg(test)]
 mod snapshot_tests;
 
 pub(crate) async fn scan_record_tree<RecordAdapter>(
@@ -489,23 +491,24 @@ fn inspect_native_xet_term(
         .is_none_or(|cached| cached.hash != chunk.hash)
     {
         *snapshot = None;
-        let metadata = match object_store.metadata(&object_key)? {
-            Some(metadata) => metadata,
-            None => {
-                push_issue(
-                    report,
-                    FsckIssueKind::MissingChunk,
-                    xorb_location,
-                    FsckIssueDetail::ReferencedByNativeXetRecord {
-                        record_location: record_location.to_owned(),
-                    },
-                )?;
-                return Ok(());
-            }
-        };
-
+        // Observe presence and bytes together. The remote store verifies the
+        // full GET's response length without a separate metadata request.
         let mut xorb_file =
-            object_store.materialize_object_to_tempfile(&object_key, metadata.length())?;
+            match object_store.materialize_object_to_tempfile_if_present(&object_key)? {
+                Some((file, _length)) => file,
+                None => {
+                    push_issue(
+                        report,
+                        FsckIssueKind::MissingChunk,
+                        xorb_location,
+                        FsckIssueDetail::ReferencedByNativeXetRecord {
+                            record_location: record_location.to_owned(),
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
+
         let expected_hash = parse_xet_hash_hex(&chunk.hash)?;
         let mut reader = xorb_file.as_file_mut();
         // A stored container whose bytes fail to parse or validate is corrupt:
