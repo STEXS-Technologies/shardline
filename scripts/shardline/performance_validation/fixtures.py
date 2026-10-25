@@ -163,6 +163,10 @@ class Deployment:
     def stop_lane(self, lane):
         if hasattr(self, "trace"):
             self.trace.close()
+            # Preserve sanitized observations even when a lane fails before it
+            # can publish results. These are diagnostics, not a qualified run.
+            (lane / "backend-request-trace.json").write_text(
+                json.dumps(self.trace.events, indent=2) + "\n")
             del self.trace
         for index, server in enumerate(self.servers):
             (lane / f"server-{index}.log").write_text(command("docker", "logs", server, stderr=subprocess.STDOUT))
