@@ -168,7 +168,12 @@ commit's credentials separately when a branch advances. Existing branch-based
 token routes remain available. Before returning
 reconstruction data, Shardline checks that the file's SHA-256 and size occur in
 that repository commit, then finds the original native record. A signed download
-URL permits only its exact serialized range. Commit-scoped CAS credentials
+URL permits only its exact serialized range. Newly issued URLs expire after at
+most 15 minutes, or when the authorizing credential expires, whichever comes
+first. An already expired credential cannot issue a new URL. Downloads remain
+behind Shardline; clients receive no backend object-store URL or credentials.
+Previously issued URLs keep their original expiry.
+Commit-scoped CAS credentials
 cannot be reused as ordinary Hub credentials or unrestricted Xorb-read tokens.
 An older commit's token cannot read a file added later. Write-token behavior is
 unchanged.

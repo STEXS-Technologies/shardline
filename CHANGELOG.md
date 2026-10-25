@@ -156,8 +156,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Fail required deployment qualification when Docker services, binaries or clock
   fixtures are missing; bound Docker probes and deployment subprocesses instead
   of accepting skipped drills as successful execution.
-- Remove a PostgreSQL round trip from native Xorb member-index lookups while
-  retaining repeatable-read snapshots and complete bounded membership checks.
+- Validate native Xorb member indexes in one PostgreSQL statement, retaining
+  one consistent snapshot and complete bounded membership checks.
 - Keep the Xet hash-writing helper's digest consistent with accepted bytes
   after short writes, interrupted writes and errors.
 - Initialize the dedicated S3 multipart-completion client only when needed,
@@ -325,6 +325,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Security
 
+- Cap newly issued Xet download URLs at their authorizing credential's expiry,
+  retaining the 15-minute upper bound and rejecting already expired credentials.
 - Upgrade the S3 backend and XML parser to remove RUSTSEC-2026-0194 and
   RUSTSEC-2026-0195 advisory exceptions, including client-supplied tagging XML.
 - Update TLS certificate verification and bundled trust roots to patched releases

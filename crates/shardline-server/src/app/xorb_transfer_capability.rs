@@ -120,7 +120,7 @@ impl XorbReadCapabilitySigner {
         Ok(())
     }
 
-    /// Issues a capability for one range already authorized by reconstruction.
+    /// Issues a capability for one authorized range, never beyond its credential's expiry.
     pub(super) fn issue(
         &self,
         authorized_claims: &TokenClaims,
@@ -135,9 +135,16 @@ impl XorbReadCapabilitySigner {
             return Err(ServerError::NotFound);
         }
         let subject = format!("{file_id}:{xorb_hash}:{range_start}:{range_end}");
-        let expires_at = unix_now_seconds_lossy()
+        let now = unix_now_seconds_lossy();
+        if authorized_claims.expires_at_unix_seconds() < now {
+            return Err(ServerError::InvalidToken(
+                shardline_protocol::TokenCodecError::Expired,
+            ));
+        }
+        let expires_at = now
             .checked_add(CAPABILITY_TTL_SECONDS)
-            .ok_or(ServerError::Overflow)?;
+            .ok_or(ServerError::Overflow)?
+            .min(authorized_claims.expires_at_unix_seconds());
         let claims = TokenClaims::new(
             if authorized_claims.issuer() == shardline_protocol::HUB_XET_READ_TOKEN_ISSUER {
                 HUB_CAPABILITY_ISSUER
@@ -307,6 +314,53 @@ mod tests {
         assert!(signer.verify(&changed).is_err());
         let other = XorbReadCapabilitySigner::new(OTHER_KEY).expect("signer is valid");
         assert!(other.verify(&token).is_err());
+    }
+
+    #[test]
+    fn capability_cannot_outlive_authorizing_credential() {
+        let signer = XorbReadCapabilitySigner::new(KEY).unwrap();
+        let source = authorized_claims();
+        let expires_at = unix_now_seconds_lossy().checked_add(120).unwrap();
+        for issuer in ["test-issuer", shardline_protocol::HUB_XET_READ_TOKEN_ISSUER] {
+            let claims = TokenClaims::new(
+                issuer,
+                source.subject(),
+                TokenScope::Read,
+                source.repository().clone(),
+                expires_at,
+            )
+            .unwrap();
+            let token = signer
+                .issue(&claims, &"a".repeat(64), &"b".repeat(64), 10, 20)
+                .unwrap();
+            let (issued, _) = signer.verify_at(&token, expires_at).unwrap();
+            assert_eq!(issued.expires_at_unix_seconds(), expires_at);
+            assert!(
+                signer
+                    .verify_at(&token, expires_at.checked_add(1).unwrap())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn expired_authorization_cannot_issue_a_download_grant() {
+        let signer = XorbReadCapabilitySigner::new(KEY).unwrap();
+        let source = authorized_claims();
+        let expired = TokenClaims::new(
+            source.issuer(),
+            source.subject(),
+            TokenScope::Read,
+            source.repository().clone(),
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            signer.issue(&expired, &"a".repeat(64), &"b".repeat(64), 10, 20),
+            Err(ServerError::InvalidToken(
+                shardline_protocol::TokenCodecError::Expired
+            ))
+        ));
     }
 
     #[test]

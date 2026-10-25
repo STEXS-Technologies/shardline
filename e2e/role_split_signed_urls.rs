@@ -7,9 +7,22 @@ pub(super) async fn verify(
     token: &str,
     file_id: &str,
 ) -> Result<(), Box<dyn Error>> {
+    let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!")?;
+    let source = signer.verify_now(token)?;
+    let expires_at = shardline_protocol::unix_now_seconds_lossy()
+        .checked_add(120)
+        .ok_or("credential expiry overflow")?
+        .min(source.expires_at_unix_seconds());
+    let credential = signer.sign(&TokenClaims::new(
+        source.issuer(),
+        source.subject(),
+        TokenScope::Read,
+        source.repository().clone(),
+        expires_at,
+    )?)?;
     let reconstruction = client
         .get(format!("{public_base}/v1/reconstructions/{file_id}"))
-        .bearer_auth(token)
+        .bearer_auth(credential)
         .send()
         .await
         .map_err(reqwest::Error::without_url)?
@@ -54,9 +67,18 @@ pub(super) async fn verify(
                 "download bypassed Shardline origin"
             );
             assert!(url.path().starts_with("/transfer/xorb/"));
-            assert!(
-                url.query_pairs()
-                    .any(|(name, _)| name == "xorb_read_capability")
+            let capability = url
+                .query_pairs()
+                .find_map(|(name, value)| (name == "xorb_read_capability").then_some(value))
+                .ok_or("missing download capability")?;
+            let (payload, _) = capability
+                .split_once('.')
+                .ok_or("invalid capability form")?;
+            let claims = shardline_protocol::decode_and_validate_claims(&hex::decode(payload)?, 0)?;
+            assert_eq!(
+                claims.expires_at_unix_seconds(),
+                expires_at,
+                "download authority must not outlive its source credential"
             );
             let range = format!("bytes={}-{}", entry.url_range.start, entry.url_range.end);
             let response = client
