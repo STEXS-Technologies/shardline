@@ -616,3 +616,17 @@ restored tree; Git projection treats quarantined legacy history as a boundary.
 Recovery runs on a blocking worker. Once validation has started, cancelling the
 awaiting operation does not cancel that worker; it keeps the maintenance barrier
 until verification and the compare-and-swap finish.
+
+The executable recovery suite covers SQLite/filesystem and disposable
+PostgreSQL/MinIO, including repository-scoped remote objects. It verifies
+BLAKE3 inline content and an LFS file spanning several verification ranges,
+rejects missing sources and digest mismatches before advancing the ref, and
+rejects a stale manifest after successful recovery. Run it with Docker available:
+
+```sh
+cargo nextest run --locked -p shardline --test hub_tree_recovery \
+  --run-ignored all --test-threads 1
+```
+
+This suite checks verified-tree publication and rejection paths. It does not
+establish recovery under process termination or live concurrent publication.

@@ -153,6 +153,11 @@ jobs:
           cargo nextest run --locked -p shardline --test fsck_cli
           --run-ignored all -E 'test(native_xet_fsck_with_postgres_and_minio)'
 
+      - name: Qualify legacy Hub tree recovery with PostgreSQL and MinIO
+        run: >-
+          cargo nextest run --locked -p shardline --test hub_tree_recovery
+          --run-ignored all --test-threads 1
+
       - name: Qualify stalled Xet verification progress and HTTP disconnects
         run: >-
           cargo nextest run --locked -p shardline-server --features docker --lib
