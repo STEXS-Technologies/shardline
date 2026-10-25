@@ -22,6 +22,8 @@ use crate::{
 
 const LARGE_METADATA_RECORD_COUNT: usize = 128;
 
+mod native_dedup;
+
 async fn rebuild_waits_for_writer(use_configured_entry: bool) {
     let storage = tempfile::tempdir().unwrap();
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
