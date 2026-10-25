@@ -32,7 +32,10 @@ pub(super) async fn download_hub_xet_file(
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
     super::operational::reject_commit_token_for_unbound_object(repo.capability())?;
-    let admit = download_admission(&state.admission, std::time::Duration::from_secs(5)).await?;
+    // Full-file verification can make one analytical burst take several
+    // seconds on a small host. Queue within a finite budget rather than
+    // increasing the number of active verifications to handle the burst.
+    let admit = download_admission(&state.admission, std::time::Duration::from_secs(30)).await?;
     validate_hash_path(&sha256)?;
     let scope = repo.capability().namespace().ok_or(ServerError::NotFound)?;
     let identity = state

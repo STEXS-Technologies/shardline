@@ -1229,6 +1229,86 @@ fn alice_headers() -> HeaderMap {
 }
 
 #[tokio::test]
+async fn native_lfs_transfer_does_not_inherit_webhook_total_timeout() {
+    use axum::{body::Body, http::Method, response::IntoResponse, routing::get};
+    use std::time::Duration;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let upstream = axum::Router::new().route(
+        "/v1/hub/xet-files/{oid}",
+        get(|| async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let body = Body::from_stream(futures_util::stream::once(async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"xyz"))
+            }));
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [("content-range", "bytes 1-3/10"), ("content-length", "3")],
+                body,
+            )
+                .into_response()
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await });
+    let (_td, mut state) = make_alice_auth_state();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(5))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    state.http_client = Some(client.clone());
+    state.public_base_url.clone_from(&endpoint);
+    let mut headers = alice_headers();
+    headers.insert("range", "bytes=1-3".parse().unwrap());
+    let response = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &headers),
+        Path("ab".repeat(32)),
+        Method::GET,
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()["content-range"], "bytes 1-3/10");
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 16)
+            .await
+            .unwrap(),
+        "xyz"
+    );
+    // The per-transfer override must not change the shared webhook deadline.
+    assert!(
+        client
+            .get(format!("{endpoint}/v1/hub/xet-files/{}", "ab".repeat(32)))
+            .send()
+            .await
+            .unwrap_err()
+            .is_timeout()
+    );
+    server.abort();
+    let _ = server.await;
+    let headers = alice_headers();
+    let error = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &headers),
+        Path("ab".repeat(32)),
+        Method::GET,
+        headers,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        HubApiError::CasError(message)
+            if message == "internal Xet file reader: connection failure"
+    ));
+}
+
+#[tokio::test]
 async fn repo_list_hides_other_tenants_private_repos() {
     let (_td, state) = make_alice_auth_state();
     let result = repo_list(State(state.clone()), test_repo(&state, &alice_headers()))

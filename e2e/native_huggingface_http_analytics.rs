@@ -80,8 +80,23 @@ async fn exercise_analytical_ranges(
 import hashlib, os, pathlib, subprocess, sys, tempfile, urllib.request, urllib.error
 stage = 'setup'
 def safe_failure(kind, error, traceback):
-    print('HUB_HTTP_FAILED_STAGE=' + stage, flush=True)
+    # Native progress output can leave a carriage-return line unfinished.
+    # Start diagnostics on a fresh line without exposing URLs or credentials.
+    print('\nHUB_HTTP_FAILED_STAGE=' + stage, flush=True)
     print('HUB_HTTP_FAILED_TYPE=' + kind.__name__, flush=True)
+    # Classify known transport failures without printing exception text, which
+    # can contain authenticated URLs or SQL credentials.
+    message = str(error).lower()
+    for category, needles in [
+        ('TIMEOUT', ('timeout', 'timed out')),
+        ('CONNECTION', ('connection', 'socket')),
+        ('BODY', ('body', 'content-length', 'content length', 'unexpected end')),
+        ('RANGE', ('range', 'partial')),
+        ('PARQUET', ('parquet',)),
+        ('HTTP', ('http',)),
+    ]:
+        if any(needle in message for needle in needles):
+            print('HUB_HTTP_FAILED_CATEGORY=' + category, flush=True)
 sys.excepthook = safe_failure
 import duckdb, pyarrow as pa, pyarrow.parquet as pq
 endpoint, read_endpoint, token = os.environ['HF_ENDPOINT'], os.environ['READ_ENDPOINT'], os.environ['HF_TOKEN']
@@ -89,6 +104,11 @@ repo = 'team/cli-model'
 # Use DuckDB's documented HTTP bearer secret, without replacing its transport.
 # https://duckdb.org/docs/stable/core_extensions/httpfs/https.html
 connection = duckdb.connect()
+# This is wire/integrity qualification with unoptimized Rust verification on
+# small CI hosts, not a latency benchmark. Keep a finite client transfer budget
+# above the server's bounded admission wait; retain range-byte and query-result
+# assertions below.
+connection.execute('SET http_timeout = 120')
 stage = 'secret'
 connection.execute('CREATE SECRET hub_http (TYPE HTTP, BEARER_TOKEN ?, SCOPE ?)', [token, read_endpoint])
 with tempfile.TemporaryDirectory() as work:

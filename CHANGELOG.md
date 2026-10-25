@@ -95,6 +95,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Give internal Hub Xet downloads their own transfer deadline and a bounded
+  admission wait for analytical range bursts, preserving verification and active
+  work limits. Keep internal URLs out of transfer error responses.
 - Omit whole-object checksum headers on partial S3 GET responses so stock SDKs
   can read verified ranges without comparing them against the full-file digest.
 - Read older v0 Xorb footers through full payload verification, deriving missing

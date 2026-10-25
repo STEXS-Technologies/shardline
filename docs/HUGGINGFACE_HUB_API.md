@@ -372,13 +372,22 @@ checkpoints. An already-issued storage request or bounded decoding step may
 finish first; its worker keeps admission until it exits. Successful transfers
 still require the same complete integrity checks.
 
-Native plain HTTP downloads wait up to five seconds for existing reconstruction
+Native plain HTTP downloads wait up to 30 seconds for existing reconstruction
 capacity before starting metadata or payload work. This absorbs short bursts
 from analytical range readers without increasing active verification work.
 If capacity remains exhausted, the Hub LFS bridge preserves HTTP
 `503` (or upstream `429`) with `Retry-After: 1`. Clients should retry after that
 delay. This keeps temporary overload distinct from an internal failure; it does
 not bypass admission or weaken content verification.
+
+The internal Hub-to-Xet transfer has a five-minute total deadline, independent
+of the webhook client's ten-second deadline. Analytical E2E tests explicitly
+set DuckDB's `http_timeout` to 120 seconds so unoptimized verification on small
+CI hosts can finish. These tests establish protocol and integrity behavior;
+they do not establish that DuckDB's default 30-second budget is sufficient for
+every file or host. Slow storage and full-file verification can still make
+small range requests expensive. Measure that cost for your workload before
+choosing a client timeout.
 
 The analytical HTTP qualification uses DuckDB 1.5.5 and PyArrow 25.0.0, with
 unmodified Hub 2.2.0/hf_xet 1.7.0 uploads. It passes regular and native-Xet
@@ -392,6 +401,10 @@ SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo test --manifest-path e2e/Cargo.toml \
   --test native_huggingface_cli_e2e native_huggingface_http_analytics \
   -- --include-ignored --test-threads=1
 ```
+
+DuckDB 2.0.0 with PyArrow 26.0.0 and Hub 2.3.0/hf_xet 1.7.0 also passes
+these four configurations with the 120-second client budget, including two
+simultaneous tests restricted to two CPU cores. This is a shared-host result.
 
 The remote cases require Docker PostgreSQL and disk-backed MinIO. This does not
 qualify multi-host deployments, other analytical client versions or sustained
@@ -439,8 +452,9 @@ DuckDB 1.5.5 also passes authenticated Parquet queries over the ordinary Hub
 resolve URLs for private regular and native-Xet files on the local backend.
 The test uses PyArrow 25.0.0 fixtures uploaded with `huggingface_hub` 1.25.1 and
 `hf_xet` 1.5.2, observes actual `206` responses through the resolve/LFS path and
-rejects anonymous reads. Remote-storage and split-role analytical qualification
-remain open; this test does not measure backend read amplification.
+rejects anonymous reads. The newer four-configuration qualification above covers
+remote storage and split roles for its named client versions; this older-client
+case does not extend that matrix or measure backend read amplification.
 
 End-to-end expired-URL recovery passes with Hub 1.25.1 and `hf_xet` 1.5.2,
 1.6.0 and 1.7.0, using both local storage and PostgreSQL/MinIO. Tests cover

@@ -1141,7 +1141,12 @@ async fn stream_hf_xet_object(
         "{}/v1/hub/xet-files/{oid}",
         state.public_base_url.trim_end_matches('/')
     );
-    let mut request = client.request(method.clone(), url).bearer_auth(read_token);
+    // This is a verified file transfer, not a webhook delivery. Verification
+    // can outlive the webhook client's ten-second total request budget.
+    let mut request = client
+        .request(method.clone(), url)
+        .timeout(std::time::Duration::from_secs(300))
+        .bearer_auth(read_token);
     for name in [
         axum::http::header::RANGE,
         axum::http::header::IF_RANGE,
@@ -1152,10 +1157,18 @@ async fn stream_hf_xet_object(
             request = request.header(name.clone(), value);
         }
     }
-    let upstream = request
-        .send()
-        .await
-        .map_err(|error| HubApiError::CasError(error.to_string()))?;
+    let upstream = request.send().await.map_err(|error| {
+        // reqwest's display includes the request URL. Keep deployment
+        // details out of the public error while retaining a useful category.
+        let category = if error.is_timeout() {
+            "timeout"
+        } else if error.is_connect() {
+            "connection failure"
+        } else {
+            "transport failure"
+        };
+        HubApiError::CasError(format!("internal Xet file reader: {category}"))
+    })?;
     if upstream.status() == StatusCode::NOT_FOUND {
         return Err(HubApiError::NotFound);
     }
