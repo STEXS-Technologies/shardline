@@ -54,6 +54,12 @@ jobs:
         run: >-
           cargo test --locked -p shardline-storage --test provider_signed_ranges -- --ignored
 
+      - name: Verify saved-delete recovery with PostgreSQL and MinIO
+        run: >-
+          cargo test --locked -p shardline-server --features docker
+          --test remote_delete_reply_recovery
+          remote_saved_reply_recovery_preserves_user_objects_and_uncertain_attempts -- --ignored
+
       - name: Apply disposable PostgreSQL schema as owner
         run: target/release/shardline db migrate up --database-url "$DATABASE_URL"
 
