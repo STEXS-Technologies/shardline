@@ -85,6 +85,8 @@ adds its SHA-256 binding while preserving the earlier file aliases. Version
 1.12.1 itself does not populate the newer identity index.
 Stock Hub 1.25.1, 2.2.0 and 2.3.0 clients each pass a history drill against the
 actual 1.12.1 binary and the candidate, on local storage and PostgreSQL/MinIO.
+The native-upload history drill also passes with Hub 1.25.1/hf_xet 1.5.2 and
+Hub 2.2.0/hf_xet 1.7.0 against the optimized candidate executable.
 It creates a private repository before migration, replaces its file after
 migration, writes again after rollback, and verifies all three byte-exact
 versions after re-upgrade with fresh client caches.
