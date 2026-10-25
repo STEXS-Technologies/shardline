@@ -6,7 +6,7 @@ use shardline_server::LocalBackend;
 use std::{
     fs,
     num::NonZeroUsize,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -14,6 +14,12 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 mod fsck_native_indexes;
 mod fsck_native_members;
+
+fn binary() -> PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_shardline")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_shardline")))
+}
 
 fn scan(root: &Path) -> std::io::Result<Output> {
     scan_configured(root, None)
@@ -29,7 +35,7 @@ fn scan_through_shell(root: &Path) -> std::io::Result<Output> {
                 "\"$1\" fsck --root \"$2\"; result=$?; exit \"$result\"",
                 "fsck-wrapper",
             ])
-            .arg(env!("CARGO_BIN_EXE_shardline"))
+            .arg(binary())
             .arg(root),
         std::time::Duration::from_secs(120),
     )
@@ -42,7 +48,7 @@ struct RemoteStorage {
 }
 
 fn scan_configured(root: &Path, remote: Option<&RemoteStorage>) -> std::io::Result<Output> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_shardline"));
+    let mut command = Command::new(binary());
     command.env_clear();
     if let Some(remote) = remote {
         command.envs(remote.environment.iter().map(|(key, value)| (*key, value)));
