@@ -26,6 +26,9 @@ def query_mix(deployment, name):
         'execution_ms', coalesce(sum(total_exec_time),0),
         'shared_blocks_read', coalesce(sum(shared_blks_read),0),
         'shared_blocks_hit', coalesce(sum(shared_blks_hit),0),
+        'statement_wal_bytes', coalesce(sum(wal_bytes),0),
+        'statement_wal_records', coalesce(sum(wal_records),0),
+        'statement_wal_full_page_images', coalesce(sum(wal_fpi),0),
         'temp_blocks_written', coalesce(sum(temp_blks_written),0))
       FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname=current_database())
         AND query NOT LIKE '/* performance-observer */%'
@@ -36,7 +39,9 @@ def top_queries(deployment, name):
     return json.loads(deployment.sql(name, """
       /* performance-observer */ SELECT coalesce(json_agg(t),'[]') FROM (
         SELECT left(query,300) AS query, calls, total_exec_time AS execution_ms,
-          rows, shared_blks_read, shared_blks_hit, temp_blks_written
+          rows, shared_blks_read, shared_blks_hit, temp_blks_written,
+          wal_bytes AS statement_wal_bytes, wal_records AS statement_wal_records,
+          wal_fpi AS statement_wal_full_page_images
         FROM pg_stat_statements
         WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
           AND query NOT LIKE '/* performance-observer */%'
