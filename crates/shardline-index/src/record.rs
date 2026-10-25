@@ -6,6 +6,8 @@ use thiserror::Error;
 
 use crate::parse_xet_hash_hex;
 
+mod first_candidate;
+
 /// Boxed asynchronous record-store operation.
 pub type RecordStoreFuture<'operation, T, E> =
     Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'operation>>;
@@ -475,6 +477,24 @@ pub trait RecordTraversal {
             self.visit_repository_version_records(&scope, &mut visitor)
                 .await
         })
+    }
+
+    /// Reads at most the first candidate for a repository/member lookup.
+    /// Indexed adapters narrow scope and hash; the compatibility default may
+    /// return other revisions or members, like the candidate traversal itself.
+    /// The returned metadata must still be verified before granting access.
+    /// A caller falling back to a complete traversal must discard any partial
+    /// proof from this lookup: the fallback may observe a newer snapshot.
+    fn first_repository_hash_record<'operation>(
+        &'operation self,
+        repository: &'operation RepositoryScope,
+        hash_hex: &'operation str,
+    ) -> RecordStoreFuture<'operation, Option<StoredRecord<Self::Locator>>, Self::Error>
+    where
+        Self: Sync,
+        Self::Error: Send + 'operation,
+    {
+        first_candidate::read(self, repository, hash_hex)
     }
 
     /// Lists immutable version-record locators.
@@ -1266,6 +1286,40 @@ mod tests {
         fn version_record_locator(&self, _record: &FileRecord) -> Self::Locator {
             DefaultVisitLocator("version".to_owned())
         }
+    }
+
+    #[tokio::test]
+    async fn default_first_candidate_handles_empty_latest_and_version_records() {
+        let store = DefaultVisitStore::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::Generic, "team", "repo", None).unwrap();
+        assert!(
+            store
+                .first_repository_hash_record(&scope, "hash")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store.write_version("v1", b"version".to_vec());
+        assert_eq!(
+            store
+                .first_repository_hash_record(&scope, "hash")
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"version"
+        );
+        store.write_latest("k1", b"latest".to_vec());
+        assert_eq!(
+            store
+                .first_repository_hash_record(&scope, "hash")
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"latest"
+        );
     }
 
     #[tokio::test]

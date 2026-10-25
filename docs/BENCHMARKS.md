@@ -829,6 +829,50 @@ passes twelve stock-client SIGKILL/retry scenarios across local and
 PostgreSQL/MinIO storage, plus seven actual v1.12.1 upgrade/rollback tests.
 These checks do not close the wider throughput, concurrency or recovery matrix.
 
+#### PostgreSQL shared-hash authorization
+
+An October 25 synthetic diagnostic exercises the application range proof with
+2, 10,000, 100,000 and 1,000,000 valid file records sharing one member hash.
+The first authoritative record covers the requested bytes. Each variant uses a
+fresh PostgreSQL 16 container, the real owner migrations and the same
+single-connection pool. Three checks per size include a subsequent query on that
+pool, exposing work required to drain an unfinished result set.
+
+| Matching records | Streaming lookup, median ms | Bounded first lookup, median ms |
+| --- | ---: | ---: |
+| 2 | 0.575 | 0.683 |
+| 10,000 | 41.936 | 0.551 |
+| 100,000 | 423.536 | 0.487 |
+| 1,000,000 | 3,050.553 | 0.462 |
+
+PostgreSQL-container outbound traffic across the complete isolated diagnostic
+fell from 2,453,938,377 to 111,433 bytes. These counters include fixture setup,
+server-side seeding, all checks and schema cleanup; they are not per-request payloads.
+Both runs returned the correct proof and reused the connection successfully.
+The earlier parsing-only optimization still transferred the full result set;
+the bounded query avoids that transfer when its one record proves access.
+
+This is a shared-host, debug-build diagnostic with warm repeated checks and
+uncontrolled host activity. It is not an accepted production throughput
+comparison, a p95/p99 result, or a cold-I/O measurement. Small candidate sets do
+not show an established speedup. A partial first proof is discarded before a
+fresh full traversal, which costs an extra query; multi-record and footer proofs
+still need their existing complete authorization checks. This does not measure
+S3 requests, source-object health, physical disk writes or storage savings.
+
+To reproduce, use a disposable PostgreSQL database with the owner migrations
+applied and `DATABASE_URL` exported:
+
+```bash
+cargo test --locked -p shardline-server --lib \
+  record_store::xorb_range::scale::shared_hash_range_authorization_scale \
+  -- --ignored --exact --nocapture
+```
+
+The diagnostic is explicitly ignored in ordinary unit runs. Set
+`SHARDLINE_RANGE_SCALE_MAX_RECORDS=10000` for its smaller two-size run; supported
+ceilings are 2, 10,000, 100,000 and 1,000,000. It creates and drops its own schema.
+
 #### PostgreSQL publication
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at

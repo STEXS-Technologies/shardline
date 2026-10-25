@@ -75,6 +75,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   avoiding unnecessary candidate traversal for shared content.
 - Stop Xorb range access checks once published file terms prove every requested
   byte, retaining gap, footer and repository-isolation checks.
+- Bound PostgreSQL's first-candidate authorization query, avoiding large result
+  transfers when one record proves access; retain full traversal when needed.
 - Overlap native Xet member writes on S3 within a bounded memory budget,
   retaining full validation, conditional writes and publication ordering.
 - Avoid scratch files when GC verifies S3 containers up to 2 MiB, using a fixed

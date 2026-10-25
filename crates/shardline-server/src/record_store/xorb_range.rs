@@ -11,7 +11,11 @@ use crate::{ServerError, record_store::parse_stored_file_record_bytes};
 #[cfg(test)]
 mod postgres;
 #[cfg(test)]
+mod scale;
+#[cfg(test)]
 mod short_circuit;
+#[cfg(test)]
+mod snapshot;
 
 /// Uses candidate indexes only for discovery. The authoritative record must
 /// authorize every requested byte, including gaps between adjacent file terms.
@@ -26,18 +30,24 @@ where
     Store::Error: Send,
     ServerError: From<Store::Error>,
 {
+    if let Some(range) = requested {
+        let Some(entry) = store.first_repository_hash_record(scope, hash).await? else {
+            return Ok(Coverage::default());
+        };
+        let mut first = Coverage::default();
+        first.include(&entry.bytes, scope, hash)?;
+        if first.covers(range) {
+            return Ok(first);
+        }
+    }
+    // A failed first-row proof contributes nothing to this traversal. Its
+    // authoritative records belong to a new, internally consistent snapshot.
     let mut coverage = Coverage::default();
     let result = store
         .visit_repository_hash_records(scope, hash, |entry| {
-            let record =
-                parse_stored_file_record_bytes(&entry.bytes).map_err(LookupError::InvalidRecord)?;
-            if record.repository_scope.as_ref() == Some(scope) {
-                for member in &record.chunks {
-                    if member.hash == hash && member.packed_end > member.packed_start {
-                        coverage.insert(member.packed_start, member.packed_end.saturating_sub(1));
-                    }
-                }
-            }
+            coverage
+                .include(&entry.bytes, scope, hash)
+                .map_err(LookupError::InvalidRecord)?;
             // Candidate membership is never sufficient: stop only after
             // authoritative file terms cover every byte actually requested.
             if requested.is_some_and(|range| coverage.covers(range)) {
@@ -57,6 +67,23 @@ where
 pub(crate) struct Coverage(BTreeMap<u64, u64>);
 
 impl Coverage {
+    fn include(
+        &mut self,
+        bytes: &[u8],
+        scope: &RepositoryScope,
+        hash: &str,
+    ) -> Result<(), ServerError> {
+        let record = parse_stored_file_record_bytes(bytes)?;
+        if record.repository_scope.as_ref() == Some(scope) {
+            for member in &record.chunks {
+                if member.hash == hash && member.packed_end > member.packed_start {
+                    self.insert(member.packed_start, member.packed_end.saturating_sub(1));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

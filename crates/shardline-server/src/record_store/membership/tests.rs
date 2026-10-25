@@ -88,7 +88,7 @@ async fn postgres_verified_match_short_circuits_and_releases_its_connection() {
         .await
         .unwrap()
     );
-    assert_eq!(visits, 17);
+    assert_eq!(visits, 18, "failed probe plus the complete fresh traversal");
     assert!(matches!(
         any_repository_hash_record(&store, &scope, &hash, |_bytes| {
             Err(ServerError::NotFound)
@@ -127,8 +127,8 @@ async fn shared_version_lookup_stops_after_first_verified_match() {
         .unwrap()
     );
     assert_eq!(
-        visits, 129,
-        "no match must exhaust latest and historical candidates"
+        visits, 130,
+        "a failed first probe must fall back to all latest and historical candidates"
     );
 
     visits = 0;
@@ -201,7 +201,7 @@ async fn derived_candidate_scope_never_grants_access() {
         .unwrap()
     );
     assert_eq!(
-        visits, 2,
-        "both forged hints must be checked against real metadata"
+        visits, 3,
+        "the failed probe and both forged hints must be checked against real metadata"
     );
 }

@@ -21,6 +21,8 @@ impl<StorageError> From<StorageError> for LookupError<StorageError> {
     }
 }
 
+/// Each predicate evaluation must independently establish a complete match.
+/// A failed first-candidate probe may be followed by a fresh full traversal.
 pub(crate) async fn any_repository_hash_record<Store, Predicate>(
     store: &Store,
     scope: &RepositoryScope,
@@ -33,6 +35,12 @@ where
     ServerError: From<Store::Error>,
     Predicate: FnMut(&[u8]) -> Result<bool, ServerError> + Send,
 {
+    let Some(first) = store.first_repository_hash_record(scope, hash).await? else {
+        return Ok(false);
+    };
+    if predicate(&first.bytes)? {
+        return Ok(true);
+    }
     let result = store
         .visit_repository_hash_records(scope, hash, |entry| {
             if predicate(&entry.bytes).map_err(LookupError::InvalidRecord)? {

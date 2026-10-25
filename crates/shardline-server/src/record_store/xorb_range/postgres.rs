@@ -1,7 +1,9 @@
 //! Exercise early proof completion and connection reuse on real PostgreSQL.
 
 use super::{repository_covers_xorb_range, repository_xorb_coverage};
-use shardline_index::{FileChunkRecord, FileRecord, PostgresRecordStore, StorageRepresentation};
+use shardline_index::{
+    FileChunkRecord, FileRecord, PostgresRecordStore, RecordTraversal, StorageRepresentation,
+};
 use shardline_protocol::{ByteRange, RepositoryProvider, RepositoryScope};
 
 #[tokio::test]
@@ -36,6 +38,29 @@ async fn complete_range_proof_releases_postgres_connection_and_preserves_incompl
         }],
     };
     store.commit_file_version_metadata(&record).await.unwrap();
+    let first = store
+        .first_repository_hash_record(&scope, &hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let authoritative: FileRecord = serde_json::from_slice(&first.bytes).unwrap();
+    assert_eq!(authoritative.file_id, "aa");
+    assert!(
+        store
+            .first_repository_hash_record(&scope, &"c".repeat(64))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let outsider =
+        RepositoryScope::new(RepositoryProvider::Generic, "other", "range", None).unwrap();
+    assert!(
+        store
+            .first_repository_hash_record(&outsider, &hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
     record.file_id = "bb".into();
     store.commit_file_version_metadata(&record).await.unwrap();
     sqlx::query("UPDATE shardline_file_records SET record='{}' WHERE file_id='bb'")

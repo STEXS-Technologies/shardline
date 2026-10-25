@@ -2,6 +2,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use std::{collections::HashSet, str::FromStr};
 
+mod first_candidate;
+
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use futures_util::TryStreamExt;
@@ -1142,6 +1144,17 @@ impl RecordTraversal for super::PostgresRecordStore {
             Ok(())
         })
     }
+    fn first_repository_hash_record<'operation>(
+        &'operation self,
+        repository: &'operation shardline_protocol::RepositoryScope,
+        hash_hex: &'operation str,
+    ) -> RecordStoreFuture<'operation, Option<StoredRecord<Self::Locator>>, Self::Error>
+    where
+        Self::Error: Send + 'operation,
+    {
+        first_candidate::read(self, repository, hash_hex)
+    }
+
     fn list_latest_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {

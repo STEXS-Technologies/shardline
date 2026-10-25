@@ -219,8 +219,13 @@ terms prove the complete requested byte range. It can then stop parsing further
 records, even when many historical versions share the container. Gaps and shared
 footer bytes still require their existing ownership proof; a lookup-index entry
 alone never authorizes a read. Object and chunk integrity verification is
-unchanged. This reduces application-side metadata traversal after a match; it
-does not establish lower PostgreSQL query cost or network transfer.
+unchanged. PostgreSQL first tries one candidate with a bounded query, so a
+complete first-record proof avoids transferring the rest of the candidate set.
+Boolean membership checks use the same bounded lookup. If a range needs more
+records, the full traversal starts with an empty proof and uses its own snapshot;
+it never combines partial permissions from the initial lookup. That fallback
+requires an extra lookup. See `docs/BENCHMARKS.md` for the synthetic shared-hash
+measurement and its limits.
 
 Existing deployments can rebuild a missing descriptor from their retained shard
 mapping and fully verified Xorb. Cached descriptors are checked against the
