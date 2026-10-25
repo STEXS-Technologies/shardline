@@ -36,15 +36,37 @@ pub(super) fn precondition_response(
 }
 
 fn matches_etag(headers: &HeaderMap, name: header::HeaderName, etag: &str, weak: bool) -> bool {
-    headers.get_all(name).iter().any(|value| {
-        shardline_protocol::entity_tag_list_matches(value.as_bytes(), etag.as_bytes(), weak)
-    })
+    shardline_protocol::entity_tag_fields_match(
+        headers.get_all(name).iter().map(|value| value.as_bytes()),
+        etag.as_bytes(),
+        weak,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn repeated_validator_fields_preserve_combined_grammar() {
+        for name in [header::IF_MATCH, header::IF_NONE_MATCH] {
+            for values in [["\"hash\"", "broken"], ["*", "\"other\""]] {
+                let mut headers = HeaderMap::new();
+                for value in values {
+                    headers.append(name.clone(), value.parse().unwrap());
+                }
+                let status = precondition_response(&headers, "\"hash\"")
+                    .unwrap()
+                    .map(|response| response.status());
+                assert_eq!(
+                    status,
+                    (name == header::IF_MATCH).then_some(StatusCode::PRECONDITION_FAILED),
+                    "repeated fields must retain the combined field grammar"
+                );
+            }
+        }
+    }
 
     #[test]
     fn opaque_list_member_preserves_following_validator() {

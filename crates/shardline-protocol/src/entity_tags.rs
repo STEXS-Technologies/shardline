@@ -10,6 +10,31 @@ pub fn entity_tag_list_matches(value: &[u8], current: &[u8], weak: bool) -> bool
     compare_list(value, current, weak).unwrap_or(false)
 }
 
+/// Compares repeated field lines as one ordered, comma-separated field value.
+///
+/// A matching line cannot hide malformed later lines or a wildcard/list mixture.
+/// The usual single-field case does not allocate.
+#[must_use]
+pub fn entity_tag_fields_match<'field>(
+    values: impl IntoIterator<Item = &'field [u8]>,
+    current: &[u8],
+    weak: bool,
+) -> bool {
+    let mut values = values.into_iter();
+    let Some(first) = values.next() else {
+        return false;
+    };
+    let Some(second) = values.next() else {
+        return entity_tag_list_matches(first, current, weak);
+    };
+    let mut combined = first.to_vec();
+    for value in std::iter::once(second).chain(values) {
+        combined.push(b',');
+        combined.extend_from_slice(value);
+    }
+    entity_tag_list_matches(&combined, current, weak)
+}
+
 /// Validated conditional entity-tag field, preserving every opaque wire byte.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityTagList(Vec<u8>);
@@ -92,6 +117,31 @@ fn trim_ows(value: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_fields_validate_the_entire_ordered_list() {
+        let cases: &[(&[&[u8]], bool, bool)] = &[
+            (&[], false, false),
+            (&[b"\"hash\""], true, true),
+            (&[b"\"other\"", b"\"hash\""], true, true),
+            (&[b"\"\x80,opaque\"", b"W/\"hash\""], false, true),
+            (&[b"", b"\"hash\"", b""], true, true),
+            (&[b"*"], true, true),
+            (&[b"*", b"\"hash\""], false, false),
+            (&[b"\"hash\"", b"broken"], false, false),
+            (&[b"\"hash\"", b"\"unfinished"], false, false),
+        ];
+        for (fields, strong, weak) in cases {
+            assert_eq!(
+                entity_tag_fields_match(fields.iter().copied(), b"\"hash\"", false),
+                *strong
+            );
+            assert_eq!(
+                entity_tag_fields_match(fields.iter().copied(), b"\"hash\"", true),
+                *weak
+            );
+        }
+    }
 
     #[test]
     fn opaque_bytes_commas_and_weak_comparison() {

@@ -154,9 +154,11 @@ fn admitted_stream(
 }
 
 fn etag_matches(headers: &HeaderMap, name: header::HeaderName, etag: &str, weak: bool) -> bool {
-    headers.get_all(name).iter().any(|value| {
-        shardline_protocol::entity_tag_list_matches(value.as_bytes(), etag.as_bytes(), weak)
-    })
+    shardline_protocol::entity_tag_fields_match(
+        headers.get_all(name).iter().map(|value| value.as_bytes()),
+        etag.as_bytes(),
+        weak,
+    )
 }
 
 fn select(
@@ -317,6 +319,27 @@ mod tests {
             select(&headers, &Method::HEAD, 10, etag).unwrap(),
             Selection::Full
         ));
+    }
+
+    #[test]
+    fn repeated_validator_fields_preserve_combined_grammar() {
+        for name in [header::IF_MATCH, header::IF_NONE_MATCH] {
+            for values in [["\"identity\"", "broken"], ["*", "\"other\""]] {
+                let mut headers = HeaderMap::new();
+                for value in values {
+                    headers.append(name.clone(), value.parse().unwrap());
+                }
+                let selected = select(&headers, &Method::GET, 10, "\"identity\"").unwrap();
+                if name == header::IF_MATCH {
+                    assert!(matches!(
+                        selected,
+                        Selection::Status(StatusCode::PRECONDITION_FAILED)
+                    ));
+                } else {
+                    assert!(matches!(selected, Selection::Full));
+                }
+            }
+        }
     }
 
     #[test]
