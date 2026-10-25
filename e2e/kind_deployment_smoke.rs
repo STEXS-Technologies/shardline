@@ -13,6 +13,7 @@ const METRICS_TOKEN: &str = "kind-smoke-metrics-token";
 const ADMIN_TOKEN: &str = "kind-smoke-admin-read-token";
 const CONCURRENT_SPLIT_ROLE_REQUESTS: usize = 8;
 
+mod deployment_probe_requirements;
 mod kind_deployment_requirements;
 
 #[derive(Debug)]
@@ -271,8 +272,18 @@ async fn exercise_concurrent_split_role_load(
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), TestError> {
+    tokio::time::timeout(Duration::from_secs(30), poll_health(client, base_url))
+        .await
+        .map_err(|_| "kind health probe exceeded its deadline")?
+}
+
+async fn poll_health(client: &Client, base_url: &str) -> Result<(), TestError> {
     for _attempt in 0..90 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
+        if let Ok(response) = client
+            .get(format!("{base_url}/healthz"))
+            .timeout(Duration::from_secs(1))
+            .send()
+            .await
             && response.status() == StatusCode::OK
         {
             return Ok(());
@@ -291,7 +302,11 @@ async fn assert_ready(
     expected_object: &str,
     expected_cache: &str,
 ) -> Result<(), TestError> {
-    let response = client.get(format!("{base_url}/readyz")).send().await?;
+    let response = client
+        .get(format!("{base_url}/readyz"))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
     assert_eq!(
         response.status(),
         StatusCode::OK,

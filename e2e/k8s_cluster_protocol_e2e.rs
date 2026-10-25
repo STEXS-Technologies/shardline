@@ -1,3 +1,4 @@
+mod deployment_probe_requirements;
 mod k8s_cluster_requirements;
 mod support;
 
@@ -1192,8 +1193,18 @@ fn mutate_bytes(base: &[u8], start: usize, end: usize, value: u8) -> Result<Vec<
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), TestError> {
+    tokio::time::timeout(Duration::from_secs(40), poll_health(client, base_url))
+        .await
+        .map_err(|_| ServerE2eInvariantError::new("cluster health probe exceeded its deadline"))?
+}
+
+async fn poll_health(client: &Client, base_url: &str) -> Result<(), TestError> {
     for _attempt in 0..120 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
+        if let Ok(response) = client
+            .get(format!("{base_url}/healthz"))
+            .timeout(Duration::from_secs(1))
+            .send()
+            .await
             && response.status().is_success()
         {
             return Ok(());

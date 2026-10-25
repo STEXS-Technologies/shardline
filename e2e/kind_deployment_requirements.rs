@@ -51,3 +51,32 @@ fn complete_deployment_configuration_preserves_manual_defaults() {
     assert_eq!(config.run_id, "manual");
     assert!(config.previous_run_id.is_none());
 }
+
+#[tokio::test]
+async fn readiness_probe_bounds_a_silent_peer() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (accepted, mut observed) = tokio::sync::oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let (_connection, _) = listener.accept().await.unwrap();
+        let _ = accepted.send(());
+        std::future::pending::<()>().await;
+    });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        super::assert_ready(
+            &reqwest::Client::new(),
+            &base,
+            "api",
+            "postgres",
+            "s3",
+            "redis",
+        ),
+    )
+    .await;
+    peer.abort();
+    assert!(peer.await.unwrap_err().is_cancelled());
+    assert!(observed.try_recv().is_ok(), "probe must reach the fixture");
+    assert!(result.is_ok(), "readiness probe exceeded its own deadline");
+    assert!(result.unwrap().is_err(), "silent peer cannot be ready");
+}
