@@ -5,6 +5,7 @@ mod native_huggingface_cards;
 mod native_huggingface_commits;
 mod native_huggingface_credentials;
 mod native_huggingface_dedup_rebuild;
+mod native_huggingface_diagnostics;
 mod native_huggingface_expiry;
 mod native_huggingface_http_analytics;
 mod native_huggingface_identity;
@@ -1503,8 +1504,9 @@ fn run_hf<const N: usize>(
     }
 
     Err(ServerE2eInvariantError::new(format!(
-        "hf failed with status {}; client output omitted because it can contain transfer credentials",
+        "hf failed with status {}; diagnostic categories: {}; raw client output omitted because it can contain transfer credentials",
         output.status,
+        native_huggingface_diagnostics::categories(&output.stdout, &output.stderr),
     ))
     .into())
 }
