@@ -30,17 +30,14 @@ fn fixture_stage<T, E>(result: Result<T, E>, stage: &str) -> T {
 /// concurrently without weakening production verification or using a process
 /// lock.
 pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => {
-            match std::env::var("SHARDLINE_INDEX_POSTGRES_URL") {
-                Ok(value) => value,
-                Err(std::env::VarError::NotPresent) => return None,
-                Err(error) => fixture_stage(Err(error), "fallback connection configuration"),
-            }
-        }
-        Err(error) => fixture_stage(Err(error), "connection configuration"),
+    let variable = if std::env::var_os("DATABASE_URL").is_none()
+        && std::env::var_os("SHARDLINE_INDEX_POSTGRES_URL").is_some()
+    {
+        "SHARDLINE_INDEX_POSTGRES_URL"
+    } else {
+        "DATABASE_URL"
     };
+    let database_url = shardline_test_support::postgres_fixture_url(variable)?;
     let thread = std::thread::current();
     let test_name = thread.name().unwrap_or("unnamed-test");
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -215,4 +212,61 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
         "isolated remote delete guard",
     );
     Some(pool)
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    #[ignore = "invoked by the prerequisite subprocess regression"]
+    async fn isolated_postgres_prerequisite_child() {
+        assert!(super::connect_isolated_postgres().await.is_none());
+    }
+
+    #[test]
+    fn isolated_postgres_respects_required_and_optional_prerequisites()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let child = concat!(module_path!(), "::isolated_postgres_prerequisite_child")
+            .split_once("::")
+            .ok_or("missing test crate prefix")?
+            .1;
+        for (required, empty_variable, succeeds) in [
+            (false, None, true),
+            (true, None, false),
+            (false, Some("DATABASE_URL"), false),
+            (false, Some("SHARDLINE_INDEX_POSTGRES_URL"), false),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command
+                .args(["--exact", child, "--ignored", "--nocapture"])
+                .env_remove("DATABASE_URL")
+                .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
+                .env_remove("SHARDLINE_REQUIRE_POSTGRES_TESTS");
+            if required {
+                command.env("SHARDLINE_REQUIRE_POSTGRES_TESTS", "1");
+            }
+            if let Some(variable) = empty_variable {
+                command.env(variable, "  ");
+            }
+            let output = shardline_test_support::native_client_output(
+                &mut command,
+                std::time::Duration::from_secs(30),
+            )?;
+            if output.status.success() != succeeds {
+                return Err("unexpected PostgreSQL prerequisite child status".into());
+            }
+            let diagnostic = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !diagnostic.contains(if succeeds {
+                "SKIPPED: optional PostgreSQL fixture"
+            } else {
+                "is missing or invalid"
+            }) {
+                return Err("unexpected PostgreSQL prerequisite diagnostic".into());
+            }
+        }
+        Ok(())
+    }
 }
