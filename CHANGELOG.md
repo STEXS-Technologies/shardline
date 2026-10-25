@@ -112,6 +112,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Recognize Hub-only native Xet storage during lifecycle repair, preserving
+  published container references without requiring a separate Xet frontend.
 - Preserve opaque bytes and quoted commas in conditional download and S3
   mutation validators, including repeated fields, without weakening strong
   ETag or authorization checks.

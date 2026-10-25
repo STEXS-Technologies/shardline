@@ -1,6 +1,32 @@
 //! Real candidate maintenance against metadata shared with released processes.
 use super::*;
 
+pub(super) async fn verify_hub_lifecycle(
+    binary: &Path,
+    root: &Path,
+    postgres: Option<&str>,
+    storage_env: &[(&str, String)],
+) {
+    let output = run(
+        binary,
+        root,
+        postgres,
+        storage_env,
+        "hub",
+        &["repair", "lifecycle"],
+    )
+    .await;
+    let summary = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        summary.lines().any(|line| {
+            line.strip_prefix("scanned_records: ")
+                .and_then(|count| count.parse::<u64>().ok())
+                .is_some_and(|count| count > 0)
+        }),
+        "lifecycle repair must inspect published records"
+    );
+}
+
 pub(super) async fn gc_before_rollback(
     binary: &Path,
     root: &Path,

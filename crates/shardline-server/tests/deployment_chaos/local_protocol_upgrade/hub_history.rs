@@ -153,13 +153,31 @@ async fn client(server: &LocalServer, state: &Path, token: &str, phase: &str) {
 #[tokio::test]
 #[ignore = "requires stock huggingface_hub and actual predecessor/current binaries"]
 async fn released_local_hub_history_survives_upgrade_and_rollback() {
-    upgrade(None, &[]).await;
+    upgrade(None, &[], false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires stock Hub native clients and predecessor/current binaries"]
+async fn hub_only_local_lifecycle_repair_preserves_native_history() {
+    upgrade(None, &[], true).await;
 }
 
 #[cfg(feature = "docker")]
 #[tokio::test]
 #[ignore = "requires stock huggingface_hub, Docker and actual predecessor/current binaries"]
 async fn released_remote_hub_history_survives_upgrade_and_rollback() {
+    remote_upgrade(false).await;
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+#[ignore = "requires stock Hub native clients, PostgreSQL/MinIO and predecessor/current binaries"]
+async fn hub_only_remote_lifecycle_repair_preserves_native_history() {
+    remote_upgrade(true).await;
+}
+
+#[cfg(feature = "docker")]
+async fn remote_upgrade(qualify_lifecycle: bool) {
     let services = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
         .with_minio()
@@ -181,10 +199,10 @@ async fn released_remote_hub_history_survives_upgrade_and_rollback() {
         ("SHARDLINE_S3_KEY_PREFIX", prefix),
         ("SHARDLINE_S3_ALLOW_HTTP", "true".to_owned()),
     ];
-    upgrade(Some(&postgres), &storage_env).await;
+    upgrade(Some(&postgres), &storage_env, qualify_lifecycle).await;
 }
 
-async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
+async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)], qualify_lifecycle: bool) {
     if !client_available() {
         return;
     }
@@ -218,6 +236,9 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     client(&candidate, &state, &token, "upgraded").await;
     maintenance::gc_before_rollback(&current, root.path(), postgres, storage_env, "hub").await;
     drop(candidate);
+    if qualify_lifecycle {
+        maintenance::verify_hub_lifecycle(&current, root.path(), postgres, storage_env).await;
+    }
     maintenance::verify_and_rebuild(&current, root.path(), postgres, storage_env).await;
     let mut rollback =
         LocalServer::spawn_with_storage(&old, root.path(), postgres, "hub", storage_env);

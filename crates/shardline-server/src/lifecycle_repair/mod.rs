@@ -12,7 +12,7 @@ pub(crate) mod types;
 
 #[cfg(test)]
 mod postgres_recovery;
-#[cfg(test)]
+#[cfg(all(test, feature = "docker"))]
 mod reachability_tests;
 #[cfg(test)]
 mod tests;

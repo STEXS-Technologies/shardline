@@ -12,6 +12,16 @@ use crate::{ServerFrontend, ServerObjectStore};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires disposable Docker MinIO"]
 async fn repair_shared_xorb_reads_once_per_scan_and_rechecks_corruption() {
+    qualify_shared_xorb_repair(&[ServerFrontend::Xet]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires disposable Docker MinIO"]
+async fn hub_only_repair_reuses_verified_sources_and_rechecks_corruption() {
+    qualify_shared_xorb_repair(&[ServerFrontend::Hub]).await;
+}
+
+async fn qualify_shared_xorb_repair(frontends: &[ServerFrontend]) {
     let stack = tokio::task::spawn_blocking(|| {
         DockerLocalStack::builder()
             .with_minio()
@@ -84,15 +94,9 @@ async fn repair_shared_xorb_reads_once_per_scan_and_rechecks_corruption() {
     for _ in 0..2 {
         let before = proxy.xorb_get_requests();
         let mut reachability = RepairReachability::default();
-        collect_referenced_object_keys(
-            &records,
-            &index,
-            &store,
-            &[ServerFrontend::Xet],
-            &mut reachability,
-        )
-        .await
-        .unwrap();
+        collect_referenced_object_keys(&records, &index, &store, frontends, &mut reachability)
+            .await
+            .unwrap();
         assert_eq!(reachability.scanned_records, 8);
         assert_eq!(proxy.xorb_get_requests().checked_sub(before).unwrap(), 1);
         assert!(reachability.referenced_object_keys.contains(key.as_str()));
@@ -125,7 +129,7 @@ async fn repair_shared_xorb_reads_once_per_scan_and_rechecks_corruption() {
             &records,
             &index,
             &store,
-            &[ServerFrontend::Xet],
+            frontends,
             &mut RepairReachability::default()
         )
         .await
@@ -163,15 +167,9 @@ async fn repair_shared_xorb_reads_once_per_scan_and_rechecks_corruption() {
     let before = proxy.head_requests();
     let before_gets = proxy.xorb_get_requests();
     let mut reachability = RepairReachability::default();
-    collect_referenced_object_keys(
-        &legacy,
-        &index,
-        &store,
-        &[ServerFrontend::Xet],
-        &mut reachability,
-    )
-    .await
-    .unwrap();
+    collect_referenced_object_keys(&legacy, &index, &store, frontends, &mut reachability)
+        .await
+        .unwrap();
     assert_eq!(reachability.scanned_records, 2);
     assert_eq!(proxy.head_requests().checked_sub(before).unwrap(), 4);
     assert_eq!(

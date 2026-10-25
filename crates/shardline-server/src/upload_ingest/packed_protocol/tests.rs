@@ -225,6 +225,7 @@ async fn corrupt_retained_encoding_is_not_reused() {
     assert_eq!(provider.state.lock().unwrap().objects.len(), 2);
 }
 
+#[cfg(feature = "docker")]
 #[tokio::test]
 #[ignore = "requires disposable Docker MinIO"]
 async fn minio_equivalent_native_encoding_reuses_retained_container() {
