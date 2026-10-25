@@ -118,8 +118,7 @@ When provider-backed token issuance is enabled, the server also exposes:
 - `POST /v1/providers/{provider}/tokens`
 - `POST /v1/providers/{provider}/webhooks`
 
-For storage adapters that cannot issue native presigned URLs, the Xet frontend also
-exposes a range-enforced transfer endpoint:
+The Xet frontend exposes a Shardline-hosted, range-enforced transfer endpoint:
 
 - `GET /transfer/xorb/{prefix}/{hash}`
 
@@ -139,9 +138,9 @@ Other frontends follow the same pattern:
 - shared authorization, object storage, metadata, cache, fsck, repair, and GC services
   in the core
 
-The transfer endpoint is an implementation detail.
-Reconstruction responses can point to native presigned object-store URLs when an adapter
-supports them.
+Reconstruction download capabilities authorize this Shardline endpoint only.
+Shardline checks authorization, reads the private backend, and returns verified bytes.
+Clients receive no backend download URLs, redirects, or storage credentials.
 
 ## CLI Shape
 

@@ -163,7 +163,7 @@ flowchart TD
     Server[server: shardline]
     Server --> Object[object store: S3-compatible]
     Server --> Index[index store: Postgres-compatible SQL]
-    Server --> Transfer[transfer: presigned object-store URLs when supported]
+    Server --> Transfer[transfer: authorized downloads through Shardline]
   end
 
   style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
