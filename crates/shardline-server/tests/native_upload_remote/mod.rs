@@ -114,6 +114,22 @@ fn container_with_compression(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "exact remote process crash boundaries require disposable PostgreSQL and MinIO"]
 async fn native_xorb_remote_sigkill_at_every_durable_boundary() -> Result {
+    remote_boundaries(RetryEncoding::Identical).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mixed-encoding process crash retries require disposable PostgreSQL and MinIO"]
+async fn native_xorb_remote_mixed_encoding_sigkill_at_every_durable_boundary() -> Result {
+    remote_boundaries(RetryEncoding::Alternate).await
+}
+
+#[derive(Clone, Copy)]
+enum RetryEncoding {
+    Identical,
+    Alternate,
+}
+
+async fn remote_boundaries(encoding: RetryEncoding) -> Result {
     use std::{io::Read, os::unix::process::ExitStatusExt};
     let remote = RemoteFixture::start().await?;
     let index = PostgresIndexStore::new(remote.pool.clone());
@@ -222,6 +238,13 @@ async fn native_xorb_remote_sigkill_at_every_durable_boundary() -> Result {
         let mut peer =
             start_with_environment(peer_root.path(), peer_address, None, &remote.environment)?;
         ready(&http, &peer_base, &mut peer).await?;
+        let (alternate_hash, alternate) = container_with_compression(byte, CompressionScheme::LZ4)?;
+        assert_eq!(alternate_hash, hash);
+        assert!(alternate.len() < bytes.len());
+        let peer_bytes = match encoding {
+            RetryEncoding::Identical => &bytes,
+            RetryEncoding::Alternate => &alternate,
+        };
         let first = http
             .post(format!("{takeover_base}/v1/xorbs/default/{hash}"))
             .bearer_auth(&token)
@@ -230,7 +253,7 @@ async fn native_xorb_remote_sigkill_at_every_durable_boundary() -> Result {
         let second = http
             .post(format!("{peer_base}/v1/xorbs/default/{hash}"))
             .bearer_auth(&token)
-            .body(bytes.clone())
+            .body(peer_bytes.clone())
             .send();
         let (first, second) = tokio::join!(first, second);
         let first = first?;
@@ -269,10 +292,13 @@ async fn native_xorb_remote_sigkill_at_every_durable_boundary() -> Result {
             .objects
             .materialize_bounded_object_if_present(&key, 0)?
             .ok_or("missing durable Xorb")?;
-        assert_eq!(length, u64::try_from(bytes.len())?);
         let mut actual = Vec::new();
         object.read_to_end(&mut actual)?;
-        assert_eq!(actual, bytes, "object bytes after {cut}");
+        assert_eq!(length, u64::try_from(actual.len())?);
+        assert!(
+            actual == bytes || actual == *peer_bytes,
+            "neither verified encoding survived {cut}"
+        );
         assert!(
             index
                 .intents_by_state(UploadIntentState::Visible)
@@ -289,9 +315,6 @@ async fn native_xorb_remote_sigkill_at_every_durable_boundary() -> Result {
             original.state(),
             UploadIntentState::Failed | UploadIntentState::Visible
         ));
-        let (alternate_hash, alternate) = container_with_compression(byte, CompressionScheme::LZ4)?;
-        assert_eq!(alternate_hash, hash);
-        assert!(alternate.len() < bytes.len());
         let equivalent = http
             .post(format!("{peer_base}/v1/xorbs/default/{hash}"))
             .bearer_auth(&token)
@@ -302,6 +325,16 @@ async fn native_xorb_remote_sigkill_at_every_durable_boundary() -> Result {
             equivalent.status().is_success(),
             "equivalent compressed retry at {cut}: {}",
             equivalent.status()
+        );
+        let (mut retained, _) = remote
+            .objects
+            .materialize_bounded_object_if_present(&key, 0)?
+            .ok_or("equivalent retry removed the durable Xorb")?;
+        let mut after_equivalent = Vec::new();
+        retained.read_to_end(&mut after_equivalent)?;
+        assert_eq!(
+            after_equivalent, actual,
+            "equivalent retry replaced the immutable representation at {cut}"
         );
         let first_byte = bytes.get_mut(8).ok_or("missing payload")?;
         *first_byte ^= 1;

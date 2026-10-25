@@ -172,6 +172,14 @@ It kills the owning process at six persisted lifecycle boundaries, checks whethe
 the object should already exist, and retries through a fresh replica. It compares
 the durable bytes and checks that an altered retry cannot replace the valid object.
 
+A separate remote drill sends simultaneous retries through two fresh server
+processes using uncompressed and LZ4 encodings of the same content. At each of
+the six boundaries, either verified representation may become immutable; later
+equivalent or mismatching retries must leave its bytes unchanged. Run it with
+`native_xorb_remote_mixed_encoding_sigkill_at_every_durable_boundary` in the same
+test target. These are HTTP-level competing retries, not a mixed-version
+stock-client qualification or a guarantee that both metadata commits overlap.
+
 ## Native client deduplication
 
 The chunk lookup endpoints return a short-lived Xet lookup shard, rather than
