@@ -327,6 +327,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Cap newly issued Xet download URLs at their authorizing credential's expiry,
   retaining the 15-minute upper bound and rejecting already expired credentials.
+- Reject expired Xet download requests with missing or invalid credentials
+  before backend discovery; preserve official-client URL refresh.
 - Upgrade the S3 backend and XML parser to remove RUSTSEC-2026-0194 and
   RUSTSEC-2026-0195 advisory exceptions, including client-supplied tagging XML.
 - Update TLS certificate verification and bundled trust roots to patched releases

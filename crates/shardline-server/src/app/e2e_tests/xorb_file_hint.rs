@@ -6,6 +6,57 @@ use crate::backend::{
 };
 
 #[tokio::test]
+async fn expired_transfer_rejects_before_object_discovery() {
+    let (app, _root) = test_app_with_auth(&[ServerFrontend::Xet]).await;
+    let scope =
+        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
+    let hash = "f".repeat(64);
+    let file_id = "e".repeat(64);
+    let subject = format!("{file_id}:{hash}:0:9");
+    // Use the real capability wire format and isolated signing key. Neither
+    // the source object nor its file metadata exists: authentication must not
+    // depend on discovering either, including for commit-scoped Hub grants.
+    let mut derivation = hmac::Hmac::<Sha256>::new_from_slice(TEST_SIGNING_KEY).unwrap();
+    derivation.update(b"shardline:xorb-range-read-capability:v1");
+    let signer = shardline_protocol::TokenSigner::new(&derivation.finalize().into_bytes()).unwrap();
+    let expired_bearer = LocalHmacProvider::new(TEST_SIGNING_KEY)
+        .unwrap()
+        .mint_token(
+            &TokenClaims::new("shardline", "test", TokenScope::Read, scope.clone(), 1).unwrap(),
+        )
+        .unwrap();
+    for issuer in ["shardline-xorb-range-v1", "shardline-hub-xorb-range-v1"] {
+        let capability = signer
+            .sign(&TokenClaims::new(issuer, &subject, TokenScope::Read, scope.clone(), 1).unwrap())
+            .unwrap();
+        let uri = format!("/transfer/xorb/default/{hash}?xorb_read_capability={capability}");
+        for (credential, expected) in [
+            (None, StatusCode::FORBIDDEN),
+            (Some("invalid"), StatusCode::UNAUTHORIZED),
+            (Some(expired_bearer.as_str()), StatusCode::UNAUTHORIZED),
+        ] {
+            let mut request = Request::builder()
+                .uri(&uri)
+                .header(header::RANGE, "bytes=0-9");
+            if let Some(credential) = credential {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {credential}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "reject before storage discovery"
+            );
+            assert!(!response.headers().contains_key(header::LOCATION));
+        }
+    }
+}
+
+#[tokio::test]
 async fn signed_transfer_uses_file_proof_and_retains_historical_fallback() {
     let (app, root) = test_app(&[ServerFrontend::Xet]).await;
     let content = b"file-specific HTTP authorization must preserve verified bytes";

@@ -173,6 +173,9 @@ most 15 minutes, or when the authorizing credential expires, whichever comes
 first. An already expired credential cannot issue a new URL. Downloads remain
 behind Shardline; clients receive no backend object-store URL or credentials.
 Previously issued URLs keep their original expiry.
+Expired URLs without fresh credentials are rejected before file or object-store
+lookups. Official clients receive the refresh response; native clients can still
+retry with a valid bearer credential and the original exact range.
 Commit-scoped CAS credentials
 cannot be reused as ordinary Hub credentials or unrestricted Xorb-read tokens.
 An older commit's token cannot read a file added later. Write-token behavior is

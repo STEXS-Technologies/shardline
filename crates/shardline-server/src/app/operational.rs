@@ -221,6 +221,23 @@ pub(super) async fn read_xorb_transfer(
     };
     validate_xorb_transfer_namespace(&prefix)?;
     validate_hash_path(&hash)?;
+    let current_repository = if expired_capability {
+        // Official clients refresh reconstruction on 403. Reject stale URLs
+        // before object or repository discovery, including when their source
+        // disappeared. Native clients may instead supply fresh credentials.
+        if !headers.contains_key(axum::http::header::AUTHORIZATION) {
+            return Ok((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "Xorb read URL expired; refresh reconstruction"
+                })),
+            )
+                .into_response());
+        }
+        Some(XetRepository::read(&state, &headers)?)
+    } else {
+        None
+    };
     let repository_namespace =
         if let Some(grant) = read_grant.as_ref().filter(|grant| grant.hub_commit) {
             let scope = repository_namespace.as_ref().ok_or(ServerError::NotFound)?;
@@ -233,6 +250,11 @@ pub(super) async fn read_xorb_transfer(
         } else {
             repository_namespace
         };
+    if let Some(current_repository) = current_repository
+        && current_repository.capability().namespace() != repository_namespace.as_ref()
+    {
+        return Err(ServerError::NotFound);
+    }
     let total_length = state.backend.xorb_length(&hash).await?;
     // Parse now to bound a successful proof, but preserve the authorization
     // error precedence: unauthorized callers must not learn range validity.
@@ -271,24 +293,6 @@ pub(super) async fn read_xorb_transfer(
         && (range.start() != grant.range_start || range.end_inclusive() != grant.range_end)
     {
         return Err(ServerError::NotFound);
-    }
-    if expired_capability {
-        // Native Xet fetches signed URLs without forwarding CAS credentials.
-        // Its URL provider refreshes reconstruction on 403, not a bearer 401.
-        // Keep the authenticated fallback for existing Shardline clients.
-        if !headers.contains_key(axum::http::header::AUTHORIZATION) {
-            return Ok((
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "error": "Xorb read URL expired; refresh reconstruction"
-                })),
-            )
-                .into_response());
-        }
-        let current_repository = XetRepository::read(&state, &headers)?;
-        if current_repository.capability().namespace() != repository_namespace.as_ref() {
-            return Err(ServerError::NotFound);
-        }
     }
     let transfer_bytes = range.len().ok_or(ServerError::Overflow)?;
     metrics::record_xet_xorb_download(total_length);
