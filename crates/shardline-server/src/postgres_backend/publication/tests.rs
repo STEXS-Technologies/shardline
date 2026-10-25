@@ -506,10 +506,9 @@ async fn scoped_file_recovery_distinguishes_colliding_legacy_labels() {
 
 #[tokio::test]
 async fn historical_server_preserves_unfinished_scoped_file_evidence() {
-    let Ok(binary) = std::env::var("SHARDLINE_LEGACY_RECOVERY_BINARY") else {
-        eprintln!(
-            "SKIPPED: historical file rollback requires SHARDLINE_LEGACY_RECOVERY_BINARY (v1.11.3)"
-        );
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_LEGACY_RECOVERY_BINARY")
+    else {
         return;
     };
     verify_released_file_recovery(binary, true).await;
@@ -517,8 +516,9 @@ async fn historical_server_preserves_unfinished_scoped_file_evidence() {
 
 #[tokio::test]
 async fn released_server_recovers_scoped_file_checkpoints_without_inventing_completion() {
-    let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
-        eprintln!("SKIPPED: rollback fixture requires SHARDLINE_N_MINUS_ONE_BINARY");
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_N_MINUS_ONE_BINARY")
+    else {
         return;
     };
     verify_released_file_recovery(binary, false).await;

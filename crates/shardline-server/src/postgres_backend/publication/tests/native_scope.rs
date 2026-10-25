@@ -140,10 +140,9 @@ async fn native_shard_publication_and_retries_have_independent_repository_eviden
 
 #[tokio::test]
 async fn historical_server_preserves_every_new_native_checkpoint() {
-    let Ok(binary) = std::env::var("SHARDLINE_LEGACY_RECOVERY_BINARY") else {
-        eprintln!(
-            "SKIPPED: historical native rollback requires SHARDLINE_LEGACY_RECOVERY_BINARY (v1.11.3)"
-        );
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_LEGACY_RECOVERY_BINARY")
+    else {
         return;
     };
     verify_released_native_recovery(binary, true).await;
@@ -151,8 +150,9 @@ async fn historical_server_preserves_every_new_native_checkpoint() {
 
 #[tokio::test]
 async fn released_server_recovers_every_native_checkpoint() {
-    let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
-        eprintln!("SKIPPED: native rollback requires SHARDLINE_N_MINUS_ONE_BINARY");
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_N_MINUS_ONE_BINARY")
+    else {
         return;
     };
     verify_released_native_recovery(binary, false).await;

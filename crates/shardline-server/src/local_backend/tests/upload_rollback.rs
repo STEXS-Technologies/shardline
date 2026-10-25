@@ -8,10 +8,9 @@ use std::num::NonZeroUsize;
 
 #[tokio::test]
 async fn historical_server_preserves_new_file_evidence_and_recovers_legacy_files() {
-    let Ok(binary) = std::env::var("SHARDLINE_LEGACY_RECOVERY_BINARY") else {
-        eprintln!(
-            "SKIPPED: historical file rollback requires SHARDLINE_LEGACY_RECOVERY_BINARY (v1.11.3)"
-        );
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_LEGACY_RECOVERY_BINARY")
+    else {
         return;
     };
     verify_file_recovery(binary, true).await;
@@ -19,8 +18,9 @@ async fn historical_server_preserves_new_file_evidence_and_recovers_legacy_files
 
 #[tokio::test]
 async fn released_server_recovers_verified_file_checkpoints_without_inventing_completion() {
-    let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
-        eprintln!("SKIPPED: SQLite rollback fixture requires SHARDLINE_N_MINUS_ONE_BINARY");
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_N_MINUS_ONE_BINARY")
+    else {
         return;
     };
     verify_file_recovery(binary, false).await;
@@ -141,7 +141,17 @@ async fn verify_file_recovery(binary: String, historical: bool) {
             assert_eq!(recovered, *checkpoint);
         } else {
             // Readiness can precede bounded background file verification.
-            assert!(recovered == *checkpoint || recovered == UploadIntentState::Visible);
+            // Killing the released process can also stop between its two
+            // durable recovery transitions. The chain/prefix checks below
+            // still authenticate this intermediate checkpoint, and current
+            // recovery must finish it after the released process stops.
+            assert!(
+                recovered == *checkpoint
+                    || recovered == UploadIntentState::Visible
+                    || (*checkpoint == UploadIntentState::Stored
+                        && recovered == UploadIntentState::MetadataCommitted),
+                "released recovery changed checkpoint {checkpoint:?} to {recovered:?}"
+            );
         }
         let events = backend
             .index_store
