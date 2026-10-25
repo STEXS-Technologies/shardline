@@ -175,6 +175,7 @@ impl Provider {
 
 mod admission;
 mod digest;
+mod encoding_ranges;
 mod local;
 mod lost_ack;
 
@@ -192,6 +193,7 @@ async fn local_equivalent_native_encoding_reuses_retained_container() {
     let root = tempfile::tempdir().unwrap();
     let store = ServerObjectStore::local(root.path().to_owned()).unwrap();
     assert_equivalent_encoding_reuse(&store).await;
+    encoding_ranges::assert_ranges(&store).await;
 }
 
 #[tokio::test]
@@ -245,7 +247,9 @@ async fn minio_equivalent_native_encoding_reuses_retained_container() {
             raw.secret_key.map(SecretString::new),
             None,
         );
-    assert_equivalent_encoding_reuse(&ServerObjectStore::s3(config).unwrap()).await;
+    let store = ServerObjectStore::s3(config).unwrap();
+    assert_equivalent_encoding_reuse(&store).await;
+    encoding_ranges::assert_ranges(&store).await;
 }
 
 async fn assert_equivalent_encoding_reuse(store: &ServerObjectStore) -> Bytes {
