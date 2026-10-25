@@ -649,11 +649,18 @@ fn remove_container(container_name: &str) -> Result<(), IoError> {
         Command::new("docker")
             .arg("rm")
             .arg("-f")
+            // These are disposable fixture containers. Their image-declared
+            // anonymous data volumes must not survive teardown and accumulate
+            // across large transfer tests. Docker preserves named volumes.
+            .arg("-v")
             .arg(container_name),
         "remove container",
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod cleanup_tests;
 
 fn stop_container(container_name: &str) -> Result<(), IoError> {
     run_command_checked(

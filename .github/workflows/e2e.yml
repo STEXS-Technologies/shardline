@@ -45,6 +45,11 @@ jobs:
       - name: Build shardline binary
         run: cargo build --locked --release
 
+      - name: Verify disposable backend data volumes are reclaimed
+        run: >-
+          cargo test --locked -p shardline-test-support --features docker
+          teardown_removes_owned_anonymous_data_volumes -- --ignored
+
       - name: Apply disposable PostgreSQL schema as owner
         run: target/release/shardline db migrate up --database-url "$DATABASE_URL"
 
