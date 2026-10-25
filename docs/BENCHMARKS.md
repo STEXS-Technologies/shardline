@@ -601,6 +601,15 @@ end-to-end throughput improvement. Qualification includes
 8,192 members, final-member corruption, excess rows and concurrent atomic
 descriptor/member updates.
 
+An additional synthetic-index check used 1,048,576 member rows across 128
+containers. The maximum-size lookup read its 8,192 members through the index,
+with no temporary block reads or writes at either 4 MiB or 64 KiB `work_mem`
+on PostgreSQL 16. A warm shared-host Rust debug-build check, with ten warmups
+and 100 samples per trial, measured median lookup times of 81.3 / 86.5 / 85.8 /
+85.3 ms in candidate/previous/previous/candidate order. Tail latency was mixed.
+These are index-only component measurements, not native payload verification,
+release-build throughput, production scaling or an NVMe-endurance result.
+
 #### Small metadata reads
 
 Small-object reads used for OCI media types and legacy metadata now obtain
