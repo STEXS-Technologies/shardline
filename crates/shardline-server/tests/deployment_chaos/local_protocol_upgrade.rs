@@ -140,14 +140,16 @@ impl Drop for LocalServer {
 
 fn migrate(binary: &Path, root: &Path) {
     let config = NamedTempFile::new().unwrap();
-    let output = Command::new(binary)
-        .env_clear()
-        .arg("--config")
-        .arg(config.path())
-        .args(["db", "migrate", "local-up", "--root"])
-        .arg(root)
-        .output()
-        .unwrap();
+    let output = shardline_test_support::native_client_output(
+        Command::new(binary)
+            .env_clear()
+            .arg("--config")
+            .arg(config.path())
+            .args(["db", "migrate", "local-up", "--root"])
+            .arg(root),
+        Duration::from_secs(120),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "migration: {}",
@@ -338,16 +340,18 @@ async fn migrate_metadata(binary: &Path, root: &Path, postgres: Option<&str>) {
     let postgres = postgres.map(str::to_owned);
     tokio::task::spawn_blocking(move || {
         if let Some(url) = postgres {
-            let output = Command::new(binary)
-                .env_clear()
-                .args(["db", "migrate", "up", "--database-url", &url])
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "migration: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let output = shardline_test_support::native_client_output(
+                Command::new(binary).env_clear().args([
+                    "db",
+                    "migrate",
+                    "up",
+                    "--database-url",
+                    &url,
+                ]),
+                Duration::from_secs(120),
+            )
+            .unwrap();
+            assert!(output.status.success(), "migration: {}", output.status);
         } else {
             migrate(&binary, &root);
         }

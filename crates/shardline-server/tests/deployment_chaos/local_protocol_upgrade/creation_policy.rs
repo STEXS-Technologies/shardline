@@ -35,7 +35,10 @@ async fn set_policy(binary: &Path, root: &Path, clear: bool) {
             command.arg("--policy-file").arg(input);
         }
         assert!(
-            command.output().unwrap().status.success(),
+            shardline_test_support::native_client_output(&mut command, Duration::from_secs(60),)
+                .unwrap()
+                .status
+                .success(),
             "owner policy command must succeed"
         );
     })

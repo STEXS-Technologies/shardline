@@ -6,30 +6,32 @@ async fn git(directory: &Path, token: &str, arguments: Vec<String>) -> Output {
     let directory = directory.to_owned();
     let token = token.to_owned();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(directory)
-            .arg("-c")
-            .arg(format!("http.extraHeader=Authorization: Bearer {token}"))
-            .args(arguments)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
-            .env("GIT_HTTP_LOW_SPEED_TIME", "10")
-            .output()
-            .expect("native Git must be installed")
+        shardline_test_support::native_client_output(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(arguments)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env(
+                    "GIT_CONFIG_VALUE_0",
+                    format!("Authorization: Bearer {token}"),
+                )
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+                .env("GIT_HTTP_LOW_SPEED_TIME", "10"),
+            Duration::from_secs(180),
+        )
+        .expect("native Git must be installed")
     })
     .await
     .expect("Git process task did not panic")
 }
 
 fn assert_git_success(output: &Output, context: &str) {
-    assert!(
-        output.status.success(),
-        "{context}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{context}: {}", output.status);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
