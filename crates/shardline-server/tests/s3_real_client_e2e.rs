@@ -688,9 +688,17 @@ async fn aws_cli_put_get_copy_rm_roundtrip() {
 // boto3 (AWS SDK for Python)
 // ---------------------------------------------------------------------------
 
-/// Returns whether python3 with boto3 is available.
+fn boto3_python() -> std::ffi::OsString {
+    std::env::var_os("BOTOCORE_PYTHON").unwrap_or_else(|| "python3".into())
+}
+
+/// Uses the same explicitly configured SDK for discovery and execution.
 fn boto3_available() -> bool {
-    let available = probe_client("python3", &["-c", "import boto3"]);
+    let available = shardline_test_support::native_client_output(
+        std::process::Command::new(boto3_python()).args(["-c", "import boto3"]),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success());
     shardline_test_support::require_native_client("python3 + boto3", available)
 }
 
@@ -708,12 +716,23 @@ import hashlib
 import io
 import os
 import struct
+import sys
+import traceback
 import zlib
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BConfig
 from botocore.exceptions import ClientError
-from botocore.exceptions import ClientError
+
+# SDK exceptions can contain signed URLs and credentials. Report only exception
+# type and script frame locations, never exception values or source lines.
+def safe_failure(exception_type, exception, tb):
+    print("boto3 failure type: " + exception_type.__name__, file=sys.stderr)
+    for frame, line in traceback.walk_tb(tb):
+        if frame.f_code.co_filename == __file__:
+            print("boto3 script line: " + str(line), file=sys.stderr)
+
+sys.excepthook = safe_failure
 
 s3 = boto3.client(
     "s3",
@@ -1050,7 +1069,7 @@ print("ALL BOTO3 CHECKS PASSED")
     )
     .unwrap();
     client_output(
-        std::process::Command::new("python3")
+        std::process::Command::new(boto3_python())
             .arg(script.to_str().unwrap())
             .env("S3_ENDPOINT", endpoint)
             .env("S3_TOKEN", token),
@@ -1071,8 +1090,9 @@ async fn boto3_sdk_roundtrip() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "boto3 subprocess failed with status {}",
-        output.status
+        "boto3 subprocess failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
     );
     assert!(
         stdout.contains("ALL BOTO3 CHECKS PASSED"),
