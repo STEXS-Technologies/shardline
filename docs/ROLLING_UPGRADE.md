@@ -108,6 +108,10 @@ atomic two-branch push, before the client receives the result. On SQLite/local
 and PostgreSQL/MinIO, restart preserves both branch heads; a retry succeeds and
 a fresh clone has exact bytes and passes `git fsck --strict --full`. This covers
 that publication boundary, not every possible crash point.
+The PostgreSQL/MinIO drill also kills the process while the second ref is
+blocked inside the publication transaction, after the first ref changed there.
+Rollback leaves refs, revisions and reliability evidence unchanged; the same
+push succeeds after restart.
 
 Hub revision IDs have a rollout boundary: 1.12.1 does not understand the new
 public Git IDs returned in SDK commit fields. It returns 404 for those IDs,

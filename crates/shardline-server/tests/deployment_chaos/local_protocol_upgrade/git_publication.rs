@@ -4,6 +4,16 @@ use axum::{body::Body, extract::State, http::Request, response::Response};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+#[cfg(feature = "docker")]
+mod pending;
+
+#[derive(Clone, Copy)]
+enum Cut {
+    AfterCommit,
+    #[cfg(feature = "docker")]
+    BeforeCommit,
+}
+
 #[derive(Clone)]
 struct PublicationProxy {
     backend: String,
@@ -17,14 +27,18 @@ async fn forward(State(proxy): State<PublicationProxy>, request: Request<Body>) 
     let publication =
         parts.method == axum::http::Method::POST && parts.uri.path().ends_with("/git-receive-pack");
     let body = axum::body::to_bytes(body, 8 * 1024 * 1024).await.unwrap();
-    let upstream = proxy
+    let Ok(upstream) = proxy
         .client
         .request(parts.method, format!("{}{}", proxy.backend, parts.uri))
         .headers(parts.headers)
         .body(body)
         .send()
         .await
-        .unwrap();
+    else {
+        // A killed server can close the socket before returning headers. Do
+        // not panic or print a transport error containing credentials or URLs.
+        return Response::builder().status(502).body(Body::empty()).unwrap();
+    };
     let status = upstream.status();
     let headers = upstream.headers().clone();
     let bytes = upstream.bytes().await.unwrap();
@@ -94,13 +108,25 @@ async fn success(root: &Path, token: &str, args: &[&str]) -> Vec<u8> {
 #[tokio::test]
 #[ignore = "requires actual Shardline executable and stock Git"]
 async fn atomic_git_survives_sigkill_after_commit_before_ack() {
-    exercise(None, &[]).await;
+    exercise(None, &[], Cut::AfterCommit).await;
 }
 
 #[cfg(feature = "docker")]
 #[tokio::test]
 #[ignore = "requires actual executable, stock Git and owned PostgreSQL/MinIO"]
 async fn remote_atomic_git_survives_sigkill_after_commit_before_ack() {
+    remote(Cut::AfterCommit).await;
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+#[ignore = "requires actual executable, stock Git and owned PostgreSQL/MinIO"]
+async fn remote_atomic_git_rolls_back_sigkill_during_second_ref() {
+    remote(Cut::BeforeCommit).await;
+}
+
+#[cfg(feature = "docker")]
+async fn remote(cut: Cut) {
     let services = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
         .with_minio()
@@ -120,10 +146,10 @@ async fn remote_atomic_git_survives_sigkill_after_commit_before_ack() {
         ("SHARDLINE_S3_KEY_PREFIX", prefix),
         ("SHARDLINE_S3_ALLOW_HTTP", "true".to_owned()),
     ];
-    exercise(Some(&database), &storage).await;
+    exercise(Some(&database), &storage, cut).await;
 }
 
-async fn exercise(database: Option<&str>, storage: &[(&str, String)]) {
+async fn exercise(database: Option<&str>, storage: &[(&str, String)], cut: Cut) {
     let binary = resolve_shardline_binary().expect("actual executable required");
     let root = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
@@ -182,6 +208,11 @@ async fn exercise(database: Option<&str>, storage: &[(&str, String)]) {
     .await;
     let head = success(&checkout_path, &token, &["rev-parse", "HEAD"]).await;
     let head = std::str::from_utf8(&head).unwrap().trim().to_owned();
+    #[cfg(feature = "docker")]
+    let pending = match cut {
+        Cut::BeforeCommit => Some(pending::Publication::arm(database.unwrap()).await),
+        Cut::AfterCommit => None,
+    };
     let committed = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let proxy = PublicationProxy {
@@ -209,9 +240,13 @@ async fn exercise(database: Option<&str>, storage: &[(&str, String)]) {
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(30), committed.notified())
-        .await
-        .expect("server must commit both refs before the process cut");
+    match cut {
+        Cut::AfterCommit => tokio::time::timeout(Duration::from_secs(30), committed.notified())
+            .await
+            .expect("server must commit both refs before the process cut"),
+        #[cfg(feature = "docker")]
+        Cut::BeforeCommit => pending.as_ref().unwrap().observe().await,
+    }
     server.child.kill().unwrap();
     assert!(!server.child.wait().unwrap().success());
     release.notify_one();
@@ -222,16 +257,22 @@ async fn exercise(database: Option<&str>, storage: &[(&str, String)]) {
     proxy_task.abort();
     let _stopped = proxy_task.await;
     drop(server);
+    #[cfg(feature = "docker")]
+    if let Some(pending) = pending {
+        pending.verify_rollback().await;
+    }
     let mut server =
         LocalServer::spawn_with_storage(&binary, root.path(), database, "hub", &storage);
     server.ready().await;
     let url = format!("{}/models/drill/drill", server.base);
-    for reference in ["refs/heads/main", "refs/heads/peer"] {
-        let refs = success(work.path(), &token, &["ls-remote", &url, reference]).await;
-        assert_eq!(
-            std::str::from_utf8(&refs).unwrap(),
-            format!("{head}\t{reference}\n")
-        );
+    if matches!(cut, Cut::AfterCommit) {
+        for reference in ["refs/heads/main", "refs/heads/peer"] {
+            let refs = success(work.path(), &token, &["ls-remote", &url, reference]).await;
+            assert_eq!(
+                std::str::from_utf8(&refs).unwrap(),
+                format!("{head}\t{reference}\n")
+            );
+        }
     }
     success(
         &checkout_path,
