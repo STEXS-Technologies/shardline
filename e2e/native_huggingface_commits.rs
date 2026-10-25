@@ -126,6 +126,35 @@ for pointer in [
         raise AssertionError("invalid pointer was published")
     assert api.repo_info(repo, revision="commit-operations").sha == moved.oid
 assert api.repo_info(repo).sha == original
+# Competing stock SDK writers must not both publish from the same parent.
+# Each uses an independent client and the server's ordinary commit endpoint.
+import concurrent.futures, threading
+from huggingface_hub.utils import HfHubHTTPError
+api.create_branch(repo, branch="competing-sdk-writers", revision=moved.oid)
+ready = threading.Barrier(2)
+def publish_competing(label):
+    writer = HfApi(endpoint=api.endpoint, token=api.token)
+    ready.wait(timeout=30)
+    try:
+        committed = writer.create_commit(repo, revision="competing-sdk-writers",
+            parent_commit=moved.oid, commit_message="competing writer " + label,
+            operations=[CommitOperationAdd(path_in_repo="winner-" + label + ".txt",
+                path_or_fileobj=label.encode())])
+        return label, committed.oid
+    except HfHubHTTPError as error:
+        assert error.response.status_code == 409, error.response.status_code
+        return label, None
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as writers:
+    results = list(writers.map(publish_competing, ["left", "right"]))
+winners = [(label, oid) for label, oid in results if oid is not None]
+assert len(winners) == 1, results
+winner, head = winners[0]
+assert api.repo_info(repo, revision="competing-sdk-writers").sha == head
+current = set(api.list_repo_files(repo, revision=head))
+assert {path for path in current if path.startswith("winner-")} == {"winner-" + winner + ".txt"}
+assert not any(path.startswith("winner-") for path in api.list_repo_files(repo, revision=moved.oid))
+assert api.repo_info(repo).sha == original
+api.delete_branch(repo, branch="competing-sdk-writers")
 api.delete_branch(repo, branch="commit-operations")
 api = HfApi(endpoint=api.endpoint, token=os.environ["HF_TOKEN"])
 
