@@ -7,8 +7,8 @@ pub(super) use shardline_index::{
 };
 pub(super) use shardline_server_core::{
     OpsRecordStore, ServerObjectStore, checked_add, checked_increment, chunk_hash,
-    chunk_object_key, content_hash, parse_stored_file_record_bytes, read_full_object,
-    validate_content_hash, validate_identifier,
+    chunk_object_key, content_hash, parse_stored_file_record_bytes, validate_content_hash,
+    validate_identifier,
 };
 pub(super) use shardline_storage::ObjectStore;
 pub(super) use shardline_xet_adapter::{validate_serialized_xorb, xorb_object_key};
@@ -24,6 +24,11 @@ struct XorbSnapshot {
     validated: shardline_xet_adapter::ValidatedXorb,
 }
 
+mod chunk_read;
+use chunk_read::{ChunkRead, MAX_CHUNK_BYTES, read_chunk};
+
+#[cfg(test)]
+mod remote_chunk_tests;
 #[cfg(test)]
 mod remote_snapshot_tests;
 #[cfg(test)]
@@ -285,7 +290,10 @@ pub(crate) fn inspect_chunks(
     // single-chunk record is xorb-backed only when a stored xorb object exists
     // under its hash (the probe separates repointed records from legacy
     // pre-packing records whose hash is the raw chunk hash).
-    let single_chunk_xorb_backed = if record.chunks.len() == 1 {
+    let single_chunk_xorb_backed = if record.chunk_size != 0
+        && record.storage_repr == StorageRepresentation::XorbCdcV1
+        && record.chunks.len() == 1
+    {
         single_chunk_is_xorb_backed(
             object_store,
             record.chunks.first().ok_or(FsckError::Overflow)?,
@@ -347,9 +355,9 @@ pub(crate) fn inspect_chunks(
         }
 
         let chunk_location = object_location_display(object_root, object_store, &object_key);
-        let metadata = match object_store.metadata(&object_key)? {
-            Some(metadata) => metadata,
-            None => {
+        let (chunk_bytes, stored_length) = match read_chunk(object_store, &object_key)? {
+            ChunkRead::Body(bytes, length) => (bytes, length),
+            ChunkRead::Missing => {
                 push_issue(
                     report,
                     FsckIssueKind::MissingChunk,
@@ -360,22 +368,19 @@ pub(crate) fn inspect_chunks(
                 )?;
                 continue;
             }
+            ChunkRead::Oversized(observed_length) => {
+                push_issue(
+                    report,
+                    FsckIssueKind::ChunkLengthMismatch,
+                    chunk_location,
+                    FsckIssueDetail::LengthMismatch {
+                        expected_length: MAX_CHUNK_BYTES,
+                        observed_length,
+                    },
+                )?;
+                continue;
+            }
         };
-
-        const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
-        if metadata.length() > MAX_CHUNK_BYTES {
-            push_issue(
-                report,
-                FsckIssueKind::ChunkLengthMismatch,
-                chunk_location,
-                FsckIssueDetail::LengthMismatch {
-                    expected_length: MAX_CHUNK_BYTES,
-                    observed_length: metadata.length(),
-                },
-            )?;
-            continue;
-        }
-        let chunk_bytes = read_full_object(object_store, &object_key, metadata.length())?;
         // XorbCdcV1 chunks are stored LZ4-compressed with a 4-byte
         // little-endian uncompressed-size prefix (mirror the download path in
         // download_stream.rs). The record's packed_end is the compressed
@@ -390,10 +395,7 @@ pub(crate) fn inspect_chunks(
                 .map(|header| u32::from_le_bytes(*header) as u64)
                 .unwrap_or(u64::MAX);
             if decompressed_size > 2 * 1024 * 1024 {
-                (
-                    xet_hash_hex_string(chunk_hash(&chunk_bytes)),
-                    metadata.length(),
-                )
+                (xet_hash_hex_string(chunk_hash(&chunk_bytes)), stored_length)
             } else {
                 match lz4_flex::decompress_size_prepended(&chunk_bytes) {
                     Ok(decompressed) => (
@@ -402,17 +404,11 @@ pub(crate) fn inspect_chunks(
                     ),
                     // A blob that fails to decompress is corrupt: report the
                     // stored bytes as the observed hash and length.
-                    Err(_error) => (
-                        xet_hash_hex_string(chunk_hash(&chunk_bytes)),
-                        metadata.length(),
-                    ),
+                    Err(_error) => (xet_hash_hex_string(chunk_hash(&chunk_bytes)), stored_length),
                 }
             }
         } else {
-            (
-                xet_hash_hex_string(chunk_hash(&chunk_bytes)),
-                metadata.length(),
-            )
+            (xet_hash_hex_string(chunk_hash(&chunk_bytes)), stored_length)
         };
         if actual_hash != chunk.hash {
             push_issue(
@@ -569,55 +565,38 @@ fn inspect_native_xet_term(
             .referenced_object_keys
             .insert(chunk_object_key.as_str().to_owned());
         let chunk_location = object_location_display(object_root, object_store, &chunk_object_key);
-        const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
-        let (chunk_bytes, stored_length) =
-            match object_store.read_object_if_present(&chunk_object_key, MAX_CHUNK_BYTES) {
-                Ok(Some(observed)) => observed,
-                Ok(None) => {
-                    // Native Xet records always store the individual chunk
-                    // objects alongside the container.  XorbCdcV1 records from
-                    // the ingestor store only the container, so a missing
-                    // member object is expected there and must not be reported.
-                    if require_member_chunks {
-                        push_issue(
-                            report,
-                            FsckIssueKind::MissingChunk,
-                            chunk_location,
-                            FsckIssueDetail::ReferencedByNativeXetXorb {
-                                xorb_location: xorb_location.clone(),
-                            },
-                        )?;
-                    }
-                    continue;
-                }
-                Err(shardline_server_core::BoundedObjectReadError::ObjectTooLarge) => {
-                    // Normal members need only the length-checked full GET. Keep
-                    // the precise oversized-object diagnostic without accepting
-                    // an unbounded body. A changed/disappearing source fails closed.
-                    let metadata = object_store.metadata(&chunk_object_key)?.ok_or(
-                        shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch,
-                    )?;
-                    if metadata.length() <= MAX_CHUNK_BYTES {
-                        return Err(
-                        shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch
-                            .into(),
-                    );
-                    }
+        let (chunk_bytes, stored_length) = match read_chunk(object_store, &chunk_object_key)? {
+            ChunkRead::Body(bytes, length) => (bytes, length),
+            ChunkRead::Missing => {
+                // Native Xet records always store the individual chunk
+                // objects alongside the container.  XorbCdcV1 records from
+                // the ingestor store only the container, so a missing
+                // member object is expected there and must not be reported.
+                if require_member_chunks {
                     push_issue(
                         report,
-                        FsckIssueKind::ChunkLengthMismatch,
+                        FsckIssueKind::MissingChunk,
                         chunk_location,
-                        FsckIssueDetail::LengthMismatch {
-                            expected_length: MAX_CHUNK_BYTES,
-                            observed_length: metadata.length(),
+                        FsckIssueDetail::ReferencedByNativeXetXorb {
+                            xorb_location: xorb_location.clone(),
                         },
                     )?;
-                    continue;
                 }
-                Err(shardline_server_core::BoundedObjectReadError::Store(error)) => {
-                    return Err(error.into());
-                }
-            };
+                continue;
+            }
+            ChunkRead::Oversized(observed_length) => {
+                push_issue(
+                    report,
+                    FsckIssueKind::ChunkLengthMismatch,
+                    chunk_location,
+                    FsckIssueDetail::LengthMismatch {
+                        expected_length: MAX_CHUNK_BYTES,
+                        observed_length,
+                    },
+                )?;
+                continue;
+            }
+        };
         // The validated Xorb descriptor commits to Xet's keyed data hash.
         // ObjectIntegrity uses Shardline's separate unkeyed storage digest;
         // comparing that digest to a native member identity flags healthy data.

@@ -570,6 +570,16 @@ missing members, corrupt member bytes and corrupt containers still produce
 findings; absent optional members remain valid. These changes reduce requests,
 not payload bytes, and do not establish a throughput gain.
 
+Ordinary standalone chunks use the same bounded reader. A MinIO fixture with
+one fixed-size chunk now uses one GET and one optional-container HEAD, versus
+one GET and three HEADs with the preceding scanner. The original-code control
+reproduced those three HEADs before the final implementation was restored.
+The layout probe remains for legacy single-chunk CDC records; ordinary fixed
+chunks and native terms no longer perform that unnecessary probe. Missing and
+corrupt chunks, oversized objects, legacy LZ4 data and excessive declared
+decompression sizes retain their checks. This is a request-count reduction for
+the measured FSCK path, not an upload or download throughput result.
+
 The final binary also passed a PostgreSQL-metadata/local-object drill with
 eight concurrent 36 MiB uploads, identical overwrites, GC and fsck. It retained
 16 containers and no redundant raw objects. All 24 full-body reads passed,
