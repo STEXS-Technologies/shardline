@@ -680,32 +680,34 @@ async fn native_aws_cli_signing_identity_and_presigned_get() {
     std::fs::write(&config, "[default]\ns3 =\n    signature_version = s3v4\n").unwrap();
     let endpoint = server.base.clone();
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("aws")
-            .args([
-                "--endpoint-url",
-                &endpoint,
-                "--region",
-                "us-east-1",
-                "s3",
-                "presign",
-                "s3://aws-resume.locks/object.bin",
-                "--expires-in",
-                "60",
-            ])
-            .env("AWS_ACCESS_KEY_ID", "SIGNINGKEY")
-            .env("AWS_SECRET_ACCESS_KEY", "legacy-token-bridge")
-            .env("AWS_CONFIG_FILE", config)
-            .env("AWS_EC2_METADATA_DISABLED", "true")
-            .env_remove("AWS_SESSION_TOKEN")
-            .output()
+        shardline_test_support::native_client_output(
+            std::process::Command::new("aws")
+                .args([
+                    "--endpoint-url",
+                    &endpoint,
+                    "--region",
+                    "us-east-1",
+                    "s3",
+                    "presign",
+                    "s3://aws-resume.locks/object.bin",
+                    "--expires-in",
+                    "60",
+                ])
+                .env("AWS_ACCESS_KEY_ID", "SIGNINGKEY")
+                .env("AWS_SECRET_ACCESS_KEY", "legacy-token-bridge")
+                .env("AWS_CONFIG_FILE", config)
+                .env("AWS_EC2_METADATA_DISABLED", "true")
+                .env_remove("AWS_SESSION_TOKEN"),
+            std::time::Duration::from_secs(180),
+        )
     })
     .await
     .unwrap()
     .unwrap();
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "AWS CLI presigning failed: {}",
+        output.status
     );
     let url = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     assert!(url.contains("X-Amz-Signature="));
@@ -1161,15 +1163,16 @@ async fn aws_json(endpoint: &str, credential: &str, arguments: &[&str]) -> Value
     if arguments[0] != "list-multipart-uploads" {
         command.args(["--key", "object.bin"]);
     }
-    let output = tokio::task::spawn_blocking(move || command.output())
-        .await
-        .unwrap()
-        .expect("AWS CLI must be installed");
-    assert!(
-        output.status.success(),
-        "AWS CLI failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = tokio::task::spawn_blocking(move || {
+        shardline_test_support::native_client_output(
+            &mut command,
+            std::time::Duration::from_secs(180),
+        )
+    })
+    .await
+    .unwrap()
+    .expect("AWS CLI must be installed");
+    assert!(output.status.success(), "AWS CLI failed: {}", output.status);
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
@@ -2582,13 +2585,15 @@ async fn exercise_native_git_lfs_at(base: &str, frontend: ServerFrontend, payloa
         let directory = directory.to_owned();
         let args: Vec<_> = args.iter().map(|arg| (*arg).to_owned()).collect();
         let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(directory)
-                .args(args)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .output()
+            shardline_test_support::native_client_output(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(directory)
+                    .args(args)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null"),
+                std::time::Duration::from_secs(180),
+            )
         })
         .await
         .unwrap()
@@ -2596,7 +2601,7 @@ async fn exercise_native_git_lfs_at(base: &str, frontend: ServerFrontend, payloa
         assert!(
             output.status.success(),
             "native git command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            output.status
         );
         output.stdout
     }
