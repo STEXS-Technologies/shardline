@@ -4,6 +4,8 @@ use super::*;
 use shardline_index::{UploadIntentState, UploadIntentStore};
 use std::io::{BufWriter, Write};
 
+mod mixed;
+
 pub(super) fn configure_remote(config: ServerConfig) -> Result<ServerConfig> {
     let Ok(url) = std::env::var("NATIVE_PROCESS_POSTGRES_URL") else {
         return Ok(config);
@@ -39,7 +41,7 @@ auth = dict(endpoint=os.environ["NATIVE_ENDPOINT"], token=os.environ["NATIVE_TOK
 with session.new_upload_commit(**auth) as commit:
     upload = commit.start_upload_file(str(source))
 info = upload.result().xet_info
-destination = source.with_suffix(".restored")
+destination = pathlib.Path(os.environ["HF_HOME"]) / "restored.bin"
 group = session.new_file_download_group(**auth)
 group.start_download_file(info, str(destination))
 group.wait_to_finish()
@@ -73,9 +75,19 @@ fn fixture(path: &Path) -> Result {
 }
 
 fn client(source: &Path, base: &str, token: &str, home: &Path) -> Result<Process> {
+    client_with_program(Path::new("python"), source, base, token, home)
+}
+
+fn client_with_program(
+    python: &Path,
+    source: &Path,
+    base: &str,
+    token: &str,
+    home: &Path,
+) -> Result<Process> {
     std::fs::create_dir_all(home)?;
     Ok(Process(
-        Command::new("python")
+        Command::new(python)
             .args(["-c", CLIENT])
             .env("NATIVE_SOURCE", source)
             .env("NATIVE_ENDPOINT", base)
@@ -107,7 +119,7 @@ async fn stock_xet_large_upload_recovers_after_server_sigkill() -> Result {
     ] {
         let root = tempfile::tempdir()?;
         let index = shardline_index::LocalIndexStore::new(root.path().to_owned())?;
-        interrupted_client(root.path(), index, &[], cut).await?;
+        interrupted_client(root.path(), index, &[], cut, None).await?;
     }
     Ok(())
 }
@@ -131,6 +143,7 @@ async fn stock_xet_large_upload_recovers_with_postgres_and_minio() -> Result {
             shardline_index::PostgresIndexStore::new(remote.pool.clone()),
             &remote.environment,
             cut,
+            None,
         )
         .await;
         remote.pool.close().await;
@@ -144,17 +157,19 @@ async fn interrupted_client<I>(
     index: I,
     environment: &[(&str, String)],
     cut: &str,
+    peer_python: Option<&Path>,
 ) -> Result
 where
     I: UploadIntentStore,
     I::Error: std::error::Error + 'static,
 {
     use std::os::unix::process::ExitStatusExt;
-    let available = Command::new("python")
-        .args(["-c", "from hf_xet import XetSession"])
-        .status()?;
+    let available = shardline_test_support::native_client_output(
+        Command::new("python").args(["-c", "from hf_xet import XetSession"]),
+        Duration::from_secs(10),
+    )?;
     assert!(
-        available.success(),
+        available.status.success(),
         "stock hf_xet with XetSession is required"
     );
     let working = tempfile::tempdir()?;
@@ -234,6 +249,10 @@ where
         environment,
     )?;
     ready(&http, &retry_base, &mut restarted).await?;
+    let mut peer = match peer_python {
+        Some(python) => Some(mixed::Peer::start(python, &source, &token, environment).await?),
+        None => None,
+    };
     let retry_home = working.path().join("retry");
     let mut retry = client(&source, &retry_base, &token, &retry_home)?;
     let status = tokio::time::timeout(Duration::from_secs(240), async {
@@ -251,6 +270,9 @@ where
     );
     let result: serde_json::Value =
         serde_json::from_slice(&std::fs::read(retry_home.join("result.json"))?)?;
+    if let Some(peer) = &mut peer {
+        peer.verify(&result).await?;
+    }
     assert_eq!(
         result.get("size").and_then(serde_json::Value::as_u64),
         Some(512 * 1024 * 1024)

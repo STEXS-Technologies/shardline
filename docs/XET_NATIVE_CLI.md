@@ -148,10 +148,28 @@ directory. The exact interrupted immutable object must become visible, with its
 prior intent history retained. This qualifies those CAS recovery scenarios;
 it does not establish every Hub workflow or every possible crash timing.
 The six-boundary matrix passed on October 24, 2026 with `hf_xet` 1.7.0,
-covering six local-storage and six PostgreSQL/MinIO interruptions. Concurrent
-mixed-client retries and the external report's precise failure sequence remain
-separate qualification requirements. This is recovery evidence, not a recovery
+covering six local-storage and six PostgreSQL/MinIO interruptions. The external
+report's precise failure sequence remains a separate qualification requirement.
+This is recovery evidence, not a recovery
 latency or normal-transfer throughput benchmark.
+
+The mixed-client PostgreSQL/MinIO drill pairs `hf_xet` 1.7.0 and 1.5.2. After
+each of the same six SIGKILL boundaries, both cold clients retry through separate
+replacement processes and check the reconstructed 512 MiB file's length and
+SHA-256. Their caches and download destinations are independent. The interrupted
+object must become visible without losing its original intent history.
+Run with the 1.7.0 environment's `python` on `PATH` and
+`SHARDLINE_NATIVE_PEER_PYTHON` pointing to the 1.5.2 environment's Python:
+
+```bash
+cargo test -p shardline-server --features docker --test native_upload_process \
+  stock_xet_large_mixed_clients_recover_with_postgres_and_minio \
+  -- --ignored --nocapture
+```
+
+CI checks both client versions explicitly and fails if either is unavailable.
+This covers CAS recovery for that pair on one host; other client combinations,
+Hub commits and multi-host recovery need their own qualification.
 
 Cancelling the upload future also cancels a final file write still queued on
 the blocking pool. A synchronous write that has already started can still
