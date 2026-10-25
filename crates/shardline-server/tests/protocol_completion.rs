@@ -650,6 +650,13 @@ async fn signed_s3_identity_cannot_outlive_or_expand_its_bound_token() {
 #[tokio::test]
 #[ignore = "requires the native AWS CLI"]
 async fn native_aws_cli_signing_identity_and_presigned_get() {
+    exercise_aws_cli_presigned_get(None, None).await;
+}
+
+async fn exercise_aws_cli_presigned_get(
+    database: Option<&str>,
+    storage: Option<S3ObjectStoreConfig>,
+) {
     let root = tempfile::tempdir().unwrap();
     let bound_token = token("writer", "aws-resume", TokenScope::Write);
     let signing = shardline_server::S3SigningIdentity::new(
@@ -663,8 +670,8 @@ async fn native_aws_cli_signing_identity_and_presigned_get() {
         root.path(),
         ServerFrontend::S3,
         true,
-        None,
-        None,
+        database,
+        storage,
         Some(signing),
     )
     .await;
@@ -711,8 +718,20 @@ async fn native_aws_cli_signing_identity_and_presigned_get() {
     );
     let url = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     assert!(url.contains("X-Amz-Signature="));
-    let client = Client::new();
-    let response = client.get(&url).send().await.unwrap();
+    let parsed = reqwest::Url::parse(&url).unwrap();
+    assert!(parsed.origin() == reqwest::Url::parse(&server.base).unwrap().origin());
+    assert_eq!(parsed.path(), "/aws-resume.locks/object.bin");
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.bytes().await.unwrap().as_ref(),
@@ -722,6 +741,7 @@ async fn native_aws_cli_signing_identity_and_presigned_get() {
         .get(format!("{url}&changed=yes"))
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .unwrap();
     assert_eq!(tampered.status(), StatusCode::FORBIDDEN);
     assert_presigned_credential_ambiguity_rejected(&client, &url, &bound_token).await;
@@ -737,7 +757,7 @@ async fn native_aws_cli_signing_identity_and_presigned_get() {
 async fn assert_presigned_credential_ambiguity_rejected(client: &Client, url: &str, token: &str) {
     for authorization in [format!("Bearer {token}"), "Bearer invalid-token".to_owned(),
         "AWS4-HMAC-SHA256 Credential=unknown/20261022/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef".to_owned()] {
-        let response = client.get(url).header("authorization", authorization).send().await.unwrap();
+        let response = client.get(url).header("authorization", authorization).send().await.map_err(reqwest::Error::without_url).unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(response.text().await.unwrap().contains("AccessDenied"));
     }
@@ -748,7 +768,12 @@ async fn assert_presigned_credential_ambiguity_rejected(client: &Client, url: &s
         "X-Amz-Signature=deadbeef",
         "X-Amz-Security-Token=invalid-token",
     ] {
-        let response = client.get(format!("{url}&{extra}")).send().await.unwrap();
+        let response = client
+            .get(format!("{url}&{extra}"))
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
     let response = client
@@ -757,9 +782,15 @@ async fn assert_presigned_credential_ambiguity_rejected(client: &Client, url: &s
         .body("must not replace signed content")
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let response = client.get(url).send().await.unwrap();
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.bytes().await.unwrap().as_ref(),

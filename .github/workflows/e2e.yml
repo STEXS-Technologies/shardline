@@ -139,6 +139,12 @@ jobs:
           sudo install --mode=0755 "${RUNNER_TEMP}/git-xet-client/git-xet" /usr/local/bin/git-xet
           git-xet --version
 
+      - name: Verify AWS presigned downloads stay behind Shardline
+        run: >-
+          cargo nextest run --locked -p shardline-server --features docker
+          --test protocol_completion --run-ignored only
+          -E 'test(native_aws_presigned_get_stays_on_shardline_with_remote_storage)'
+
       - name: Qualify Git LFS locking and OCI Distribution v1.1.1
         run: bash scripts/verify-protocol-conformance.sh
 

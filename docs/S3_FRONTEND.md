@@ -282,6 +282,11 @@ JSON file containing an array like this:
 
 Give the client the access key and secret key. Keep the bound token on the
 server. Its normal expiry, permissions and repository restrictions still apply.
+
+Generate presigned URLs using the Shardline S3 endpoint. Downloads are served
+through Shardline, including when MinIO or another S3-compatible service stores
+the bytes. Clients do not receive backend download URLs or backend credentials.
+
 Registered keys require valid SigV4 signatures and support presigned GET/PUT URLs;
 signed payload hashes are checked before publication. Use TLS, including with
 the standard `UNSIGNED-PAYLOAD` signing mode. An optional `session_token` field
