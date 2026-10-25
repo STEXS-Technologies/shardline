@@ -6,13 +6,18 @@ use std::{
     fs::{read, write as write_file},
     num::NonZeroUsize,
     path::PathBuf,
-    process::Command,
+    process::{Command, Output},
+    time::Duration,
 };
 
 use bytes::Bytes;
 use serde_json::{Value, from_slice};
 use shardline_server::LocalBackend;
 use support::CliE2eInvariantError;
+
+fn run(command: &mut Command) -> std::io::Result<Output> {
+    shardline_test_support::native_client_output(command, Duration::from_secs(120))
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn backup_manifest_inventories_local_deployment() {
@@ -77,7 +82,7 @@ async fn exercise_backup_manifest() -> Result<(), Box<dyn Error>> {
 
     let output_path = storage.path().join("backup-manifest.json");
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "backup",
@@ -91,12 +96,11 @@ async fn exercise_backup_manifest() -> Result<(), Box<dyn Error>> {
             output_path
                 .to_str()
                 .ok_or("output path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "backup manifest failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            output.status
         ))
         .into());
     }
@@ -163,7 +167,7 @@ async fn exercise_backup_manifest_from_current_directory() -> Result<(), Box<dyn
 
     let output_path = storage.path().join("backup-manifest-cwd.json");
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .current_dir(storage.path())
         .env_remove("SHARDLINE_ROOT_DIR")
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
@@ -174,12 +178,11 @@ async fn exercise_backup_manifest_from_current_directory() -> Result<(), Box<dyn
             output_path
                 .to_str()
                 .ok_or("output path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "backup manifest from cwd failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            output.status
         ))
         .into());
     }
@@ -216,7 +219,7 @@ async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn
 
     let output_path = project.path().join("backup-manifest-project.json");
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .current_dir(project.path())
         .env_remove("SHARDLINE_ROOT_DIR")
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
@@ -227,12 +230,11 @@ async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn
             output_path
                 .to_str()
                 .ok_or("output path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "backup manifest from project directory failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            output.status
         ))
         .into());
     }
@@ -274,7 +276,7 @@ async fn exercise_backup_manifest_rejects_symlinked_output_path() -> Result<(), 
     symlink(&target, &output_path)?;
 
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "backup",
@@ -288,8 +290,7 @@ async fn exercise_backup_manifest_rejects_symlinked_output_path() -> Result<(), 
             output_path
                 .to_str()
                 .ok_or("output path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if output.status.success() {
         return Err(CliE2eInvariantError::new(
             "backup manifest unexpectedly accepted a symlinked output path",
@@ -324,7 +325,7 @@ async fn exercise_backup_manifest_rejects_symlinked_root_override() -> Result<()
     symlink(redirected.path(), &root_link)?;
     let output_path = storage.path().join("backup-manifest.json");
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "backup",
@@ -337,8 +338,7 @@ async fn exercise_backup_manifest_rejects_symlinked_root_override() -> Result<()
             output_path
                 .to_str()
                 .ok_or("output path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if output.status.success() {
         return Err(CliE2eInvariantError::new(
             "backup manifest unexpectedly accepted a symlinked root override",
