@@ -107,6 +107,12 @@ test matrix, not a claim that the current branch has passed release CI.
 Versions outside this matrix require qualification before support is claimed.
 The 1.5.2 large-file and refresh tests do not establish all workflows for that version.
 
+Cold-cache deduplication after descriptor-index loss and rebuild also passes with
+Hub 1.25.1 / `hf_xet` 1.5.2, 1.6.0 and 1.7.0, and Hub 2.2.0 / `hf_xet` 1.7.0.
+Each combination covers local and PostgreSQL/MinIO storage with combined and
+split API/transfer roles. The tests verify upload-byte reuse and exact downloads;
+they do not replace predecessor-binary or maintenance-failure qualification.
+
 Xet's newer [`GET /v2/file-chunk-hashes/{file_id}`](https://huggingface.co/docs/xet/api#9-get-file-chunk-hashes)
 delta-upload API is implemented with repository authorization, chunk-aligned edit
 windows and upstream-compatible gap commitments. HTTP tests cover proof

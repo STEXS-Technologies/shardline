@@ -4,6 +4,7 @@ mod native_client_policy;
 mod native_huggingface_cards;
 mod native_huggingface_commits;
 mod native_huggingface_credentials;
+mod native_huggingface_dedup_rebuild;
 mod native_huggingface_expiry;
 mod native_huggingface_http_analytics;
 mod native_huggingface_identity;
@@ -36,6 +37,8 @@ use support::{ServerE2eInvariantError, bearer_token, wait_for_health, write_prov
 
 type TestError = Box<dyn Error>;
 
+static MEASUREMENTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct HubRuntime {
     base_url: String,
     // Per-repo tokens: repo-scoped Hub-API routes (upload/commit/download/
@@ -46,6 +49,7 @@ struct HubRuntime {
     model_token: String,
     dataset_token: String,
     postgres_url: Option<String>,
+    maintenance_config: ServerConfig,
     _storage: tempfile::TempDir,
     server: JoinHandle<Result<(), ServerError>>,
     transfer: Option<(String, JoinHandle<Result<(), ServerError>>)>,
@@ -229,7 +233,6 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
         .try_init();
     // The production Prometheus registry is process-wide. Keep benchmark
     // intervals disjoint when this test binary hosts several server fixtures.
-    static MEASUREMENTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _measurements = MEASUREMENTS.lock().await;
     let client_home = tempfile::tempdir()?;
     let working = tempfile::tempdir()?;
@@ -1182,6 +1185,7 @@ async fn start_runtime_with_roles(
     if split {
         config = config.with_server_role(shardline_server::ServerRole::Api);
     }
+    let maintenance_config = config.clone();
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
     let transfer = if split {
@@ -1240,6 +1244,7 @@ async fn start_runtime_with_roles(
         model_token,
         dataset_token,
         postgres_url,
+        maintenance_config,
         _storage: storage,
         server,
         transfer,
@@ -1271,6 +1276,15 @@ async fn verify_cold_client_chunk_dedup(
     repository: &str,
     working: &Path,
 ) -> Result<(), TestError> {
+    verify_cold_client_chunk_dedup_with_rebuild(runtime, repository, working, false).await
+}
+
+async fn verify_cold_client_chunk_dedup_with_rebuild(
+    runtime: &HubRuntime,
+    repository: &str,
+    working: &Path,
+    rebuild: bool,
+) -> Result<(), TestError> {
     // Incompressible, deterministic data prevents compression or repeated-byte
     // fixtures from masquerading as network deduplication. Each upload runs in
     // a new process with a genuinely empty Hub and Xet cache.
@@ -1299,6 +1313,9 @@ async fn verify_cold_client_chunk_dedup(
             "dedup baseline",
         ],
     )?;
+    if rebuild {
+        native_huggingface_dedup_rebuild::recover_legacy_descriptors(runtime).await?;
+    }
     let before = read_metric_counter(runtime, "shardline_xet_xorb_upload_bytes_total").await?;
     let hits = read_metric_counter(runtime, "shardline_xet_dedupe_shard_hits_total").await?;
     for byte in content.iter_mut().rev().take(256 * 1024) {

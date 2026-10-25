@@ -194,6 +194,15 @@ third empty-cache client downloaded matching bytes. This is a focused transfer
 measurement, not a production throughput or total storage-cost estimate. The
 test asserts a dedup endpoint hit and counts consumed upload payload bytes.
 
+Recovery is tested with the same workload after deleting the derived descriptor
+index and running the maintenance rebuild used by `shardline index rebuild`.
+Fresh official clients reuse existing chunks
+and download matching bytes with `hf_xet` 1.5.2, 1.6.0 and 1.7.0, on local and
+PostgreSQL/MinIO storage with combined or split API/transfer roles. Split roles
+use the documented ingress routing. These tests retain authoritative files and
+immutable objects; they do not qualify every predecessor migration or concurrent
+maintenance failure.
+
 ## Non-Goals
 
 - Reimplementing the shardline server or any part of the CAS coordinator.
