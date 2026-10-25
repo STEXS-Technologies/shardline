@@ -90,6 +90,7 @@ def wait_for(check):
 
 def qualify(args, root, log):
     import boto3
+    from botocore.config import Config
 
     binary = Path(args.binary).resolve(strict=True)
     # Resolving a venv's interpreter symlink would silently select the base
@@ -169,7 +170,9 @@ wait "$child"
         wait_for(lambda: request(port, "GET", "/minio/health/ready")[0] == 200)
         client = boto3.client("s3", endpoint_url=f"http://127.0.0.1:{port}",
                               aws_access_key_id=KEY, aws_secret_access_key=SECRET,
-                              region_name="us-east-1")
+                              region_name="us-east-1",
+                              config=Config(connect_timeout=5, read_timeout=5,
+                                            retries={"max_attempts": 0}))
         client.create_bucket(Bucket="pressure")
         config = root / "empty.toml"
         config.write_text("")
@@ -250,11 +253,32 @@ wait "$child"
                               stdout=log, stderr=subprocess.PIPE, timeout=60)
         assert full.returncode != 0 and b"No space left on device" in full.stderr
         provider_error = None
-        try:
-            client.put_object(Bucket="pressure", Key="must-not-persist", Body=retry)
-        except client.exceptions.ClientError as error:
-            provider_error = error.response["Error"]["Code"]
-        assert provider_error == "XMinioStorageFull"
+
+        def backend_reports_full():
+            nonlocal provider_error
+            try:
+                client.put_object(Bucket="pressure", Key="must-not-persist", Body=retry)
+            except client.exceptions.ClientError as error:
+                provider_error = error.response["Error"]["Code"]
+                # A real ENOSPC can initially surface as an aborted request
+                # body. Require the explicit capacity response before testing
+                # Shardline; never count that preliminary error as qualification.
+                if provider_error in {"IncompleteBody", "InternalError"}:
+                    log.write(
+                        f"backend exhaustion probe: {provider_error}; awaiting capacity response\n".encode()
+                    )
+                    log.flush()
+                    return False
+                return True
+            return True
+
+        capacity_deadline = time.monotonic() + 30
+        while not backend_reports_full() and time.monotonic() < capacity_deadline:
+            time.sleep(0.5)
+        assert provider_error == "XMinioStorageFull", (
+            "backend exhaustion prerequisite failed: expected XMinioStorageFull, "
+            f"observed {provider_error!r}"
+        )
         failed_status, _ = request(api_port, "PUT", "/team.bench/retry", token, retry)
         assert not 200 <= failed_status < 300
         assert request(api_port, "GET", "/team.bench/retry", token)[0] == 404
