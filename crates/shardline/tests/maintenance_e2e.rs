@@ -88,13 +88,18 @@ fn ordinary_maintenance_preserves_existing_writable_files_under_read_only_root()
     }
     let sandbox = tempfile::tempdir()?;
     let root = sandbox.path().join("deployment");
-    let bootstrap = Command::new(binary())
-        .env_clear()
-        .current_dir(sandbox.path())
-        .args(["index", "rebuild", "--root"])
-        .arg(&root)
-        .output()?;
-    assert!(bootstrap.status.success(), "{bootstrap:?}");
+    let bootstrap = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(sandbox.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(&root),
+    )?;
+    assert!(
+        bootstrap.status.success(),
+        "bootstrap failed: {}",
+        bootstrap.status
+    );
     fs::remove_dir_all(root.join(".shardline-maintenance"))?;
     // A running deployment keeps its SQLite sidecars open. The database and
     // sidecars remain writable even when operators disallow new root entries.
@@ -132,15 +137,19 @@ fn ordinary_maintenance_preserves_existing_writable_files_under_read_only_root()
         vec!["repair", "lifecycle"],
         vec!["gc", "--mark"],
     ] {
-        let output = Command::new(binary())
-            .env_clear()
-            .current_dir(sandbox.path())
-            .args(&arguments)
-            .arg("--root")
-            .arg(&root)
-            .output()?;
-        assert!(output.status.success(), "{arguments:?}: {output:?}");
-        assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+        let output = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(sandbox.path())
+                .args(&arguments)
+                .arg("--root")
+                .arg(&root),
+        )?;
+        assert!(output.status.success(), "{arguments:?}: {}", output.status);
+        assert!(
+            output.stderr.is_empty(),
+            "maintenance emitted an unexpected diagnostic"
+        );
         assert!(!root.join(".shardline-maintenance").exists());
         assert_eq!(fs::metadata(&root)?.permissions().mode() & 0o777, 0o555);
     }
@@ -190,22 +199,22 @@ fn first_maintenance_initializes_tracking_without_narrowing_deployment_permissio
         fs::create_dir_all(&reference)?;
         let expected_mode = fs::metadata(&reference)?.permissions().mode() & 0o777;
         let root = sandbox.path().join("actual/nested/deployment");
-        let output = Command::new(binary())
-            .env_clear()
-            .current_dir(sandbox.path())
-            .args(arguments)
-            .arg("--root")
-            .arg(&root)
-            .output()?;
+        let output = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(sandbox.path())
+                .args(arguments)
+                .arg("--root")
+                .arg(&root),
+        )?;
         assert!(
             output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+            "maintenance failed: {}",
+            output.status
         );
         assert!(
             output.stderr.is_empty(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+            "maintenance emitted an unexpected diagnostic"
         );
         for directory in [
             root.clone(),
@@ -251,12 +260,13 @@ fn invalid_root_preserves_original_validation_status_without_duplicate_tracking_
     let sandbox = tempfile::tempdir()?;
     let root = sandbox.path().join("not-a-directory");
     fs::write(&root, b"existing deployment diagnostic fixture")?;
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(sandbox.path())
-        .args(["fsck", "--root"])
-        .arg(&root)
-        .output()?;
+    let output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(sandbox.path())
+            .args(["fsck", "--root"])
+            .arg(&root),
+    )?;
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -296,18 +306,15 @@ fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> R
         fs::create_dir(&root)?;
         let mut results = Vec::new();
         for _ in 0..2 {
-            let output = Command::new(binary())
-                .env_clear()
-                .current_dir(&root)
-                .args(&arguments)
-                .arg("--root")
-                .arg(&root)
-                .output()?;
-            assert!(
-                output.status.success(),
-                "{arguments:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let output = run_cli(
+                Command::new(binary())
+                    .env_clear()
+                    .current_dir(&root)
+                    .args(&arguments)
+                    .arg("--root")
+                    .arg(&root),
+            )?;
+            assert!(output.status.success(), "{arguments:?}: {}", output.status);
             assert!(!String::from_utf8_lossy(&output.stdout).contains("maintenance.task:"));
             results.push(output);
         }
@@ -418,17 +425,14 @@ fn shared_publication_failure_preserves_existing_command_and_local_supervision()
             "CREATE TRIGGER deny_task_publication BEFORE INSERT ON shardline_task_artifacts_v1
              BEGIN SELECT RAISE(ABORT, 'fixture denies shared publication'); END;",
         )?;
-        let output = Command::new(binary())
-            .env_clear()
-            .current_dir(&root)
-            .args(["index", "rebuild", "--root"])
-            .arg(&root)
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(&root)
+                .args(["index", "rebuild", "--root"])
+                .arg(&root),
+        )?;
+        assert!(output.status.success(), "{}", output.status);
         assert!(
             root.join("metadata.sqlite3").exists(),
             "shared audit permissions must not break existing maintenance"
@@ -466,17 +470,14 @@ fn shared_publication_failure_preserves_existing_command_and_local_supervision()
             }
         }
         metadata.execute_batch("DROP TRIGGER deny_task_publication")?;
-        let subsequent = Command::new(binary())
-            .env_clear()
-            .current_dir(&root)
-            .args(["index", "rebuild", "--root"])
-            .arg(&root)
-            .output()?;
-        assert!(
-            subsequent.status.success(),
-            "{}",
-            String::from_utf8_lossy(&subsequent.stderr)
-        );
+        let subsequent = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(&root)
+                .args(["index", "rebuild", "--root"])
+                .arg(&root),
+        )?;
+        assert!(subsequent.status.success(), "{}", subsequent.status);
         assert_eq!(maintenance_identities(&root)?.len(), 2);
         assert_private_scratch_cleaned(&root)?;
         assert_eq!(
@@ -496,17 +497,14 @@ fn ordinary_gc_dry_run_does_not_require_or_write_deployment_audit_storage() -> R
         root.path().join("chunks/_shardline_tasks/v1/manifests"),
         b"unwritable audit namespace",
     )?;
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["gc", "--root"])
-        .arg(root.path())
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["gc", "--root"])
+            .arg(root.path()),
+    )?;
+    assert!(output.status.success(), "{}", output.status);
     assert!(String::from_utf8_lossy(&output.stdout).contains("mode: dry-run"));
     assert!(!root.path().join(".shardline-maintenance").exists());
     assert_eq!(
@@ -514,21 +512,17 @@ fn ordinary_gc_dry_run_does_not_require_or_write_deployment_audit_storage() -> R
         b"unwritable audit namespace"
     );
     let fresh = root.path().join("fresh/nested/deployment");
-    let fresh_output = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["gc", "--root"])
-        .arg(&fresh)
-        .output()?;
-    assert!(
-        fresh_output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&fresh_output.stderr)
-    );
+    let fresh_output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["gc", "--root"])
+            .arg(&fresh),
+    )?;
+    assert!(fresh_output.status.success(), "{}", fresh_output.status);
     assert!(
         fresh_output.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&fresh_output.stderr)
+        "dry-run emitted an unexpected diagnostic"
     );
     assert!(String::from_utf8_lossy(&fresh_output.stdout).contains("mode: dry-run"));
     assert!(fresh.is_dir());
@@ -545,17 +539,14 @@ fn ordinary_commands_preserve_non_utf8_paths() -> Result<()> {
         .path()
         .join(OsString::from_vec(b"deployment-\xff".to_vec()));
     fs::create_dir(&root)?;
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(&root)
-        .args(["index", "rebuild", "--root"])
-        .arg(&root)
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(&root)
+            .args(["index", "rebuild", "--root"])
+            .arg(&root),
+    )?;
+    assert!(output.status.success(), "{}", output.status);
     assert!(root.join("metadata.sqlite3").exists());
     assert_eq!(maintenance_identities(&root)?.len(), 1);
     Ok(())
@@ -617,17 +608,14 @@ fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Resul
     barrier.unlock()?;
     // An intentional integrity scan may run, but exporting old evidence must
     // neither retry the interrupted rebuild nor append a success to its journal.
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["fsck", "--root"])
-        .arg(root.path())
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["fsck", "--root"])
+            .arg(root.path()),
+    )?;
+    assert!(output.status.success(), "{}", output.status);
     let connection = Connection::open_with_flags(
         directory.join("tasks.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -680,8 +668,8 @@ fn ordinary_maintenance_uses_the_original_cli_process() -> Result<()> {
     let output = child.wait_with_output()?;
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "maintenance process failed: {}",
+        output.status
     );
     let manifests = maintenance_identities(root.path())?;
     assert_eq!(manifests.len(), 1);
@@ -702,12 +690,13 @@ fn ordinary_commands_relocate_finished_legacy_history_incrementally() -> Result<
     let config = shardline::load_server_config(Some(root.path()), None)?;
     let deployment = deployment_fingerprint(&config)?;
     let objects = shardline_server::object_store_from_config(&config)?;
-    let seed = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["index", "rebuild", "--root"])
-        .arg(root.path())
-        .output()?;
+    let seed = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(root.path()),
+    )?;
     assert!(seed.status.success());
     let legacy = TaskEvidenceStore::from_config(&config)?;
     let id = legacy
@@ -766,17 +755,14 @@ fn ordinary_commands_relocate_finished_legacy_history_incrementally() -> Result<
         shardline_storage::ObjectPrefix::parse(&format!("_shardline_tasks/v1/runs/{id}/"))?;
     let before = objects.list_prefix(&prefix)?.len();
     for invocation in 0..2 {
-        let output = Command::new(binary())
-            .env_clear()
-            .current_dir(root.path())
-            .args(["index", "rebuild", "--root"])
-            .arg(root.path())
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(root.path())
+                .args(["index", "rebuild", "--root"])
+                .arg(root.path()),
+        )?;
+        assert!(output.status.success(), "{}", output.status);
         assert!(String::from_utf8_lossy(&output.stdout).contains("scanned_version_records: 0"));
         assert_eq!(fs::read(&payload)?, b"preserved payload bytes");
         assert_eq!(
@@ -992,7 +978,7 @@ fn real_workflows_commit_native_checkpoints_and_reuse_completed_history() -> Res
                 .join("artifacts")
                 .join(hex::encode(proof.artifact.digest.0)),
         )?)?;
-        let different = command(
+        let different = run_cli(&mut command(
             &state,
             &root,
             if operation == "fsck" {
@@ -1000,8 +986,7 @@ fn real_workflows_commit_native_checkpoints_and_reuse_completed_history() -> Res
             } else {
                 "fsck"
             },
-        )
-        .output()?;
+        ))?;
         assert!(!different.status.success());
         assert!(String::from_utf8_lossy(&different.stderr).contains("different request"));
     }
@@ -1083,8 +1068,7 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
     assert!(!recovery.status.success());
     assert!(
         String::from_utf8_lossy(&recovery.stderr).contains("effects remain unknown"),
-        "{}",
-        String::from_utf8_lossy(&recovery.stderr)
+        "interrupted effects must retain their unresolved diagnostic"
     );
     let connection = Connection::open(journal(&state))?;
     assert!(
