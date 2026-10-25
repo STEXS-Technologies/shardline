@@ -418,7 +418,9 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
     } else if local_source {
         history_command.arg("--root").arg(source.path());
     }
-    let history = history_command.output().unwrap();
+    let history =
+        shardline_test_support::native_client_output(&mut history_command, Duration::from_secs(60))
+            .unwrap();
     if !local_source && !legacy {
         assert!(
             source
@@ -427,11 +429,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
                 .is_file()
         );
     }
-    assert!(
-        history.status.success(),
-        "{}",
-        String::from_utf8_lossy(&history.stderr)
-    );
+    assert!(history.status.success(), "{}", history.status);
     let page: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
     if unrelated_database {
         assert_eq!(
@@ -494,18 +492,16 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
                 .find(|path| path.file_name().is_some_and(|name| name == "tasks.sqlite"))
                 .and_then(|path| path.parent())
                 .expect("predecessor must retain its native journal");
-            let native = Command::new(&binary)
-                .env_clear()
-                .current_dir(source.path())
-                .args(["history", "--archive", "--root"])
-                .arg(workspace)
-                .output()
-                .unwrap();
-            assert!(
-                native.status.success(),
-                "{}",
-                String::from_utf8_lossy(&native.stderr)
-            );
+            let native = shardline_test_support::native_client_output(
+                Command::new(&binary)
+                    .env_clear()
+                    .current_dir(source.path())
+                    .args(["history", "--archive", "--root"])
+                    .arg(workspace),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+            assert!(native.status.success(), "{}", native.status);
             let native_page: serde_json::Value = serde_json::from_slice(&native.stdout).unwrap();
             assert_eq!(
                 native_page
