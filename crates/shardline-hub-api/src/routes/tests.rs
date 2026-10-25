@@ -1280,7 +1280,7 @@ async fn native_lfs_transfer_does_not_inherit_webhook_total_timeout() {
             .unwrap(),
         "xyz"
     );
-    // The per-transfer override must not change the shared webhook deadline.
+    // The native transport must not change the webhook deadline.
     assert!(
         client
             .get(format!("{endpoint}/v1/hub/xet-files/{}", "ab".repeat(32)))
@@ -1306,6 +1306,102 @@ async fn native_lfs_transfer_does_not_inherit_webhook_total_timeout() {
         HubApiError::CasError(message)
             if message == "internal Xet file reader: connection failure"
     ));
+}
+
+#[tokio::test]
+async fn native_lfs_reader_does_not_use_public_only_webhook_dns() {
+    use axum::{http::Method, routing::get};
+    use std::{sync::Arc, time::Duration};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+    let upstream = axum::Router::new().route(
+        "/v1/hub/xet-files/{oid}",
+        get(|| async { ([("content-length", "3")], "xyz") }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await });
+    let (_td, mut state) = make_alice_auth_state();
+    let webhook = reqwest::Client::builder()
+        .dns_resolver(Arc::new(super::webhooks::PublicWebhookDnsResolver))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    // Prove the configured webhook transport refuses the private DNS answer.
+    assert!(
+        webhook
+            .get(format!("{endpoint}/v1/hub/xet-files/{}", "ab".repeat(32)))
+            .send()
+            .await
+            .is_err()
+    );
+    state.http_client = Some(webhook);
+    state.public_base_url = endpoint;
+    let headers = alice_headers();
+    let response = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &headers),
+        Path("ab".repeat(32)),
+        Method::GET,
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 16)
+            .await
+            .unwrap(),
+        "xyz"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn native_lfs_reader_does_not_follow_credential_redirects() {
+    use axum::{http::Method, response::Redirect, routing::get};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let visits = Arc::new(AtomicUsize::new(0));
+    let observed = visits.clone();
+    let upstream = axum::Router::new()
+        .route(
+            "/v1/hub/xet-files/{oid}",
+            get(|| async { Redirect::temporary("/credential-sink") }),
+        )
+        .route(
+            "/credential-sink",
+            get(move || {
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    "unexpected"
+                }
+            }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await });
+    let (_td, mut state) = make_alice_auth_state();
+    state.public_base_url = endpoint;
+    let headers = alice_headers();
+    let result = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &headers),
+        Path("ab".repeat(32)),
+        Method::GET,
+        headers,
+    )
+    .await;
+    assert!(matches!(result, Err(HubApiError::CasError(_))));
+    assert_eq!(visits.load(Ordering::SeqCst), 0);
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]

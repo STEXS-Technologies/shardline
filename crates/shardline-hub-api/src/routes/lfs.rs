@@ -1134,19 +1134,12 @@ async fn stream_hf_xet_object(
         .provider()
         .mint_token(&read_claims)
         .map_err(|_error| HubApiError::InvalidToken)?;
-    let client = state.http_client.as_ref().ok_or_else(|| {
-        HubApiError::CasError("internal Xet file reader is unavailable".to_owned())
-    })?;
+    let client = super::native_reader_http::client()?;
     let url = format!(
         "{}/v1/hub/xet-files/{oid}",
         state.public_base_url.trim_end_matches('/')
     );
-    // This is a verified file transfer, not a webhook delivery. Verification
-    // can outlive the webhook client's ten-second total request budget.
-    let mut request = client
-        .request(method.clone(), url)
-        .timeout(std::time::Duration::from_secs(300))
-        .bearer_auth(read_token);
+    let mut request = client.request(method.clone(), url).bearer_auth(read_token);
     for name in [
         axum::http::header::RANGE,
         axum::http::header::IF_RANGE,

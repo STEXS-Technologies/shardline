@@ -389,6 +389,11 @@ every file or host. Slow storage and full-file verification can still make
 small range requests expensive. Measure that cost for your workload before
 choosing a client timeout.
 
+Internal reads use a separate connection pool and can resolve the configured
+Shardline endpoint to private service addresses. Webhook delivery retains its
+public-only DNS policy. Internal reads do not follow redirects or use environment
+proxies, so their scoped token stays on the configured route.
+
 The analytical HTTP qualification uses DuckDB 1.5.5 and PyArrow 25.0.0, with
 unmodified Hub 2.2.0/hf_xet 1.7.0 uploads. It passes regular and native-Xet
 Parquet reads on local storage and PostgreSQL/MinIO, with combined or split

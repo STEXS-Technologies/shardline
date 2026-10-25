@@ -9,6 +9,7 @@ pub mod helpers;
 mod history;
 pub mod lfs;
 mod lfs_revision;
+mod native_reader_http;
 pub(crate) mod object_io;
 pub(crate) mod path_history;
 mod paths_info;

@@ -95,6 +95,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Separate internal Hub file-reader transport from webhook transport so private
+  service DNS works without weakening webhook SSRF checks or forwarding scoped
+  read credentials through redirects or environment proxies.
 - Give internal Hub Xet downloads their own transfer deadline and a bounded
   admission wait for analytical range bursts, preserving verification and active
   work limits. Keep internal URLs out of transfer error responses.
