@@ -443,8 +443,11 @@ so clients can fetch that range without forwarding their bearer token.
 Ordinary S3 presigned URLs grant access to the whole object and must not replace
 these scoped URLs for shared containers. MinIO qualification confirms that signing
 the exact `Range` header rejects omitted or changed ranges, expires and can be
-refreshed. Shardline continues serving its own URLs to retain repository authorization
-and content verification; direct AWS/R2 URL delivery is not qualified.
+refreshed. This is a provider-signature test only, not a supported download path.
+Download capabilities authorize Shardline endpoints only. Clients read through
+Shardline, which enforces repository authorization and content verification before
+serving backend bytes. Shardline does not issue backend MinIO, S3 or R2 download
+URLs to clients, and storage credentials remain on the server.
 An expired signed URL returns `403` when no bearer token is supplied, allowing
 the native client's URL provider to request fresh reconstruction metadata. A
 current bearer token for the same repository can still authorize the exact
