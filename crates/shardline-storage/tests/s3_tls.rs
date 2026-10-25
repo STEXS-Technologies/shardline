@@ -49,7 +49,8 @@ fn s3_https_trusted_root_roundtrip() {
         )
         .unwrap();
         assert!(
-            output.status.success(),
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
             "isolated HTTPS storage qualification failed (reject={reject})"
         );
     }

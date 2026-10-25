@@ -687,9 +687,14 @@ mod tests {
         ])
         .expect("owned HTTPS discovery fixture");
         let unrelated = HttpsDocumentFixture::start(&[]).expect("independent test CA");
-        for (ca, reject) in [
-            (fixture.ca_cert_path(), false),
-            (unrelated.ca_cert_path(), true),
+        let mut wrong_hostname = reqwest::Url::parse(fixture.origin()).expect("fixture origin");
+        wrong_hostname
+            .set_host(Some("oidc.invalid"))
+            .expect("fixture mismatch hostname");
+        for (ca, issuer, reject) in [
+            (fixture.ca_cert_path(), fixture.origin(), false),
+            (unrelated.ca_cert_path(), fixture.origin(), true),
+            (fixture.ca_cert_path(), wrong_hostname.as_str(), true),
         ] {
             let output = native_client_output(
                 std::process::Command::new(std::env::current_exe().expect("test executable"))
@@ -699,7 +704,8 @@ mod tests {
                         "--ignored",
                     ])
                     .env("SSL_CERT_FILE", ca)
-                    .env("SHARDLINE_OIDC_TLS_ISSUER", fixture.origin())
+                    .env("SHARDLINE_OIDC_TLS_ISSUER", issuer)
+                    .env("SHARDLINE_OIDC_TLS_ORIGIN", fixture.origin())
                     .env("SHARDLINE_OIDC_TLS_REJECT", reject.to_string()),
                 Duration::from_secs(30),
             )
@@ -710,7 +716,7 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(
-                output.status.success(),
+                output.status.success() && child_diagnostic.contains("1 passed; 0 failed"),
                 "OIDC HTTPS qualification failed (reject={reject}, discovery={}, jwks={})",
                 child_diagnostic.contains("DiscoveryFetch"),
                 child_diagnostic.contains("JwksFetch")
@@ -728,14 +734,46 @@ mod tests {
                 .expect("fixture CA"),
         )
         .expect("test CA certificate");
+        let origin = reqwest::Url::parse(
+            &std::env::var("SHARDLINE_OIDC_TLS_ORIGIN").expect("fixture origin"),
+        )
+        .expect("fixture URL");
+        let address =
+            std::net::SocketAddr::from(([127, 0, 0, 1], origin.port().expect("fixture port")));
         let client = Client::builder()
+            .no_proxy()
+            .resolve("oidc.invalid", address)
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .add_root_certificate(certificate)
             .build()
             .expect("verified fixture HTTP client");
+        let reject =
+            std::env::var("SHARDLINE_OIDC_TLS_REJECT").expect("trust expectation") == "true";
+        if reject {
+            let error = client
+                .get(format!(
+                    "{}/.well-known/openid-configuration",
+                    issuer.trim_end_matches('/')
+                ))
+                .send()
+                .await
+                .expect_err("invalid CA or hostname must fail TLS");
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            let mut certificate_error = false;
+            while let Some(current) = cause {
+                let diagnostic = current.to_string().to_lowercase();
+                certificate_error |=
+                    diagnostic.contains("certificate") || diagnostic.contains("unknownissuer");
+                cause = current.source();
+            }
+            assert!(
+                certificate_error,
+                "failure must identify certificate validation"
+            );
+        }
         let result = OidcProvider::from_client(client, &issuer, None, &[]).await;
-        if std::env::var("SHARDLINE_OIDC_TLS_REJECT").expect("trust expectation") == "true" {
+        if reject {
             assert!(
                 matches!(result, Err(OidcProviderError::DiscoveryFetch(_))),
                 "untrusted discovery must fail before parsing keys"
