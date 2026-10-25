@@ -10,7 +10,7 @@ use shardline_xet_core::{
 
 #[test]
 #[ignore = "requires owned Docker MinIO"]
-fn remote_native_snapshot_uses_one_get_and_still_detects_corruption() {
+fn remote_native_snapshot_uses_bounded_gets_and_still_detects_corruption() {
     let services = DockerLocalStack::builder()
         .with_minio()
         .start()
@@ -84,32 +84,91 @@ fn remote_native_snapshot_uses_one_get_and_still_detects_corruption() {
         issues: Vec::new(),
     };
     let mut reachability = FsckReachability::default();
-    for damaged in [false, true] {
-        if damaged {
+    let member_key = chunk_object_key(&member.hex()).unwrap();
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Case {
+        OptionalMissing,
+        RequiredMissing,
+        Valid,
+        Corrupt,
+        Oversized,
+        SourceCorrupt,
+    }
+    use Case::*;
+    for case in [
+        OptionalMissing,
+        RequiredMissing,
+        Valid,
+        Corrupt,
+        Oversized,
+        SourceCorrupt,
+    ] {
+        ObjectStore::delete_if_present(&store, &member_key).unwrap();
+        let member_bytes = match case {
+            Valid => Some(body.to_vec()),
+            Corrupt => Some(vec![b'!'; body.len()]),
+            Oversized => Some(vec![0; 2 * 1024 * 1024 + 1]),
+            OptionalMissing | RequiredMissing | SourceCorrupt => None,
+        };
+        if let Some(bytes) = member_bytes {
+            let integrity = ObjectIntegrity::new(chunk_hash(&bytes), bytes.len() as u64);
+            ObjectStore::put_if_absent(
+                &store,
+                &member_key,
+                ObjectBody::from_bytes(bytes.into()),
+                &integrity,
+            )
+            .unwrap();
+        }
+        if case == SourceCorrupt {
             proxy.arm();
         }
+        report.issues.clear();
         let gets = proxy.get_requests();
         let heads = proxy.head_requests();
         inspect_native_xet_term(
             &context,
             "native-record",
             &term,
-            false,
+            case != OptionalMissing,
             &mut reachability,
             &mut report,
             &mut None,
         )
         .unwrap();
-        assert_eq!(proxy.get_requests() - gets, 1);
-        // Healthy inspection still checks the independent member object's
-        // presence. There is no metadata request for the container itself.
-        assert_eq!(proxy.head_requests() - heads, usize::from(!damaged));
-        assert_eq!(report.is_clean(), !damaged);
-        if damaged {
-            assert!(matches!(
+        assert_eq!(
+            proxy.get_requests() - gets,
+            if case == SourceCorrupt { 1 } else { 2 },
+            "{case:?}"
+        );
+        // Normal members and missing members need no preceding HEAD. Only an
+        // oversized object uses metadata for its exact diagnostic length.
+        assert_eq!(
+            proxy.head_requests() - heads,
+            usize::from(case == Oversized),
+            "{case:?}"
+        );
+        match case {
+            OptionalMissing | Valid => assert!(report.is_clean(), "{case:?}"),
+            RequiredMissing => assert!(matches!(
+                report.issues.last().unwrap().detail,
+                FsckIssueDetail::ReferencedByNativeXetXorb { .. }
+            )),
+            Corrupt => assert!(matches!(
+                report.issues.last().unwrap().detail,
+                FsckIssueDetail::HashMismatch { .. }
+            )),
+            Oversized => assert!(matches!(
+                report.issues.last().unwrap().detail,
+                FsckIssueDetail::LengthMismatch {
+                    expected_length: 2097152,
+                    observed_length: 2097153
+                }
+            )),
+            SourceCorrupt => assert!(matches!(
                 report.issues.last().unwrap().detail,
                 FsckIssueDetail::XorbHashMismatch { .. }
-            ));
+            )),
         }
     }
 }

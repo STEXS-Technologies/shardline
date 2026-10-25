@@ -569,42 +569,55 @@ fn inspect_native_xet_term(
             .referenced_object_keys
             .insert(chunk_object_key.as_str().to_owned());
         let chunk_location = object_location_display(object_root, object_store, &chunk_object_key);
-        let chunk_metadata = match object_store.metadata(&chunk_object_key)? {
-            Some(chunk_metadata) => chunk_metadata,
-            None => {
-                // Native Xet records always store the individual chunk
-                // objects alongside the container.  XorbCdcV1 records from
-                // the ingestor store only the container, so a missing
-                // member object is expected there and must not be reported.
-                if require_member_chunks {
+        const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+        let (chunk_bytes, stored_length) =
+            match object_store.read_object_if_present(&chunk_object_key, MAX_CHUNK_BYTES) {
+                Ok(Some(observed)) => observed,
+                Ok(None) => {
+                    // Native Xet records always store the individual chunk
+                    // objects alongside the container.  XorbCdcV1 records from
+                    // the ingestor store only the container, so a missing
+                    // member object is expected there and must not be reported.
+                    if require_member_chunks {
+                        push_issue(
+                            report,
+                            FsckIssueKind::MissingChunk,
+                            chunk_location,
+                            FsckIssueDetail::ReferencedByNativeXetXorb {
+                                xorb_location: xorb_location.clone(),
+                            },
+                        )?;
+                    }
+                    continue;
+                }
+                Err(shardline_server_core::BoundedObjectReadError::ObjectTooLarge) => {
+                    // Normal members need only the length-checked full GET. Keep
+                    // the precise oversized-object diagnostic without accepting
+                    // an unbounded body. A changed/disappearing source fails closed.
+                    let metadata = object_store.metadata(&chunk_object_key)?.ok_or(
+                        shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch,
+                    )?;
+                    if metadata.length() <= MAX_CHUNK_BYTES {
+                        return Err(
+                        shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch
+                            .into(),
+                    );
+                    }
                     push_issue(
                         report,
-                        FsckIssueKind::MissingChunk,
+                        FsckIssueKind::ChunkLengthMismatch,
                         chunk_location,
-                        FsckIssueDetail::ReferencedByNativeXetXorb {
-                            xorb_location: xorb_location.clone(),
+                        FsckIssueDetail::LengthMismatch {
+                            expected_length: MAX_CHUNK_BYTES,
+                            observed_length: metadata.length(),
                         },
                     )?;
+                    continue;
                 }
-                continue;
-            }
-        };
-
-        const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
-        if chunk_metadata.length() > MAX_CHUNK_BYTES {
-            push_issue(
-                report,
-                FsckIssueKind::ChunkLengthMismatch,
-                chunk_location,
-                FsckIssueDetail::LengthMismatch {
-                    expected_length: MAX_CHUNK_BYTES,
-                    observed_length: chunk_metadata.length(),
-                },
-            )?;
-            continue;
-        }
-        let chunk_bytes =
-            read_full_object(object_store, &chunk_object_key, chunk_metadata.length())?;
+                Err(shardline_server_core::BoundedObjectReadError::Store(error)) => {
+                    return Err(error.into());
+                }
+            };
         // The validated Xorb descriptor commits to Xet's keyed data hash.
         // ObjectIntegrity uses Shardline's separate unkeyed storage digest;
         // comparing that digest to a native member identity flags healthy data.
@@ -623,14 +636,14 @@ fn inspect_native_xet_term(
                 },
             )?;
         }
-        if chunk_metadata.length() != unpacked_length {
+        if stored_length != unpacked_length {
             push_issue(
                 report,
                 FsckIssueKind::ChunkLengthMismatch,
                 chunk_location,
                 FsckIssueDetail::LengthMismatch {
                     expected_length: unpacked_length,
-                    observed_length: chunk_metadata.length(),
+                    observed_length: stored_length,
                 },
             )?;
         }
