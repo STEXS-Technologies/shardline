@@ -6,7 +6,9 @@
 //! provably inside the operation when we abort it — never a sleep guess.
 //! The harness aborts the server task and reopens the SAME root directory.
 //! This exercises interrupted-request recovery, not OS process termination;
-//! process SIGKILL is qualified separately by the deployment chaos suite.
+//! process SIGKILL is qualified separately by the deployment chaos suite and
+//! the backup/restore drill, which requires every SQLite handle to be gone
+//! before copying the database and its journal files.
 //!
 //! These tests are hermetic (SQLite metadata + local object store, no Docker)
 //! except `drill3_*`, which owns a disposable PostgreSQL Docker fixture.
@@ -41,6 +43,8 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
+
+mod backup_process;
 
 // ---------------------------------------------------------------------------
 // Auth / tokens — same signing key as the server, identical across restarts.
@@ -989,8 +993,9 @@ async fn drill8_client_disconnect_after_publish_object_stays_durable() {
 /// regenerate the inventory, and verify every acknowledged object byte-for-byte.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill9_backup_destroy_restore_fsck_and_download() {
+    backup_process::serve_child().await;
     let mut harness = DrillHarness::new(3600);
-    harness.spawn_server().await;
+    let mut server = backup_process::BackupProcess::spawn(&mut harness).await;
 
     let fixtures = [
         ("restore-a", deterministic_bytes(96 * 1024 + 3, 901)),
@@ -1009,7 +1014,23 @@ async fn drill9_backup_destroy_restore_fsck_and_download() {
         .unwrap();
     assert!(before_report.object_count > 0);
 
-    harness.kill_hard().await;
+    // Aborting only the HTTP task is insufficient: connection tasks and idle
+    // SQLite handles can still checkpoint while a raw directory copy runs.
+    // Wait for OS process termination before taking an offline snapshot.
+    let status = server.kill_and_wait();
+    assert!(
+        !status.success(),
+        "backup child must be forcibly terminated"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "backup child must receive SIGKILL"
+        );
+    }
     let backup = TempDir::new().unwrap();
     let snapshot = backup.path().join("snapshot");
     copy_directory_tree(&harness.root, &snapshot).unwrap();
