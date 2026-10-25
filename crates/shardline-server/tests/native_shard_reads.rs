@@ -3,6 +3,8 @@
 
 use std::{io::Cursor, sync::Arc};
 
+mod native_head;
+
 use sha2::{Digest, Sha256};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretString};
 use shardline_server_core::{DEFAULT_SHARD_METADATA_LIMITS, ServerObjectStore};

@@ -158,7 +158,6 @@ pub(super) async fn head_xorb(
         .try_acquire(weights::XORB_READ)
         .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&hash)?;
-    let total_length = state.backend.xorb_length(&hash).await?;
     if let Some(namespace) = repo.capability().namespace() {
         let reachable = state
             .backend
@@ -168,6 +167,7 @@ pub(super) async fn head_xorb(
             return Err(ServerError::NotFound);
         }
     }
+    let total_length = state.backend.xorb_length(&hash).await?;
     Ok((StatusCode::OK, [(CONTENT_LENGTH, total_length.to_string())]))
 }
 

@@ -1076,6 +1076,25 @@ distinguish executable residency from heap growth; they do not establish equal
 RSS, production memory requirements or PostgreSQL CPU cost. All paired tests
 passed the same coverage, denial, revocation and connection-reuse assertions.
 
+#### Denied native Xorb HEAD requests
+
+Native Xorb HEAD now checks published repository references before reading
+backend metadata. With an uploaded but unpublished 64 KiB Xorb, the original
+MinIO control sent one provider HEAD before returning 404; the new path sends
+none. Disposable local-metadata and PostgreSQL cases also confirm zero provider
+HEAD/GET requests for another repository's object and an unreferenced missing
+hash. Authorized HEAD retains HTTP 200, the correct `Content-Length`, one provider
+HEAD and no GETs.
+
+These are request counts, not a total-cost or throughput benchmark. Missing
+objects now encounter the repository lookup first; the metadata fallback costs
+described above remain relevant. Run the actual HTTP/provider checks with:
+
+```bash
+cargo nextest run -p shardline-server --features docker --test native_shard_reads \
+  --run-ignored all -E 'test(native_head::)'
+```
+
 #### PostgreSQL publication
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at

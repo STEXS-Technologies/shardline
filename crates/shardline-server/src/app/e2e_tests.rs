@@ -1458,12 +1458,10 @@ async fn reconstruction_not_found() {
 
 // ── Read-path admission gating ──────────────────────────────────────────
 //
-// `read_chunk`, `head_xorb`, and `read_xorb_transfer` each run an O(N)
-// repository-reference metadata scan (`repository_references_xorb` enumerates
-// the repo's latest + version records) with no LIMIT and no cache. They must be
-// admission-gated like the upload/reconstruction paths so a request flood
-// cannot drive unbounded per-request scans. When the admission gate is
-// saturated, every read handler rejects with 503 SERVICE_UNAVAILABLE.
+// Read authorization can fall back to repository-reference traversal when an
+// indexed candidate or named-file proof is insufficient. Admission bounds the
+// concurrent metadata and storage work, including those proportional fallbacks.
+// When the gate is saturated, every read handler rejects with 503.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_paths_are_admission_gated() {
