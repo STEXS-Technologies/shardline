@@ -34,6 +34,7 @@ use super::{ValidatedXorb, validate_serialized_xorb};
 mod blocking;
 mod chunk_writes;
 mod encoding;
+mod file_preparation;
 mod member_read;
 mod normalization;
 pub use member_read::read_verified_xorb_chunk;
@@ -292,19 +293,30 @@ async fn store_xorb_file_with_resources<R: Send + 'static>(
     path: &Path,
     resources: R,
 ) -> Result<StoredXorbUpload, XetAdapterError> {
-    let expected_hash_value = parse_xet_hash_hex(expected_hash)?;
-    let normalized = normalize_uploaded_xorb_file(expected_hash, path)?;
-    let path = normalized.as_ref().map_or(path, |file| file.path());
-    let mut file = File::open(path).map_err(XetAdapterError::Io)?;
-    let canonical_length = file.metadata().map_err(XetAdapterError::Io)?.len();
-    let validated = validate_serialized_xorb(&mut file, expected_hash_value)?;
+    let hash_for_preparation = expected_hash.to_owned();
+    let path_for_preparation = path.to_owned();
+    // Hold both staging and admission in the worker, including after caller
+    // cancellation. Preparation performs full synchronous reads and hashing.
+    let (prepared, resources) = blocking::cancellable_write((), move || {
+        Ok((
+            file_preparation::prepare(&hash_for_preparation, path_for_preparation)?,
+            resources,
+        ))
+    })
+    .await?;
+    let file_preparation::PreparedFile {
+        normalized,
+        mut file,
+        path: path_for_store,
+        validated,
+        integrity,
+        length: canonical_length,
+    } = prepared;
     let stored_bytes = chunk_writes::store(object_store, &mut file, &validated).await?;
     let key = xorb_object_key(expected_hash)?;
-    let integrity = ObjectIntegrity::new(chunk_hash_file(path)?, canonical_length);
     tracing::debug!(xorb_hash = expected_hash, "persisting verified Xorb");
     let store = object_store.clone();
     let key_for_store = key.clone();
-    let path_for_store = path.to_owned();
     let outcome = blocking::cancellable_write((normalized, resources), move || {
         let result = store.put_content_addressed_file(&key_for_store, &path_for_store, &integrity);
         encoding::resolve_conflict(&store, &key_for_store, &validated, result)

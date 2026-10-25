@@ -39,6 +39,51 @@ mod tests {
     };
 
     #[test]
+    fn cancelled_queued_file_preparation_never_reads_or_publishes_input() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let objects = shardline_server_core::ServerObjectStore::local(root.path()).unwrap();
+            let admission = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = admission.clone().acquire_owned().await.unwrap();
+            // Empty input would fail immediately if preparation still ran on
+            // this async thread. Occupy the only worker before polling it.
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let path = file.path().to_owned();
+            let hash = "a".repeat(64);
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (finish, wait) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+            });
+            started.await.unwrap();
+            let mut queued = Box::pin(super::super::store_owned_xorb_file(
+                &objects, &hash, file, permit,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(queued.as_mut().poll(&mut context).is_pending());
+            assert!(path.exists());
+            assert_eq!(admission.available_permits(), 0);
+            drop(queued);
+            finish.send(()).unwrap();
+            occupied.await.unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            assert!(!path.exists());
+            assert_eq!(admission.available_permits(), 1);
+            let key = super::super::xorb_object_key(&hash).unwrap();
+            assert!(
+                shardline_storage::ObjectStore::metadata(&objects, &key)
+                    .unwrap()
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
     fn cancelled_queued_native_file_write_never_runs() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(1)
