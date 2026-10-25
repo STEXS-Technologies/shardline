@@ -811,11 +811,7 @@ fn build_file_records_with_cache(
                     chunk.unpacked_len(),
                 )
             });
-        if shardline_xet_core::merklehash::file_hash_from_iter(members)
-            != file_info.metadata.file_hash
-        {
-            return Err(InvalidSerializedShardError::ParserRejectedMetadata.into());
-        }
+        verification::verify_file_hash(file_info.metadata.file_hash, members, checkpoint)?;
 
         let sha256 = digest.finish()?;
         records.push(FileRecord {

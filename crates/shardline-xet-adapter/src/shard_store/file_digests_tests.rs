@@ -173,6 +173,93 @@ fn cancelled_digest_reload_stops_s3_materialization_and_can_retry() {
 }
 
 #[test]
+fn nonempty_preparation_cancellation_at_each_checkpoint_never_publishes() {
+    use shardline_storage::ObjectPrefix;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().unwrap();
+    let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
+    let (hash, leaves) = store_members(&objects, &[b"first", b"second"]);
+    let repeated: Vec<_> = leaves.iter().copied().cycle().take(128).collect();
+    let mut shard = MDBInMemoryShard::default();
+    shard
+        .add_file_reconstruction_info(MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(file_hash(&repeated), 64, false, false),
+            segments: vec![FileDataSequenceEntry::new(hash, 11, 0, 2); 64],
+            verification: Vec::new(),
+            metadata_ext: None,
+        })
+        .unwrap();
+    let bytes = shard.to_bytes().unwrap();
+    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+    let checks = AtomicUsize::new(0);
+    drop(
+        prepare_uploaded_shard_with_checkpoint(
+            &mut Cursor::new(&bytes),
+            &objects,
+            Some(&scope),
+            DEFAULT_SHARD_METADATA_LIMITS,
+            &|| {
+                checks.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap(),
+    );
+    let total = checks.load(Ordering::SeqCst);
+    assert!(
+        total > 128,
+        "fixture must exercise repeated member processing"
+    );
+    for cut in 0..total {
+        checks.store(0, Ordering::SeqCst);
+        assert!(
+            prepare_uploaded_shard_with_checkpoint(
+                &mut Cursor::new(&bytes),
+                &objects,
+                Some(&scope),
+                DEFAULT_SHARD_METADATA_LIMITS,
+                &|| {
+                    if checks.fetch_add(1, Ordering::SeqCst) >= cut {
+                        Err(std::io::ErrorKind::Interrupted.into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .is_err(),
+            "cancelled preparation at checkpoint {cut} returned publishable state"
+        );
+    }
+    let mut stored = 0;
+    objects
+        .visit_prefix(&ObjectPrefix::parse("shards/").unwrap(), |_| {
+            stored += 1;
+            Ok::<(), XetAdapterError>(())
+        })
+        .unwrap();
+    assert_eq!(stored, 0);
+    let prepared = prepare_uploaded_shard(
+        &mut Cursor::new(&bytes),
+        &objects,
+        Some(&scope),
+        DEFAULT_SHARD_METADATA_LIMITS,
+    )
+    .unwrap();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(
+            prepared.register(|records, _, _, identities, _| async move {
+                assert_eq!(records.len(), 1);
+                assert_eq!(identities.len(), 1);
+                assert_eq!(records[0].total_bytes, 704);
+                Ok(())
+            }),
+        )
+        .unwrap();
+}
+
+#[test]
 fn cancelled_source_validation_stops_inside_container_and_can_retry() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let root = tempfile::tempdir().unwrap();

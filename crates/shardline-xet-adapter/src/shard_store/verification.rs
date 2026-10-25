@@ -8,6 +8,33 @@ use shardline_xet_core::{
 
 use crate::{ValidatedXorbChunk, error::XetAdapterError};
 
+/// Repeated reconstruction terms can describe many more members than the shard
+/// contains. Stop aggregation when its request is cancelled without accepting
+/// the identity of the partially consumed sequence.
+pub(super) fn verify_file_hash(
+    expected: MerkleHash,
+    members: impl Iterator<Item = (MerkleHash, u64)>,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(), XetAdapterError> {
+    let mut cancellation = None;
+    let members = members.take_while(|_| match checkpoint() {
+        Ok(()) => true,
+        Err(error) => {
+            cancellation = Some(error);
+            false
+        }
+    });
+    let actual = shardline_xet_core::merklehash::file_hash_from_iter(members);
+    if let Some(error) = cancellation {
+        return Err(error.into());
+    }
+    checkpoint()?;
+    if actual != expected {
+        return Err(InvalidSerializedShardError::ParserRejectedMetadata.into());
+    }
+    Ok(())
+}
+
 pub(super) fn verify_term_length(
     supplied: &FileDataSequenceEntry,
     verified: &[ValidatedXorbChunk],
@@ -59,6 +86,42 @@ mod tests {
         merklehash::compute_data_hash,
         metadata_shard::xorb_structs::{XorbChunkSequenceEntry, XorbChunkSequenceHeader},
     };
+
+    #[test]
+    fn file_identity_preserves_wire_hash_and_rejects_cancelled_prefix() {
+        use shardline_xet_core::merklehash::file_hash;
+        use std::cell::Cell;
+
+        let members: Vec<_> = (0..1024_u64)
+            .map(|index| (compute_data_hash(&index.to_le_bytes()), index + 1))
+            .collect();
+        let expected = file_hash(&members);
+        verify_file_hash(expected, members.iter().copied(), &|| Ok(())).unwrap();
+        assert!(
+            verify_file_hash(MerkleHash::default(), members.iter().copied(), &|| Ok(())).is_err()
+        );
+        let checks = Cell::new(0);
+        let error = verify_file_hash(expected, members.iter().copied(), &|| {
+            let seen = checks.get();
+            checks.set(seen + 1);
+            if seen == 3 {
+                Err(std::io::ErrorKind::Interrupted.into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(error, XetAdapterError::Io(ref error)
+            if error.kind() == std::io::ErrorKind::Interrupted));
+        assert_eq!(checks.get(), 4);
+        verify_file_hash(file_hash(&[]), std::iter::empty(), &|| Ok(())).unwrap();
+        assert!(
+            verify_file_hash(file_hash(&[]), std::iter::empty(), &|| {
+                Err(std::io::ErrorKind::Interrupted.into())
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn term_length_is_checked_against_only_the_selected_verified_members() {
