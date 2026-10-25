@@ -5,6 +5,10 @@ use std::process::Command;
 fn required_missing_hf_fails_instead_of_passing() {
     for test in [
         "native_huggingface_cli_model_and_dataset_flows_work_against_shardline",
+        "native_hf_cli_and_s3_clients_coexist_on_one_server",
+        "native_huggingface_whoami::native_huggingface_permissive_whoami_preserves_anonymous_identity",
+        "native_huggingface_expiry::native_huggingface_cli_recovers_after_expired_xorb_url",
+        "native_huggingface_expiry::native_huggingface_cli_recovers_after_expired_xorb_url_split_roles",
         "native_huggingface_http_analytics::duckdb_queries_authenticated_regular_and_xet_hub_ranges",
         "native_huggingface_http_analytics::duckdb_queries_authenticated_hub_ranges_split_roles",
     ] {
