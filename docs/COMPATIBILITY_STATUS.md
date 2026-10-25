@@ -117,9 +117,9 @@ test matrix, not a claim that the current branch has passed release CI.
 
 | `huggingface_hub` | `hf_xet` | Required workflows |
 | --- | --- | --- |
-| 1.25.1 | 1.5.2 | 1 GiB native upload/download with concurrent slow HTTP readers on local and PostgreSQL/MinIO storage; expired download URL and refresh |
-| 1.25.1 | 1.6.0 | Large transfers, interrupted uploads, URL refresh and identity checks |
-| 1.25.1 | 1.7.0 | Model/dataset upload and download on local and PostgreSQL/MinIO storage, URL refresh and interrupted uploads |
+| 1.25.1 | 1.5.2 | 1 GiB native upload/download with concurrent slow HTTP readers on local and PostgreSQL/MinIO storage, combined and separate API/transfer roles; expired download URL and refresh |
+| 1.25.1 | 1.6.0 | 1 GiB transfers with combined and separate API/transfer roles, interrupted uploads, URL refresh and identity checks |
+| 1.25.1 | 1.7.0 | Model/dataset upload and download on local and PostgreSQL/MinIO storage, 1 GiB transfers with combined and separate API/transfer roles, URL refresh and interrupted uploads |
 | 2.2.0 | 1.7.0 | Model/dataset upload and download on SQLite/filesystem, PostgreSQL/filesystem and PostgreSQL/MinIO storage; URL refresh with combined and split API/transfer roles; endpoint-local stock `ModelCard.push_to_hub()` on local and PostgreSQL/MinIO storage |
 
 Versions outside this matrix require qualification before support is claimed.

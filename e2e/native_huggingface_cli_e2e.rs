@@ -1260,7 +1260,17 @@ async fn start_hub_runtime() -> Result<HubRuntime, TestError> {
 }
 
 async fn read_metric_counter(runtime: &HubRuntime, name: &str) -> Result<u64, TestError> {
-    let response = reqwest::get(format!("{}/metrics", runtime.base_url)).await?;
+    read_metric_counter_at(&runtime.base_url, name).await
+}
+
+async fn read_metric_counter_at(base: &str, name: &str) -> Result<u64, TestError> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?
+        .get(format!("{base}/metrics"))
+        .send()
+        .await?;
     let metrics = response.error_for_status()?.text().await?;
     let value = metrics
         .lines()
@@ -1438,6 +1448,37 @@ async fn verify_plain_xet_downloads(
         } else {
             assert!(!response.headers().contains_key("content-range"));
             assert!(response.bytes().await?.is_empty());
+        }
+    }
+    let native_url = format!(
+        "{}/v1/hub/xet-files/{}",
+        runtime.base_url,
+        hex::encode(Sha256::digest(content))
+    );
+    for endpoint in [&url, &native_url] {
+        for (name, expected) in [
+            ("If-Match", reqwest::StatusCode::PRECONDITION_FAILED),
+            ("If-None-Match", reqwest::StatusCode::OK),
+        ] {
+            let mut fields = reqwest::header::HeaderMap::new();
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())?;
+            fields.append(name.clone(), etag.parse()?);
+            fields.append(name, "broken".parse()?);
+            let response = client
+                .get(endpoint)
+                .bearer_auth(&runtime.model_token)
+                .headers(fields)
+                .send()
+                .await?;
+            assert_eq!(response.status(), expected);
+            if expected == reqwest::StatusCode::OK {
+                assert!(
+                    response.bytes().await?.as_ref() == content,
+                    "malformed cache validator must preserve the complete download"
+                );
+            } else {
+                assert!(response.bytes().await?.is_empty());
+            }
         }
     }
     let response = client

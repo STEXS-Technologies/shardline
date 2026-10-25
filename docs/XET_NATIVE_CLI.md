@@ -83,20 +83,23 @@ For large-file qualification, run the explicit Linux tests with stock `hf` and
 `hf_xet` installed on `PATH`:
 
 ```bash
-cargo test --manifest-path e2e/Cargo.toml --test native_huggingface_cli_e2e \
-  native_huggingface_one_gib_upload_and_download_remain_bounded -- --ignored --nocapture
-cargo test --manifest-path e2e/Cargo.toml --test native_huggingface_cli_e2e \
-  native_huggingface_one_gib_with_postgres_and_minio -- --ignored --nocapture
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo nextest run --locked \
+  --manifest-path e2e/Cargo.toml --test native_huggingface_cli_e2e \
+  --run-ignored only -E 'test(native_huggingface_one_gib)'
 ```
 
-These require Docker for PostgreSQL/MinIO and fail if prerequisites are missing.
+This checks combined and separate API/transfer roles on local storage and
+PostgreSQL/MinIO. The remote cases require Docker; missing prerequisites fail.
 They generate 1 GiB of incompressible content, require native Xorb/shard ingestion,
 compare a cold-cache stock-client download byte-for-byte, then verify two
 concurrent slow ordinary HTTP downloads against the file's SHA-256. Linux peak
 RSS covers the server/test process, excluding the stock client and backend
 services. Each test requires the process peak to stay below 384 MiB. This bounds
 the tested workload; sustained saturation still requires separate qualification.
-Run each command separately so other tests do not contaminate process-wide RSS.
+Nextest isolates each case in its own process and runs these large cases one at
+a time. The split-role cases use the documented streaming front door and require
+successful ranged downloads through the Shardline transfer role. Both roles run
+inside the measured test process; their combined peak must meet the same ceiling.
 
 The same large-file and two-reader checks pass with Hub 1.25.1 / hf_xet 1.5.2
 on local storage and PostgreSQL/MinIO. Process I/O counters include more than

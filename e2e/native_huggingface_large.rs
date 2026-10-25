@@ -92,6 +92,51 @@ async fn native_huggingface_one_gib_with_postgres_and_minio() -> Result<(), Test
     qualify_large_transfer(runtime).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit 1 GiB stock-client qualification with separate API and transfer roles"]
+async fn native_huggingface_one_gib_with_split_roles() -> Result<(), TestError> {
+    qualify_split_large_transfer(None).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit 1 GiB split-role qualification with Docker PostgreSQL and MinIO"]
+async fn native_huggingface_one_gib_with_split_roles_postgres_and_minio() -> Result<(), TestError> {
+    let services = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .with_minio()
+        .start()?
+        .ok_or("large split-role qualification requires Docker")?;
+    assert!(
+        services.s3_raw_config(None).is_some(),
+        "remote split-role qualification requires S3 objects"
+    );
+    qualify_split_large_transfer(Some(services)).await
+}
+
+async fn qualify_split_large_transfer(
+    services: Option<shardline_test_support::DockerLocalStack>,
+) -> Result<(), TestError> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let public = format!("http://{}", listener.local_addr()?);
+    let mut runtime =
+        start_runtime_with_roles(&[ServerFrontend::Hub], services, Some(&public), true).await?;
+    let transfer = &runtime.transfer.as_ref().ok_or("missing transfer role")?.0;
+    let (_proxy, observations) =
+        native_huggingface_proxy::start_observing_ranges(listener, &runtime.base_url, transfer);
+    runtime.base_url = public;
+    qualify_large_transfer(runtime).await?;
+    assert!(
+        observations
+            .lock()
+            .map_err(|_| "range observations poisoned")?
+            .iter()
+            .any(|(path, status)| path.starts_with("/transfer/xorb/")
+                && *status == reqwest::StatusCode::PARTIAL_CONTENT),
+        "cold stock-client download must traverse the Shardline transfer role"
+    );
+    Ok(())
+}
+
 async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
     let _subscriber = tracing_subscriber::fmt()
         .with_env_filter("shardline_server=warn,shardline_server::app::operational=debug,shardline_xet_adapter=debug")
@@ -137,7 +182,7 @@ async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
     );
     let download = working.path().join("download");
     let cold_home = tempfile::tempdir()?;
-    let native_reads = read_metric_counter(&runtime, "shardline_xet_xorb_downloads_total").await?;
+    let native_reads = native_download_counter(&runtime).await?;
     let download_started = std::time::Instant::now();
     run_hf(
         &runtime,
@@ -159,7 +204,7 @@ async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
         1024.0 / download_seconds
     );
     assert!(
-        read_metric_counter(&runtime, "shardline_xet_xorb_downloads_total").await? > native_reads,
+        native_download_counter(&runtime).await? > native_reads,
         "cold stock-client download must use the native Xorb transfer path"
     );
     let downloaded = download.join("one-gib.bin");
@@ -202,9 +247,20 @@ async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
     Ok(())
 }
 
+async fn native_download_counter(runtime: &HubRuntime) -> Result<u64, TestError> {
+    let base = runtime
+        .transfer
+        .as_ref()
+        .map_or(runtime.base_url.as_str(), |(url, _)| url.as_str());
+    read_metric_counter_at(base, "shardline_xet_xorb_downloads_total").await
+}
+
 async fn verify_slow_http_download(runtime: &HubRuntime, digest: &str) -> Result<(), TestError> {
     // Also exercise the ordinary HTTP path that previously buffered whole files.
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?
         .get(format!("{}/v1/hub/xet-files/{digest}", runtime.base_url))
         .bearer_auth(&runtime.model_token)
         .send()
