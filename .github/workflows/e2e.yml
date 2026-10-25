@@ -153,11 +153,11 @@ jobs:
           cargo nextest run --locked -p shardline --test fsck_cli
           --run-ignored all -E 'test(native_xet_fsck_with_postgres_and_minio)'
 
-      - name: Qualify HTTP disconnect during remote Xet verification and downloads
+      - name: Qualify stalled Xet verification progress and HTTP disconnects
         run: >-
           cargo nextest run --locked -p shardline-server --features docker --lib
           --run-ignored all
-          -E 'test(disconnect_during_remote_shard_verification_prevents_publication_and_allows_retry) | test(disconnected_remote_native_download_stops_before_next_source_and_retries_verified)'
+          -E 'test(app::shard_progress::cancellation_http::) | test(disconnected_remote_native_download_stops_before_next_source_and_retries_verified)'
 
       - name: Qualify native shard source reuse and corruption rejection
         run: >-

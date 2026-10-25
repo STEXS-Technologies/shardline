@@ -61,6 +61,13 @@ and bounded admission remain attached to publication. Disconnecting cancels the
 operation without a detached worker; retry through the normal recovery path if
 the final result was lost.
 
+When admission is full, a new registration receives HTTP 503 with `Retry-After`
+instead of starting another verification. A PostgreSQL/MinIO HTTP test holds a
+source read across two validation events, checks this rejection, and verifies
+that no file record appears before storage is released. It also checks that a
+disconnected registration can retry safely. This qualifies that stalled-read
+case, rather than sustained saturation across multiple hosts.
+
 The stock `hf_xet` 1.6.0 and 1.7.0 Hub model/dataset workflows pass with both local storage
 and disposable PostgreSQL/MinIO. Separate tests cover terminal errors,
 authentication, cross-node PostgreSQL visibility, session loss and lock release
