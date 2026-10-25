@@ -143,6 +143,7 @@ impl DrillHarness {
         }
     }
 
+    #[cfg(feature = "docker")]
     fn with_postgres(mut self, url: &str) -> Self {
         self.index_postgres_url = Some(url.to_owned());
         self
@@ -446,6 +447,7 @@ async fn wait_part_evidence(
 }
 
 /// Migrate the owned PostgreSQL fixture; the server does not self-migrate.
+#[cfg(feature = "docker")]
 async fn ensure_dev_postgres_migrated(url: &str) {
     let mut last = None;
     for _ in 0..5 {
@@ -850,6 +852,7 @@ async fn drill2_gc_abort_mid_mark_recovery_and_fixed_point() {
 // DRILL 3 — PostgreSQL-backed upload interruption (owned Docker fixture)
 // ===========================================================================
 
+#[cfg(feature = "docker")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill3_postgres_kill_mid_upload_recovery() {
     let stack = shardline_test_support::DockerLocalStack::builder()

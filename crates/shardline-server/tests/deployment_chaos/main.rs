@@ -674,16 +674,16 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
 }
 
 async fn try_boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
-    if !shardline_test_support::DockerLocalStack::docker_available() {
+    let docker = tokio::task::spawn_blocking(|| {
+        shardline_test_support::native_client_output(
+            Command::new("docker").arg("version"),
+            Duration::from_secs(10),
+        )
+    })
+    .await
+    .unwrap();
+    if !docker.is_ok_and(|output| output.status.success()) {
         eprintln!("SKIPPED: {drill} — Docker is unavailable");
-        return None;
-    }
-    let docker = docker_run(&["version"]).await;
-    if !docker.status.success() {
-        eprintln!(
-            "SKIPPED: {drill} — Docker is unavailable: {}",
-            docker.status
-        );
         return None;
     }
     let project = format!(

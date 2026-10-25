@@ -759,6 +759,7 @@ async fn drill_extreme_2a_dead_redis_boots_and_serves() {
 /// restarted with the same URL after the owned Redis container stops. Objects
 /// must remain byte-exact. This checks S3 availability with an unavailable cache;
 /// the S3 GET path does not itself use the Xet reconstruction cache.
+#[cfg(feature = "docker")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_extreme_2b_live_redis_then_redis_down() {
     let stack = shardline_test_support::DockerLocalStack::builder()
@@ -935,6 +936,7 @@ async fn drill_extreme_3_stale_read_pinned_snapshot() {
 /// persisted container evidence while EOF is withheld (before publication) must
 /// leave the committed v1 byte-exact; a subsequent full PUT must restore the
 /// metadata path functionality post-crash.
+#[cfg(feature = "docker")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_extreme_4_postgres_kill_mid_transaction() {
     let stack = shardline_test_support::DockerLocalStack::builder()
