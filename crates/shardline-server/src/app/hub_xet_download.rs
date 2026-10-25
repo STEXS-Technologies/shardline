@@ -154,15 +154,9 @@ fn admitted_stream(
 }
 
 fn etag_matches(headers: &HeaderMap, name: header::HeaderName, etag: &str, weak: bool) -> bool {
-    headers
-        .get_all(name)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .any(|value| {
-            value == "*" || value == etag || (weak && value.strip_prefix("W/") == Some(etag))
-        })
+    headers.get_all(name).iter().any(|value| {
+        shardline_protocol::entity_tag_list_matches(value.as_bytes(), etag.as_bytes(), weak)
+    })
 }
 
 fn select(
@@ -322,6 +316,28 @@ mod tests {
         assert!(matches!(
             select(&headers, &Method::HEAD, 10, etag).unwrap(),
             Selection::Full
+        ));
+    }
+
+    #[test]
+    fn opaque_list_member_preserves_following_validator() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::IF_MATCH,
+            axum::http::HeaderValue::from_bytes(b"\"\x80,opaque\", \"identity\"").unwrap(),
+        );
+        assert!(matches!(
+            select(&headers, &Method::GET, 10, "\"identity\"").unwrap(),
+            Selection::Full
+        ));
+        headers.remove(header::IF_MATCH);
+        headers.insert(
+            header::IF_NONE_MATCH,
+            axum::http::HeaderValue::from_bytes(b"\"\x80,opaque\", W/\"identity\"").unwrap(),
+        );
+        assert!(matches!(
+            select(&headers, &Method::GET, 10, "\"identity\"").unwrap(),
+            Selection::Status(StatusCode::NOT_MODIFIED)
         ));
     }
 }

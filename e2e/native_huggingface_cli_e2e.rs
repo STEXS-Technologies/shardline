@@ -1419,6 +1419,27 @@ async fn verify_plain_xet_downloads(
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(response.bytes().await?.as_ref(), content);
+    for (name, expected) in [
+        ("If-Match", reqwest::StatusCode::PARTIAL_CONTENT),
+        ("If-None-Match", reqwest::StatusCode::NOT_MODIFIED),
+    ] {
+        let mut validators = b"\"\x80,opaque\", ".to_vec();
+        validators.extend_from_slice(etag.as_bytes());
+        let response = client
+            .get(&url)
+            .bearer_auth(&runtime.model_token)
+            .header("Range", "bytes=0-3")
+            .header(name, reqwest::header::HeaderValue::from_bytes(&validators)?)
+            .send()
+            .await?;
+        assert_eq!(response.status(), expected);
+        if expected == reqwest::StatusCode::PARTIAL_CONTENT {
+            assert_eq!(response.bytes().await?.as_ref(), &content[..4]);
+        } else {
+            assert!(!response.headers().contains_key("content-range"));
+            assert!(response.bytes().await?.is_empty());
+        }
+    }
     let response = client
         .get(&url)
         .bearer_auth(&runtime.model_token)

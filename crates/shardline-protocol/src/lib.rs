@@ -63,6 +63,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod entity_tags;
 mod hash;
 mod ranges;
 mod security;
@@ -72,6 +73,7 @@ mod token;
 /// Signed read credentials whose revision denotes one immutable Hub commit.
 /// CAS servers must check file membership before resolving a storage revision.
 pub const HUB_XET_READ_TOKEN_ISSUER: &str = "shardline-hub-commit-read-v1";
+pub use entity_tags::entity_tag_list_matches;
 pub use hash::{HashParseError, ShardlineHash};
 pub use ranges::{ByteRange, ChunkRange, HttpRangeParseError, RangeError, parse_http_byte_range};
 pub use security::{SecretBytes, SecretString};

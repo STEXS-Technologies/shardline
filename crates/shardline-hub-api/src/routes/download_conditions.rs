@@ -36,21 +36,33 @@ pub(super) fn precondition_response(
 }
 
 fn matches_etag(headers: &HeaderMap, name: header::HeaderName, etag: &str, weak: bool) -> bool {
-    headers
-        .get_all(name)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .any(|value| {
-            value == "*" || value == etag || (weak && value.strip_prefix("W/") == Some(etag))
-        })
+    headers.get_all(name).iter().any(|value| {
+        shardline_protocol::entity_tag_list_matches(value.as_bytes(), etag.as_bytes(), weak)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn opaque_list_member_preserves_following_validator() {
+        let mut headers = HeaderMap::new();
+        for name in [header::IF_MATCH, header::IF_NONE_MATCH] {
+            headers.clear();
+            headers.insert(
+                name.clone(),
+                axum::http::HeaderValue::from_bytes(b"\"\x80,opaque\", \"hash\"").unwrap(),
+            );
+            let response = precondition_response(&headers, "\"hash\"").unwrap();
+            if name == header::IF_MATCH {
+                assert!(response.is_none());
+            } else {
+                assert_eq!(response.unwrap().status(), StatusCode::NOT_MODIFIED);
+            }
+        }
+    }
 
     #[test]
     fn strong_precondition_precedes_weak_cache_validation_and_range() {
