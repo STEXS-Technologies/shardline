@@ -865,26 +865,39 @@ async fn migrate_chaos_postgres(url: &str) {
 
 async fn migrate_chaos_postgres_with_binary(binary: &Path, url: &str) {
     let mut last_output = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     for attempt in 0..60 {
-        match Command::new(binary)
-            .args(["db", "migrate", "up", "--database-url", url])
-            .output()
-        {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let binary = binary.to_owned();
+        let url = url.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            shardline_test_support::native_client_output(
+                Command::new(binary)
+                    .args(["db", "migrate", "up"])
+                    .env("SHARDLINE_INDEX_POSTGRES_URL", url),
+                remaining,
+            )
+        })
+        .await
+        .expect("migration subprocess task did not panic");
+        match result {
             Ok(output) if output.status.success() => return,
             Ok(output) => {
-                last_output = format!(
-                    "status={} stdout={} stderr={}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                last_output = format!("status={}", output.status);
             }
-            Err(error) => last_output = error.to_string(),
+            Err(error) => last_output = format!("subprocess error: {:?}", error.kind()),
         }
         let delay = 250_u64.saturating_add((attempt as u64).saturating_mul(250));
-        tokio::time::sleep(Duration::from_millis(delay.min(2_000))).await;
+        tokio::time::sleep(
+            Duration::from_millis(delay.min(2_000))
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+        )
+        .await;
     }
-    panic!("migrate_chaos_postgres_with_binary: {binary:?} could not migrate {url}: {last_output}");
+    panic!("migrate_chaos_postgres_with_binary: {binary:?} could not migrate: {last_output}");
 }
 
 // ---------------------------------------------------------------------------
