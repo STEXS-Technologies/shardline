@@ -768,26 +768,16 @@ pub(crate) async fn repository_references_hash_in_scope<RecordAdapter>(
 ) -> Result<bool, ServerError>
 where
     RecordAdapter: RecordStore + Sync,
+    RecordAdapter::Error: Send,
     ServerError: From<RecordAdapter::Error>,
 {
-    let mut found = false;
-    RecordTraversal::visit_repository_hash_records(
+    crate::record_store::any_repository_hash_record(
         record_store,
         repository_scope,
         hash_hex,
-        |entry| {
-            if found {
-                return Ok::<(), ServerError>(());
-            }
-            if stored_record_references_hash(&entry.bytes, hash_hex, repository_scope)? {
-                found = true;
-            }
-            Ok(())
-        },
+        |bytes| stored_record_references_hash(bytes, hash_hex, repository_scope),
     )
-    .await?;
-
-    Ok(found)
+    .await
 }
 
 fn stored_record_references_hash(

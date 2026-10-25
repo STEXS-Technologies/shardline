@@ -65,12 +65,16 @@ pub(super) async fn repository_references_xorb(
     repository_scope: &RepositoryScope,
 ) -> Result<bool, ServerError> {
     let mut found = false;
-    record_store
-        .visit_repository_hash_records(repository_scope, hash_hex, |entry| {
-            inspect_repository_record_for_xorb(&mut found, &entry.bytes, hash_hex, repository_scope)
-        })
-        .await?;
-    Ok(found)
+    crate::record_store::any_repository_hash_record(
+        record_store,
+        repository_scope,
+        hash_hex,
+        |bytes| {
+            inspect_repository_record_for_xorb(&mut found, bytes, hash_hex, repository_scope)?;
+            Ok(found)
+        },
+    )
+    .await
 }
 
 fn inspect_repository_record_for_xorb(
