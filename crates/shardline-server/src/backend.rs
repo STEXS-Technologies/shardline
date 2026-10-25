@@ -40,6 +40,7 @@ mod dedup;
 mod delta;
 mod hub_read;
 mod lfs_locks;
+mod xorb_authorization;
 
 #[cfg(test)]
 pub(crate) mod s3_delete_fault_injection {

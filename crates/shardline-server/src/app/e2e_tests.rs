@@ -3,6 +3,8 @@
 //! Each test group builds a minimal [`Router`] with only the routes needed for that
 //! protocol and sends real HTTP requests via [`tower::ServiceExt::oneshot`].
 
+mod xorb_file_hint;
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,

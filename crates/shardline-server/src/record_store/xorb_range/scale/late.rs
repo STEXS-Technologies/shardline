@@ -6,12 +6,13 @@ use shardline_protocol::{ByteRange, RepositoryProvider, RepositoryScope};
 pub(super) async fn verify(
     store: &PostgresRecordStore,
     pool: &sqlx::PgPool,
+    backend: Option<&crate::ServerBackend>,
     scope: &RepositoryScope,
     hash: &str,
     last_key: &str,
-    count: i64,
-    revoke: bool,
+    case: (i64, bool),
 ) {
+    let (count, revoke) = case;
     // Only the last candidate covers the second serialized term. Every earlier
     // record remains a valid, authorized reference to the first term.
     assert_eq!(
@@ -42,6 +43,29 @@ pub(super) async fn verify(
             (label, count, expected),
         )
         .await;
+    }
+    if let Some(backend) = backend {
+        let file_id: String =
+            sqlx::query_scalar("SELECT file_id FROM shardline_file_records WHERE record_key=$1")
+                .bind(last_key)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let started = Instant::now();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(120),
+                backend.file_xorb_coverage(&file_id, hash, scope, ByteRange::new(12, 23).unwrap()),
+            )
+            .await
+            .expect("synthetic file proof exceeded 120 seconds")
+            .unwrap()
+            .is_some()
+        );
+        eprintln!(
+            "range_scale case=file_hint records={count} proof_ms={:.3}",
+            milliseconds(started.elapsed())
+        );
     }
     let outsider =
         RepositoryScope::new(RepositoryProvider::Generic, "outsider", "range", None).unwrap();

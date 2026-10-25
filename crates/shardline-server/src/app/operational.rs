@@ -183,7 +183,7 @@ pub(super) async fn read_xorb_transfer(
     Query(query): Query<XorbTransferQuery>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
-    // Admission gate for the repository-reference metadata scan (see read_chunk).
+    // Bound repository authorization, including historical discovery fallback.
     let _admit = state
         .admission
         .try_acquire(weights::XORB_READ)
@@ -238,10 +238,27 @@ pub(super) async fn read_xorb_transfer(
     // error precedence: unauthorized callers must not learn range validity.
     let requested = parse_required_xorb_transfer_range(&headers, total_length);
     let coverage = if let Some(namespace) = repository_namespace.as_ref() {
-        let allowed = state
-            .backend
-            .repository_xorb_coverage(&hash, namespace, requested.as_ref().ok().copied())
-            .await?;
+        let file_proof = match (read_grant.as_ref(), requested.as_ref()) {
+            (Some(grant), Ok(range)) => {
+                state
+                    .backend
+                    .file_xorb_coverage(&grant.file_id, &hash, namespace, *range)
+                    .await?
+            }
+            _ => None,
+        };
+        // A missing/replaced file or incomplete proof contributes nothing to
+        // fallback discovery. Preserve historical, combined-record and footer
+        // access with a fresh internally consistent repository traversal.
+        let allowed = match file_proof {
+            Some(coverage) => coverage,
+            None => {
+                state
+                    .backend
+                    .repository_xorb_coverage(&hash, namespace, requested.as_ref().ok().copied())
+                    .await?
+            }
+        };
         if allowed.is_empty() {
             return Err(ServerError::NotFound);
         }

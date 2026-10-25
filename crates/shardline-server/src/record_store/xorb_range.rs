@@ -74,6 +74,16 @@ impl Coverage {
         hash: &str,
     ) -> Result<(), ServerError> {
         let record = parse_stored_file_record_bytes(bytes)?;
+        self.include_record(&record, scope, hash);
+        Ok(())
+    }
+
+    fn include_record(
+        &mut self,
+        record: &shardline_index::FileRecord,
+        scope: &RepositoryScope,
+        hash: &str,
+    ) {
         if record.repository_scope.as_ref() == Some(scope) {
             for member in &record.chunks {
                 if member.hash == hash && member.packed_end > member.packed_start {
@@ -81,7 +91,19 @@ impl Coverage {
                 }
             }
         }
-        Ok(())
+    }
+
+    /// A file hint can short-circuit discovery only when its current
+    /// authoritative record independently proves every requested byte.
+    pub(crate) fn from_file_record(
+        record: &shardline_index::FileRecord,
+        scope: &RepositoryScope,
+        hash: &str,
+        requested: ByteRange,
+    ) -> Option<Self> {
+        let mut coverage = Self::default();
+        coverage.include_record(record, scope, hash);
+        coverage.covers(requested).then_some(coverage)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

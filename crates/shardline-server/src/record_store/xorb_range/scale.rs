@@ -12,16 +12,22 @@ mod late;
 #[tokio::test]
 #[ignore = "large synthetic PostgreSQL diagnostic; requires an owner-migrated disposable database"]
 async fn shared_hash_range_authorization_scale() {
-    verify_scale(false).await;
+    verify_scale(false, false).await;
 }
 
 #[tokio::test]
 #[ignore = "large synthetic PostgreSQL late/multi-record/negative authorization diagnostic"]
 async fn shared_hash_late_and_negative_authorization_scale() {
-    verify_scale(true).await;
+    verify_scale(true, false).await;
 }
 
-async fn verify_scale(include_late: bool) {
+#[tokio::test]
+#[ignore = "large synthetic PostgreSQL signed-file hint comparison; requires an owner-migrated disposable database"]
+async fn signed_file_hint_authorization_scale() {
+    verify_scale(true, true).await;
+}
+
+async fn verify_scale(include_late: bool, file_hint: bool) {
     let fixture = crate::test_support::postgres_fixture::PostgresFixture::new()
         .await
         .expect("range scale diagnostic requires DATABASE_URL");
@@ -48,7 +54,11 @@ async fn verify_scale(include_late: bool) {
         }],
     };
     store.commit_file_version_metadata(&record).await.unwrap();
-    let template = store.version_record_locator(&record);
+    let template = if file_hint {
+        store.latest_record_locator(&record)
+    } else {
+        store.version_record_locator(&record)
+    };
     let mut inserted = 2_i64;
     let maximum = std::env::var("SHARDLINE_RANGE_SCALE_MAX_RECORDS")
         .map_or(1_000_000, |value| value.parse::<i64>().unwrap());
@@ -125,11 +135,11 @@ async fn verify_scale(include_late: bool) {
             late::verify(
                 &store,
                 &pool,
+                file_hint.then_some(&fixture.backend),
                 &scope,
                 &hash,
                 &last_key,
-                count,
-                count == maximum,
+                (count, count == maximum),
             )
             .await;
         }

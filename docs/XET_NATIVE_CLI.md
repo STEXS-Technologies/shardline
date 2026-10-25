@@ -235,6 +235,13 @@ it never combines partial permissions from the initial lookup. That fallback
 requires an extra lookup. See `docs/BENCHMARKS.md` for the synthetic shared-hash
 measurement and its limits.
 
+Signed reconstruction URLs name a file. Shardline first checks that file's
+current authoritative record for the exact repository, container and requested
+bytes. A complete proof avoids searching other files sharing the container.
+Missing, replaced or incomplete records use the existing historical and
+multi-record lookup; partial proofs from separate reads are never combined.
+This changes neither the download URL format nor content verification.
+
 Existing deployments can rebuild a missing descriptor from their retained shard
 mapping and fully verified Xorb. Cached descriptors are checked against the
 native content root, published file terms, object existence and PostgreSQL's

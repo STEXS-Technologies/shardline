@@ -865,6 +865,38 @@ These checks do not close the wider throughput, concurrency or recovery matrix.
 
 #### PostgreSQL shared-hash authorization
 
+Signed reconstruction downloads can now check the named file's current
+authoritative record before searching every file sharing its container. In a
+warm, unoptimized October 25 diagnostic with one million valid records, a
+range found in the last matching record took 28,639.743 ms through repository
+discovery and 0.301 ms through the exact-file proof on the same dataset.
+At 100,000 records, the exact-file proof took 0.360 ms. Each result was checked;
+combined ranges, denials and committed revocation also passed their existing
+fallback checks. These are individual synthetic samples on a shared host with
+other qualification work running, not production latency or HTTP throughput.
+
+The shortcut requires a complete current-file proof for the exact repository,
+container and requested bytes. It does not authorize from the signed file name
+alone. A missing or replaced file, historical-only ownership, a combined proof,
+or footer access can still require repository discovery. No metadata format,
+object layout or integrity check changes; a failed shortcut adds one lookup.
+This does not establish constant-time authorization for every request or measure
+S3, disk, WAL or monetary savings.
+
+To compare both lookup paths on one disposable, owner-migrated PostgreSQL
+database with `DATABASE_URL` exported:
+
+```bash
+cargo test --locked -p shardline-server --lib --all-features \
+  record_store::xorb_range::scale::signed_file_hint_authorization_scale \
+  -- --ignored --exact --nocapture
+```
+
+This diagnostic seeds latest records so the named file is directly readable;
+the historical-record diagnostic below remains separate. Use the same build
+profile for comparisons. Production qualification must measure optimized
+executables, concurrency and tail latency separately.
+
 An October 25 synthetic diagnostic exercises the application range proof with
 2, 10,000, 100,000 and 1,000,000 valid file records sharing one member hash.
 The first authoritative record covers the requested bytes. Each variant uses a

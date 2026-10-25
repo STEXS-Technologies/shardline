@@ -476,7 +476,7 @@ impl LocalBackend {
         Ok(pending_files)
     }
 
-    pub(super) async fn read_record(
+    pub(crate) async fn read_record(
         &self,
         file_id: &str,
         content_hash: Option<&str>,

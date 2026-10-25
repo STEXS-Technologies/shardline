@@ -32,7 +32,7 @@ cargo nextest run --locked -p shardline-server --lib --all-features --no-fail-fa
 # unconfigured developer run. They use local object storage, not MinIO.
 cargo nextest run --locked -p shardline-server --lib --all-features \
     --run-ignored only \
-    -E 'test(copy_integrity::postgres_) & !test(postgres_minio_)' --no-fail-fast
+    -E '(test(copy_integrity::postgres_) & !test(postgres_minio_)) | test(file_hint_observes_postgres_authoritative_replacement_and_revocation)' --no-fail-fast
 # Native frontend contracts require SDKs and remote-storage fixtures; the E2E
 # workflow runs them explicitly through verify-protocol-conformance.sh.
 cargo nextest run --locked -p shardline --all-features --test db_migrate_e2e --no-fail-fast
