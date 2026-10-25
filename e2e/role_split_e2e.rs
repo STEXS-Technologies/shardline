@@ -33,11 +33,7 @@ use support::ServerE2eInvariantError;
 /// topology through the authenticated admin API (the unauthenticated /readyz
 /// no longer carries runtime metadata).
 const TEST_ADMIN_TOKEN: &str = "role-split-admin-read-token";
-use tokio::{
-    net::TcpListener,
-    spawn,
-    time::{sleep, timeout},
-};
+use tokio::{net::TcpListener, spawn, time::timeout};
 use xet_client::cas_client::auth::AuthConfig;
 use xet_data::processing::{
     FileDownloadSession, FileUploadSession, Sha256Policy, XetFileInfo,
@@ -184,29 +180,15 @@ async fn exercise_role(
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20))
+        .await
+        .map_err(Into::into)
 }
 
 async fn wait_for_ready(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..100 {
-        if let Ok(response) = client.get(format!("{base_url}/readyz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become ready").into())
+    support::wait_for_endpoint(client, base_url, "readyz", 100, Duration::from_millis(20))
+        .await
+        .map_err(Into::into)
 }
 
 async fn start_frontend_role_runtime(

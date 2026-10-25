@@ -38,7 +38,7 @@ use shardline_server::{
     validate_serialized_xorb,
 };
 use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, time::sleep};
+use tokio::{net::TcpListener, spawn};
 
 type TestError = Box<dyn Error + Send + Sync>;
 
@@ -1027,16 +1027,9 @@ async fn read_server_stats_for_repository(
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), TestError> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20))
+        .await
+        .map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]

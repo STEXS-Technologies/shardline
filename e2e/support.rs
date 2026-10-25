@@ -43,17 +43,42 @@ pub(crate) fn bearer_token(
 
 pub(crate) async fn wait_for_health(base_url: &str) -> Result<(), Box<dyn StdError>> {
     let client = Client::new();
-    for _attempt in 0..50 {
-        let response = client.get(format!("{base_url}/healthz")).send().await;
-        if let Ok(response) = response
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
+    wait_for_endpoint(&client, base_url, "healthz", 50, Duration::from_millis(20)).await?;
+    Ok(())
+}
 
-    Err(ServerTestInvariantError::new("server did not become healthy").into())
+pub(crate) async fn wait_for_endpoint(
+    client: &Client,
+    base_url: &str,
+    endpoint: &str,
+    attempts: usize,
+    interval: Duration,
+) -> Result<(), ServerE2eInvariantError> {
+    let poll = async {
+        for _attempt in 0..attempts {
+            let response = client
+                .get(format!("{base_url}/{endpoint}"))
+                .timeout(Duration::from_secs(1))
+                .send()
+                .await;
+            if let Ok(response) = response
+                && response.status().is_success()
+            {
+                return Ok(());
+            }
+            sleep(interval).await;
+        }
+        Err(ServerE2eInvariantError::new(
+            "server endpoint did not become ready",
+        ))
+    };
+    tokio::time::timeout(Duration::from_secs(10), poll)
+        .await
+        .unwrap_or_else(|_| {
+            Err(ServerE2eInvariantError::new(
+                "server probe exceeded its deadline",
+            ))
+        })
 }
 
 pub(crate) fn test_byte_stream(items: Vec<Result<Bytes, ServerError>>) -> ServerByteStream {

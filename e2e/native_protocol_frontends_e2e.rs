@@ -32,7 +32,7 @@ use shardline_server::{
 };
 use shardline_test_support::DockerLocalStack;
 use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, task::JoinHandle, time::sleep};
+use tokio::{net::TcpListener, spawn, task::JoinHandle};
 
 type TestError = Box<dyn Error + Send + Sync>;
 
@@ -1692,17 +1692,9 @@ fn scoped_token(scope: TokenScope, owner: &str, repo: &str) -> Result<String, Te
 
 async fn wait_for_health(base_url: &str) -> Result<(), TestError> {
     let client = Client::new();
-    for _attempt in 0..50 {
-        let response = client.get(format!("{base_url}/healthz")).send().await;
-        if let Ok(response) = response
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(&client, base_url, "healthz", 50, Duration::from_millis(20))
+        .await
+        .map_err(Into::into)
 }
 
 fn command_available(program: &str) -> bool {

@@ -1,5 +1,6 @@
 #![allow(clippy::indexing_slicing, clippy::panic_in_result_fn)]
 
+mod health_deadline_requirements;
 mod support;
 
 use std::{
