@@ -94,6 +94,21 @@ impl Mutation {
 }
 
 struct StopOnDrop(std::process::Child);
+impl StopOnDrop {
+    async fn wait_bounded(&mut self) -> Result<std::process::ExitStatus> {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Some(status) = self.0.try_wait()? {
+                    return Ok::<_, std::io::Error>(status);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_elapsed| "owned rebuild CLI exceeded its test deadline")?
+        .map_err(Into::into)
+    }
+}
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
         let _kill = self.0.kill();
@@ -231,14 +246,17 @@ async fn verify_cut(mutation: Mutation, hard_kill: bool) -> Result<()> {
         .ok_or("missing rebuild identity")?;
     assert_eq!(identity.operation, "IndexRebuild");
     assert!(
-        Command::new("kill")
-            .arg(if hard_kill { "-KILL" } else { "-TERM" })
-            .arg(original.0.id().to_string())
-            .status()?
-            .success()
+        shardline_test_support::native_client_output(
+            Command::new("kill")
+                .arg(if hard_kill { "-KILL" } else { "-TERM" })
+                .arg(original.0.id().to_string()),
+            Duration::from_secs(5)
+        )?
+        .status
+        .success()
     );
     assert_eq!(
-        original.0.wait()?.signal(),
+        original.wait_bounded().await?.signal(),
         Some(if hard_kill { 9 } else { 15 })
     );
     let owns: bool = sqlx::query_scalar(
@@ -302,10 +320,10 @@ async fn verify_cut(mutation: Mutation, hard_kill: bool) -> Result<()> {
     );
     let before = fs::read(workspace.join("tasks.sqlite"))?;
     let before_wal = fs::read(workspace.join("tasks.sqlite-wal")).ok();
-    let inspection = command()
-        .args(["history", "--root"])
-        .arg(root.path())
-        .output()?;
+    let inspection = shardline_test_support::native_client_output(
+        command().args(["history", "--root"]).arg(root.path()),
+        Duration::from_secs(30),
+    )?;
     assert!(inspection.status.success());
     assert_eq!(
         heads().await?,
@@ -313,18 +331,19 @@ async fn verify_cut(mutation: Mutation, hard_kill: bool) -> Result<()> {
         "inspection does not resume the interrupted rebuild"
     );
     mutation.seed(root.path(), &admin, 2).await?;
-    let fresh_child = command()
-        .args(["index", "rebuild", "--root"])
-        .arg(root.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let fresh_pid = fresh_child.id();
-    let fresh = fresh_child.wait_with_output()?;
+    let mut fresh_child = StopOnDrop(
+        command()
+            .args(["index", "rebuild", "--root"])
+            .arg(root.path())
+            .stdout(fs::File::create(scratch.path().join("fresh.stdout"))?)
+            .stderr(fs::File::create(scratch.path().join("fresh.stderr"))?)
+            .spawn()?,
+    );
+    let fresh_pid = fresh_child.0.id();
+    let fresh = fresh_child.wait_bounded().await?;
     assert!(
-        fresh.status.success(),
-        "{}",
-        String::from_utf8_lossy(&fresh.stderr)
+        fresh.success(),
+        "fresh rebuild CLI failed; output remains in the private fixture"
     );
     assert_eq!(
         heads().await?,
@@ -370,10 +389,10 @@ async fn verify_cut(mutation: Mutation, hard_kill: bool) -> Result<()> {
         fs::read(workspace.join("tasks.sqlite-wal")).ok(),
         before_wal
     );
-    let history = command()
-        .args(["history", "--root"])
-        .arg(root.path())
-        .output()?;
+    let history = shardline_test_support::native_client_output(
+        command().args(["history", "--root"]).arg(root.path()),
+        Duration::from_secs(30),
+    )?;
     assert!(history.status.success());
     let page: serde_json::Value = serde_json::from_slice(&history.stdout)?;
     let tasks = page
