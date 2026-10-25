@@ -18,7 +18,11 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The full pinned-client matrix reaches Hub 2.2 after ~87 minutes on a
+    # hosted runner. Keep time for its remaining rollout, LFS and S3 gates
+    # instead of cancelling completed qualification and rebuilding on retry.
+    # Individual process/transfer deadlines remain enforced by the tests.
+    timeout-minutes: 150
     services:
       postgres:
         image: postgres:16
