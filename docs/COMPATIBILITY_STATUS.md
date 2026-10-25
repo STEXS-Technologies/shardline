@@ -70,6 +70,23 @@ storage or provider-billing saving.
 
 ### Client Test Execution
 
+The following S3 frontend clients pass the real-HTTP source-tree suite on
+SQLite/filesystem storage with the legacy access-key-as-token credential mode.
+The suite requires every listed tool and reports missing tools as failures in
+mandatory qualification. These results do not qualify every client operation,
+verified SigV4, remote storage, split roles or a released binary; those have
+separate tests.
+
+| Client | Tested version | Executed workflow |
+| --- | --- | --- |
+| AWS CLI | 1.46.1 | Upload, download, copy and delete |
+| MinIO `mc` | RELEASE.2025-08-13T08-35-41Z | Object round trip, listing/stat, multipart upload and recursive mirror/removal |
+| Boto3 | 1.43.95 | Object and multipart SDK round trips |
+| `s3cmd` | 2.4.0 | Upload, download, list and delete |
+| `rclone` | 1.75.0 | Copy, list, read and delete |
+| PyArrow | 25.0.0 | Parquet write, read and metadata inspection |
+| DuckDB with PyArrow | 1.5.5 / 25.0.0 | Parquet glob, filtering, aggregation and write |
+
 Targeted stock Git LFS 3.7.1 and 3.6.1 checks pass push/pull, fetch-all and
 byte-exact downloads with local storage, plus a dedicated MinIO-backed transfer.
 Both versions also pass lock creation/listing/verification, competing owners,
