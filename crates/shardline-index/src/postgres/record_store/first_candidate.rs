@@ -32,6 +32,11 @@ pub(super) fn read<'operation>(
         )
         .bind(shared_repository_scope_key(Some(repository)))
         .bind(hash)
+        // LIMIT 1 is sensitive to hash frequency: a generic plan trained on
+        // shared content can scan the record-key index for an absent hash.
+        // Keep parameter-aware planning local to this probe, without changing
+        // connection-wide planner settings or the authoritative join.
+        .persistent(false)
         .fetch_optional(&store.pool)
         .await?;
         let Some(row) = row else {

@@ -125,6 +125,18 @@ async fn complete_range_proof_releases_postgres_connection_and_preserves_incompl
             .unwrap()
         );
     }
+    // A hash shared by many records can bias PostgreSQL's generic LIMIT plan
+    // toward a record-key scan. Replan this probe for its actual bound hash;
+    // repeated successful probes must not leave that statement cached.
+    let cached_probes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_prepared_statements
+         WHERE position('ORDER BY m.record_key LIMIT 1' in statement)>0
+           AND position('pg_prepared_statements' in statement)=0",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cached_probes, 0);
     assert!(
         repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 12).unwrap())
             .await

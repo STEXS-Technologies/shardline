@@ -956,6 +956,34 @@ orchestration inside the test process, but exclude PostgreSQL and measure neithe
 object-store I/O nor production concurrency. This exchanges a small bounded
 buffer for fewer thread handoffs; it does not reduce the database result set.
 
+The separate first-candidate probe uses an unnamed statement so PostgreSQL can
+plan for the requested hash instead of reusing a generic plan trained on common
+content. Its authorization join and connection-wide planner settings are
+unchanged. In a subsequent optimized million-record run, wrong-scope and
+missing-hash denials took 0.592 and 0.421 ms, respectively; fallback proofs still
+took 3.3–3.5 seconds. This does not eliminate proportional fallback work.
+
+Three alternating 100,000-record pairs measured these trade-offs against the
+batched implementation with its cached first probe:
+
+| Measurement | Cached probe | Unnamed probe |
+| --- | ---: | ---: |
+| Median wrong-scope denial, ms | 18.594 | 0.558 |
+| Median missing-hash denial, ms | 4.002 | 0.436 |
+| Median warm successful probe, ms | 0.1575 | 0.486 |
+| Median application user + system CPU, seconds | 1.49 | 1.50 |
+| Median peak application RSS, KiB | 20,476 | 30,828 |
+
+The cached missing-hash samples varied from 3.073 to 183.081 ms. Replanning costs
+an extra round trip and increases successful-probe latency in this fixture.
+Separate two-record tests reproduced the RSS difference. Allocation profiling
+measured almost identical peak heap allocations (about 590 KB); sampled process
+maps placed the additional resident memory in executable file mappings, with
+about 0.75 MiB anonymous resident memory in both processes. These observations
+distinguish executable residency from heap growth; they do not establish equal
+RSS, production memory requirements or PostgreSQL CPU cost. All paired tests
+passed the same coverage, denial, revocation and connection-reuse assertions.
+
 #### PostgreSQL publication
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
