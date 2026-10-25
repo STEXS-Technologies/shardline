@@ -77,6 +77,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   byte, retaining gap, footer and repository-isolation checks.
 - Bound PostgreSQL's first-candidate authorization query, avoiding large result
   transfers when one record proves access; retain full traversal when needed.
+- Reduce PostgreSQL authorization overhead for containers shared by many files
+  with bounded record-conversion batches, retaining access checks, corruption
+  reporting and cancellation accounting.
 - Overlap native Xet member writes on S3 within a bounded memory budget,
   retaining full validation, conditional writes and publication ordering.
 - Avoid scratch files when GC verifies S3 containers up to 2 MiB, using a fixed

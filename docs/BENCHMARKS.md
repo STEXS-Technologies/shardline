@@ -920,6 +920,42 @@ test or a measurement of cold storage. Compare equivalent build profiles and
 record late, combined and denied proofs separately from early matches. A fast
 early match must not be presented as bounded lookup cost for all ranges.
 
+An optimized, all-features diagnostic on October 25 compared the per-record
+blocking handoff with bounded conversion batches. Both runs seeded one million
+valid records and passed every proof, denial, committed-revocation and same-pool
+reuse assertion:
+
+| Proof at one million records | Per-record handoff, ms | Bounded batches, ms |
+| --- | ---: | ---: |
+| Match in last record | 9,114 | 3,489 |
+| Combined range | 9,165 | 3,637 |
+| Uncovered range denied | 9,805 | 3,637 |
+| Deleted grant denied | 9,029 | 3,246 |
+
+The fallback still reads and verifies authoritative records from one SQL
+snapshot. Batching amortizes blocking-pool handoffs for up to sixteen already
+available rows, targeting 64 KiB of raw row values plus one oversized row per
+admitted batch. It retains the existing global admission budget, does not wait
+for speculative network rows, and preserves ordered errors and early proof
+completion. These bounds describe the owned batch, not total process RSS or
+SQL driver's existing buffers.
+
+These are single shared-host measurements, with short profiling attachments
+overlapping some proofs and unrelated activity during fixture setup. Complete
+test duration was about 198 seconds before and 196 seconds after; setup dominates
+that total. The table measures a specific fallback, not upload/download throughput,
+production tail latency or backend savings. The scan remains proportional to
+candidate count, and missing-hash queries are unaffected by conversion batching.
+
+Three additional alternating release-build pairs at 100,000 records all passed.
+Their median late/combined/uncovered proof times were 974/971/1,011 ms before
+and 409/418/390 ms after. Whole-process user plus system CPU medians fell from
+4.43 to 1.54 seconds. Median peak RSS increased from 20,084 to 21,108 KiB;
+individual paired increases were 176–1,044 KiB. Resource figures include fixture
+orchestration inside the test process, but exclude PostgreSQL and measure neither
+object-store I/O nor production concurrency. This exchanges a small bounded
+buffer for fewer thread handoffs; it does not reduce the database result set.
+
 #### PostgreSQL publication
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at

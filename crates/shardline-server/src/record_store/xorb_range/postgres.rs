@@ -62,7 +62,40 @@ async fn complete_range_proof_releases_postgres_connection_and_preserves_incompl
             .is_none()
     );
     record.file_id = "bb".into();
+    record.chunks[0].packed_start = 12;
+    record.chunks[0].packed_end = 24;
     store.commit_file_version_metadata(&record).await.unwrap();
+    let mut corrupt = record.clone();
+    corrupt.file_id = "cc".into();
+    store.commit_file_version_metadata(&corrupt).await.unwrap();
+    sqlx::query("UPDATE shardline_file_records SET record='{}' WHERE file_id='cc'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO shardline_record_membership(record_key,scope_key,member_hash)
+         SELECT record_key,scope_key,$1 FROM shardline_file_records WHERE file_id='cc'",
+    )
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The first probe is partial. Traversal must combine aa and bb, then stop
+    // before a later corrupt candidate even when conversion batches read ahead.
+    assert!(
+        repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 23).unwrap())
+            .await
+            .unwrap()
+    );
+    assert!(
+        repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 24).unwrap())
+            .await
+            .is_err()
+    );
+    sqlx::query("DELETE FROM shardline_file_records WHERE file_id='cc'")
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("UPDATE shardline_file_records SET record='{}' WHERE file_id='bb'")
         .execute(&pool)
         .await

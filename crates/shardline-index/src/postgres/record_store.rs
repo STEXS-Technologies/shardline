@@ -2,6 +2,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use std::{collections::HashSet, str::FromStr};
 
+mod candidate_batch;
 mod first_candidate;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -1127,19 +1128,16 @@ impl RecordTraversal for super::PostgresRecordStore {
             .bind(hash_hex)
             .fetch(&self.pool);
             loop {
-                let permit = admit_record_conversion().await.map_err(Into::into)?;
-                let Some(row) = rows
-                    .try_next()
-                    .await
-                    .map_err(PostgresMetadataStoreError::from)
-                    .map_err(Into::into)?
-                else {
+                let batch = candidate_batch::read(&mut rows).await.map_err(Into::into)?;
+                for record in batch.records {
+                    visitor(record.map_err(Into::into)?)?;
+                }
+                if let Some(error) = batch.error {
+                    return Err(error.into());
+                }
+                if batch.finished {
                     break;
-                };
-                let record = run_record_conversion(permit, move || stored_record_from_row(&row))
-                    .await
-                    .map_err(Into::into)?;
-                visitor(record)?;
+                }
             }
             Ok(())
         })
