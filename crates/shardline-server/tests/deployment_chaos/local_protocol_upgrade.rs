@@ -4,6 +4,7 @@ use super::*;
 use shardline_index::{LocalRecordStore, XetFileIdentity};
 
 mod creation_policy;
+mod git_publication;
 mod hub_history;
 mod maintenance;
 mod native_xet;

@@ -281,7 +281,7 @@ jobs:
           unset DATABASE_URL SHARDLINE_INDEX_POSTGRES_URL
           cargo nextest run --locked -p shardline-server --features docker \
             --test deployment_chaos --run-ignored only --test-threads 1 \
-            --success-output immediate -E 'test(hub_history::)'
+            --success-output immediate -E 'test(hub_history::) | test(git_publication::)'
 
       - name: Qualify stock Git LFS transfers with MinIO
         run: >-

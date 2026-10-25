@@ -103,6 +103,12 @@ findings; fresh-client reads then verify the regular history and native bytes.
 This checks healthy-data rebuild preservation, not recovery from corrupted Hub
 metadata or concurrent publication during rebuild.
 
+A separate actual-process Git drill kills the candidate after it commits an
+atomic two-branch push, before the client receives the result. On SQLite/local
+and PostgreSQL/MinIO, restart preserves both branch heads; a retry succeeds and
+a fresh clone has exact bytes and passes `git fsck --strict --full`. This covers
+that publication boundary, not every possible crash point.
+
 Hub revision IDs have a rollout boundary: 1.12.1 does not understand the new
 public Git IDs returned in SDK commit fields. It returns 404 for those IDs,
 although the corresponding content remains readable by `main` and the legacy
