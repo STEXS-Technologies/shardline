@@ -1,3 +1,4 @@
+mod k8s_cluster_requirements;
 mod support;
 
 use std::{
@@ -76,34 +77,53 @@ impl Drop for LocalClusterRuntime {
 }
 
 impl ClusterConfig {
-    fn from_env() -> Option<Self> {
-        let base_url = var("SHARDLINE_K8S_E2E_BASE_URL").ok()?;
-        let bucket = var("SHARDLINE_K8S_E2E_S3_BUCKET").ok()?;
-        let region =
-            var("SHARDLINE_K8S_E2E_S3_REGION").unwrap_or_else(|_error| "us-east-1".to_owned());
-        let endpoint = var("SHARDLINE_K8S_E2E_S3_ENDPOINT").ok();
-        let access_key_id = var("SHARDLINE_K8S_E2E_S3_ACCESS_KEY_ID").ok();
-        let secret_access_key = var("SHARDLINE_K8S_E2E_S3_SECRET_ACCESS_KEY").ok();
-        let allow_http = var("SHARDLINE_K8S_E2E_S3_ALLOW_HTTP")
-            .ok()
+    fn from_env() -> Result<Option<Self>, TestError> {
+        let configured = std::env::vars_os().any(|(name, _)| {
+            name.to_str()
+                .is_some_and(|name| name.starts_with("SHARDLINE_K8S_E2E_"))
+        });
+        Self::from_values(configured, |name| var(name).ok())
+    }
+
+    fn from_values(
+        configured: bool,
+        value: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Self>, TestError> {
+        if !configured {
+            return Ok(None);
+        }
+        let required = |name| {
+            value(name)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    IoError::other(format!(
+                        "configured Kubernetes qualification requires non-empty {name}"
+                    ))
+                })
+        };
+        let base_url = required("SHARDLINE_K8S_E2E_BASE_URL")?;
+        let bucket = required("SHARDLINE_K8S_E2E_S3_BUCKET")?;
+        let region = value("SHARDLINE_K8S_E2E_S3_REGION").unwrap_or_else(|| "us-east-1".to_owned());
+        let endpoint = value("SHARDLINE_K8S_E2E_S3_ENDPOINT");
+        let access_key_id = value("SHARDLINE_K8S_E2E_S3_ACCESS_KEY_ID");
+        let secret_access_key = value("SHARDLINE_K8S_E2E_S3_SECRET_ACCESS_KEY");
+        let allow_http = value("SHARDLINE_K8S_E2E_S3_ALLOW_HTTP")
             .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes"));
 
-        Some(Self {
-            transfer_url: var("SHARDLINE_K8S_E2E_TRANSFER_URL")
-                .unwrap_or_else(|_error| base_url.clone()),
+        Ok(Some(Self {
+            transfer_url: value("SHARDLINE_K8S_E2E_TRANSFER_URL")
+                .unwrap_or_else(|| base_url.clone()),
             base_url,
-            metrics_url: var("SHARDLINE_K8S_E2E_METRICS_URL").ok(),
-            metrics_token: var("SHARDLINE_K8S_E2E_METRICS_TOKEN").ok(),
-            provider: var("SHARDLINE_K8S_E2E_PROVIDER")
-                .unwrap_or_else(|_error| "generic".to_owned()),
-            owner: var("SHARDLINE_K8S_E2E_OWNER").unwrap_or_else(|_error| "team".to_owned()),
-            repo: var("SHARDLINE_K8S_E2E_REPO").unwrap_or_else(|_error| "assets".to_owned()),
-            subject: var("SHARDLINE_K8S_E2E_SUBJECT")
-                .unwrap_or_else(|_error| "operator".to_owned()),
-            provider_key: var("SHARDLINE_K8S_E2E_PROVIDER_KEY")
-                .unwrap_or_else(|_error| "local-provider-bootstrap-key".to_owned()),
-            postgres_url: var("SHARDLINE_K8S_E2E_POSTGRES_URL").ok()?,
-            redis_url: var("SHARDLINE_K8S_E2E_REDIS_URL").ok()?,
+            metrics_url: value("SHARDLINE_K8S_E2E_METRICS_URL"),
+            metrics_token: value("SHARDLINE_K8S_E2E_METRICS_TOKEN"),
+            provider: value("SHARDLINE_K8S_E2E_PROVIDER").unwrap_or_else(|| "generic".to_owned()),
+            owner: value("SHARDLINE_K8S_E2E_OWNER").unwrap_or_else(|| "team".to_owned()),
+            repo: value("SHARDLINE_K8S_E2E_REPO").unwrap_or_else(|| "assets".to_owned()),
+            subject: value("SHARDLINE_K8S_E2E_SUBJECT").unwrap_or_else(|| "operator".to_owned()),
+            provider_key: value("SHARDLINE_K8S_E2E_PROVIDER_KEY")
+                .unwrap_or_else(|| "local-provider-bootstrap-key".to_owned()),
+            postgres_url: required("SHARDLINE_K8S_E2E_POSTGRES_URL")?,
+            redis_url: required("SHARDLINE_K8S_E2E_REDIS_URL")?,
             s3_config: S3ObjectStoreConfig::new(bucket, region)
                 .with_endpoint(endpoint)
                 .with_credentials(
@@ -112,7 +132,7 @@ impl ClusterConfig {
                     None,
                 )
                 .with_allow_http(allow_http),
-        })
+        }))
     }
 }
 
@@ -313,7 +333,7 @@ struct ProviderRoute<'route> {
 #[ignore = "requires k8s cluster / S3 / Postgres / Garnet infrastructure"]
 async fn k8s_cluster_native_xet_sparse_mutation_flow_uses_s3_postgres_and_garnet() {
     let result = async {
-        let local_runtime = if let Some(config) = ClusterConfig::from_env() {
+        let local_runtime = if let Some(config) = ClusterConfig::from_env()? {
             (config, None)
         } else {
             let Some(runtime) = start_local_cluster_runtime()

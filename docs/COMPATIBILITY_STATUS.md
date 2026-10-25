@@ -288,9 +288,13 @@ both releases before running the full server library.
 
 The E2E job separately selects the ignored native Xet PostgreSQL/MinIO test and
 the two Bazel flows. Kubernetes and kind tests still require their dedicated
-deployment fixtures. The live GitHub/Gitea bridge test is explicitly ignored by
-default because it requires external credentials and test repositories. Selecting
-it explicitly requires its clients and complete configuration; missing prerequisites
+deployment fixtures. The Kubernetes protocol test uses local Docker services only
+when no `SHARDLINE_K8S_E2E_*` configuration is supplied. A partially configured external
+cluster fails instead of qualifying a replacement local stack.
+
+The live GitHub/Gitea bridge test is explicitly ignored by default because it
+requires external credentials and test repositories. Selecting it explicitly
+requires its clients and complete configuration; missing prerequisites
 or failed identity lookups fail the test. A default E2E pass does not qualify that live integration.
 Likewise, optional developer runs without the required-client flag can omit
 tool-dependent flows. Keep these limits separate from executed native-client
