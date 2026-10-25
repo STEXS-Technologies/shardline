@@ -1418,6 +1418,19 @@ async fn verify_plain_xet_downloads(
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(response.bytes().await?.as_ref(), content);
+    let response = client
+        .get(&url)
+        .bearer_auth(&runtime.model_token)
+        .header("Range", "bytes=0-3")
+        .header(
+            "If-Range",
+            reqwest::header::HeaderValue::from_bytes(b"\"\xff\"")?,
+        )
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(!response.headers().contains_key("content-range"));
+    assert_eq!(response.bytes().await?.as_ref(), content);
     for (name, value, status) in [
         (
             "If-None-Match",

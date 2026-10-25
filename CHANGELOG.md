@@ -99,6 +99,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Return complete Hub/LFS downloads when an opaque non-ASCII `If-Range`
+  validator does not match, instead of incorrectly serving a partial response.
 - Use commit-specific Xet token refresh URLs so cached credentials for an older
   branch head do not cause reconstruction failures after a new upload.
 - Supply the development Compose Hub webhook encryption key so a fresh stack

@@ -3653,6 +3653,32 @@ async fn handler_lfs_download_supports_single_ranges_and_if_range() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), bytes);
 
+    // Entity tags permit obs-text bytes. An opaque, nonmatching validator
+    // must not disappear merely because HeaderValue::to_str rejects it.
+    let mut headers = HeaderMap::new();
+    headers.insert(axum::http::header::RANGE, "bytes=3-7".parse().unwrap());
+    headers.insert(
+        axum::http::header::IF_RANGE,
+        axum::http::HeaderValue::from_bytes(b"\"\xff\"").unwrap(),
+    );
+    let response = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_owned()),
+        axum::http::Method::GET,
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !response
+            .headers()
+            .contains_key(axum::http::header::CONTENT_RANGE)
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), bytes);
+
     let mut headers = HeaderMap::new();
     headers.insert(axum::http::header::RANGE, "bytes=-4".parse().unwrap());
     headers.insert(

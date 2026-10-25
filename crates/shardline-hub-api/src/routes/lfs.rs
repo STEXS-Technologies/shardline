@@ -1052,8 +1052,7 @@ pub(crate) fn parse_lfs_range(headers: &HeaderMap, length: u64, etag: &str) -> L
     };
     if headers
         .get(axum::http::header::IF_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|if_range| if_range != etag)
+        .is_some_and(|if_range| if_range.as_bytes() != etag.as_bytes())
     {
         return LfsRangeSelection::Full;
     }
