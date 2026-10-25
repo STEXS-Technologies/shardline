@@ -48,20 +48,38 @@ fn app(root: &std::path::Path, store: BoxedHubStore) -> Router {
     )
 }
 async fn read(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let (status, body, _) = read_with_link(app, uri).await;
+    (status, body)
+}
+
+async fn read_with_link(
+    app: &Router,
+    uri: &str,
+) -> (StatusCode, serde_json::Value, Option<String>) {
     let response = app
         .clone()
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status();
-    assert!(
-        !response.headers().contains_key("link"),
-        "existing JSON array contract must not introduce pagination headers"
-    );
+    let link = response
+        .headers()
+        .get("link")
+        .map(|value| value.to_str().unwrap().to_owned());
+    let requested = url::Url::parse(&format!("http://localhost{uri}")).unwrap();
+    if !requested
+        .query_pairs()
+        .any(|(key, value)| key == "limit" || (key == "expand" && value == "true"))
+    {
+        assert!(
+            link.is_none(),
+            "ordinary complete listings must remain unpaginated"
+        );
+    }
     let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
         .await
         .unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap())
+    (status, serde_json::from_slice(&bytes).unwrap(), link)
 }
 async fn equivalence(root: &std::path::Path, store: BoxedHubStore) {
     expanded_pages(root, store.clone()).await;
@@ -171,7 +189,7 @@ async fn equivalence(root: &std::path::Path, store: BoxedHubStore) {
                         url.query_pairs_mut().append_pair("cursor", cursor);
                     }
                     let uri = format!("{}?{}", url.path(), url.query().unwrap());
-                    let (status, page) = read(&app, &uri).await;
+                    let (status, page, link) = read_with_link(&app, &uri).await;
                     assert_eq!(status, StatusCode::OK, "{uri}");
                     let start = cursor.map_or(0, |cursor| {
                         expected
@@ -181,6 +199,28 @@ async fn equivalence(root: &std::path::Path, store: BoxedHubStore) {
                     });
                     let wanted: Vec<_> = expected.iter().skip(start).take(limit).cloned().collect();
                     assert_eq!(page, serde_json::json!(wanted), "{uri}");
+                    let has_more = !wanted.is_empty() && start + wanted.len() < expected.len();
+                    assert_eq!(link.is_some(), has_more, "next-page availability: {uri}");
+                    if let Some(link) = link {
+                        let target = link
+                            .strip_prefix('<')
+                            .unwrap()
+                            .strip_suffix(">; rel=\"next\"")
+                            .unwrap();
+                        let target = url::Url::parse(target).unwrap();
+                        assert_eq!(target.host_str(), Some("localhost"));
+                        let revision = target.path_segments().unwrap().nth(5).unwrap();
+                        assert_eq!(revision.len(), 40, "next link must use an immutable commit");
+                        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                        let query: std::collections::HashMap<_, _> = target.query_pairs().collect();
+                        assert_eq!(query.get("expand").unwrap(), "false");
+                        assert_eq!(query.get("recursive").unwrap(), &recursive.to_string());
+                        assert_eq!(query.get("limit").unwrap(), &limit.to_string());
+                        assert_eq!(
+                            query.get("cursor").unwrap(),
+                            wanted.last().unwrap()["path"].as_str().unwrap()
+                        );
+                    }
                 }
             }
             let (_, ignored_cursor) = read(
