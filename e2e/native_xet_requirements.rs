@@ -13,7 +13,8 @@ fn without_docker(required: bool) -> Output {
     if required {
         command.env("SHARDLINE_REQUIRE_NATIVE_CLIENTS", "1");
     }
-    command.output().unwrap()
+    shardline_test_support::native_client_output(&mut command, std::time::Duration::from_secs(30))
+        .unwrap()
 }
 
 #[test]

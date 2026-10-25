@@ -1364,7 +1364,10 @@ fn with_test_home<'command>(command: &'command mut Command, home: &Path) -> &'co
 }
 
 fn run_command(command: &mut Command) -> Result<Output, TestError> {
-    Ok(command.output()?)
+    Ok(shardline_test_support::native_client_output(
+        command,
+        std::time::Duration::from_secs(300),
+    )?)
 }
 
 fn run_command_checked(command: &mut Command, description: &str) -> Result<(), TestError> {
@@ -1378,16 +1381,16 @@ fn run_command_checked(command: &mut Command, description: &str) -> Result<(), T
 
 fn command_error(description: &str, output: &Output) -> IoError {
     ServerE2eInvariantError::new(format!(
-        "{description} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "{description} failed with status {}",
+        output.status
     ))
     .into()
 }
 
 fn command_available(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+    shardline_test_support::native_client_output(
+        Command::new(program).arg("--version"),
+        std::time::Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success())
 }
