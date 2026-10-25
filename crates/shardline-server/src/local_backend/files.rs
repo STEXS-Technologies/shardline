@@ -582,6 +582,16 @@ mod tests {
         objects.delete_if_present(&chunk_key).unwrap();
         assert!(objects.metadata(&chunk_key).unwrap().is_none());
         assert_eq!(backend.read_chunk(&chunk).await.unwrap(), content);
+        let generic = blake3::hash(content).to_hex().to_string();
+        assert_ne!(generic, chunk);
+        assert!(matches!(
+            backend.read_chunk(&generic).await,
+            Err(crate::ServerError::NotFound)
+        ));
+        assert!(matches!(
+            backend.chunk_length(&generic).await,
+            Err(crate::ServerError::NotFound)
+        ));
         assert_eq!(
             backend.chunk_length(&chunk).await.unwrap(),
             content.len() as u64

@@ -99,6 +99,15 @@ mod tests {
                 .unwrap(),
             second
         );
+        // Equal payload bytes do not make generic and native identities
+        // interchangeable, even when discovery supplies a valid source Xorb.
+        let generic_member = shardline_index::xet_hash_hex_string(chunk_hash(second));
+        assert_ne!(generic_member, member);
+        assert!(
+            read_verified_xorb_chunk(&objects, &hash.hex(), &generic_member)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             read_verified_xorb_chunk(&objects, &hash.hex(), &compute_data_hash(b"absent").hex())
                 .unwrap()
