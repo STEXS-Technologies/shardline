@@ -77,7 +77,7 @@ async fn exercise_analytical_ranges(
         native_huggingface_proxy::start_observing_ranges(listener, &runtime.base_url, transfer);
     let home = tempfile::tempdir()?;
     let script = r#"
-import hashlib, os, pathlib, subprocess, sys, tempfile, urllib.request, urllib.error
+import hashlib, os, pathlib, subprocess, sys, tempfile, time, urllib.request, urllib.error
 stage = 'setup'
 def safe_failure(kind, error, traceback):
     # Native progress output can leave a carriage-return line unfinished.
@@ -108,7 +108,9 @@ connection = duckdb.connect()
 # small CI hosts, not a latency benchmark. Keep a finite client transfer budget
 # above the server's bounded admission wait; retain range-byte and query-result
 # assertions below.
-connection.execute('SET http_timeout = 120')
+http_timeout = int(os.environ.get('SHARDLINE_ANALYTICAL_HTTP_TIMEOUT_SECONDS', '120'))
+assert 1 <= http_timeout <= 120
+connection.execute('SET http_timeout = ' + str(http_timeout))
 stage = 'secret'
 connection.execute('CREATE SECRET hub_http (TYPE HTTP, BEARER_TOKEN ?, SCOPE ?)', [token, read_endpoint])
 with tempfile.TemporaryDirectory() as work:
@@ -171,8 +173,10 @@ api.upload_file(path_or_fileobj=source, path_in_repo=source.name, repo_id='team/
         result = connection.execute('SELECT id, payload FROM read_parquet(?) WHERE id IN (3, 2050) ORDER BY id', [url]).fetchall()
         assert result == [(i, hashlib.sha256(str(i).encode()).digest()) for i in [3, 2050]]
         stage = 'native_aggregate' if native else 'regular_aggregate'
+        aggregate_started = time.perf_counter()
         result = connection.execute('SELECT count(*), sum(id) FROM read_parquet(?)', [url]).fetchone()
         assert result == (rows, rows * (rows - 1) // 2)
+        print('HUB_HTTP_' + ('NATIVE' if native else 'REGULAR') + '_AGGREGATE_MS=' + str(round((time.perf_counter() - aggregate_started) * 1000)), flush=True)
         try:
             urllib.request.urlopen(url, timeout=30)
         except urllib.error.HTTPError as error:
@@ -228,6 +232,19 @@ api.upload_file(path_or_fileobj=source, path_in_repo=source.name, repo_id='team/
         .lock()
         .map_err(|_| "range observations poisoned")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        for prefix in [
+            "HUB_HTTP_REGULAR_AGGREGATE_MS=",
+            "HUB_HTTP_NATIVE_AGGREGATE_MS=",
+        ] {
+            if let Some(milliseconds) = line.strip_prefix(prefix)
+                && !milliseconds.is_empty()
+                && milliseconds.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                eprintln!("{prefix}{milliseconds}");
+            }
+        }
+    }
     let oid = stdout
         .lines()
         .find_map(|line| line.strip_prefix("HUB_HTTP_NATIVE_OID="))

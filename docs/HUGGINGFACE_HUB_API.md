@@ -419,6 +419,27 @@ DuckDB 2.0.0 with PyArrow 26.0.0 and Hub 2.3.0/hf_xet 1.7.0 also passes
 these four configurations with the 120-second client budget, including two
 simultaneous tests restricted to two CPU cores. This is a shared-host result.
 
+The same current-client stack also passes all four configurations sequentially
+in an optimized E2E build restricted to two CPU cores with a 30-second client
+HTTP timeout. Native aggregate queries took 2.38–3.07 seconds in that run;
+all four workflows completed in 35.38 seconds. This qualifies that fixture,
+not general latency, sustained load or a shipped-binary performance comparison.
+Content verification and authorization assertions remain unchanged. Reproduce
+with the required Python clients and Docker available:
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 \
+SHARDLINE_ANALYTICAL_HTTP_TIMEOUT_SECONDS=30 \
+taskset -c 0,1 cargo test --manifest-path e2e/Cargo.toml --release \
+  --test native_huggingface_cli_e2e native_huggingface_http_analytics \
+  -- --include-ignored --test-threads=1 --nocapture
+```
+
+The test timeout override accepts 1–120 seconds and otherwise defaults to
+120 seconds for unoptimized CI. It does not change a server timeout or a
+production DuckDB setting. The test emits aggregate durations without URLs,
+credentials or query results.
+
 The remote cases require Docker PostgreSQL and disk-backed MinIO. This does not
 qualify multi-host deployments, other analytical client versions or sustained
 overload. The E2E workflow explicitly selects all four cases with the pinned
