@@ -24,6 +24,25 @@ pub(super) async fn verify(
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()?;
+    let other_repository = bearer_token(
+        "other-reader",
+        TokenScope::Read,
+        RepositoryProvider::Generic,
+        "team",
+        "other",
+        Some("main"),
+    )?;
+    assert_eq!(
+        client
+            .get(format!("{public_base}/v1/reconstructions/{file_id}"))
+            .bearer_auth(other_repository)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .status(),
+        StatusCode::NOT_FOUND,
+        "another repository must not obtain this file's download grants"
+    );
     let public = reqwest::Url::parse(public_base)?;
     let mut count = 0;
     for entries in reconstruction.fetch_info.values() {
@@ -54,6 +73,25 @@ pub(super) async fn verify(
                     .await
                     .map_err(reqwest::Error::without_url)?
                     .is_empty()
+            );
+            let mut damaged = url.clone();
+            let mut parameters: Vec<_> = damaged.query_pairs().into_owned().collect();
+            for (name, value) in &mut parameters {
+                if name == "xorb_read_capability" {
+                    value.push('!');
+                }
+            }
+            damaged.query_pairs_mut().clear().extend_pairs(parameters);
+            assert_eq!(
+                client
+                    .get(damaged)
+                    .header("Range", &range)
+                    .send()
+                    .await
+                    .map_err(reqwest::Error::without_url)?
+                    .status(),
+                StatusCode::UNAUTHORIZED,
+                "a damaged capability must not authorize any download"
             );
             assert_eq!(
                 client
