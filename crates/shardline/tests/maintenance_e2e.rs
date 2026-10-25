@@ -27,8 +27,12 @@ fn command(state: &Path, root: &Path, operation: &str) -> Command {
 }
 
 fn run_operation(state: &Path, root: &Path, operation: &str) -> Result<std::process::Output> {
+    run_cli(&mut command(state, root, operation))
+}
+
+fn run_cli(command: &mut Command) -> Result<std::process::Output> {
     Ok(shardline_test_support::native_client_output(
-        &mut command(state, root, operation),
+        command,
         Duration::from_secs(120),
     )?)
 }
@@ -842,13 +846,13 @@ fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counte
         if dry_run {
             command.arg("--dry-run");
         }
-        Ok(command.output()?)
+        run_cli(&mut command)
     };
     let dry = invoke(true)?;
     assert!(
         dry.status.success(),
-        "{}",
-        String::from_utf8_lossy(&dry.stderr)
+        "migration dry run failed: {}",
+        dry.status
     );
     assert!(!destination.path().join("chunks/test/object").exists());
     assert!(!source.path().join("chunks/_shardline_tasks/v1").exists());
@@ -859,11 +863,7 @@ fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counte
             .exists()
     );
     let real = invoke(false)?;
-    assert!(
-        real.status.success(),
-        "{}",
-        String::from_utf8_lossy(&real.stderr)
-    );
+    assert!(real.status.success(), "migration failed: {}", real.status);
     assert_eq!(
         fs::read(destination.path().join("chunks/test/object"))?,
         bytes
@@ -873,14 +873,13 @@ fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counte
     let repeated = invoke(false)?;
     assert!(
         repeated.status.success(),
-        "{}",
-        String::from_utf8_lossy(&repeated.stderr)
+        "repeated migration failed: {}",
+        repeated.status
     );
     for output in [dry, real, repeated] {
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("scanned_objects: 1"),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
+            "migration did not report exactly one scanned object"
         );
     }
     Ok(())
@@ -909,20 +908,21 @@ fn storage_copy_preserves_success_when_destination_history_publication_fails() -
          BEGIN SELECT RAISE(ABORT, 'fixture denies destination history'); END;",
     )?;
     let invoke = || -> Result<std::process::Output> {
-        Ok(Command::new(binary())
-            .env_clear()
-            .current_dir(source.path())
-            .args(["storage", "migrate", "--from", "local", "--from-root"])
-            .arg(source.path())
-            .args(["--to", "local", "--to-root"])
-            .arg(destination.path())
-            .output()?)
+        run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(source.path())
+                .args(["storage", "migrate", "--from", "local", "--from-root"])
+                .arg(source.path())
+                .args(["--to", "local", "--to-root"])
+                .arg(destination.path()),
+        )
     };
     let output = invoke()?;
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "storage copy failed: {}",
+        output.status
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("scanned_objects: 1"));
     assert_eq!(fs::read(source.path().join("chunks/test/object"))?, bytes);
@@ -939,8 +939,8 @@ fn storage_copy_preserves_success_when_destination_history_publication_fails() -
     let next = invoke()?;
     assert!(
         next.status.success(),
-        "{}",
-        String::from_utf8_lossy(&next.stderr)
+        "storage copy retry failed: {}",
+        next.status
     );
     assert_eq!(
         fs::read(destination.path().join("chunks/test/object"))?,
@@ -1106,8 +1106,7 @@ fn state_inside_deployment_and_untrusted_worker_invocation_are_rejected() -> Res
     let root = sandbox.path().join("deployment");
     fs::create_dir(&root)?;
     assert!(
-        !command(&root.join("state"), &root, "fsck")
-            .output()?
+        !run_operation(&root.join("state"), &root, "fsck")?
             .status
             .success()
     );
@@ -1115,17 +1114,17 @@ fn state_inside_deployment_and_untrusted_worker_invocation_are_rejected() -> Res
     let alias = sandbox.path().join("alias");
     fs::create_dir(&alias)?;
     assert!(
-        !command(&alias.join("../deployment/state"), &root, "fsck")
-            .output()?
+        !run_operation(&alias.join("../deployment/state"), &root, "fsck")?
             .status
             .success()
     );
     assert!(!root.join("state").exists());
-    let worker = Command::new(binary())
-        .args(["maintenance-worker", "--journal"])
-        .arg(root.join("missing.sqlite"))
-        .args(["--scope", "00", "--generation", "1"])
-        .output()?;
+    let worker = run_cli(
+        Command::new(binary())
+            .args(["maintenance-worker", "--journal"])
+            .arg(root.join("missing.sqlite"))
+            .args(["--scope", "00", "--generation", "1"]),
+    )?;
     assert!(!worker.status.success());
     assert!(!root.join("missing.sqlite").exists());
     Ok(())
@@ -1139,20 +1138,14 @@ fn explicit_configuration_reaches_workers_and_changed_targets_cannot_resume() ->
     let state = sandbox.path().join("maintenance");
     let config = sandbox.path().join("active config.toml");
     fs::write(&config, "[server]\nfrontends = [\"s3\"]\n")?;
-    let output = command(&state, &root, "fsck")
-        .arg("--config")
-        .arg(&config)
-        .output()?;
+    let output = run_cli(command(&state, &root, "fsck").arg("--config").arg(&config))?;
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "configured maintenance failed: {}",
+        output.status
     );
     fs::write(&config, "[server]\nfrontends = [\"xet\"]\n")?;
-    let changed = command(&state, &root, "fsck")
-        .arg("--config")
-        .arg(&config)
-        .output()?;
+    let changed = run_cli(command(&state, &root, "fsck").arg("--config").arg(&config))?;
     assert!(!changed.status.success());
     assert!(String::from_utf8_lossy(&changed.stderr).contains("different request"));
     Ok(())
@@ -1181,14 +1174,15 @@ async fn migration_copies_real_objects_and_pins_the_destination() -> Result<()> 
         )
         .await?;
     let state = sandbox.path().join("maintenance");
-    let first = command(&state, &root, "storage-migrate")
-        .args(["--from", "local", "--to", "local", "--to-root"])
-        .arg(&destination)
-        .output()?;
+    let first = run_cli(
+        command(&state, &root, "storage-migrate")
+            .args(["--from", "local", "--to", "local", "--to-root"])
+            .arg(&destination),
+    )?;
     assert!(
         first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
+        "supervised storage migration failed: {}",
+        first.status
     );
     let directory = journal(&state)
         .parent()
@@ -1201,17 +1195,21 @@ async fn migration_copies_real_objects_and_pins_the_destination() -> Result<()> 
             .join("artifacts")
             .join(hex::encode(proof.artifact.digest.0)),
     )?;
-    assert!(!report.contains("inserted_objects: 0"), "{report}");
+    assert!(
+        !report.contains("inserted_objects: 0"),
+        "migration must insert objects"
+    );
     assert!(destination.join("chunks").is_dir());
     let other = sandbox.path().join("other");
     fs::create_dir(&other)?;
     assert!(
-        !command(&state, &root, "storage-migrate")
-            .args(["--from", "local", "--to", "local", "--to-root"])
-            .arg(&other)
-            .output()?
-            .status
-            .success()
+        !run_cli(
+            command(&state, &root, "storage-migrate")
+                .args(["--from", "local", "--to", "local", "--to-root"])
+                .arg(&other)
+        )?
+        .status
+        .success()
     );
     Ok(())
 }
