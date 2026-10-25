@@ -51,6 +51,11 @@ In particular, dedupe-shard mappings are rebuildable index state, so they must n
 retained-shard objects alive on their own after the live file graph no longer references
 the chunk content they describe.
 
+Hub-only deployments also use native Xet storage for `hf_xet` uploads. The
+collector recognizes these containers and applies the same reachability and
+content-verification checks as the Xet frontend. You do not need to enable an
+additional frontend to collect native Hub data safely.
+
 Xorb member lists are read from validated containers. Old `_xorb_chunks/`
 sidecars are not trusted to describe all members: a damaged list could leave out
 a live chunk. This can increase read traffic for scans that previously used those

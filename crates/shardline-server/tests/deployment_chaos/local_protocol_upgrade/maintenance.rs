@@ -31,9 +31,23 @@ pub(super) async fn gc_before_rollback(
     .await
     .expect("pre-rollback GC worker")
     .expect("pre-rollback GC process");
+    // Classify failures without printing URLs, tokens or raw process output.
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let diagnostic: Vec<_> = [
+        "content hash",
+        "configuration",
+        "frontend",
+        "encryption",
+        "token",
+        "metadata",
+        "migration",
+    ]
+    .into_iter()
+    .filter(|category| stderr.contains(category))
+    .collect();
     assert!(
         output.status.success(),
-        "candidate GC must succeed before actual predecessor reads: {}",
-        output.status
+        "candidate GC must succeed before actual predecessor reads: {} {diagnostic:?}",
+        output.status,
     );
 }

@@ -13,7 +13,7 @@ use crate::{
     GcError, ServerFrontend,
     dispatch::{
         managed_protocol_object_identity, optional_chunk_container_keys,
-        referenced_term_object_key, visit_protocol_object_member_chunks,
+        referenced_term_object_key, uses_native_xet_storage, visit_protocol_object_member_chunks,
     },
     quarantine::LAST_GC_CLOCK_ANCHOR_KEY,
 };
@@ -300,7 +300,7 @@ pub(super) fn scan_orphan_objects(
     // A lost derived index must not make an intact source collectible. Use the
     // inventory already collected above, then authenticate candidate sources
     // only when a referenced standalone copy is absent. No per-chunk HEADs.
-    if !missing_chunks.is_empty() && frontends.contains(&ServerFrontend::Xet) {
+    if !missing_chunks.is_empty() && uses_native_xet_storage(frontends) {
         let mut protected = Vec::new();
         for (key, orphan) in &orphans {
             let Some(hash) =

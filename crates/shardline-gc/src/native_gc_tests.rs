@@ -26,6 +26,15 @@ fn generic_record(content: &[u8]) -> FileRecord {
 
 #[tokio::test]
 async fn missing_copy_recovery_stops_before_sweep_on_corrupt_source() {
+    corrupt_source(&[ServerFrontend::Xet]).await;
+}
+
+#[tokio::test]
+async fn hub_only_missing_copy_recovery_stops_before_sweep_on_corrupt_source() {
+    corrupt_source(&[ServerFrontend::Hub]).await;
+}
+
+async fn corrupt_source(frontends: &[ServerFrontend]) {
     let root = tempfile::tempdir().unwrap();
     let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
     let records = LocalRecordStore::new(root.path().join("records")).unwrap();
@@ -59,7 +68,7 @@ async fn missing_copy_recovery_stops_before_sweep_on_corrupt_source() {
         &records,
         &MemoryIndexStore::new(),
         &objects,
-        &[ServerFrontend::Xet],
+        frontends,
         LocalGcOptions::mark_and_sweep(0),
     )
     .await;
@@ -107,6 +116,15 @@ async fn source(objects: &ServerObjectStore, content: &[u8]) -> String {
 
 #[tokio::test]
 async fn physical_sweep_recovers_reachability_without_member_index_or_copy() {
+    physical_sweep(&[ServerFrontend::Xet]).await;
+}
+
+#[tokio::test]
+async fn hub_only_physical_sweep_recovers_reachability_without_member_index_or_copy() {
+    physical_sweep(&[ServerFrontend::Hub]).await;
+}
+
+async fn physical_sweep(frontends: &[ServerFrontend]) {
     let root = tempfile::tempdir().unwrap();
     let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
     let records = LocalRecordStore::new(root.path().join("records")).unwrap();
@@ -144,7 +162,7 @@ async fn physical_sweep_recovers_reachability_without_member_index_or_copy() {
         &records,
         &index,
         &objects,
-        &[ServerFrontend::Xet],
+        frontends,
         LocalGcOptions::mark_and_sweep(0),
     )
     .await
@@ -172,7 +190,7 @@ async fn physical_sweep_recovers_reachability_without_member_index_or_copy() {
         &records,
         &index,
         &objects,
-        &[ServerFrontend::Xet],
+        frontends,
         LocalGcOptions::mark_and_sweep(0),
     )
     .await

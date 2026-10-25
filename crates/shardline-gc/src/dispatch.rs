@@ -8,6 +8,12 @@ use shardline_xet_adapter::{
 
 use crate::{GcError, ServerFrontend};
 
+pub(super) fn uses_native_xet_storage(frontends: &[ServerFrontend]) -> bool {
+    frontends
+        .iter()
+        .any(|frontend| matches!(frontend, ServerFrontend::Xet | ServerFrontend::Hub))
+}
+
 pub(super) fn optional_chunk_container_keys(
     frontends: &[ServerFrontend],
     chunk_hash: &str,
@@ -15,7 +21,9 @@ pub(super) fn optional_chunk_container_keys(
     let mut object_keys = Vec::new();
     for frontend in frontends {
         match frontend {
-            ServerFrontend::Xet => {
+            // Hub uploads use the same native Xet storage even when the public
+            // Xet frontend was not selected separately.
+            ServerFrontend::Xet | ServerFrontend::Hub => {
                 let object_key = xorb_object_key(chunk_hash)?;
                 if !object_keys.contains(&object_key) {
                     object_keys.push(object_key);
@@ -38,8 +46,7 @@ pub(super) fn optional_chunk_container_keys(
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::S3
-            | ServerFrontend::Hub => {}
+            | ServerFrontend::S3 => {}
         }
     }
 
@@ -50,7 +57,7 @@ pub(super) fn referenced_term_object_key(
     frontends: &[ServerFrontend],
     term_hash: &str,
 ) -> Result<ObjectKey, GcError> {
-    if frontends.contains(&ServerFrontend::Xet) {
+    if uses_native_xet_storage(frontends) {
         return Ok(xorb_object_key(term_hash)?);
     }
 
@@ -63,7 +70,7 @@ pub(super) fn managed_protocol_object_identity(
 ) -> Result<Option<String>, GcError> {
     for frontend in frontends {
         match frontend {
-            ServerFrontend::Xet => {
+            ServerFrontend::Xet | ServerFrontend::Hub => {
                 if let Some(hash) = xorb_hash_from_object_key_if_present(key)? {
                     return Ok(Some(hash.to_owned()));
                 }
@@ -75,8 +82,7 @@ pub(super) fn managed_protocol_object_identity(
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::S3
-            | ServerFrontend::Hub => {}
+            | ServerFrontend::S3 => {}
         }
     }
 
@@ -94,7 +100,7 @@ where
 {
     for frontend in frontends {
         match frontend {
-            ServerFrontend::Xet => {
+            ServerFrontend::Xet | ServerFrontend::Hub => {
                 if xorb_hash_from_object_key_if_present(object_key)?.is_some() {
                     let mut result = Ok(());
                     let present = visit_stored_xorb_chunk_hashes_if_present(
@@ -116,8 +122,7 @@ where
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::S3
-            | ServerFrontend::Hub => {}
+            | ServerFrontend::S3 => {}
         }
     }
 
@@ -128,6 +133,25 @@ where
 mod tests {
     use super::*;
     use shardline_storage::ObjectKey;
+
+    #[test]
+    fn hub_only_frontend_resolves_native_xet_terms() {
+        let hash = "a".repeat(64);
+        let expected = xorb_object_key(&hash).unwrap();
+        assert_eq!(
+            referenced_term_object_key(&[ServerFrontend::Hub], &hash).unwrap(),
+            expected
+        );
+        assert_eq!(
+            managed_protocol_object_identity(&[ServerFrontend::Hub], &expected).unwrap(),
+            Some(hash.clone())
+        );
+        assert!(
+            optional_chunk_container_keys(&[ServerFrontend::Hub], &hash)
+                .unwrap()
+                .contains(&expected)
+        );
+    }
 
     #[test]
     fn hub_git_archives_are_excluded_from_orphan_sweep() {
@@ -261,7 +285,7 @@ mod tests {
             ServerFrontend::Lfs,
             ServerFrontend::BazelHttp,
             ServerFrontend::Oci,
-            ServerFrontend::Hub,
+            ServerFrontend::S3,
         ];
         let keys = optional_chunk_container_keys(&frontends, VALID_HASH).unwrap();
         assert!(keys.is_empty());

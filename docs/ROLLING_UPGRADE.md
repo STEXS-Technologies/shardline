@@ -83,11 +83,17 @@ The rollback binary also uploads a third chunk layout. Its native file remains
 readable after re-upgrade. An identical retry through the candidate verifies and
 adds its SHA-256 binding while preserving the earlier file aliases. Version
 1.12.1 itself does not populate the newer identity index.
-Stock Hub 1.25.1, 2.2.0 and 2.3.0 clients each pass a small regular-file history drill against
-the actual 1.12.1 binary and the candidate, on local storage and PostgreSQL/MinIO.
+Stock Hub 1.25.1, 2.2.0 and 2.3.0 clients each pass a history drill against the
+actual 1.12.1 binary and the candidate, on local storage and PostgreSQL/MinIO.
 It creates a private repository before migration, replaces its file after
 migration, writes again after rollback, and verifies all three byte-exact
 versions after re-upgrade with fresh client caches.
+The candidate additionally accepts a 9 MiB native Xet Hub upload. Destructive
+GC with only the Hub frontend selected preserves that historical file before
+rollback and after re-upgrade, including after the old binary adds a regular
+file commit. The stock clients verify the complete native bytes after each
+candidate-side GC. This does not claim the old Hub download route understands
+the new native identity protocol.
 
 Hub revision IDs have a rollout boundary: 1.12.1 does not understand the new
 public Git IDs returned in SDK commit fields. It returns 404 for those IDs,
@@ -96,8 +102,8 @@ internal revision ID from `/api/models/{namespace}/{repo}/revisions`.
 Retain that listing before rollback if you need historical reads with 1.12.1.
 During a mixed-version rollout, keep requests using new public Git IDs on
 upgraded Hub replicas. Old saved revision IDs remain accepted after upgrading.
-This drill does not qualify concurrent mixed-version Hub publication, native
-large-file Hub histories, historical GC/repair or signed URL rollout.
+This drill does not qualify concurrent mixed-version Hub publication, maximum-size
+native histories, repair interruption, aged-retention campaigns or signed URL rollout.
 
 The alias migration preserves current mappings and future replacements. It
 cannot recover mappings already overwritten before the upgrade.

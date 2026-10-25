@@ -77,16 +77,34 @@ if phase != 'verify':
     path = hf_hub_download('drill/drill', 'history.txt', revision=revision,
         endpoint=os.environ['HF_ENDPOINT'], token=os.environ['HF_TOKEN'], force_download=True)
     assert pathlib.Path(path).read_bytes() == text.encode()
+if phase == 'upgraded':
+    stage = 'native_upload'
+    native_source = state_path.parent / 'native.bin'
+    native_source.write_bytes(bytes(range(256)) * (9 * 4096))
+    native_commit = api.upload_file(path_or_fileobj=native_source,
+        path_in_repo='native.bin', repo_id='drill/drill', commit_message='native history')
+    state_path.with_suffix('.native').write_text(native_commit.oid)
+if phase in ('upgraded', 'verify'):
+    stage = 'native_history'
+    native_revision = state_path.with_suffix('.native').read_text()
+    request = urllib.request.Request(os.environ['HF_ENDPOINT'] + '/drill/drill/resolve/' + native_revision + '/native.bin',
+        headers={'Authorization': 'Bearer ' + os.environ['HF_TOKEN']}, method='HEAD')
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.headers.get('X-Xet-Hash')
+        assert int(response.headers['Content-Length']) == 9 * 1024 * 1024
+    path = hf_hub_download('drill/drill', 'native.bin', revision=native_revision,
+        endpoint=os.environ['HF_ENDPOINT'], token=os.environ['HF_TOKEN'], force_download=True)
+    assert pathlib.Path(path).read_bytes() == bytes(range(256)) * (9 * 4096)
 print('HUB_HISTORY_OK=' + phase, flush=True)
 "#;
 
 fn client_available() -> bool {
     let available = shardline_test_support::native_client_output(
-        Command::new("python3").args(["-c", "import huggingface_hub"]),
+        Command::new("python3").args(["-c", "import huggingface_hub, hf_xet"]),
         Duration::from_secs(10),
     )
     .is_ok_and(|output| output.status.success());
-    shardline_test_support::require_native_client("python3 + huggingface_hub", available)
+    shardline_test_support::require_native_client("python3 + huggingface_hub + hf_xet", available)
 }
 
 async fn client(server: &LocalServer, state: &Path, token: &str, phase: &str) {
@@ -102,7 +120,7 @@ async fn client(server: &LocalServer, state: &Path, token: &str, phase: &str) {
                 .env("HF_ENDPOINT", base)
                 .env("HF_TOKEN", token)
                 .env("HF_HOME", home.path())
-                .env("HF_HUB_DISABLE_XET", "1")
+                .env("HF_HUB_DISABLE_XET", "0")
                 .env("HF_HUB_DISABLE_TELEMETRY", "1")
                 .env("NO_PROXY", "127.0.0.1,localhost")
                 .env("no_proxy", "127.0.0.1,localhost")
@@ -178,6 +196,10 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     let mut webhook_key = [0_u8; 16];
     getrandom::fill(&mut webhook_key).unwrap();
     storage_env.push(("SHARDLINE_HUB_WEBHOOK_SECRET_KEY", hex::encode(webhook_key)));
+    storage_env.push((
+        "SHARDLINE_TOKEN_SIGNING_KEY",
+        std::str::from_utf8(TEST_SIGNING_KEY).unwrap().to_owned(),
+    ));
     let storage_env = &storage_env;
     let root = TempDir::new().unwrap();
     let state_root = TempDir::new().unwrap();
@@ -194,6 +216,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
         LocalServer::spawn_with_storage(&current, root.path(), postgres, "hub", storage_env);
     candidate.ready().await;
     client(&candidate, &state, &token, "upgraded").await;
+    maintenance::gc_before_rollback(&current, root.path(), postgres, storage_env, "hub").await;
     drop(candidate);
     let mut rollback =
         LocalServer::spawn_with_storage(&old, root.path(), postgres, "hub", storage_env);
@@ -203,5 +226,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     let mut restart =
         LocalServer::spawn_with_storage(&current, root.path(), postgres, "hub", storage_env);
     restart.ready().await;
+    client(&restart, &state, &token, "verify").await;
+    maintenance::gc_before_rollback(&current, root.path(), postgres, storage_env, "hub").await;
     client(&restart, &state, &token, "verify").await;
 }

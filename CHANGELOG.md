@@ -99,6 +99,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Recognize native Xet storage during Hub-only garbage collection, preserving
+  live containers and verified member recovery without requiring a separate
+  `xet` frontend setting.
 - Return complete Hub/LFS downloads when an opaque non-ASCII `If-Range`
   validator does not match, instead of incorrectly serving a partial response.
 - Use commit-specific Xet token refresh URLs so cached credentials for an older
