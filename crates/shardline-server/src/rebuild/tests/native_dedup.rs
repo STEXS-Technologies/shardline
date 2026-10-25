@@ -149,6 +149,7 @@ async fn rebuild_restores_both_scoped_sources_lost_by_single_legacy_mapping() {
         assert_eq!(candidates.len(), 1);
         assert_eq!(&candidates[0].hash, hash);
     }
+    let objects = backend.object_store();
     let backend = crate::ServerBackend::Local(backend);
     for scope in [&left, &right] {
         assert!(
@@ -165,4 +166,23 @@ async fn rebuild_restores_both_scoped_sources_lost_by_single_legacy_mapping() {
             .await,
         Err(ServerError::NotFound)
     ));
+    shardline_storage::AsyncObjectStore::delete_if_present(
+        &objects,
+        &shardline_xet_adapter::xorb_object_key(&expected[0]).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        backend
+            .scoped_dedup_shard(&member, Some(&left), ShardMetadataLimits::default())
+            .await,
+        Err(ServerError::NotFound)
+    ));
+    assert!(
+        !backend
+            .scoped_dedup_shard(&member, Some(&right), ShardMetadataLimits::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -137,6 +137,28 @@ async fn native_members_rebuild_all_legacy_scoped_sources_on_postgres_minio() {
             .await,
         Err(ServerError::NotFound)
     ));
+    // A rebuilt candidate is not proof that its source remains available. Do
+    // not substitute another repository's shared member when this source goes
+    // missing, and do not make the healthy repository unavailable with it.
+    AsyncObjectStore::delete_if_present(
+        &objects,
+        &shardline_xet_adapter::xorb_object_key(&expected[0]).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        backend
+            .scoped_dedup_shard(&member, Some(&left), ShardMetadataLimits::default())
+            .await,
+        Err(ServerError::NotFound)
+    ));
+    assert!(
+        !backend
+            .scoped_dedup_shard(&member, Some(&right), ShardMetadataLimits::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     if let crate::ServerBackend::Postgres(backend) = backend {
         backend.index_store().pool().close().await;
         backend.resource_lock_pool.close().await;
