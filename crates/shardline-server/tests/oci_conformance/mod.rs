@@ -158,9 +158,15 @@ async fn official_oci_distribution_prepopulated_repository() {
         .env("OCI_TAG_NAME", "tag-a").env("OCI_TAG_LIST", "tag-a,tag-b,tag-c,tag-d")
         .env("OCI_BLOB_DIGEST", blob_digest).env("OCI_MANIFEST_DIGEST", digest)
         .env("OCI_REPORT_DIR", "none");
-    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
-        .await
-        .unwrap();
+    let output = tokio::task::spawn_blocking(move || {
+        shardline_test_support::native_client_output(
+            &mut command,
+            std::time::Duration::from_secs(330),
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
     assert!(
         output.status.success(),
         "{}\n{}",

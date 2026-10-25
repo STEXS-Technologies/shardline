@@ -2447,10 +2447,15 @@ async fn run_official_oci_distribution(root: &Path, server: &Runtime) {
         .env("OCI_DELETE_MANIFEST_BEFORE_BLOBS", "1")
         .env("OCI_AUTOMATIC_CROSSMOUNT", "1")
         .env("OCI_REPORT_DIR", "none");
-    let output = tokio::task::spawn_blocking(move || command.output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = tokio::task::spawn_blocking(move || {
+        shardline_test_support::native_client_output(
+            &mut command,
+            std::time::Duration::from_secs(330),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         output.status.success(),
         "official OCI suite failed:\n{}\n{}",
