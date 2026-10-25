@@ -18,6 +18,12 @@ pub(super) async fn verify(
         .json::<shardline_server::FileReconstructionResponse>()
         .await
         .map_err(reqwest::Error::without_url)?;
+    // Checking the advertised origin alone is insufficient: following a
+    // redirect could still bypass Shardline and expose a backend capability.
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()?;
     let public = reqwest::Url::parse(public_base)?;
     let mut count = 0;
     for entries in reconstruction.fetch_info.values() {
@@ -41,6 +47,7 @@ pub(super) async fn verify(
                 .await
                 .map_err(reqwest::Error::without_url)?;
             assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert!(!response.headers().contains_key("Location"));
             assert!(
                 !response
                     .bytes()
