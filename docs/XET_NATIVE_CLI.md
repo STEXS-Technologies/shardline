@@ -84,13 +84,18 @@ cargo test --manifest-path e2e/Cargo.toml --test native_huggingface_cli_e2e \
 
 These require Docker for PostgreSQL/MinIO and fail if prerequisites are missing.
 They generate 1 GiB of incompressible content, require native Xorb/shard ingestion,
-compare a cold-cache stock-client download byte-for-byte, and verify the ordinary
-HTTP download's SHA-256. Linux peak RSS covers the server/test process, excluding
-the stock client and backend services. This is a single-client memory check;
-concurrent and slow-client saturation still require separate qualification.
+compare a cold-cache stock-client download byte-for-byte, then verify two
+concurrent slow ordinary HTTP downloads against the file's SHA-256. Linux peak
+RSS covers the server/test process, excluding the stock client and backend
+services. Each test requires the process peak to stay below 384 MiB. This bounds
+the tested workload; sustained saturation still requires separate qualification.
 Run each command separately so other tests do not contaminate process-wide RSS.
 
-The local run with Hub 1.25.1 / hf_xet 1.6.0 peaked at 109,636 KiB. The
+The same large-file and two-reader checks pass with Hub 1.25.1 / hf_xet 1.5.2
+on local storage and PostgreSQL/MinIO. Process I/O counters include more than
+scratch writes and do not establish reduced device wear or a throughput gain.
+
+The earlier single-client local run with Hub 1.25.1 / hf_xet 1.6.0 peaked at 109,636 KiB. The
 PostgreSQL/MinIO run peaked at 240,460 KiB after large native bodies switched
 to bounded file-backed staging; earlier in-memory staging runs reached
 734,364–866,844 KiB. These are single-client observations, not cluster memory
