@@ -15,6 +15,8 @@ use shardline_server_core::{AuthProvider, LocalHmacProvider, ServerObjectStore};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 use tower::ServiceExt;
 
+mod snapshot_v2;
+
 fn token(name: &str, revision: Option<&str>) -> String {
     LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!")
         .unwrap()
@@ -305,6 +307,7 @@ async fn snapshot_contract(
         .await
         .unwrap();
     assert_eq!(blob_response.status(), StatusCode::FORBIDDEN);
+    snapshot_v2::deny_hidden_objects(&app, &head, oid, &secret_blob).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!(
         "http://{}/models/alice/assets",
