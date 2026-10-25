@@ -237,24 +237,34 @@ impl Drop for TestServer {
 }
 
 fn duckdb_available() -> bool {
-    let available = Command::new("python3")
-        .args(["-c", "import duckdb, pyarrow"])
-        .output()
-        .is_ok_and(|output| output.status.success());
+    let available = shardline_test_support::native_client_output(
+        Command::new("python3").args(["-c", "import duckdb, pyarrow"]),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success());
     shardline_test_support::require_native_client("python3 + duckdb + pyarrow", available)
 }
 
-fn run_duckdb_production_shape(
+async fn run_duckdb_production_shape(
     endpoint: &str,
     token: &str,
     script_path: &Path,
 ) -> std::process::Output {
-    Command::new("python3")
-        .arg(script_path)
-        .env("S3_ENDPOINT", endpoint)
-        .env("S3_TOKEN", token)
-        .output()
-        .unwrap()
+    let endpoint = endpoint.to_owned();
+    let token = token.to_owned();
+    let script_path = script_path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        shardline_test_support::native_client_output(
+            Command::new("python3")
+                .arg(script_path)
+                .env("S3_ENDPOINT", endpoint)
+                .env("S3_TOKEN", token),
+            Duration::from_secs(300),
+        )
+        .expect("DuckDB client failed to start or exceeded its deadline")
+    })
+    .await
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -299,16 +309,16 @@ print("ALL POSTGRES+S3 DUCKDB CHECKS PASSED")
 "#,
     )
     .unwrap();
-    let output = run_duckdb_production_shape(&server.base_url, &server.token, &script);
+    let output = run_duckdb_production_shape(&server.base_url, &server.token, &script).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "DuckDB Postgres+S3 subprocess failed:\n{stdout}\n{stderr}"
+        "DuckDB Postgres+S3 subprocess failed: {}",
+        output.status
     );
     assert!(
         stdout.contains("ALL POSTGRES+S3 DUCKDB CHECKS PASSED"),
-        "DuckDB Postgres+S3 checks did not complete:\n{stdout}\n{stderr}"
+        "DuckDB Postgres+S3 checks did not complete"
     );
 }
 
