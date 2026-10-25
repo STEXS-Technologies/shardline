@@ -24,7 +24,7 @@ cleanup() {
     for pid in "${server_pids[@]}"; do
         if test -n "$pid"; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done
-    if test -n "$container_id"; then docker rm -f "$container_id" > "$fixture/cleanup.log" 2>&1 || true; fi
+    if test -n "$container_id"; then docker rm -f -v "$container_id" > "$fixture/cleanup.log" 2>&1 || true; fi
 }
 trap cleanup EXIT
 container_id=$(docker run -d -e POSTGRES_PASSWORD=owned_fixture_password \

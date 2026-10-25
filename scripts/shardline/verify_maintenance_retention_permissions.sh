@@ -16,7 +16,7 @@ container_name=$(basename "$fixture" | tr '[:upper:].' '[:lower:]-')
 container_id=''
 cleanup() {
     if test -n "$container_id"; then
-        docker rm -f "$container_id" > "$fixture/cleanup.log" 2>&1 || true
+        docker rm -f -v "$container_id" > "$fixture/cleanup.log" 2>&1 || true
     fi
 }
 trap cleanup EXIT
