@@ -140,9 +140,12 @@ Snapshot-scoped Git credentials currently negotiate the legacy fetch protocol,
 including when stock Git requests v2. Repository and branch credentials retain
 native v2 support. Native v2 snapshot fetch remains unqualified; a requested-v2
 clone that falls back to legacy framing is not evidence that it works.
-Git 2.52.0 also reproduces recursive filtered fetching against an unmodified
+Git 2.52.0 and 2.55.0 also reproduce recursive filtered fetching against an unmodified
 stock shallow Git server; an unfiltered v2 clone of that fixture passes strict
-fsck. Shardline's snapshot fallback remains necessary for the tested clients.
+fsck. The 2.55.0 filtered clone returns success after 32 recursive fetch commands
+and connection/shallow-root errors; its exit code alone does not establish
+healthy interoperability. Shardline's snapshot fallback remains necessary for
+the tested clients.
 
 The Hub API's native Git regression compares incremental-fetch HTTP response
 bytes with a fresh clone at the same commit. It requires less transfer for the
