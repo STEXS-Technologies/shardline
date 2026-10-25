@@ -253,6 +253,14 @@ fn resolve_docker_arg(arg: &str) -> String {
     arg.to_owned()
 }
 
+fn cleanup_docker(args: &[&str]) {
+    let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
+    let _ = shardline_test_support::native_client_output(
+        Command::new("docker").args(args),
+        Duration::from_secs(30),
+    );
+}
+
 async fn docker_run(args: &[&str]) -> std::process::Output {
     let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
     tokio::task::spawn_blocking(move || {
@@ -453,29 +461,23 @@ impl ServiceRecoveryGuard {
 impl Drop for ServiceRecoveryGuard {
     fn drop(&mut self) {
         for name in &self.stopped {
-            let _ = std::process::Command::new("docker")
-                .args(["start", name])
-                .output();
+            cleanup_docker(&["start", name]);
         }
         for name in &self.disconnected {
-            let _ = std::process::Command::new("docker")
-                .args(["network", "connect", NET, name])
-                .output();
+            cleanup_docker(&["network", "connect", NET, name]);
         }
         for name in &self.netem {
             let network = format!("--network=container:{name}");
-            let _ = std::process::Command::new("docker")
-                .args([
-                    "run",
-                    "--rm",
-                    &network,
-                    "--cap-add=NET_ADMIN",
-                    NETEM_IMAGE,
-                    "sh",
-                    "-c",
-                    "tc qdisc del dev eth0 root 2>/dev/null || true",
-                ])
-                .output();
+            cleanup_docker(&[
+                "run",
+                "--rm",
+                &network,
+                "--cap-add=NET_ADMIN",
+                NETEM_IMAGE,
+                "sh",
+                "-c",
+                "tc qdisc del dev eth0 root 2>/dev/null || true",
+            ]);
         }
     }
 }

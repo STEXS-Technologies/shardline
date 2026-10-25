@@ -20,9 +20,7 @@ use tokio::sync::Semaphore;
 struct Container(String);
 impl Drop for Container {
     fn drop(&mut self) {
-        let _removed = Command::new("docker")
-            .args(["rm", "--force", &self.0])
-            .output();
+        cleanup_docker(&["rm", "--force", &self.0]);
     }
 }
 

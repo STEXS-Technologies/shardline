@@ -2,6 +2,53 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn recovery_cleanup_targets_only_isolated_resources() {
+    const CHILD: &str = "SHARDLINE_TEST_RECOVERY_CLEANUP";
+    if std::env::var_os(CHILD).is_some() {
+        let mut guard = ServiceRecoveryGuard::new();
+        guard.stopped.push(CONTAINER_POSTGRES);
+        guard.disconnected.push(CONTAINER_REDIS);
+        guard.netem.push(CONTAINER_MINIO);
+        drop(guard);
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("docker");
+    let calls = directory.path().join("calls");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SHARDLINE_TEST_CLEANUP_CALLS\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = shardline_test_support::native_client_output(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "prerequisite_tests::recovery_cleanup_targets_only_isolated_resources",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .env("PATH", directory.path())
+            .env("SHARDLINE_TEST_CLEANUP_CALLS", &calls)
+            .env("SHARDLINE_CHAOS_POSTGRES_CONTAINER", "owned-postgres")
+            .env("SHARDLINE_CHAOS_REDIS_CONTAINER", "owned-redis")
+            .env("SHARDLINE_CHAOS_MINIO_CONTAINER", "owned-minio")
+            .env("SHARDLINE_CHAOS_NETWORK", "owned-network"),
+        Duration::from_secs(20),
+    )
+    .unwrap();
+    assert!(output.status.success(), "cleanup child: {}", output.status);
+    let calls = std::fs::read_to_string(calls).unwrap();
+    let calls: Vec<_> = calls.lines().collect();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0], "start owned-postgres");
+    assert_eq!(calls[1], "network connect owned-network owned-redis");
+    assert!(calls[2].starts_with("run --rm --network=container:owned-minio "));
+    assert!(!calls.iter().any(|call| call.contains("chaos-")));
+}
+
 fn run(required: bool, script: Option<&str>) -> std::process::Output {
     run_drill(
         required,
