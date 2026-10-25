@@ -179,14 +179,18 @@ async fn upload(
         if disconnect {
             command.arg("--disconnect");
         }
-        command.arg(endpoint).output().unwrap()
+        shardline_test_support::native_client_output(
+            command.arg(endpoint),
+            std::time::Duration::from_secs(180),
+        )
+        .unwrap()
     })
     .await
     .unwrap();
     assert!(
         output.status.success(),
         "native signer corrupt={corrupt} bad_checksum={bad_checksum} disconnect={disconnect}: {}",
-        String::from_utf8_lossy(&output.stderr)
+        output.status
     );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }

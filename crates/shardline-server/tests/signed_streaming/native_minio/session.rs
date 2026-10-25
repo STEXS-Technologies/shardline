@@ -44,13 +44,19 @@ async fn exercise_session(database: Option<&str>) {
                 command.arg("--expect-denied");
             }
             command.arg(&url);
-            let output = tokio::task::spawn_blocking(move || command.output().unwrap())
-                .await
-                .unwrap();
+            let output = tokio::task::spawn_blocking(move || {
+                shardline_test_support::native_client_output(
+                    &mut command,
+                    std::time::Duration::from_secs(180),
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
             assert!(
                 output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
+                "native session signer failed: {}",
+                output.status
             );
             let response = client
                 .get(&url)

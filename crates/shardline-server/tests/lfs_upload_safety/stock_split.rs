@@ -3,10 +3,11 @@ use super::*;
 use shardline_server::ServerRole;
 
 async fn exercise(database: Option<&str>, storage: Option<S3ObjectStoreConfig>) {
-    let available = std::process::Command::new("git-lfs")
-        .arg("version")
-        .output()
-        .is_ok_and(|output| output.status.success());
+    let available = shardline_test_support::native_client_output(
+        std::process::Command::new("git-lfs").arg("version"),
+        std::time::Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success());
     if !shardline_test_support::require_native_client("git-lfs", available) {
         return;
     }
