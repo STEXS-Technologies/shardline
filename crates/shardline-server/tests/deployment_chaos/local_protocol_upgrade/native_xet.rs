@@ -16,6 +16,13 @@ struct NativeFile {
     members: Vec<(String, Vec<u8>)>,
 }
 
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap()
+}
+
 async fn upload(base: &str, token: &str, seed: u8) -> NativeFile {
     upload_parts(
         base,
@@ -30,7 +37,7 @@ async fn upload(base: &str, token: &str, seed: u8) -> NativeFile {
 }
 
 async fn upload_parts(base: &str, token: &str, parts: Vec<Vec<u8>>, identity: bool) -> NativeFile {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut members = Vec::new();
     for data in parts {
         let (encoded, hash) = shardline_server::test_fixtures::single_chunk_xorb(&data);
@@ -176,7 +183,7 @@ async fn verify_identity_download(base: &str, token: &str, file: &NativeFile) {
         .collect();
     let sha256 = format!("{:x}", Sha256::digest(&expected));
     let url = format!("{base}/v1/hub/xet-files/{sha256}");
-    let client = reqwest::Client::new();
+    let client = http_client();
     let actual = client
         .get(&url)
         .bearer_auth(token)
@@ -199,7 +206,7 @@ async fn verify_identity_download(base: &str, token: &str, file: &NativeFile) {
 }
 
 async fn verify(base: &str, token: &str, file: &NativeFile) {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .get(format!("{base}/v1/reconstructions/{}", file.file_id))
         .bearer_auth(token)
@@ -321,8 +328,21 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     verify(&rollback.base, &token, &original).await;
     verify(&rollback.base, &token, &added).await;
     verify(&rollback.base, &token, &repacked).await;
+    // Old writers do not populate the new SHA-256/alias indexes, even when the
+    // shard carries extended SHA-256 metadata. They must preserve existing
+    // bindings while publishing additional readable native file identities.
     let replayed = upload(&rollback.base, &token, 17).await;
     assert_eq!(replayed.file_id, original.file_id);
+    // Use a third, previously unseen native identity so this is a real old
+    // metadata write, rather than an idempotent replay of a completed intent.
+    let bytes = original_bytes.concat();
+    let rollback_parts: Vec<_> = bytes.chunks(87_386).map(<[u8]>::to_vec).collect();
+    let replaced = upload_parts(&rollback.base, &token, rollback_parts.clone(), true).await;
+    assert_ne!(replaced.file_id, original.file_id);
+    assert_ne!(replaced.file_id, repacked.file_id);
+    verify(&rollback.base, &token, &replaced).await;
+    verify(&rollback.base, &token, &repacked).await;
+    verify_identities(root.path(), postgres, &repacked, &original).await;
     drop(rollback);
     let mut restart =
         LocalServer::spawn_with_storage(&current, root.path(), postgres, "xet", storage_env);
@@ -330,6 +350,14 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     verify(&restart.base, &token, &original).await;
     verify(&restart.base, &token, &added).await;
     verify(&restart.base, &token, &repacked).await;
+    verify(&restart.base, &token, &replaced).await;
     verify_identities(root.path(), postgres, &repacked, &original).await;
+    // An identical retry through the new binary must verify and backfill the
+    // legacy publication instead of bypassing work for its visible old intent.
+    let rebound = upload_parts(&restart.base, &token, rollback_parts, true).await;
+    assert_eq!(rebound.file_id, replaced.file_id);
+    verify_identities(root.path(), postgres, &rebound, &original).await;
+    verify_identities(root.path(), postgres, &rebound, &repacked).await;
+    verify_identity_download(&restart.base, &token, &rebound).await;
     verify_identity_download(&restart.base, &token, &repacked).await;
 }

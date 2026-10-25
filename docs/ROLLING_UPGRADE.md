@@ -79,6 +79,10 @@ with 1.12.1 preserves the candidate's current mapping and historical alias.
 The candidate's SHA-256 download returns the original bytes after restart and
 denies another repository. The same drill also passes with disposable PostgreSQL
 and MinIO, retaining the database and object prefix across each binary switch.
+The rollback binary also uploads a third chunk layout. Its native file remains
+readable after re-upgrade. An identical retry through the candidate verifies and
+adds its SHA-256 binding while preserving the earlier file aliases. Version
+1.12.1 itself does not populate the newer identity index.
 Full Hub commit history, mixed-version official clients and signed URL rollout
 still require separate qualification.
 
