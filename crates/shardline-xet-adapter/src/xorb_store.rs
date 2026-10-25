@@ -268,7 +268,14 @@ pub async fn store_uploaded_xorb_file(
     expected_hash: &str,
     path: &Path,
 ) -> Result<StoredXorbUpload, XetAdapterError> {
-    store_xorb_file_with_resources(object_store, expected_hash, path, ()).await
+    store_xorb_file_with_resources(
+        object_store,
+        expected_hash,
+        path,
+        (),
+        file_preparation::SourceOwnership::Borrowed,
+    )
+    .await
 }
 
 /// Persists an owned staged container, retaining application admission through
@@ -283,7 +290,14 @@ pub async fn store_owned_xorb_file<R: Send + 'static>(
     resources: R,
 ) -> Result<StoredXorbUpload, XetAdapterError> {
     let path = file.path().to_owned();
-    store_xorb_file_with_resources(object_store, expected_hash, &path, (file, resources)).await
+    store_xorb_file_with_resources(
+        object_store,
+        expected_hash,
+        &path,
+        (file, resources),
+        file_preparation::SourceOwnership::OwnedStaging,
+    )
+    .await
 }
 
 async fn store_xorb_file_with_resources<R: Send + 'static>(
@@ -291,6 +305,7 @@ async fn store_xorb_file_with_resources<R: Send + 'static>(
     expected_hash: &str,
     path: &Path,
     resources: R,
+    ownership: file_preparation::SourceOwnership,
 ) -> Result<StoredXorbUpload, XetAdapterError> {
     let hash_for_preparation = expected_hash.to_owned();
     let path_for_preparation = path.to_owned();
@@ -298,7 +313,12 @@ async fn store_xorb_file_with_resources<R: Send + 'static>(
     // cancellation. Preparation performs full synchronous reads and hashing.
     let (prepared, resources) = blocking::cancellable_read((), move |checkpoint| {
         Ok((
-            file_preparation::prepare(&hash_for_preparation, path_for_preparation, checkpoint)?,
+            file_preparation::prepare_source(
+                &hash_for_preparation,
+                path_for_preparation,
+                ownership,
+                checkpoint,
+            )?,
             resources,
         ))
     })

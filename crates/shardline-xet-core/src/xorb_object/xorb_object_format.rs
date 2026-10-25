@@ -808,6 +808,50 @@ pub fn reconstruct_xorb_with_footer_from_reader(
     reader: &mut (impl Read + Seek),
     raw_length: u64,
 ) -> Result<(XorbObject, MerkleHash), CoreError> {
+    let info = inspect_footerless_chunks(reader, raw_length, |header, payload| {
+        write_chunk_header(writer, header)?;
+        writer.write_all(payload)?;
+        Ok(())
+    })?;
+    let computed_hash = info.xorb_hash;
+    let (xorb_obj, _) = XorbObject::serialize_given_info(writer, info)?;
+    Ok((xorb_obj, computed_hash))
+}
+
+/// Verifies a complete standard footerless chunk stream without copying its
+/// encoded payload. The caller must compare the computed root with its trusted
+/// expected hash before publishing or appending the returned footer metadata.
+///
+/// # Errors
+/// Rejects malformed/truncated input, excessive decompression, more than 8,192
+/// chunks, trailing non-chunk bytes, and I/O failures.
+pub fn inspect_footerless_xorb_from_reader(
+    reader: &mut (impl Read + Seek),
+    raw_length: u64,
+) -> Result<XorbObjectInfoV1, CoreError> {
+    let mut count = 0_usize;
+    let info = inspect_footerless_chunks(reader, raw_length, |_, _| {
+        count += 1;
+        if count > 8192 {
+            return Err(CoreError::MalformedData(
+                "footerless chunk limit exceeded".to_owned(),
+            ));
+        }
+        Ok(())
+    })?;
+    if info.chunk_boundary_offsets.last().copied() != Some(raw_length) || count == 0 {
+        return Err(CoreError::MalformedData(
+            "incomplete footerless chunk stream".to_owned(),
+        ));
+    }
+    Ok(info)
+}
+
+fn inspect_footerless_chunks(
+    reader: &mut (impl Read + Seek),
+    raw_length: u64,
+    mut visit: impl FnMut(&XorbChunkHeader, &[u8]) -> Result<(), CoreError>,
+) -> Result<XorbObjectInfoV1, CoreError> {
     reader.seek(SeekFrom::Start(0))?;
     let estimated_chunks = usize::try_from(raw_length)
         .unwrap_or(usize::MAX)
@@ -900,8 +944,7 @@ pub fn reconstruct_xorb_with_footer_from_reader(
             info.unpacked_chunk_offsets.last().unwrap_or(&0) + uncompressed_data.len() as u64,
         );
 
-        write_chunk_header(writer, &chunk_header)?;
-        writer.write_all(&compressed_buf)?;
+        visit(&chunk_header, &compressed_buf)?;
     }
 
     let computed_hash = xorb_hash(&chunk_hash_and_size);
@@ -909,9 +952,7 @@ pub fn reconstruct_xorb_with_footer_from_reader(
     info.num_chunks = chunk_hash_and_size.len() as u64;
     info.fill_in_boundary_offsets();
 
-    let (xorb_obj, _) = XorbObject::serialize_given_info(writer, info)?;
-
-    Ok((xorb_obj, computed_hash))
+    Ok(info)
 }
 
 #[cfg(test)]

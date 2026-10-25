@@ -96,9 +96,11 @@ to bounded file-backed staging; earlier in-memory staging runs reached
 734,364–866,844 KiB. These are single-client observations, not cluster memory
 or throughput guarantees. File-backed staging trades heap use for temporary
 storage writes and uses the existing conditional multipart upload path on S3.
-Footerless input can require both the staged source and a normalized temporary
-container. Provision scratch capacity for concurrent uploads; temporary storage
-is not a substitute for acknowledged durable objects.
+For privately owned upload staging, footerless normalization verifies the payload
+and appends its footer in place, avoiding a second payload copy. The public
+file-upload API preserves caller-owned input and still uses a separate normalized
+temporary container when needed. Provision scratch capacity for concurrent uploads;
+temporary storage is not a substitute for acknowledged durable objects.
 
 Shard registration verifies containers in logical file order and reuses each
 open source while computing the file's SHA-256. It keeps one materialized
@@ -184,7 +186,10 @@ that an object will remain present until a later upload.
 Footerless uploads use file-backed normalization at standard Xorb sizes instead
 of buffering the whole container in memory. Normalization checks declared sizes
 before decompression, verifies the native hash, and validates the resulting
-footer. Temporary normalization files are not published file data. Historical
+footer. Owned staging changes only after its computed native hash matches the
+expected identity. Cancellation stops preparation before publication; immutable
+storage still completes its existing verification and persistence steps.
+Temporary normalization files are not published file data. Historical
 footer-bearing Xorbs keep their existing read format.
 
 The real-client test uses separate empty Hub/Xet caches for successive uploads

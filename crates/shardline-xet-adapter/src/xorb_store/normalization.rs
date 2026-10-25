@@ -32,6 +32,83 @@ pub(super) fn normalize_with_checkpoint(
     checkpoint: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<Option<tempfile::NamedTempFile>, XetAdapterError> {
     use crate::checkpoint_reader::CheckpointReader;
+    let Some(mut input) = footerless_input(expected_hash, path, checkpoint)? else {
+        return Ok(None);
+    };
+    let expected = parse_xet_hash_hex(expected_hash)?;
+    let length = input.metadata()?.len();
+    let mut normalized = tempfile::NamedTempFile::new()?;
+    let (_, computed) = reconstruct_xorb_with_footer_from_reader(
+        normalized.as_file_mut(),
+        &mut CheckpointReader {
+            reader: &mut input,
+            checkpoint,
+        },
+        length,
+    )
+    .map_err(normalization_error)?;
+    if parse_xet_hash_hex(&computed.hex())? != expected {
+        return Err(XetAdapterError::XorbHashMismatch);
+    }
+    checkpoint()?;
+    validate_serialized_xorb(
+        &mut CheckpointReader {
+            reader: normalized.as_file_mut(),
+            checkpoint,
+        },
+        expected,
+    )?;
+    Ok(Some(normalized))
+}
+
+/// Only privately owned upload staging may be modified. Authenticate every
+/// member/root before writing the footer; borrowed input keeps the copy path.
+pub(super) fn normalize_owned_with_checkpoint(
+    expected_hash: &str,
+    path: &Path,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(), XetAdapterError> {
+    use crate::checkpoint_reader::CheckpointReader;
+    use shardline_xet_core::xorb_object::{XorbObject, inspect_footerless_xorb_from_reader};
+    let Some(mut input) = footerless_input(expected_hash, path, checkpoint)? else {
+        return Ok(());
+    };
+    let expected = parse_xet_hash_hex(expected_hash)?;
+    let length = input.metadata()?.len();
+    let info = inspect_footerless_xorb_from_reader(
+        &mut CheckpointReader {
+            reader: &mut input,
+            checkpoint,
+        },
+        length,
+    )
+    .map_err(normalization_error)?;
+    if parse_xet_hash_hex(&info.xorb_hash.hex())? != expected {
+        return Err(XetAdapterError::XorbHashMismatch);
+    }
+    checkpoint()?;
+    let mut output = std::fs::OpenOptions::new().append(true).open(path)?;
+    if output.metadata()?.len() != length {
+        return Err(XetAdapterError::InvalidSerializedXorb);
+    }
+    XorbObject::serialize_given_info(&mut output, info).map_err(normalization_error)?;
+    checkpoint()?;
+    validate_serialized_xorb(
+        &mut CheckpointReader {
+            reader: &mut input,
+            checkpoint,
+        },
+        expected,
+    )?;
+    Ok(())
+}
+
+fn footerless_input(
+    expected_hash: &str,
+    path: &Path,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<Option<File>, XetAdapterError> {
+    use crate::checkpoint_reader::CheckpointReader;
     checkpoint()?;
     let expected = parse_xet_hash_hex(expected_hash)?;
     let mut input = File::open(path)?;
@@ -93,28 +170,7 @@ pub(super) fn normalize_with_checkpoint(
         }
         input.seek(SeekFrom::Start(end))?;
     }
-    let mut normalized = tempfile::NamedTempFile::new()?;
-    let (_, computed) = reconstruct_xorb_with_footer_from_reader(
-        normalized.as_file_mut(),
-        &mut CheckpointReader {
-            reader: &mut input,
-            checkpoint,
-        },
-        length,
-    )
-    .map_err(normalization_error)?;
-    if parse_xet_hash_hex(&computed.hex())? != expected {
-        return Err(XetAdapterError::XorbHashMismatch);
-    }
-    checkpoint()?;
-    validate_serialized_xorb(
-        &mut CheckpointReader {
-            reader: normalized.as_file_mut(),
-            checkpoint,
-        },
-        expected,
-    )?;
-    Ok(Some(normalized))
+    Ok(Some(input))
 }
 
 #[expect(
@@ -144,6 +200,67 @@ mod tests {
         xorb_format_test_utils::{ChunkSize, build_raw_xorb},
     };
     use std::io::{Cursor, Write};
+
+    #[test]
+    fn owned_normalization_matches_borrowed_bytes_and_rejects_before_mutation() {
+        for scheme in [
+            CompressionScheme::None,
+            CompressionScheme::LZ4,
+            CompressionScheme::ByteGrouping4LZ4,
+        ] {
+            let serialized = SerializedXorbObject::from_xorb_with_compression(
+                build_raw_xorb(8, ChunkSize::Fixed(4096)),
+                scheme,
+                false,
+            )
+            .unwrap();
+            let mut source = tempfile::NamedTempFile::new().unwrap();
+            source.write_all(&serialized.serialized_data).unwrap();
+            let hash = serialized.hash.hex();
+            let borrowed = normalize_uploaded_xorb_file(&hash, source.path())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                std::fs::read(source.path()).unwrap(),
+                serialized.serialized_data
+            );
+            let wrong_hash = "00".repeat(32);
+            assert!(
+                normalize_owned_with_checkpoint(&wrong_hash, source.path(), &|| Ok(())).is_err()
+            );
+            assert_eq!(
+                std::fs::read(source.path()).unwrap(),
+                serialized.serialized_data
+            );
+            assert!(
+                normalize_owned_with_checkpoint(&hash, source.path(), &|| Err(
+                    std::io::ErrorKind::ConnectionAborted.into()
+                ))
+                .is_err()
+            );
+            assert_eq!(
+                std::fs::read(source.path()).unwrap(),
+                serialized.serialized_data
+            );
+            normalize_owned_with_checkpoint(&hash, source.path(), &|| Ok(())).unwrap();
+            let canonical = std::fs::read(source.path()).unwrap();
+            assert_eq!(canonical, std::fs::read(borrowed.path()).unwrap());
+            assert!(canonical.starts_with(&serialized.serialized_data));
+            normalize_owned_with_checkpoint(&hash, source.path(), &|| Ok(())).unwrap();
+            assert_eq!(std::fs::read(source.path()).unwrap(), canonical);
+            for malformed in [
+                serialized.serialized_data[..serialized.serialized_data.len() - 1].to_vec(),
+                [serialized.serialized_data.clone(), vec![255; 8]].concat(),
+            ] {
+                let mut invalid = tempfile::NamedTempFile::new().unwrap();
+                invalid.write_all(&malformed).unwrap();
+                assert!(
+                    normalize_owned_with_checkpoint(&hash, invalid.path(), &|| Ok(())).is_err()
+                );
+                assert_eq!(std::fs::read(invalid.path()).unwrap(), malformed);
+            }
+        }
+    }
 
     #[test]
     fn normalization_preserves_output_quota_failures_as_storage_errors() {
