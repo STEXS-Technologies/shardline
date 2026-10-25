@@ -59,27 +59,40 @@ impl PostgresRecordStore {
         &self,
         hash: &str,
     ) -> Result<Option<XetXorbDescriptor>, PostgresMetadataStoreError> {
-        // Establish the snapshot in BEGIN itself, avoiding a separate SET
-        // round trip while keeping descriptor and member reads consistent.
-        let mut transaction = self
-            .pool
-            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            .await?;
-        let row = query("SELECT CASE WHEN octet_length(descriptor::text)<=4194304 THEN descriptor END FROM shardline_xet_xorbs WHERE xorb_hash=$1")
-            .bind(hash).fetch_optional(&mut *transaction).await?;
+        // One SELECT gives the descriptor and its bounded member index the
+        // same statement snapshot without a multi-round-trip transaction.
+        let row = query(
+            "SELECT CASE WHEN octet_length(d.descriptor::text)<=4194304
+                         THEN d.descriptor END AS descriptor,
+                    members.indices, members.hashes
+             FROM shardline_xet_xorbs d
+             CROSS JOIN LATERAL (
+                 SELECT COALESCE(array_agg(chunk_index ORDER BY chunk_index), ARRAY[]::bigint[]) AS indices,
+                        COALESCE(array_agg(chunk_hash ORDER BY chunk_index), ARRAY[]::text[]) AS hashes
+                 FROM (
+                     SELECT chunk_index,chunk_hash FROM shardline_xet_chunks
+                     WHERE xorb_hash=d.xorb_hash ORDER BY chunk_index LIMIT 8193
+                 ) bounded_members
+             ) members
+             WHERE d.xorb_hash=$1",
+        )
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some(row) = row else {
             return Ok(None);
         };
         let descriptor = decode(
-            row.try_get::<Option<serde_json::Value>, _>(0)?
+            row.try_get::<Option<serde_json::Value>, _>("descriptor")?
                 .ok_or_else(invalid)?,
             hash,
         )?;
-        let rows = query("SELECT chunk_index,chunk_hash FROM shardline_xet_chunks WHERE xorb_hash=$1 ORDER BY chunk_index LIMIT 8193")
-            .bind(hash).fetch_all(&mut *transaction).await?
-            .into_iter().map(|member_row| Ok((member_row.try_get(0)?, member_row.try_get(1)?)))
-            .collect::<Result<Vec<(i64, String)>, sqlx::Error>>()?;
-        transaction.commit().await?;
+        let indices: Vec<i64> = row.try_get("indices")?;
+        let hashes: Vec<String> = row.try_get("hashes")?;
+        if indices.len() != hashes.len() {
+            return Err(invalid());
+        }
+        let rows: Vec<_> = indices.into_iter().zip(hashes).collect();
         Ok(crate::xet_xorb::member_rows_match(&descriptor, &rows).then_some(descriptor))
     }
 

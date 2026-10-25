@@ -588,11 +588,16 @@ single-host compatibility/correctness check, not a cluster scaling result.
 
 Native missing-copy resolution also checks the derived descriptor and its
 complete ordered member index. For an existing PostgreSQL descriptor, this
-lookup now uses four statements instead of five: transaction setup establishes
-repeatable-read isolation directly, followed by the two reads and commit.
-This removes one database round trip per lookup without changing the returned
-payload or adding a cache. It does not reduce source-object integrity checks
-or establish an end-to-end throughput improvement. Qualification includes
+lookup now uses one statement instead of four. A lateral subquery reads at most
+8,193 ordered member rows alongside the descriptor in one PostgreSQL statement
+snapshot; the extra row detects an index exceeding the 8,192-member limit.
+This removes the explicit read transaction's begin/commit and the second read
+round trip without adding a cache. Owned PostgreSQL command logs for the same
+three tests showed 137 combined lookups in place of 137 explicit read
+transactions and their separate descriptor/member reads. The eight additional
+member reads used by repair remained unchanged. This does not reduce
+source-object integrity checks, prove lower disk writes, or establish an
+end-to-end throughput improvement. Qualification includes
 8,192 members, final-member corruption, excess rows and concurrent atomic
 descriptor/member updates.
 
