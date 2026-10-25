@@ -3,6 +3,47 @@ use super::*;
 use crate::task_tracking::TASK_EVIDENCE_PREFIX;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhausted_history_pool_reports_acquisition_timeout_and_recovers() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_task_history_scope()
+        .await
+        .unwrap();
+    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+        .await
+        .unwrap();
+    let prepare = store.clone();
+    tokio::task::spawn_blocking(move || prepare.publish("fixture/acquisition", b"original"))
+        .await
+        .unwrap()
+        .unwrap();
+    // This fixture deliberately has one index connection. Hold it without
+    // issuing SQL: the diagnostic must distinguish checkout from query waits.
+    let checkout = fixture.index().pool().acquire().await.unwrap();
+    let blocked = store.clone();
+    let result = tokio::task::spawn_blocking(move || blocked.read("fixture/acquisition", 8))
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(ServerError::Io(error))
+        if error.kind() == std::io::ErrorKind::TimedOut
+            && error.to_string().contains("phase=acquiring connection")
+            && error.to_string().contains("pool_size=1, pool_idle=0")));
+    drop(checkout);
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            store.read("fixture/acquisition", 8).unwrap().unwrap(),
+            b"original"
+        );
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocked_history_read_times_out_and_recovers_after_lock_release() {
     let Some(fixture) = Fixture::new().await else {
         return;
@@ -20,19 +61,30 @@ async fn blocked_history_read_times_out_and_recovers_after_lock_release() {
         .await
         .unwrap()
         .unwrap();
-    let mut lock = fixture.index().pool().begin().await.unwrap();
-    sqlx::query("LOCK TABLE shardline_task_artifacts_v1 IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *lock)
-        .await
-        .unwrap();
+    // Hold the SQL lock on the independent admin pool. Holding the sole
+    // index connection would test acquisition starvation instead of SQL I/O.
+    let mut lock = fixture.admin.begin().await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "LOCK TABLE {}.shardline_task_artifacts_v1 IN ACCESS EXCLUSIVE MODE",
+        fixture.schema
+    )))
+    .execute(&mut *lock)
+    .await
+    .unwrap();
     let blocked = store.clone();
     let result = tokio::task::spawn_blocking(move || blocked.read("fixture/deadline", 8))
         .await
         .unwrap();
-    assert!(matches!(result, Err(ServerError::Io(error))
+    assert!(
+        matches!(&result, Err(ServerError::Io(error))
         if error.kind() == std::io::ErrorKind::TimedOut
             && error.to_string().contains("task metadata read exceeded")
-            && std::error::Error::source(&error).is_some()));
+            && error.to_string().contains("phase=executing")
+            && error.to_string().contains("pool_size=")
+            && error.to_string().contains("pool_idle=")
+            && std::error::Error::source(error).is_some()),
+        "unexpected history timeout: {result:?}"
+    );
     lock.commit().await.unwrap();
     tokio::task::spawn_blocking(move || {
         assert_eq!(
@@ -120,6 +172,9 @@ async fn blocked_history_delete_preserves_retirement_marker_and_resumes() {
     assert!(matches!(result, Err(ServerError::Io(error))
         if error.kind() == std::io::ErrorKind::TimedOut
             && error.to_string().contains("task metadata delete exceeded")
+            && error.to_string().contains("phase=executing")
+            && error.to_string().contains("pool_size=")
+            && error.to_string().contains("pool_idle=")
             && std::error::Error::source(&error).is_some()));
     lock.rollback().await.unwrap();
     tokio::task::spawn_blocking(move || {
