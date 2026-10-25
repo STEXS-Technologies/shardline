@@ -15,9 +15,7 @@ pub(crate) struct PostgresFixture {
 
 impl PostgresFixture {
     pub(crate) async fn new() -> Option<Self> {
-        let Ok(database_url) = std::env::var("DATABASE_URL") else {
-            return None;
-        };
+        let database_url = shardline_test_support::postgres_fixture_url("DATABASE_URL")?;
         let admin = PgPool::connect(&database_url).await.unwrap();
         let mut nonce = [0_u8; 8];
         getrandom::fill(&mut nonce).unwrap();
