@@ -1,5 +1,8 @@
 //! File-backed normalization of standard footerless Xorbs.
 
+#[cfg(all(test, target_os = "linux"))]
+mod io_qualification;
+
 use std::{
     fs::File,
     io::{Seek, SeekFrom},

@@ -440,6 +440,34 @@ tmpfs avoids direct SSD scratch writes but consumes memory and may use swap.
 Measure the chosen layout's memory, disk accounting and capacity before applying
 the numbers to a deployment. Durable object and SQLite sync policies are unchanged.
 
+#### Footerless Xet staging
+
+Owned request staging verifies footerless Xorb members and appends their footer
+in place. The public borrowed-file API preserves its input and uses a separate
+normalized copy. A Linux diagnostic with 64 MiB of uncompressed content and 256
+members measured these normalization writes on file-backed scratch:
+
+| Path | Logical bytes written (`wchar`) | Process-accounted `write_bytes` |
+| --- | ---: | ---: |
+| Borrowed input, normalized copy | 67,123,320 | 67,141,632 |
+| Owned staging, appended footer | 12,408 | 12,288 |
+
+The avoided logical write is exactly the 67,110,912-byte input, including chunk
+headers. Both outputs have the same verified canonical content. Reproduce this
+diagnostic alone, with `TMPDIR` on the scratch filesystem being evaluated:
+
+```bash
+cargo test --locked -p shardline-xet-adapter --lib \
+  footerless_owned_staging_avoids_one_payload_write \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+This measures normalization only, excluding fixture creation and object
+publication. Kernel accounting does not measure NAND wear; temporary dirty pages
+may be discarded before writeback. Total upload cost still includes staging,
+verification, decoded chunk storage and durable container persistence. The
+stock-client workload has not demonstrated a reduction in those total costs.
+
 #### S3 requests and upload resources
 
 With SQLite metadata and real MinIO, direct packing reduced upload requests for
