@@ -5,7 +5,7 @@ use std::{
     error::Error,
     num::NonZeroUsize,
     path::PathBuf,
-    process::Command,
+    process::{Command, Output},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -27,6 +27,10 @@ use tokio::{
 // repair engine's runtime clock. Exact boundary semantics are covered deterministically in
 // `shardline_server::lifecycle_repair::tests`.
 const WEBHOOK_REPAIR_TIME_MARGIN_SECONDS: u64 = 120;
+
+fn run(command: &mut Command) -> std::io::Result<Output> {
+    shardline_test_support::native_client_output(command, Duration::from_secs(120))
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_repair_cleans_stale_metadata_and_keeps_live_quarantine() {
@@ -170,7 +174,7 @@ async fn exercise_lifecycle_repair() -> Result<(), Box<dyn Error>> {
     let _recorded_fresh = index_store.record_webhook_delivery(&fresh_delivery)?;
 
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "repair",
@@ -182,8 +186,7 @@ async fn exercise_lifecycle_repair() -> Result<(), Box<dyn Error>> {
                 .ok_or("storage path was not valid utf-8")?,
             "--webhook-retention-seconds",
             &DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS.to_string(),
-        ])
-        .output()?;
+        ]))?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "repair lifecycle failed: {}",
@@ -285,7 +288,7 @@ async fn exercise_repair_orchestrator() -> Result<(), Box<dyn Error>> {
     let _recorded = index_store.record_webhook_delivery(&old_delivery)?;
 
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "repair",
@@ -296,8 +299,7 @@ async fn exercise_repair_orchestrator() -> Result<(), Box<dyn Error>> {
                 .ok_or("storage path was not valid utf-8")?,
             "--webhook-retention-seconds",
             &DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS.to_string(),
-        ])
-        .output()?;
+        ]))?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "repair failed: {}",
@@ -351,7 +353,7 @@ async fn exercise_lifecycle_repair_fails_closed_on_corrupt_webhook_delivery_meta
     )?;
 
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "repair",
@@ -363,8 +365,7 @@ async fn exercise_lifecycle_repair_fails_closed_on_corrupt_webhook_delivery_meta
                 .ok_or("storage path was not valid utf-8")?,
             "--webhook-retention-seconds",
             &DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS.to_string(),
-        ])
-        .output()?;
+        ]))?;
 
     if output.status.success() {
         return Err(

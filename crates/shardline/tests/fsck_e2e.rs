@@ -6,7 +6,8 @@ use std::{
     fs::{remove_file, write as write_file},
     num::NonZeroUsize,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -15,6 +16,10 @@ use shardline_index::{LifecycleStore, LocalIndexStore, WebhookDelivery};
 use shardline_protocol::RepositoryProvider;
 use shardline_server::LocalBackend;
 use support::CliE2eInvariantError;
+
+fn run(command: &mut Command) -> std::io::Result<Output> {
+    shardline_test_support::native_client_output(command, Duration::from_secs(120))
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fsck_succeeds_for_clean_storage_and_fails_for_missing_chunk() {
@@ -56,7 +61,7 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
         .await?;
     let shardline_bin = shardline_binary()?;
 
-    let clean_output = Command::new(&shardline_bin)
+    let clean_output = run(Command::new(&shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "fsck",
@@ -65,8 +70,7 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
                 .path()
                 .to_str()
                 .ok_or("storage path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if !clean_output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "clean fsck failed: {}",
@@ -84,7 +88,7 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
     let xorb_path = find_xorb_container(storage.path())?;
     remove_file(xorb_path)?;
 
-    let broken_output = Command::new(shardline_bin)
+    let broken_output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "fsck",
@@ -93,8 +97,7 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
                 .path()
                 .to_str()
                 .ok_or("storage path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if broken_output.status.success() {
         return Err(CliE2eInvariantError::new("broken fsck unexpectedly succeeded").into());
     }
@@ -129,7 +132,7 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
     let shardline_bin = shardline_binary()?;
     // GC runs on the intact container first: the xorb is the reachable
     // object for XorbCdcV1 records, so it must survive the sweep.
-    let gc_output = Command::new(&shardline_bin)
+    let gc_output = run(Command::new(&shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
@@ -142,8 +145,7 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
             "--sweep",
             "--retention-seconds",
             "0",
-        ])
-        .output()?;
+        ]))?;
     if !gc_output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "gc failed for reachable xorb container: {}",
@@ -159,7 +161,7 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
     // stays consistent) and verify fsck reports the corruption.
     write_file(&xorb_path, vec![0x5e; corrupt_len as usize])?;
 
-    let fsck_output = Command::new(shardline_bin)
+    let fsck_output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "fsck",
@@ -168,8 +170,7 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
                 .path()
                 .to_str()
                 .ok_or("storage path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if fsck_output.status.success() {
         return Err(CliE2eInvariantError::new("corrupt fsck unexpectedly succeeded").into());
     }
@@ -202,7 +203,7 @@ async fn exercise_fsck_fails_closed_on_corrupt_webhook_delivery_metadata()
     )?;
 
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "fsck",
@@ -211,8 +212,7 @@ async fn exercise_fsck_fails_closed_on_corrupt_webhook_delivery_metadata()
                 .path()
                 .to_str()
                 .ok_or("storage path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
 
     if output.status.success() {
         return Err(
