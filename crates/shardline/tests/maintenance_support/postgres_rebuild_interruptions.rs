@@ -104,7 +104,7 @@ impl Drop for StopOnDrop {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the owned PostgreSQL process-cut verifier"]
 async fn postgres_rebuild_preserves_partial_heads_and_fresh_discovery() -> Result<()> {
-    verify_cut(Mutation::Heads).await
+    verify_cut(Mutation::Heads, false).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -115,12 +115,26 @@ async fn postgres_rebuild_preserves_partial_derived_indexes_and_fresh_discovery(
         Mutation::DedupePrune,
         Mutation::DedupeRestore,
     ] {
-        verify_cut(mutation).await?;
+        verify_cut(mutation, false).await?;
     }
     Ok(())
 }
 
-async fn verify_cut(mutation: Mutation) -> Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires the owned PostgreSQL process-cut verifier"]
+async fn postgres_rebuild_sigkill_preserves_heads_and_derived_indexes() -> Result<()> {
+    for mutation in [
+        Mutation::Heads,
+        Mutation::ReconstructionPrune,
+        Mutation::DedupePrune,
+        Mutation::DedupeRestore,
+    ] {
+        verify_cut(mutation, true).await?;
+    }
+    Ok(())
+}
+
+async fn verify_cut(mutation: Mutation, hard_kill: bool) -> Result<()> {
     use std::os::unix::process::ExitStatusExt;
     let (url, admin) = postgres_fixture::connect_owned().await?;
     let root = tempfile::tempdir()?;
@@ -218,12 +232,15 @@ async fn verify_cut(mutation: Mutation) -> Result<()> {
     assert_eq!(identity.operation, "IndexRebuild");
     assert!(
         Command::new("kill")
-            .arg("-TERM")
+            .arg(if hard_kill { "-KILL" } else { "-TERM" })
             .arg(original.0.id().to_string())
             .status()?
             .success()
     );
-    assert_eq!(original.0.wait()?.signal(), Some(15));
+    assert_eq!(
+        original.0.wait()?.signal(),
+        Some(if hard_kill { 9 } else { 15 })
+    );
     let owns: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND granted)",
     )

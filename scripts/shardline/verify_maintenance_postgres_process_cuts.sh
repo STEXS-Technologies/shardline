@@ -65,3 +65,22 @@ if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/derived-rebuild-test.log"; 
 rg -Fx "test $derived_test ... ok" "$fixture/derived-rebuild-test.log"
 rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/derived-rebuild-test.log"
 test "$(rg -c '^PASS: PostgreSQL .* preserves partial mutation, native evidence and fresh discovery$' "$fixture/derived-rebuild-test.log")" = 3
+
+# These cuts must start from a fresh owned database: the TERM cases above
+# deliberately retain their repaired rows and task history for inspection.
+docker exec "$container_id" psql -h 127.0.0.1 -U postgres -d shardline -v ON_ERROR_STOP=1 \
+    -c 'CREATE DATABASE shardline_sigkill;' > "$fixture/sigkill-database.log" 2>&1
+sigkill_url="postgres://postgres:owned_process_fixture@127.0.0.1:$port/shardline_sigkill"
+env -i "$released" --config "$fixture/empty.toml" db migrate up --database-url "$sigkill_url" > "$fixture/sigkill-released-bootstrap.log" 2>&1
+env -i "$current" --config "$fixture/empty.toml" db migrate up --database-url "$sigkill_url" > "$fixture/sigkill-owner-upgrade.log" 2>&1
+docker exec "$container_id" psql -h 127.0.0.1 -U postgres -d shardline_sigkill -v ON_ERROR_STOP=1 \
+    -c "CREATE TABLE shardline_validation_owner(token text NOT NULL); INSERT INTO shardline_validation_owner VALUES ('$token');" > "$fixture/sigkill-owner.log" 2>&1
+sigkill_test=maintenance_support::postgres_rebuild_interruptions::postgres_rebuild_sigkill_preserves_heads_and_derived_indexes
+env -i CARGO_BIN_EXE_shardline="$current" SHARDLINE_OWNED_PG_FIXTURE_URL="$sigkill_url" \
+    SHARDLINE_OWNED_PG_FIXTURE_TOKEN="$token" "$harness" --ignored --exact "$sigkill_test" --nocapture \
+    > "$fixture/sigkill-rebuild-test.log" 2>&1
+if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/sigkill-rebuild-test.log"; then exit 1; fi
+rg -Fx "test $sigkill_test ... ok" "$fixture/sigkill-rebuild-test.log"
+rg -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture/sigkill-rebuild-test.log"
+test "$(rg -c '^PASS: PostgreSQL ' "$fixture/sigkill-rebuild-test.log")" = 4
+echo 'PASS: four actual PostgreSQL rebuild SIGKILL cuts preserve partial state and fresh recovery'
