@@ -13,6 +13,8 @@ pub(crate) mod types;
 #[cfg(test)]
 mod postgres_recovery;
 #[cfg(test)]
+mod reachability_tests;
+#[cfg(test)]
 mod tests;
 
 // Public API re-exports

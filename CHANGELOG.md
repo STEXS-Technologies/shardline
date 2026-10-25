@@ -89,6 +89,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   larger containers.
 - Reuse native Xorb sources during shard validation and file hashing to avoid
   repeated object-store reads and temporary copies for sequential file terms.
+- Reuse fully verified packed-container reachability within lifecycle repair's
+  bounded working set, avoiding repeated source reads for shared latest and
+  version records while verifying sources again on later repair runs.
 - Reuse an existing native Xorb during protocol packing when its verified content
   matches but its compression encoding differs, retaining the installed offsets
   instead of writing redundant standalone chunks.

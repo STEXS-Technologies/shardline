@@ -504,6 +504,15 @@ stock-client workload has not demonstrated a reduction in those total costs.
 
 #### S3 requests and upload resources
 
+Lifecycle repair has a separate shared-container optimization: a bounded,
+run-local set remembers fully verified packed sources while scanning latest and
+version records. In a real MinIO fixture with four files sharing one container,
+this reduces source GETs from eight to one per scan. Every file record is still
+parsed, and a later repair reads the source again and detects intervening
+corruption. The set holds at most 4,096 identities, with rereads after turnover;
+it retains no container payloads. This fixture does not establish a reduction
+in GC's transfer cost across separate commands or total production repair cost.
+
 Protocol packing can also reuse a native Xorb with identical ordered chunks but
 a different compression encoding. Reuse verifies the retained container's full
 content and native identity, then records its actual packed offsets. This avoids

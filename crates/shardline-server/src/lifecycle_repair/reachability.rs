@@ -23,6 +23,11 @@ use crate::{
 
 use super::types::RepairReachability;
 
+// Cache identities only, never container payloads. Traversals beyond this
+// working set safely reread sources instead of accumulating another unbounded
+// set alongside the reachability graph.
+const MAX_RESOLVED_XORBS: usize = 4096;
+
 pub(crate) async fn collect_referenced_object_keys<RecordAdapter, IndexAdapter>(
     record_store: &RecordAdapter,
     index_store: &IndexAdapter,
@@ -36,13 +41,28 @@ where
     IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<ServerError>,
 {
+    // This observation belongs only to this traversal. A later repair must
+    // verify the stored source again, even if its metadata has not changed.
+    let mut resolved_xorbs = std::collections::HashSet::new();
     RecordTraversal::visit_latest_records(record_store, |entry| {
-        collect_record_object_references(object_store, frontends, &entry.bytes, reachability)
+        collect_record_object_references_cached(
+            object_store,
+            frontends,
+            &entry.bytes,
+            reachability,
+            &mut resolved_xorbs,
+        )
     })
     .await?;
 
     RecordTraversal::visit_version_records(record_store, |entry| {
-        collect_record_object_references(object_store, frontends, &entry.bytes, reachability)
+        collect_record_object_references_cached(
+            object_store,
+            frontends,
+            &entry.bytes,
+            reachability,
+            &mut resolved_xorbs,
+        )
     })
     .await?;
 
@@ -64,18 +84,35 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn collect_record_object_references(
     object_store: &ServerObjectStore,
     frontends: &[ServerFrontend],
     record_bytes: &[u8],
     reachability: &mut RepairReachability,
 ) -> Result<(), ServerError> {
+    collect_record_object_references_cached(
+        object_store,
+        frontends,
+        record_bytes,
+        reachability,
+        &mut std::collections::HashSet::new(),
+    )
+}
+
+fn collect_record_object_references_cached(
+    object_store: &ServerObjectStore,
+    frontends: &[ServerFrontend],
+    record_bytes: &[u8],
+    reachability: &mut RepairReachability,
+    resolved_xorbs: &mut std::collections::HashSet<String>,
+) -> Result<(), ServerError> {
     let record = parse_stored_file_record_bytes(record_bytes)?;
     let storage_layout = record.storage_layout();
     reachability.scanned_records = checked_increment(reachability.scanned_records)?;
-    // Resolve each distinct xorb container once; all chunks of a repointed
-    // record share the same xorb hash.
-    let mut resolved_xorbs = std::collections::HashSet::new();
+    // Preserve the legacy per-record probe bound for raw-chunk records whose
+    // optional container is absent. Only verified sources cross record bounds.
+    let mut attempted_xorbs = std::collections::HashSet::new();
     for chunk in &record.chunks {
         match storage_layout {
             FileRecordStorageLayout::ReferencedObjectTerms => {
@@ -105,6 +142,12 @@ pub(crate) fn collect_record_object_references(
                     .live_dedupe_chunk_hashes
                     .insert(chunk.hash.clone());
 
+                if record.storage_repr == StorageRepresentation::XorbCdcV1
+                    && resolved_xorbs.contains(&chunk.hash)
+                {
+                    continue;
+                }
+
                 for protocol_object_key in optional_chunk_container_keys(frontends, &chunk.hash)? {
                     if object_store.metadata(&protocol_object_key)?.is_some() {
                         reachability
@@ -124,14 +167,19 @@ pub(crate) fn collect_record_object_references(
                 // under that key, and walking a missing container must not error
                 // the repair run.
                 if record.storage_repr == StorageRepresentation::XorbCdcV1
-                    && resolved_xorbs.insert(chunk.hash.clone())
-                {
-                    collect_xorb_member_chunk_references(
+                    && attempted_xorbs.insert(chunk.hash.clone())
+                    && collect_xorb_member_chunk_references(
                         object_store,
                         frontends,
                         &chunk.hash,
                         reachability,
-                    )?;
+                    )?
+                {
+                    // Never cache a missing or failed source observation.
+                    if resolved_xorbs.len() >= MAX_RESOLVED_XORBS {
+                        resolved_xorbs.clear();
+                    }
+                    resolved_xorbs.insert(chunk.hash.clone());
                 }
             }
         }
@@ -151,17 +199,17 @@ fn collect_xorb_member_chunk_references(
     frontends: &[ServerFrontend],
     chunk_hash_hex: &str,
     reachability: &mut RepairReachability,
-) -> Result<(), ServerError> {
+) -> Result<bool, ServerError> {
     let Some(xorb_key) = optional_chunk_container_keys(frontends, chunk_hash_hex)?
         .into_iter()
         .next()
     else {
-        return Ok(());
+        return Ok(false);
     };
     let Some((mut reader, _length)) =
         object_store.materialize_bounded_object_if_present(&xorb_key, 0)?
     else {
-        return Ok(());
+        return Ok(false);
     };
     let xorb_hash_hex =
         xorb_hash_from_object_key_if_present(&xorb_key)?.ok_or(ServerError::InvalidContentHash)?;
@@ -178,7 +226,7 @@ fn collect_xorb_member_chunk_references(
             .insert(member_hash_hex);
         Ok::<(), ServerError>(())
     }) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         Err(XorbVisitError::Parse(error)) => Err(ServerError::from(error)),
         Err(XorbVisitError::Visitor(error)) => Err(error),
     }
