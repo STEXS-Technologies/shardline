@@ -348,6 +348,9 @@ reachable record remain protected.
   The legacy `commit_id` field and `/revisions` listing retain internal IDs.
   SDK response IDs can therefore differ from opaque IDs saved before upgrading;
   resolve an old revision to obtain its corresponding Git ID before comparison.
+  Released 1.12.1 replicas do not resolve the new public Git IDs. During rollout,
+  route those requests to upgraded replicas; rollback historical reads require
+  the legacy IDs from `/revisions`. See [Rolling Upgrade](ROLLING_UPGRADE.md).
 - The compatibility claim applies to the documented route surfaces and native client
   workflows above. It does not imply implementation of unrelated upstream products or
   optional APIs such as Bazel Remote Execution, Hugging Face

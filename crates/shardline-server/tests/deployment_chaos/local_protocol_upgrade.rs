@@ -4,6 +4,7 @@ use super::*;
 use shardline_index::{LocalRecordStore, XetFileIdentity};
 
 mod creation_policy;
+mod hub_history;
 mod maintenance;
 mod native_xet;
 #[cfg(feature = "docker")]
@@ -341,13 +342,10 @@ async fn migrate_metadata(binary: &Path, root: &Path, postgres: Option<&str>) {
     tokio::task::spawn_blocking(move || {
         if let Some(url) = postgres {
             let output = shardline_test_support::native_client_output(
-                Command::new(binary).env_clear().args([
-                    "db",
-                    "migrate",
-                    "up",
-                    "--database-url",
-                    &url,
-                ]),
+                Command::new(binary)
+                    .env_clear()
+                    .env("SHARDLINE_INDEX_POSTGRES_URL", &url)
+                    .args(["db", "migrate", "up"]),
                 Duration::from_secs(120),
             )
             .unwrap();

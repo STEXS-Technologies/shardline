@@ -83,8 +83,21 @@ The rollback binary also uploads a third chunk layout. Its native file remains
 readable after re-upgrade. An identical retry through the candidate verifies and
 adds its SHA-256 binding while preserving the earlier file aliases. Version
 1.12.1 itself does not populate the newer identity index.
-Full Hub commit history, mixed-version official clients and signed URL rollout
-still require separate qualification.
+Stock Hub 1.25.1, 2.2.0 and 2.3.0 clients each pass a small regular-file history drill against
+the actual 1.12.1 binary and the candidate, on local storage and PostgreSQL/MinIO.
+It creates a private repository before migration, replaces its file after
+migration, writes again after rollback, and verifies all three byte-exact
+versions after re-upgrade with fresh client caches.
+
+Hub revision IDs have a rollout boundary: 1.12.1 does not understand the new
+public Git IDs returned in SDK commit fields. It returns 404 for those IDs,
+although the corresponding content remains readable by `main` and the legacy
+internal revision ID from `/api/models/{namespace}/{repo}/revisions`.
+Retain that listing before rollback if you need historical reads with 1.12.1.
+During a mixed-version rollout, keep requests using new public Git IDs on
+upgraded Hub replicas. Old saved revision IDs remain accepted after upgrading.
+This drill does not qualify concurrent mixed-version Hub publication, native
+large-file Hub histories, historical GC/repair or signed URL rollout.
 
 The alias migration preserves current mappings and future replacements. It
 cannot recover mappings already overwritten before the upgrade.

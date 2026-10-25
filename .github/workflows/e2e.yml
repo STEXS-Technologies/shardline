@@ -258,6 +258,21 @@ jobs:
             --test native_huggingface_cli_e2e --run-ignored all --test-threads 1 \
             -E 'test(native_huggingface_http_analytics::)'
 
+      - name: Qualify released Hub history through upgrade and rollback
+        run: |
+          set -euo pipefail
+          export PATH="${RUNNER_TEMP}/native-hub-22-qualification/bin:$PATH"
+          history_fixture="${RUNNER_TEMP}/hub-history-upgrade"
+          mkdir -p "$history_fixture"
+          export SHARDLINE_N_MINUS_ONE_BINARY
+          SHARDLINE_N_MINUS_ONE_BINARY=$(bash scripts/shardline/fetch_compatibility_baseline.sh "$history_fixture")
+          cp target/release/shardline "$history_fixture/current-shardline"
+          export CARGO_BIN_EXE_shardline="$history_fixture/current-shardline"
+          unset DATABASE_URL SHARDLINE_INDEX_POSTGRES_URL
+          cargo nextest run --locked -p shardline-server --features docker \
+            --test deployment_chaos --run-ignored only --test-threads 1 \
+            --success-output immediate -E 'test(hub_history::)'
+
       - name: Qualify stock Git LFS transfers with MinIO
         run: >-
           cargo nextest run --locked --manifest-path e2e/Cargo.toml
