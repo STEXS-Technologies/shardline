@@ -26,6 +26,13 @@ fn command(state: &Path, root: &Path, operation: &str) -> Command {
     command
 }
 
+fn run_operation(state: &Path, root: &Path, operation: &str) -> Result<std::process::Output> {
+    Ok(shardline_test_support::native_client_output(
+        &mut command(state, root, operation),
+        Duration::from_secs(120),
+    )?)
+}
+
 fn journal(state: &Path) -> std::path::PathBuf {
     state
         .join(hex::encode(Digest::of(b"test-task").0))
@@ -954,22 +961,18 @@ fn real_workflows_commit_native_checkpoints_and_reuse_completed_history() -> Res
         let root = sandbox.path().join("deployment");
         fs::create_dir(&root)?;
         let state = sandbox.path().join("maintenance");
-        let first = command(&state, &root, operation).output()?;
-        assert!(
-            first.status.success(),
-            "{operation}: {}",
-            String::from_utf8_lossy(&first.stderr)
-        );
+        let first = run_operation(&state, &root, operation)?;
+        assert!(first.status.success(), "{operation}: {}", first.status);
         let connection = Connection::open(journal(&state))?;
         let records: u32 =
             connection.query_row("SELECT count(*) FROM penelope_records_v1", [], |row| {
                 row.get(0)
             })?;
-        let repeated = command(&state, &root, operation).output()?;
+        let repeated = run_operation(&state, &root, operation)?;
         assert!(
             repeated.status.success(),
             "repeat {operation}: {}",
-            String::from_utf8_lossy(&repeated.stderr)
+            repeated.status
         );
         assert_eq!(
             connection.query_row("SELECT count(*) FROM penelope_records_v1", [], |row| row
@@ -1011,7 +1014,7 @@ fn completed_task_rejects_materialized_report_tampering() -> Result<()> {
     let root = sandbox.path().join("deployment");
     fs::create_dir(&root)?;
     let state = sandbox.path().join("maintenance");
-    assert!(command(&state, &root, "fsck").output()?.status.success());
+    assert!(run_operation(&state, &root, "fsck")?.status.success());
     let directory = journal(&state)
         .parent()
         .ok_or("state directory")?
@@ -1024,7 +1027,7 @@ fn completed_task_rejects_materialized_report_tampering() -> Result<()> {
             .join(hex::encode(proof.artifact.digest.0)),
         b"altered",
     )?;
-    assert!(!command(&state, &root, "fsck").output()?.status.success());
+    assert!(!run_operation(&state, &root, "fsck")?.status.success());
     Ok(())
 }
 
@@ -1052,7 +1055,7 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
     let worker_pid: u32 =
         Connection::open_with_flags(journal(&state), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
             .query_row("SELECT pid FROM penelope_runtime_v1", [], |row| row.get(0))?;
-    let concurrent = command(&state, &root, "index-rebuild").output()?;
+    let concurrent = run_operation(&state, &root, "index-rebuild")?;
     assert!(!concurrent.status.success());
     controller.kill()?;
     let _status = controller.wait()?;
@@ -1072,7 +1075,7 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
         thread::sleep(Duration::from_millis(5));
     };
     // Recovery cleans up a surviving fixture child even if this assertion fails.
-    let recovery = command(&state, &root, "index-rebuild").output()?;
+    let recovery = run_operation(&state, &root, "index-rebuild")?;
     assert!(
         worker_stopped,
         "optional worker survived controller termination"
