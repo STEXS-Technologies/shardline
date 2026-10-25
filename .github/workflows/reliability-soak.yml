@@ -246,6 +246,8 @@ jobs:
         run: docker compose -f docker-compose.postgres-failover.yml up -d --wait
 
       - name: Kill primary, promote standby, and verify live recovery
+        env:
+          SHARDLINE_REQUIRE_NATIVE_CLIENTS: "1"
         run: |
           set -euo pipefail
           mkdir -p reliability-postgres-results
