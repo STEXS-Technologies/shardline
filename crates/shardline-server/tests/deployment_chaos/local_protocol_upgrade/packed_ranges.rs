@@ -1,9 +1,18 @@
 //! Released and candidate processes read both generations of packed S3 data.
 use super::*;
 
-async fn verify(server: &LocalServer, token: &str, key: &str, expected: &[u8]) {
+async fn verify(
+    server: &LocalServer,
+    token: &str,
+    key: &str,
+    expected: &[u8],
+    boundaries: &[usize],
+) {
     assert_s3_bytes(&server.base, token, key, expected, "packed range upgrade").await;
-    for start in [0, expected.len() / 2, expected.len() - 4096] {
+    for start in [0, expected.len() / 2, expected.len() - 4096]
+        .into_iter()
+        .chain(boundaries.iter().map(|boundary| boundary - 2048))
+    {
         let end = start + 4095;
         let response = reqwest::Client::new()
             .get(format!("{}/{BUCKET}/{key}", server.base))
@@ -22,6 +31,41 @@ async fn verify(server: &LocalServer, token: &str, key: &str, expected: &[u8]) {
             &expected[start..=end]
         );
     }
+}
+
+async fn container_boundaries(postgres: &str) -> Vec<usize> {
+    let pool = sqlx::PgPool::connect(postgres).await.unwrap();
+    let records: Vec<String> = sqlx::query_scalar(
+        "SELECT record::text FROM shardline_file_records WHERE record_kind = 'latest'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    assert!(!records.is_empty(), "fixture must publish packed records");
+    let mut boundaries = std::collections::BTreeSet::new();
+    for bytes in records {
+        let record: shardline_index::FileRecord = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(record.total_bytes, 36 * 1024 * 1024);
+        assert_eq!(
+            record.storage_repr,
+            shardline_index::StorageRepresentation::XorbCdcV1
+        );
+        let mut transitions = 0;
+        for pair in record.chunks.windows(2) {
+            if pair[0].hash != pair[1].hash {
+                let boundary = usize::try_from(pair[1].offset).unwrap();
+                assert!(
+                    boundary >= 2048
+                        && boundary + 2048 <= usize::try_from(record.total_bytes).unwrap()
+                );
+                boundaries.insert(boundary);
+                transitions += 1;
+            }
+        }
+        assert!(transitions > 0, "fixture must span multiple containers");
+    }
+    boundaries.into_iter().collect()
 }
 
 #[tokio::test]
@@ -54,7 +98,7 @@ async fn released_remote_packed_ranges_survive_upgrade_and_rollback() {
     let root = TempDir::new().unwrap();
     let token = mint_token("drill", "drill", TokenScope::Write);
     let mut state = 748973_u64;
-    let payload: Vec<u8> = (0..4 * 1024 * 1024)
+    let payload: Vec<u8> = (0..36 * 1024 * 1024)
         .map(|_| {
             state ^= state << 13;
             state ^= state >> 7;
@@ -93,9 +137,17 @@ async fn released_remote_packed_ranges_survive_upgrade_and_rollback() {
                     .is_success()
             );
         }
-        verify(&server, &token, "released-packed", &payload).await;
+        let boundaries = container_boundaries(&postgres).await;
+        verify(&server, &token, "released-packed", &payload, &boundaries).await;
         if write_key != Some("released-packed") {
-            verify(&server, &token, "candidate-packed", &candidate_payload).await;
+            verify(
+                &server,
+                &token,
+                "candidate-packed",
+                &candidate_payload,
+                &boundaries,
+            )
+            .await;
         }
         if write_key == Some("candidate-packed") {
             tokio::join!(
@@ -106,11 +158,24 @@ async fn released_remote_packed_ranges_survive_upgrade_and_rollback() {
                     &storage_env,
                     "s3"
                 ),
-                verify(&server, &token, "released-packed", &payload),
-                verify(&server, &token, "candidate-packed", &candidate_payload),
+                verify(&server, &token, "released-packed", &payload, &boundaries),
+                verify(
+                    &server,
+                    &token,
+                    "candidate-packed",
+                    &candidate_payload,
+                    &boundaries
+                ),
             );
-            verify(&server, &token, "released-packed", &payload).await;
-            verify(&server, &token, "candidate-packed", &candidate_payload).await;
+            verify(&server, &token, "released-packed", &payload, &boundaries).await;
+            verify(
+                &server,
+                &token,
+                "candidate-packed",
+                &candidate_payload,
+                &boundaries,
+            )
+            .await;
         }
         drop(server);
     }

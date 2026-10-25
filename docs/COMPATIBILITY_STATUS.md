@@ -286,6 +286,13 @@ binaries. Missing binaries fail mandatory native-client or PostgreSQL qualificat
 optional local runs report an explicit skip. `scripts/test-postgres.sh` supplies
 both releases before running the full server library.
 
+The packed-range deployment drill uses 36 MiB files written by the actual
+v1.12.1 and candidate binaries against PostgreSQL/MinIO. It requires multiple
+packed containers and checks complete downloads plus 4 KiB reads across the
+container transitions recorded in metadata. The checks continue during candidate
+GC, after predecessor rollback and after re-upgrade; a small single-container
+fixture would not establish this boundary coverage.
+
 The E2E job separately selects the ignored native Xet PostgreSQL/MinIO test and
 the two Bazel flows. Kubernetes and kind tests still require their dedicated
 deployment fixtures. The Kubernetes protocol test uses local Docker services only
