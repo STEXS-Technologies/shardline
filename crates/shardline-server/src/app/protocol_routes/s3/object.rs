@@ -116,8 +116,8 @@ use md5::{Digest, Md5};
 use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_s3_adapter::{
     CopyObjectResult, S3Error, S3SubResource, classify, etag_header, format_iso8601,
-    parse_content_md5, parse_copy_source, parse_s3_range, read_conditional_headers,
-    require_s3_bucket_binding,
+    parse_content_md5, parse_copy_source, parse_s3_range,
+    read_wire_conditional_headers as read_conditional_headers, require_s3_bucket_binding,
 };
 use shardline_server_core::AuthorizedRepository;
 
@@ -825,18 +825,13 @@ fn check_copy_source_preconditions(
     for condition in conditions {
         // Snapshot resolution already proved source existence. A legacy
         // source without an ETag cannot satisfy concrete tag predicates.
-        let satisfied = match &condition {
-            shardline_s3_adapter::ConditionalHeader::IfMatch(
-                shardline_s3_adapter::EntityTagSet::Any,
-            ) => true,
-            shardline_s3_adapter::ConditionalHeader::IfNoneMatch(
-                shardline_s3_adapter::EntityTagSet::Any,
-            ) => false,
-            shardline_s3_adapter::ConditionalHeader::IfMatch(_)
-            | shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_) => snapshot
+        let satisfied = if condition.is_wildcard() {
+            condition.is_match()
+        } else {
+            snapshot
                 .etag
                 .as_deref()
-                .is_some_and(|etag| condition.satisfied(Some(etag))),
+                .is_some_and(|etag| condition.satisfied(Some(etag)))
         };
         if !satisfied {
             return Err(S3Error::precondition_failed());
@@ -913,11 +908,7 @@ pub(super) fn check_precondition(
     let Some(condition) = failing_condition(stored_etag, headers)? else {
         return Ok(());
     };
-    if matches!(
-        condition,
-        shardline_s3_adapter::ConditionalHeader::IfMatch(_)
-    ) && stored_etag.is_none()
-    {
+    if condition.is_match() && stored_etag.is_none() {
         return Err(S3Error::no_such_key(key));
     }
     Err(S3Error::precondition_failed())
@@ -926,7 +917,7 @@ pub(super) fn check_precondition(
 fn failing_condition(
     stored_etag: Option<&str>,
     headers: &HeaderMap,
-) -> Result<Option<shardline_s3_adapter::ConditionalHeader>, S3Error> {
+) -> Result<Option<shardline_s3_adapter::WireConditionalHeader>, S3Error> {
     let conditions = read_conditional_headers(headers)
         .map_err(|_error| S3Error::invalid_argument("Invalid conditional entity-tag header"))?;
     Ok(conditions
@@ -944,7 +935,7 @@ fn check_read_precondition(
     let failed_tag = failing_condition(stored_etag, headers)?;
     conditions::require_unmodified(modified_at, headers)?;
     match failed_tag {
-        Some(shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_)) => {
+        Some(condition) if !condition.is_match() => {
             let mut response = StatusCode::NOT_MODIFIED.into_response();
             if let Some(etag) =
                 stored_etag.and_then(|etag| HeaderValue::from_str(&etag_header(etag)).ok())

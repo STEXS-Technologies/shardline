@@ -4929,6 +4929,69 @@ async fn s3_mutations_preserve_all_conditional_safeguards() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_opaque_validator_lists_preserve_read_and_write_conditions() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "opaque.txt").await;
+    let etag = get_etag(&app, "opaque.txt").await;
+    let mut validators = b"\"\x80,opaque\", ".to_vec();
+    validators.extend_from_slice(etag.as_bytes());
+    let value = header::HeaderValue::from_bytes(&validators).unwrap();
+    for method in ["GET", "HEAD"] {
+        for (name, expected) in [
+            (header::IF_MATCH, StatusCode::OK),
+            (header::IF_NONE_MATCH, StatusCode::NOT_MODIFIED),
+        ] {
+            let mut request = conditional_request(
+                method,
+                format!("/{BUCKET}/opaque.txt"),
+                &sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                None,
+            );
+            request.headers_mut().insert(name, value.clone());
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected, "{method}");
+            let bytes = body_bytes(response).await;
+            if method == "GET" && expected == StatusCode::OK {
+                assert_eq!(bytes, b"seed-content");
+            } else {
+                assert!(bytes.is_empty());
+            }
+        }
+    }
+    let mut denied = conditional_put_request(
+        format!("/{BUCKET}/opaque.txt"),
+        b"must-not-land".to_vec(),
+        None,
+    );
+    denied
+        .headers_mut()
+        .insert(header::IF_NONE_MATCH, value.clone());
+    assert_eq!(
+        app.clone().oneshot(denied).await.unwrap().status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(
+        body_bytes(get_etag_request(&app, "opaque.txt").await).await,
+        b"seed-content"
+    );
+    let mut accepted = conditional_put_request(
+        format!("/{BUCKET}/opaque.txt"),
+        b"replacement".to_vec(),
+        None,
+    );
+    accepted.headers_mut().insert(header::IF_MATCH, value);
+    assert_eq!(
+        app.clone().oneshot(accepted).await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        body_bytes(get_etag_request(&app, "opaque.txt").await).await,
+        b"replacement"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_read_conditions_and_if_range_preserve_representation() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);

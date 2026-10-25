@@ -51,9 +51,10 @@ use shardline_s3_adapter::{
     CompleteMultipartUploadResult, CompleteParts, InitiateMultipartUploadResult, MultipartPart,
     PartQuotaLimits, S3Error, S3SessionError, acquire_session_part_lock_for_root, create_session,
     delete_session_locked, lock_session_parts, lock_upload_sessions, new_upload_id,
-    parse_complete_multipart_parts, parse_content_md5, read_conditional_headers,
-    read_session_locked, session_dir, store_versioned_part_with_checksum_locked,
-    stored_part_file_path, validate_part_quota_for_session_locked, versioned_part_file_name,
+    parse_complete_multipart_parts, parse_content_md5, read_session_locked,
+    read_wire_conditional_headers as read_conditional_headers, session_dir,
+    store_versioned_part_with_checksum_locked, stored_part_file_path,
+    validate_part_quota_for_session_locked, versioned_part_file_name,
 };
 use shardline_storage::ObjectKey;
 use tokio::io::AsyncWriteExt;

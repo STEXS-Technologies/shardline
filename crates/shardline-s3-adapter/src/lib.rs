@@ -45,6 +45,9 @@ mod multipart;
 mod protocol_support;
 mod sigv4;
 mod types;
+mod wire_conditions;
+
+pub use wire_conditions::{WireConditionalHeader, read_wire_conditional_headers};
 
 pub use auth::{
     AuthScheme, CredentialScope, QueryCredential, extract_access_key,

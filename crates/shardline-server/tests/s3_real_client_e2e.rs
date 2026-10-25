@@ -1258,6 +1258,125 @@ async fn rclone_run(endpoint: &str, token: &str, args: &[&str]) -> std::process:
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opaque_conditional_headers_preserve_bytes_over_http() {
+    let server = TestServer::start().await;
+    let token = mint_token(OWNER, NAME);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let url = format!("{}/{BUCKET}/opaque.bin", server.base_url);
+    let put = client
+        .put(&url)
+        .bearer_auth(&token)
+        .body("original")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), reqwest::StatusCode::OK);
+    let etag = put.headers()["etag"].clone();
+    let mut list = b"\"\x80,opaque\", ".to_vec();
+    list.extend_from_slice(etag.as_bytes());
+    let value = reqwest::header::HeaderValue::from_bytes(&list).unwrap();
+    for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
+        for (name, expected) in [
+            ("If-Match", reqwest::StatusCode::OK),
+            ("If-None-Match", reqwest::StatusCode::NOT_MODIFIED),
+        ] {
+            let response = client
+                .request(method.clone(), &url)
+                .bearer_auth(&token)
+                .header(name, value.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let body = response.bytes().await.unwrap();
+            if method == reqwest::Method::GET && expected == reqwest::StatusCode::OK {
+                assert_eq!(body.as_ref(), b"original");
+            } else {
+                assert!(body.is_empty());
+            }
+        }
+    }
+    let copied = format!("{}/{BUCKET}/copied.bin", server.base_url);
+    let copy = client
+        .put(&copied)
+        .bearer_auth(&token)
+        .header("x-amz-copy-source", format!("/{BUCKET}/opaque.bin"))
+        .header("x-amz-copy-source-if-match", value.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(copy.status(), reqwest::StatusCode::OK);
+    let denied = client
+        .put(&url)
+        .bearer_auth(&token)
+        .header("If-None-Match", value.clone())
+        .body("must-not-land")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+    let accepted = client
+        .put(&url)
+        .bearer_auth(&token)
+        .header("If-Match", value.clone())
+        .body("replacement")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::OK);
+    let body = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"replacement");
+    let denied = client
+        .delete(&copied)
+        .bearer_auth(&token)
+        .header("If-None-Match", value.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+    let body = client
+        .get(&copied)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"original");
+    let deleted = client
+        .delete(&copied)
+        .bearer_auth(&token)
+        .header("If-Match", value)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(
+        client
+            .get(&copied)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rclone_copy_ls_cat_delete() {
     if !rclone_available() {
         eprintln!("SKIP: rclone is not installed (skipping rclone_copy_ls_cat_delete)");

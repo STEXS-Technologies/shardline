@@ -106,6 +106,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Preserve opaque bytes and quoted commas in conditional download and S3
+  mutation validators without weakening strong ETag or authorization checks.
 - Stop Xorb normalization immediately on cancellation or reader failures instead
   of retrying them as footerless input and continuing to modify upload staging.
 - Recognize native Xet storage during Hub-only garbage collection, preserving
