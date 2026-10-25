@@ -65,6 +65,10 @@ async fn run(
         .arg(config.path())
         .args(args)
         .env("SHARDLINE_ROOT_DIR", root)
+        .env(
+            "SHARDLINE_TOKEN_SIGNING_KEY",
+            std::str::from_utf8(TEST_SIGNING_KEY).unwrap(),
+        )
         .env("TMPDIR", std::env::temp_dir())
         .env("SHARDLINE_OBJECT_STORAGE_ADAPTER", "local")
         .env("SHARDLINE_SERVER_FRONTENDS", frontends);

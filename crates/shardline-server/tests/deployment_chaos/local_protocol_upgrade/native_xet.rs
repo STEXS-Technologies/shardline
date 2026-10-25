@@ -1,5 +1,7 @@
 //! Actual predecessor native-CAS publication, upgrade and rollback reads.
 
+mod rebuild;
+
 use super::*;
 use shardline_xet_core::{
     merklehash::{MerkleHash, compute_data_hash, file_hash},
@@ -360,4 +362,17 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     verify_identities(root.path(), postgres, &rebound, &repacked).await;
     verify_identity_download(&restart.base, &token, &rebound).await;
     verify_identity_download(&restart.base, &token, &repacked).await;
+    drop(restart);
+    let published_descriptors = rebuild::descriptors(root.path(), postgres, false).await;
+    assert!(published_descriptors > 0);
+    assert_eq!(rebuild::descriptors(root.path(), postgres, true).await, 0);
+    maintenance::verify_and_rebuild(&current, root.path(), postgres, storage_env).await;
+    assert!(rebuild::descriptors(root.path(), postgres, false).await >= published_descriptors);
+    let mut recovered =
+        LocalServer::spawn_with_storage(&current, root.path(), postgres, "xet", storage_env);
+    recovered.ready().await;
+    for file in [&original, &added, &repacked, &replaced] {
+        verify(&recovered.base, &token, file).await;
+    }
+    verify_identity_download(&recovered.base, &token, &rebound).await;
 }
