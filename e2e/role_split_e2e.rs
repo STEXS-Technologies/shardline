@@ -1,3 +1,4 @@
+mod role_split_signed_urls;
 mod support;
 
 use std::{
@@ -322,7 +323,6 @@ async fn exercise_oci_role_surface(role: ServerRole) -> Result<(), Box<dyn Error
 
 #[derive(Debug, Clone)]
 struct SplitProxyState {
-    access_token: String,
     api_base_url: String,
     client: Client,
     transfer_base_url: String,
@@ -387,12 +387,23 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
         .fallback(any(handle_split_proxy))
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(SplitProxyState {
-            access_token: write_token.clone(),
             api_base_url,
             client: client.clone(),
             transfer_base_url,
         });
     let proxy_server = spawn(async move { serve_http(proxy_listener, proxy_router).await });
+
+    // Routing must never turn an unauthenticated request into an authorized
+    // one. Native clients supply their own credentials; signed transfer URLs
+    // must work using only their advertised capability.
+    let unauthenticated = client
+        .get(format!(
+            "{proxy_base_url}/v1/reconstructions/{}",
+            "a".repeat(64)
+        ))
+        .send()
+        .await?;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
     let translator = authenticated_translator(&proxy_base_url, client_root.path(), &write_token)?;
     let first_bytes = seeded_bytes(384 * 1024, 0x19);
@@ -406,6 +417,9 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     assert!(first_metrics.total_bytes > 0);
     assert!(second_metrics.deduped_chunks > 0);
     assert!(second_metrics.new_bytes < second_metrics.total_bytes);
+
+    role_split_signed_urls::verify(&client, &proxy_base_url, &write_token, first_info.hash())
+        .await?;
 
     let download_session = FileDownloadSession::new(translator, None).await?;
     let first_output = client_root.path().join("split-first.out");
@@ -516,23 +530,17 @@ async fn handle_split_proxy(
         .unwrap_or_else(|| uri.path().to_owned());
     let upstream_base_url = select_upstream_base_url(&path_and_query, &state);
     let upstream_url = format!("{upstream_base_url}{path_and_query}");
-    let has_authorization = headers.contains_key("authorization");
     let request = state
         .client
         .request(method, upstream_url)
         .headers(headers)
         .body(body);
-    let request = if has_authorization {
-        request
-    } else {
-        request.bearer_auth(&state.access_token)
-    };
     let response = match request.send().await {
         Ok(built_response) => built_response,
-        Err(error) => {
+        Err(_error) => {
             return response_with_status(
                 StatusCode::BAD_GATEWAY,
-                format!("split proxy request failed: {error}"),
+                "split proxy request failed".to_owned(),
             );
         }
     };
@@ -540,10 +548,10 @@ async fn handle_split_proxy(
     let upstream_headers = response.headers().clone();
     let body_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
-        Err(error) => {
+        Err(_error) => {
             return response_with_status(
                 StatusCode::BAD_GATEWAY,
-                format!("split proxy body read failed: {error}"),
+                "split proxy body read failed".to_owned(),
             );
         }
     };
