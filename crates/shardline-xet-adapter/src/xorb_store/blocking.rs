@@ -1,15 +1,23 @@
 //! Cancellation ownership for native file persistence queued on Tokio's pool.
 
 use crate::XetAdapterError;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-struct CancelQueuedWrite(tokio::task::AbortHandle);
+struct CancelQueuedWrite {
+    abort: tokio::task::AbortHandle,
+    cancelled: Arc<AtomicBool>,
+}
 
 impl Drop for CancelQueuedWrite {
     fn drop(&mut self) {
         // Tokio aborts a queued blocking job, but cannot interrupt one which
         // already started synchronous I/O. Its result remains unacknowledged
         // and the upload intent must be reconciled through the normal path.
-        self.0.abort();
+        self.cancelled.store(true, Ordering::Release);
+        self.abort.abort();
     }
 }
 
@@ -17,11 +25,31 @@ pub(super) async fn cancellable_write<R: Send + 'static, T: Send + 'static>(
     resources: R,
     work: impl FnOnce() -> Result<T, XetAdapterError> + Send + 'static,
 ) -> Result<T, XetAdapterError> {
+    cancellable_read(resources, move |_| work()).await
+}
+
+/// Read-only work can stop between reads; started immutable writes retain
+/// their existing completion/reconciliation semantics through cancellable_write.
+pub(super) async fn cancellable_read<R: Send + 'static, T: Send + 'static>(
+    resources: R,
+    work: impl FnOnce(&dyn Fn() -> std::io::Result<()>) -> Result<T, XetAdapterError> + Send + 'static,
+) -> Result<T, XetAdapterError> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&cancelled);
     let job = tokio::task::spawn_blocking(move || {
         let _resources = resources;
-        work()
+        work(&|| {
+            if observed.load(Ordering::Acquire) {
+                Err(std::io::ErrorKind::ConnectionAborted.into())
+            } else {
+                Ok(())
+            }
+        })
     });
-    let _cancellation = CancelQueuedWrite(job.abort_handle());
+    let _cancellation = CancelQueuedWrite {
+        abort: job.abort_handle(),
+        cancelled,
+    };
     job.await
         .map_err(|error| XetAdapterError::Io(std::io::Error::other(error)))?
 }
@@ -37,6 +65,45 @@ mod tests {
         },
         task::{Context, Waker},
     };
+
+    #[test]
+    fn running_read_stops_at_its_next_checkpoint_and_releases_admission() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let admission = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = admission.clone().acquire_owned().await.unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let path = file.path().to_owned();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (finish, wait) = std::sync::mpsc::channel();
+            let (result, observed) = tokio::sync::oneshot::channel();
+            let mut running = Box::pin(cancellable_read((file, permit), move |checkpoint| {
+                checkpoint()?;
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                let error = checkpoint().unwrap_err();
+                result.send(error.kind()).unwrap();
+                Err::<(), _>(error.into())
+            }));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(running.as_mut().poll(&mut context).is_pending());
+            started.await.unwrap();
+            drop(running);
+            assert!(path.exists());
+            assert_eq!(admission.available_permits(), 0);
+            finish.send(()).unwrap();
+            assert_eq!(
+                observed.await.unwrap(),
+                std::io::ErrorKind::ConnectionAborted
+            );
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            assert!(!path.exists());
+            assert_eq!(admission.available_permits(), 1);
+        });
+    }
 
     #[test]
     fn cancelled_queued_file_preparation_never_reads_or_publishes_input() {

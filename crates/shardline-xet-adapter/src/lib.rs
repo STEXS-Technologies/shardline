@@ -46,6 +46,7 @@
 //! reconstruction responses are built with
 //! [`build_batch_reconstruction_response`].
 
+mod checkpoint_reader;
 mod error;
 mod frontend;
 mod ingest;

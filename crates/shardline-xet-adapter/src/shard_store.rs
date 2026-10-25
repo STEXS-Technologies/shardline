@@ -37,7 +37,7 @@ use crate::error::XetAdapterError;
 
 use super::{ValidatedXorbChunk, validate_serialized_xorb, xorb_object_key};
 
-mod checkpoint_reader;
+use crate::checkpoint_reader;
 mod dedup;
 mod file_digests;
 #[cfg(test)]

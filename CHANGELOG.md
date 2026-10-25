@@ -99,7 +99,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   cannot be stored under an earlier validated chunk identity.
 - Prepare file-backed native Xet uploads on blocking workers so full validation
   and hashing do not block async request handling; retain staging and admission
-  through cancelled work.
+  through active work and stop cancelled preparation between reads.
 - Include next-page links for ordinary paginated Hub tree listings, keeping
   cursors bound to immutable revisions and preserving nested directory paths.
 - Reject oversized Xorb footer lengths without arithmetic overflow or parser

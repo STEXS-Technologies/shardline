@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    fs::File,
     io::{BufReader, Cursor},
     path::Path,
 };
@@ -297,9 +296,9 @@ async fn store_xorb_file_with_resources<R: Send + 'static>(
     let path_for_preparation = path.to_owned();
     // Hold both staging and admission in the worker, including after caller
     // cancellation. Preparation performs full synchronous reads and hashing.
-    let (prepared, resources) = blocking::cancellable_write((), move || {
+    let (prepared, resources) = blocking::cancellable_read((), move |checkpoint| {
         Ok((
-            file_preparation::prepare(&hash_for_preparation, path_for_preparation)?,
+            file_preparation::prepare(&hash_for_preparation, path_for_preparation, checkpoint)?,
             resources,
         ))
     })
@@ -358,13 +357,6 @@ pub fn canonical_uploaded_xorb_file_length(
 ) -> Result<u64, XetAdapterError> {
     let normalized = normalize_uploaded_xorb_file(expected_hash, path)?;
     Ok(std::fs::metadata(normalized.as_ref().map_or(path, |file| file.path()))?.len())
-}
-
-fn chunk_hash_file(path: &Path) -> Result<ShardlineHash, XetAdapterError> {
-    let mut file = File::open(path).map_err(XetAdapterError::Io)?;
-    let mut hasher = blake3::Hasher::new();
-    std::io::copy(&mut file, &mut hasher).map_err(XetAdapterError::Io)?;
-    Ok(ShardlineHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 /// # Errors

@@ -23,12 +23,29 @@ pub fn normalize_uploaded_xorb_file(
     expected_hash: &str,
     path: &Path,
 ) -> Result<Option<tempfile::NamedTempFile>, XetAdapterError> {
+    normalize_with_checkpoint(expected_hash, path, &|| Ok(()))
+}
+
+pub(super) fn normalize_with_checkpoint(
+    expected_hash: &str,
+    path: &Path,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<Option<tempfile::NamedTempFile>, XetAdapterError> {
+    use crate::checkpoint_reader::CheckpointReader;
+    checkpoint()?;
     let expected = parse_xet_hash_hex(expected_hash)?;
     let mut input = File::open(path)?;
-    match validate_serialized_xorb(&mut input, expected) {
+    match validate_serialized_xorb(
+        &mut CheckpointReader {
+            reader: &mut input,
+            checkpoint,
+        },
+        expected,
+    ) {
         Ok(_) => return Ok(None),
         Err(error) => tracing::debug!(%error, "trying bounded footerless Xorb normalization"),
     }
+    checkpoint()?;
     let length = input.metadata()?.len();
     // Standard Xet Xorbs contain at most 64 MiB and 8,192 chunks. Preserve the
     // wider canonical-input acceptance; these bounds apply to normalization.
@@ -46,6 +63,7 @@ pub fn normalize_uploaded_xorb_file(
     let mut decoded = 0_u64;
     let mut count = 0_usize;
     while input.stream_position()? < length {
+        checkpoint()?;
         // Only a complete footerless chunk stream is eligible for repair.
         // In particular, never discard an invalid footer and authenticate only
         // the payload prefix that happened to precede it.
@@ -76,13 +94,26 @@ pub fn normalize_uploaded_xorb_file(
         input.seek(SeekFrom::Start(end))?;
     }
     let mut normalized = tempfile::NamedTempFile::new()?;
-    let (_, computed) =
-        reconstruct_xorb_with_footer_from_reader(normalized.as_file_mut(), &mut input, length)
-            .map_err(normalization_error)?;
+    let (_, computed) = reconstruct_xorb_with_footer_from_reader(
+        normalized.as_file_mut(),
+        &mut CheckpointReader {
+            reader: &mut input,
+            checkpoint,
+        },
+        length,
+    )
+    .map_err(normalization_error)?;
     if parse_xet_hash_hex(&computed.hex())? != expected {
         return Err(XetAdapterError::XorbHashMismatch);
     }
-    validate_serialized_xorb(normalized.as_file_mut(), expected)?;
+    checkpoint()?;
+    validate_serialized_xorb(
+        &mut CheckpointReader {
+            reader: normalized.as_file_mut(),
+            checkpoint,
+        },
+        expected,
+    )?;
     Ok(Some(normalized))
 }
 

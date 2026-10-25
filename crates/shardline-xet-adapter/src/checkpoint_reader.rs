@@ -2,9 +2,9 @@
 
 use std::io::{Read, Result, Seek, SeekFrom};
 
-pub(super) struct CheckpointReader<'request, R> {
-    pub(super) reader: &'request mut R,
-    pub(super) checkpoint: &'request dyn Fn() -> Result<()>,
+pub(crate) struct CheckpointReader<'request, R> {
+    pub(crate) reader: &'request mut R,
+    pub(crate) checkpoint: &'request dyn Fn() -> Result<()>,
 }
 
 impl<R> CheckpointReader<'_, R> {
