@@ -290,7 +290,9 @@ The E2E job separately selects the ignored native Xet PostgreSQL/MinIO test and
 the two Bazel flows. Kubernetes and kind tests still require their dedicated
 deployment fixtures. The Kubernetes protocol test uses local Docker services only
 when no `SHARDLINE_K8S_E2E_*` configuration is supplied. A partially configured external
-cluster fails instead of qualifying a replacement local stack.
+cluster fails instead of qualifying a replacement local stack. Explicitly selecting
+the ignored kind smoke test also requires non-empty API and transfer endpoints;
+missing configuration fails instead of returning success without deployment checks.
 
 The live GitHub/Gitea bridge test is explicitly ignored by default because it
 requires external credentials and test repositories. Selecting it explicitly

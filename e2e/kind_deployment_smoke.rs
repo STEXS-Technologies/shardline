@@ -13,6 +13,8 @@ const METRICS_TOKEN: &str = "kind-smoke-metrics-token";
 const ADMIN_TOKEN: &str = "kind-smoke-admin-read-token";
 const CONCURRENT_SPLIT_ROLE_REQUESTS: usize = 8;
 
+mod kind_deployment_requirements;
+
 #[derive(Debug)]
 struct KindDeploymentConfig {
     api_url: String,
@@ -22,13 +24,21 @@ struct KindDeploymentConfig {
 }
 
 impl KindDeploymentConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            api_url: env::var("SHARDLINE_KIND_SMOKE_API_URL").ok()?,
-            transfer_url: env::var("SHARDLINE_KIND_SMOKE_TRANSFER_URL").ok()?,
-            run_id: env::var("SHARDLINE_KIND_SMOKE_RUN_ID").unwrap_or_else(|_| "manual".to_owned()),
-            previous_run_id: env::var("SHARDLINE_KIND_SMOKE_PREVIOUS_RUN_ID")
-                .ok()
+    fn from_env() -> Result<Self, TestError> {
+        Self::from_values(|name| env::var(name).ok())
+    }
+
+    fn from_values(value: impl Fn(&str) -> Option<String>) -> Result<Self, TestError> {
+        let required = |name: &str| {
+            value(name)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("kind deployment qualification requires {name}"))
+        };
+        Ok(Self {
+            api_url: required("SHARDLINE_KIND_SMOKE_API_URL")?,
+            transfer_url: required("SHARDLINE_KIND_SMOKE_TRANSFER_URL")?,
+            run_id: value("SHARDLINE_KIND_SMOKE_RUN_ID").unwrap_or_else(|| "manual".to_owned()),
+            previous_run_id: value("SHARDLINE_KIND_SMOKE_PREVIOUS_RUN_ID")
                 .filter(|run_id| !run_id.is_empty()),
         })
     }
@@ -37,9 +47,7 @@ impl KindDeploymentConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the disposable kind deployment created by scripts/k8s/kind-smoke.sh"]
 async fn kind_scaled_deployment_serves_split_roles_with_real_backends() -> Result<(), TestError> {
-    let Some(config) = KindDeploymentConfig::from_env() else {
-        return Ok(());
-    };
+    let config = KindDeploymentConfig::from_env()?;
     let client = Client::new();
 
     wait_for_health(&client, &config.api_url).await?;
