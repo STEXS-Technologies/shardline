@@ -1,5 +1,6 @@
 //! Physical native-source reclamation through the fenced production GC path.
 
+mod publication;
 mod repair;
 
 use crate::ServerObjectStore;
@@ -232,7 +233,9 @@ async fn native_source_physical_sweep_survives_lost_index_and_copy() {
     let pool = replacement;
     let records = PostgresRecordStore::new(pool.clone());
     let index = PostgresIndexStore::new(pool.clone());
+    let publication = publication::Pending::start(&database, objects.clone(), &owner).await;
     repair::qualify(&database, pool.clone(), objects.clone(), &live).await;
+    publication.assert_blocked(&owner).await;
     assert!(
         AsyncObjectStore::metadata(&objects, &live_key)
             .await
@@ -314,5 +317,6 @@ async fn native_source_physical_sweep_survives_lost_index_and_copy() {
             .is_none()
     );
     pool.close().await;
+    publication.finish().await;
     owner.close().await;
 }
