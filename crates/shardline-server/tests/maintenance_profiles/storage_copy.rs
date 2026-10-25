@@ -4,6 +4,21 @@ use std::os::unix::{fs::MetadataExt, process::ExitStatusExt};
 use std::{fs, process::Command, thread, time::Instant};
 
 struct StopOnDrop(std::process::Child);
+impl StopOnDrop {
+    fn wait_until_exit(&mut self) -> std::process::ExitStatus {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.0.try_wait().expect("inspect owned copy process") {
+                return status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "owned copy process exceeded exit deadline"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
         let _kill = self.0.kill();
@@ -293,8 +308,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         );
         assert!(
             child.0.try_wait().unwrap().is_none(),
-            "{}",
-            fs::read_to_string(scratch.path().join("cli.stderr")).unwrap()
+            "copy process exited before the response fault"
         );
         thread::sleep(Duration::from_millis(5));
     }
@@ -312,7 +326,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         );
     }
     if !history_available {
-        assert!(child.0.wait().unwrap().success());
+        assert!(child.wait_until_exit().success());
         assert!(
             fs::read_to_string(scratch.path().join("cli.stdout"))
                 .unwrap()
@@ -339,7 +353,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         return;
     }
     if completed {
-        assert!(child.0.wait().unwrap().success());
+        assert!(child.wait_until_exit().success());
     } else if matches!(
         interruption,
         CopyInterruption::TerminateAcceptedPut
@@ -357,14 +371,17 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
             None
         };
         assert!(
-            Command::new("kill")
-                .arg("-TERM")
-                .arg(child.0.id().to_string())
-                .status()
-                .unwrap()
-                .success()
+            shardline_test_support::native_client_output(
+                Command::new("kill")
+                    .arg("-TERM")
+                    .arg(child.0.id().to_string()),
+                Duration::from_secs(5)
+            )
+            .unwrap()
+            .status
+            .success()
         );
-        assert_eq!(child.0.wait().unwrap().signal(), Some(15));
+        assert_eq!(child.wait_until_exit().signal(), Some(15));
         if let Some(connection) = &_held_completion {
             assert_eq!(
                 connection
@@ -376,7 +393,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         }
     } else {
         child.0.kill().unwrap();
-        child.0.wait().unwrap();
+        child.wait_until_exit();
     }
     if local_source {
         fs::write(source.path().join("chunks/copy-cut/later"), b"never replay").unwrap();
