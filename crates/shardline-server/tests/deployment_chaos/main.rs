@@ -57,6 +57,9 @@ mod tracker_replacement;
 
 mod gc_acknowledgement;
 
+#[cfg(all(feature = "docker", unix))]
+mod native_source_gc;
+
 mod maintenance_history;
 
 mod local_protocol_upgrade;

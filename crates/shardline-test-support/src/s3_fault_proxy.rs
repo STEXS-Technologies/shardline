@@ -23,6 +23,13 @@ pub enum S3ProxyFault {
     ServiceUnavailableOnce,
     /// Forward successful GET headers, pause, then forward the original body.
     DelaySuccessfulGetBody(Duration),
+    /// Pause a successful GET body only when its request path has this suffix.
+    DelaySuccessfulGetBodyForPath {
+        /// Exact trailing object path, excluding the query string.
+        suffix: String,
+        /// Time to hold the provider's response body.
+        delay: Duration,
+    },
     /// Replace one successful GET body with same-length stale provider bytes.
     ReplaceSuccessfulGetBody(Arc<[u8]>),
 }
@@ -252,9 +259,27 @@ fn proxy_one_s3_request(
         thread::sleep(delay);
         return client.write_all(&response);
     }
+    let get_delay = match &fault {
+        S3ProxyFault::DelaySuccessfulGetBody(delay) => Some(*delay),
+        S3ProxyFault::DelaySuccessfulGetBodyForPath { suffix, delay }
+            if request
+                .split(|byte| *byte == b' ')
+                .nth(1)
+                .and_then(|path| path.split(|byte| *byte == b'?').next())
+                .is_some_and(|path| path.ends_with(suffix.as_bytes())) =>
+        {
+            Some(*delay)
+        }
+        S3ProxyFault::DropAcceptedPut
+        | S3ProxyFault::DropAcceptedDelete
+        | S3ProxyFault::DelaySuccessfulPutResponse(_)
+        | S3ProxyFault::ServiceUnavailableOnce
+        | S3ProxyFault::DelaySuccessfulGetBodyForPath { .. }
+        | S3ProxyFault::ReplaceSuccessfulGetBody(_) => None,
+    };
     if is_get
         && accepted
-        && let S3ProxyFault::DelaySuccessfulGetBody(delay) = fault
+        && let Some(delay) = get_delay
         && mark_injected(armed, injected)
     {
         let header_end = response_header_end(&response)?;

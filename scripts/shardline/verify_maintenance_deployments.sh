@@ -19,7 +19,7 @@ export CARGO_BIN_EXE_shardline="$fixture/current-shardline"
 export SHARDLINE_N_MINUS_ONE_BINARY="$fixture/released-shardline"
 export CARGO_BUILD_JOBS=2
 cargo nextest run --locked -p shardline-server --all-features --test deployment_chaos \
-    -E 'test(readonly_maintenance_deployment::) | test(tracker_replacement::) | test(gc_acknowledgement::) | test(drill_deploy_f_real_mixed_version_rollout_and_rollback) | test(local_protocol_upgrade::)' \
+    -E 'test(readonly_maintenance_deployment::) | test(tracker_replacement::) | test(gc_acknowledgement::) | test(native_source_gc::) | test(drill_deploy_f_real_mixed_version_rollout_and_rollback) | test(local_protocol_upgrade::)' \
     --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \
     > "$fixture/test.log" 2>&1
 if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/test.log"; then
@@ -27,6 +27,6 @@ if rg -ni 'SKIPPED:|skipping:|panicked at' "$fixture/test.log"; then
     exit 1
 fi
 # Require every selected drill: a renamed test must not silently shrink coverage.
-rg 'Starting 16 tests across 1 binary' "$fixture/test.log"
-rg 'Summary.*16 tests run: 16 passed' "$fixture/test.log"
+rg 'Starting 19 tests across 1 binary' "$fixture/test.log"
+rg 'Summary.*19 tests run: 19 passed' "$fixture/test.log"
 echo 'PASS: startup, restricted commands, concurrent ownership, replacement, remote-delete faults and rolling rollback'
