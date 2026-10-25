@@ -26,7 +26,7 @@ fn required_missing_backend_fails_instead_of_passing() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        diagnostic.contains("required native client Docker/MinIO native Xet backend"),
+        diagnostic.contains("required native client Docker daemon is missing or cannot run"),
         "unexpected child failure: {diagnostic}"
     );
 }

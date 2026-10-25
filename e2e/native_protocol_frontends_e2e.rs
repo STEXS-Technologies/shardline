@@ -1902,6 +1902,15 @@ fn run_bazel_build_with_download_mode(
 }
 
 fn run_command(command: &mut Command) -> Result<Output, IoError> {
+    // Exercise the supplied fixture credentials, independently of the host's
+    // registry login files (which may be unreadable or carry unrelated grants).
+    let auth = (command.get_program() == std::ffi::OsStr::new("skopeo"))
+        .then(tempfile::NamedTempFile::new)
+        .transpose()?;
+    if let Some(auth) = &auth {
+        std::fs::write(auth.path(), br#"{"auths":{}}"#)?;
+        command.env("REGISTRY_AUTH_FILE", auth.path());
+    }
     shardline_test_support::native_client_output(command, Duration::from_secs(600))
 }
 
@@ -1938,9 +1947,21 @@ fn run_command_with_stdin_checked(
 }
 
 fn command_error(description: &str, output: &Output) -> IoError {
+    // Client diagnostics may contain credentials or signed URLs. Preserve them
+    // in a private temporary file rather than copying them into CI output.
+    let diagnostics = tempfile::NamedTempFile::new().ok().and_then(|mut file| {
+        use std::io::Write as _;
+        file.write_all(&output.stdout).ok()?;
+        file.write_all(&output.stderr).ok()?;
+        file.keep().ok().map(|(_, path)| path)
+    });
     ServerE2eInvariantError::new(format!(
-        "{description} failed with status {}",
-        output.status
+        "{description} failed with status {}; private diagnostics: {}",
+        output.status,
+        diagnostics.as_ref().map_or_else(
+            || "unavailable".to_owned(),
+            |path| path.display().to_string()
+        )
     ))
     .into()
 }
