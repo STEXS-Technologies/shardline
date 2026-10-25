@@ -95,6 +95,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Reject oversized Xorb footer lengths without arithmetic overflow or parser
+  panics, preserving valid container reads and retries after rejected uploads.
+
 - Separate internal Hub file-reader transport from webhook transport so private
   service DNS works without weakening webhook SSRF checks or forwarding scoped
   read credentials through redirects or environment proxies.

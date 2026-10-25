@@ -500,6 +500,15 @@ impl Default for XorbObject {
 }
 
 impl XorbObject {
+    fn checked_info_start(container_length: u64, info_length: u64) -> Result<u64, CoreError> {
+        container_length
+            .checked_sub(size_of::<u64>() as u64)
+            .and_then(|end| end.checked_sub(info_length))
+            .ok_or_else(|| {
+                CoreError::MalformedData("Xorb info length exceeds container length".to_owned())
+            })
+    }
+
     pub fn get_info_length<R: Read + Seek>(reader: &mut R) -> Result<u64, CoreError> {
         reader.seek(SeekFrom::End(-(size_of::<u64>() as i64)))?;
         let mut info_length = [0u8; 8];
@@ -510,9 +519,11 @@ impl XorbObject {
 
     pub fn deserialize<R: Read + Seek>(reader: &mut R) -> Result<Self, CoreError> {
         let info_length = Self::get_info_length(reader)?;
-        reader.seek(SeekFrom::End(
-            -(size_of::<u64>() as i64 + info_length as i64),
-        ))?;
+        // Reading the terminal length left the cursor at the container end.
+        // Check unsigned bounds before seeking; a client-supplied u64 length
+        // must never overflow signed relative-offset arithmetic.
+        let info_start = Self::checked_info_start(reader.stream_position()?, info_length)?;
+        reader.seek(SeekFrom::Start(info_start))?;
         let (info, total_bytes_read) = XorbObjectInfoV1::deserialize(reader)?;
         if u64::from(total_bytes_read) != info_length {
             return Err(CoreError::MalformedData(
@@ -655,7 +666,7 @@ impl XorbObject {
         let cur_position = reader.stream_position()?;
         let expected_position = cumulative_compressed_length;
         let expected_from_end_position =
-            reader.seek(SeekFrom::End(0))? - xorb.info_length - size_of::<u64>() as u64;
+            Self::checked_info_start(reader.seek(SeekFrom::End(0))?, xorb.info_length)?;
         if cur_position != expected_position || cur_position != expected_from_end_position {
             warn!("XORB Validation: Content bytes after known chunks in Info object.");
             return Ok(None);

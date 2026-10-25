@@ -1903,6 +1903,60 @@ async fn xet_write_token_without_provider_key_returns_unauthorized() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_tcp_upload_rejects_overflowing_footers_and_allows_verified_retry() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let (valid, hash) = test_fixtures::single_chunk_xorb(b"valid after rejected footer");
+    for length in [
+        i64::MAX as u64 - 7,
+        i64::MAX as u64,
+        i64::MAX as u64 + 1,
+        u64::MAX,
+    ] {
+        let response = client
+            .post(format!("{endpoint}/v1/xorbs/default/{hash}"))
+            .body(length.to_le_bytes().to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            client
+                .head(format!("{endpoint}/v1/xorbs/default/{hash}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let response = client
+        .post(format!("{endpoint}/v1/xorbs/default/{hash}"))
+        .body(valid.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = client
+        .get(format!("{endpoint}/transfer/xorb/default/{hash}"))
+        .header("range", format!("bytes=0-{}", valid.len() - 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), valid.as_ref());
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xorb_upload_hash_mismatch() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
 
