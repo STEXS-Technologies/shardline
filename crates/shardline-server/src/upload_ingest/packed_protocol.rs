@@ -101,7 +101,7 @@ impl PackedProtocolUpload {
                 );
                 // Move the encoded buffer into the request; retaining raw input
                 // must not require another whole-container payload copy.
-                let stored = match &self.store {
+                let mut stored = match &self.store {
                     ServerObjectStore::S3(store) => store
                         .put_if_absent_with_read_back(
                             &key,
@@ -127,6 +127,22 @@ impl PackedProtocolUpload {
                     }
                     ServerObjectStore::Blackhole => return Err(ServerError::Overflow),
                 };
+                let mut retained_length = integrity.length();
+                if stored.as_ref().is_err_and(encoding::is_encoding_conflict) {
+                    let store = self.store.clone();
+                    let ((retained_packed, reused), retained_permit) =
+                        crate::admission::blocking_work_with_permit(_permit, move || {
+                            let reused = encoding::reuse_retained(&store, &mut packed);
+                            Ok((packed, reused))
+                        })
+                        .await?;
+                    _permit = retained_permit;
+                    packed = retained_packed;
+                    if let Ok(Some(length)) = reused {
+                        retained_length = length;
+                        stored = Ok(PutOutcome::AlreadyExists);
+                    }
+                }
                 match stored {
                     Ok(outcome) => {
                         let inserted = outcome == PutOutcome::Inserted;
@@ -134,7 +150,7 @@ impl PackedProtocolUpload {
                         if recovered_chunks.len() != packed.chunk_entries.len() {
                             return Err(ServerError::Overflow);
                         }
-                        crate::metrics::record_compression_saved(raw_bytes, integrity.length());
+                        crate::metrics::record_compression_saved(raw_bytes, retained_length);
                         for ((bytes, offset), entry) in
                             recovered_chunks.into_iter().zip(packed.chunk_entries)
                         {
@@ -248,6 +264,7 @@ impl PackedProtocolUpload {
     }
 }
 
+mod encoding;
 mod local_store;
 
 #[cfg(test)]

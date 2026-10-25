@@ -504,6 +504,16 @@ stock-client workload has not demonstrated a reduction in those total costs.
 
 #### S3 requests and upload resources
 
+Protocol packing can also reuse a native Xorb with identical ordered chunks but
+a different compression encoding. Reuse verifies the retained container's full
+content and native identity, then records its actual packed offsets. This avoids
+the standalone-chunk fallback for this case without rewriting the existing
+container. It applies only when the chunk boundaries and resulting Xorb identity
+match; it does not establish physical deduplication across arbitrary ingestion
+layouts or remove the legacy decoded copies retained for rollback compatibility.
+An encoding conflict requires a complete retained-object verification read, so
+this behavior alone does not establish lower request cost for every workload.
+
 With SQLite metadata and real MinIO, direct packing reduced upload requests for
 32 unique one-MiB objects from 1,144 to 96. It replaced 540 individual chunk
 PUTs and 540 chunk GETs with 32 container PUTs and 32 complete verification GETs;

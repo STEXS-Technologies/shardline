@@ -30,7 +30,7 @@ async fn ingest(
         .0
 }
 
-async fn assert_read(
+pub(super) async fn assert_read(
     store: &ServerObjectStore,
     record: &shardline_index::FileRecord,
     expected: &[u8],

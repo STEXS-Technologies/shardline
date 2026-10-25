@@ -89,6 +89,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   larger containers.
 - Reuse native Xorb sources during shard validation and file hashing to avoid
   repeated object-store reads and temporary copies for sequential file terms.
+- Reuse an existing native Xorb during protocol packing when its verified content
+  matches but its compression encoding differs, retaining the installed offsets
+  instead of writing redundant standalone chunks.
 - Remove the preliminary shard-existence probe from native Xet publication;
   conditional writes retain verified duplicate detection and upload results.
 - Reject S3 ACL grants and ACL updates with `AccessControlListNotSupported`;
