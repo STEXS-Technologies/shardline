@@ -169,7 +169,7 @@ jobs:
         run: >-
           cargo nextest run --locked -p shardline-server --features docker --lib
           --run-ignored only
-          -E 'test(native_members_survive_replica_restart_without_standalone_copies)'
+          -E 'test(native_members_survive_replica_restart_without_standalone_copies) or test(native_members_rebuild_all_legacy_scoped_sources_on_postgres_minio)'
 
       - name: Qualify S3 and stock Xet after actual disk exhaustion
         timeout-minutes: 25

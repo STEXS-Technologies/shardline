@@ -16,6 +16,9 @@ use shardline_xet_core::{
 
 const SHARED: &[u8] = b"shared native member";
 
+#[cfg(feature = "docker")]
+mod remote;
+
 fn fixture(tail: &[u8]) -> (Bytes, String, Bytes) {
     let chunks = vec![
         (compute_data_hash(SHARED), SHARED.len() as u64),
