@@ -1517,6 +1517,8 @@ mod tests {
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use
     )]
+    use std::time::Duration;
+
     use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
     use shardline_storage::ObjectKey;
 
@@ -1732,7 +1734,93 @@ mod tests {
                 .xet_file_identity(&identity.repository_scope, &identity.sha256)
                 .await
                 .unwrap(),
-            Some(identity)
+            Some(identity.clone())
+        );
+
+        // Force both replacements to wait on the same existing row. Merely
+        // joining two futures can otherwise exercise sequential publications.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("SELECT sha256 FROM shardline_xet_file_identities FOR UPDATE")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        let mut left = pool.acquire().await.unwrap();
+        let mut right = pool.acquire().await.unwrap();
+        let left_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *left)
+            .await
+            .unwrap();
+        let right_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *right)
+            .await
+            .unwrap();
+        let mut left_identity = identity.clone();
+        left_identity.file_id = "1".repeat(64);
+        let mut right_identity = identity.clone();
+        right_identity.file_id = "2".repeat(64);
+        let release = async {
+            let both_waiting = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let waiting: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM pg_stat_activity \
+                         WHERE pid = ANY($1) AND wait_event_type = 'Lock'",
+                    )
+                    .bind(vec![left_pid, right_pid])
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting == 2 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+            blocker.rollback().await.unwrap();
+            both_waiting.expect("both identity writers must overlap on the locked row");
+        };
+        let (left_result, right_result, ()) =
+            tokio::time::timeout(Duration::from_secs(20), async {
+                tokio::join!(
+                    store.commit_native_shard_metadata_on_connection_with_xet_identities(
+                        &mut left,
+                        &[],
+                        &[],
+                        &[],
+                        std::slice::from_ref(&left_identity),
+                    ),
+                    store.commit_native_shard_metadata_on_connection_with_xet_identities(
+                        &mut right,
+                        &[],
+                        &[],
+                        &[],
+                        std::slice::from_ref(&right_identity),
+                    ),
+                    release,
+                )
+            })
+            .await
+            .expect("contending identity publications must finish after lock release");
+        left_result.unwrap();
+        right_result.unwrap();
+        let canonical = store
+            .xet_file_identity(&identity.repository_scope, &identity.sha256)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(canonical == left_identity || canonical == right_identity);
+        let aliases: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT file_id, sha256, total_bytes FROM shardline_xet_file_aliases ORDER BY file_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            aliases,
+            ["1", "2", "b", "c"]
+                .map(|digit| (digit.repeat(64), identity.sha256.clone(), 42))
+                .to_vec(),
+            "neither concurrent publication may lose an earlier or competing alias",
         );
     }
 
