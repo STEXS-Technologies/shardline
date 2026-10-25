@@ -48,7 +48,7 @@ fn store_members(
 
 #[test]
 fn cancelled_digest_stops_between_verified_members_and_can_retry() {
-    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let root = tempfile::tempdir().unwrap();
     let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
     let members = [b"first".as_slice(), b"second".as_slice()];
@@ -65,13 +65,11 @@ fn cancelled_digest_stops_between_verified_members_and_can_retry() {
         load_xorb_range_info(&objects, &hash.hex(), None).unwrap(),
     );
     let digest = format!("{:x}", Sha256::digest(members.concat()));
-    let checks = Cell::new(0_usize);
+    let checks = AtomicUsize::new(0);
     let mut verifier = file_digests::FileDigestVerifier::default();
     let error = verifier
         .verify(&objects, &file, Some(&digest), false, &verified, &|| {
-            let seen = checks.get();
-            checks.set(seen.checked_add(1).unwrap());
-            if seen == 2 {
+            if checks.fetch_add(1, Ordering::SeqCst) == 4 {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "cancelled",
@@ -83,10 +81,95 @@ fn cancelled_digest_stops_between_verified_members_and_can_retry() {
         .unwrap_err();
     assert!(matches!(error, XetAdapterError::Io(ref error)
         if error.kind() == std::io::ErrorKind::Interrupted));
-    assert_eq!(checks.get(), 3);
+    assert_eq!(checks.load(Ordering::SeqCst), 5);
     verifier
         .verify(&objects, &file, Some(&digest), false, &verified, &|| Ok(()))
         .unwrap();
+}
+
+#[test]
+fn cancelled_digest_reload_stops_s3_materialization_and_can_retry() {
+    use shardline_protocol::SecretString;
+    use shardline_server_core::ServerObjectStoreError;
+    use shardline_storage::S3ObjectStoreConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let data = vec![b'x'; 2 * 1024 * 1024];
+    let leaf = compute_data_hash(&data);
+    let hash = xorb_hash(&[(leaf, data.len() as u64)]);
+    let serialized = serialized_xorb_object_from_components(
+        &hash,
+        data.clone(),
+        vec![(leaf, data.len() as u64)],
+        CompressionScheme::None,
+    )
+    .unwrap();
+    let validated = validate_serialized_xorb(
+        &mut std::io::Cursor::new(&serialized.serialized_data),
+        parse_xet_hash_hex(&hash.hex()).unwrap(),
+    )
+    .unwrap();
+    let info = XorbRangeInfo {
+        total_length: validated.total_length(),
+        packed_chunk_ends: validated
+            .chunks()
+            .iter()
+            .map(ValidatedXorbChunk::packed_end)
+            .collect(),
+        verified_chunks: validated.chunks().to_vec(),
+    };
+    let file = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(
+            file_hash(&[(leaf, data.len() as u64)]),
+            1,
+            false,
+            true,
+        ),
+        segments: vec![FileDataSequenceEntry::new(hash, data.len() as u64, 0, 1)],
+        verification: Vec::new(),
+        metadata_ext: None,
+    };
+    let expected = format!("{:x}", Sha256::digest(&data));
+    tokio::runtime::Runtime::new().unwrap().block_on(async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let body = serialized.serialized_data;
+        let app = axum::Router::new().fallback(move || {
+            let body = body.clone();
+            async move { body }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let objects = ServerObjectStore::s3(
+            S3ObjectStoreConfig::new("fixture".to_owned(), "us-east-1".to_owned())
+                .with_endpoint(Some(endpoint))
+                .with_allow_http(true)
+                .with_credentials(
+                    Some(SecretString::new("fixture".to_owned())),
+                    Some(SecretString::new("fixture-secret".to_owned())),
+                    None,
+                ),
+        ).unwrap();
+        tokio::task::spawn_blocking(move || {
+            let mut verified = HashMap::new();
+            verified.insert(hash.hex(), info);
+            let checks = AtomicUsize::new(0);
+            let mut verifier = file_digests::FileDigestVerifier::default();
+            // Model an evicted source whose authenticated metadata remains cached.
+            let error = verifier.verify(&objects, &file, Some(&expected), false, &verified, &|| {
+                if checks.fetch_add(1, Ordering::SeqCst) >= 3 {
+                    Err(std::io::ErrorKind::Interrupted.into())
+                } else {
+                    Ok(())
+                }
+            }).unwrap_err();
+            assert!(matches!(error, XetAdapterError::ObjectStore(ServerObjectStoreError::Io(ref error))
+                if error.kind() == std::io::ErrorKind::Interrupted));
+            assert_eq!(verifier.source_reads, 0, "partial source must not enter the verified cache");
+            verifier.verify(&objects, &file, Some(&expected), false, &verified, &|| Ok(())).unwrap();
+            assert_eq!(verifier.source_reads, 1);
+        }).await.unwrap();
+        server.abort();
+    });
 }
 
 #[test]

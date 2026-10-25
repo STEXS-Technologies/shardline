@@ -40,7 +40,7 @@ impl FileDigestVerifier {
         expected: Option<&str>,
         derive: bool,
         verified: &HashMap<String, XorbRangeInfo>,
-        checkpoint: &dyn Fn() -> std::io::Result<()>,
+        checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
     ) -> Result<Option<String>, XetAdapterError> {
         let mut digest = FileDigest::new(expected.map(str::to_owned), derive);
         for term in &file.segments {
@@ -70,7 +70,7 @@ impl FileDigest {
         store: &ServerObjectStore,
         term: &FileDataSequenceEntry,
         info: &XorbRangeInfo,
-        checkpoint: &dyn Fn() -> std::io::Result<()>,
+        checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
     ) -> Result<(), XetAdapterError> {
         let Some(digest) = &mut self.digest else {
             return Ok(());
@@ -89,7 +89,11 @@ impl FileDigest {
             // S3 sources spool to bounded-memory temporary storage; local
             // objects are read directly. Do not trust decoded chunk copies.
             let (reader, _) = store
-                .materialize_bounded_object_if_present(&xorb_object_key(&hash)?, 0)?
+                .materialize_bounded_object_if_present_with_checkpoint(
+                    &xorb_object_key(&hash)?,
+                    0,
+                    checkpoint,
+                )?
                 .ok_or(XetAdapterError::MissingReferencedXorb)?;
             verifier.retain_verified_source(&hash, reader);
         }
