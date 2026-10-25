@@ -1,6 +1,8 @@
 //! Native Git through ordinary server startup, durable backends and restart.
 use super::*;
 
+#[cfg(feature = "docker")]
+mod competing;
 mod connection_loss;
 mod interrupted_fetch;
 mod lost_ack;
@@ -12,22 +14,24 @@ async fn git(directory: &Path, arguments: &[&str]) -> std::process::Output {
         .map(|argument| (*argument).to_owned())
         .collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(directory)
-            .args(arguments)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "Protocol Test")
-            .env("GIT_AUTHOR_EMAIL", "protocol@example.invalid")
-            .env("GIT_COMMITTER_NAME", "Protocol Test")
-            .env("GIT_COMMITTER_EMAIL", "protocol@example.invalid")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_TRACE_PACKET", "1")
-            .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
-            .env("GIT_HTTP_LOW_SPEED_TIME", "10")
-            .output()
-            .expect("native Git must be installed")
+        shardline_test_support::native_client_output(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(arguments)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "Protocol Test")
+                .env("GIT_AUTHOR_EMAIL", "protocol@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Protocol Test")
+                .env("GIT_COMMITTER_EMAIL", "protocol@example.invalid")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_TRACE_PACKET", "1")
+                .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+                .env("GIT_HTTP_LOW_SPEED_TIME", "10"),
+            std::time::Duration::from_secs(30),
+        )
+        .expect("native Git must be installed and finish within its deadline")
     })
     .await
     .unwrap()

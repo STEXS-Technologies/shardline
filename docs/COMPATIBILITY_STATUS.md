@@ -166,6 +166,11 @@ drill also kills the Shardline process while the second ref is paused inside the
 atomic transaction, verifies both refs remain at their old heads, then restarts,
 retries, clones and runs strict `git fsck`. Broader concurrent deployment
 qualification remains separate.
+An owned PostgreSQL/MinIO test also gates two stock Git pushes after both have
+read the same old refs from separate Shardline nodes. Exactly one atomic push
+wins; both nodes expose both winning refs, the losing commit is not fetchable,
+and a fresh server clones the winning bytes and passes strict fsck. These nodes
+share one host; this does not establish production-scale concurrency limits.
 Custom stores advertise atomic support
 only when they implement the batch contract. Receive-pack negotiates and
 validates push-options framing before publication. Shardline has no Git receive

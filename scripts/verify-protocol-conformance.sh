@@ -58,7 +58,7 @@ cargo nextest run --locked -p shardline-server --test protocol_completion \
 # or a failed database/object-store startup must fail this required gate.
 cargo nextest run --locked -p shardline-server --features docker \
   --test protocol_completion --run-ignored only \
-  -E 'test(official_oci_distribution_on_postgres_and_minio) | test(native_atomic_git_with_owned_postgres_and_minio) | test(native_botocore_checksum_with_owned_postgres_and_minio) | test(native_small_ranges_with_owned_postgres_and_minio)'
+  -E 'test(official_oci_distribution_on_postgres_and_minio) | test(native_atomic_git_with_owned_postgres_and_minio) | test(native_atomic_git_competing_replicas_with_owned_postgres_and_minio) | test(native_botocore_checksum_with_owned_postgres_and_minio) | test(native_small_ranges_with_owned_postgres_and_minio)'
 cargo test --locked -p shardline-server --features docker --lib \
   authenticated_ranges_on_real_minio -- --ignored --nocapture
 
