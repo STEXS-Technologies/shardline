@@ -92,6 +92,40 @@ async fn native_members_survive_replica_restart_without_standalone_copies() {
     backend.resource_lock_pool.close().await;
     drop(backend);
     let restarted = open().await.unwrap();
+    let generic = blake3::hash(content).to_hex().to_string();
+    assert_ne!(generic, member);
+    // A derived discovery row cannot turn equal payload bytes into a valid
+    // identity from a different hash domain. Exercise the actual SQL lookup,
+    // source verification and MinIO read after replacing the backend instance.
+    sqlx::query(
+        "INSERT INTO shardline_xet_chunks (xorb_hash,chunk_index,chunk_hash) VALUES ($1,99,$2)",
+    )
+    .bind(&hash)
+    .bind(&generic)
+    .execute(&owner)
+    .await
+    .unwrap();
+    assert!(
+        !restarted
+            .record_store()
+            .xet_chunk_candidates_after(&generic, None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        restarted.read_chunk(&generic).await,
+        Err(ServerError::NotFound)
+    ));
+    assert!(matches!(
+        restarted.chunk_length(&generic).await,
+        Err(ServerError::NotFound)
+    ));
+    sqlx::query("DELETE FROM shardline_xet_chunks WHERE xorb_hash=$1 AND chunk_index=99")
+        .bind(&hash)
+        .execute(&owner)
+        .await
+        .unwrap();
     let native_references = shardline_index::RecordTraversal::native_chunk_reference_page(
         restarted.record_store(),
         None,
