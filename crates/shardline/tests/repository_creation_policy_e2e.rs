@@ -6,7 +6,12 @@ use shardline_index::{
 use std::{
     path::Path,
     process::{Command, Output},
+    time::Duration,
 };
+
+fn run(command: &mut Command) -> Output {
+    shardline_test_support::native_client_output(command, Duration::from_secs(30)).unwrap()
+}
 
 fn command(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_shardline"));
@@ -34,16 +39,10 @@ fn json(output: Output) -> serde_json::Value {
 fn owner_can_inspect_apply_and_clear_policy_without_changing_repositories() {
     let root = tempfile::tempdir().unwrap();
     let store = LocalIndexStore::new(root.path().join("hub")).unwrap();
-    assert!(json(command(root.path()).output().unwrap()).is_null());
+    assert!(json(run(&mut command(root.path()))).is_null());
     let input = root.path().join("policy.json");
     std::fs::write(&input, r#"{"max_repositories":1}"#).unwrap();
-    let policy = json(
-        command(root.path())
-            .arg("--policy-file")
-            .arg(&input)
-            .output()
-            .unwrap(),
-    );
+    let policy = json(run(command(root.path()).arg("--policy-file").arg(&input)));
     assert_eq!(policy.get("max_repositories"), Some(&serde_json::json!(1)));
     assert!(matches!(
         store
@@ -59,14 +58,7 @@ fn owner_can_inspect_apply_and_clear_policy_without_changing_repositories() {
     ));
     std::fs::write(&input, r#"{"enabled":false}"#).unwrap();
     assert_eq!(
-        json(
-            command(root.path())
-                .arg("--policy-file")
-                .arg(&input)
-                .output()
-                .unwrap()
-        )
-        .get("enabled"),
+        json(run(command(root.path()).arg("--policy-file").arg(&input))).get("enabled"),
         Some(&serde_json::json!(false))
     );
     assert!(matches!(
@@ -75,7 +67,7 @@ fn owner_can_inspect_apply_and_clear_policy_without_changing_repositories() {
             .unwrap(),
         HubCreationOutcome::Denied
     ));
-    assert!(json(command(root.path()).arg("--clear").output().unwrap()).is_null());
+    assert!(json(run(command(root.path()).arg("--clear"))).is_null());
     assert!(store.get_repo("alice/one").unwrap().unwrap().private);
     store
         .create_repo(HubRepoType::Model, "alice/two", false)
@@ -94,25 +86,18 @@ fn invalid_policy_is_rejected_before_database_access() {
         " ".repeat(65537),
     ] {
         std::fs::write(&input, contents).unwrap();
-        let output = command(root.path())
-            .arg("--policy-file")
-            .arg(&input)
-            .env(
-                "SHARDLINE_INDEX_POSTGRES_URL",
-                "postgres://127.0.0.1:1/unavailable",
-            )
-            .output()
-            .unwrap();
+        let output = run(command(root.path()).arg("--policy-file").arg(&input).env(
+            "SHARDLINE_INDEX_POSTGRES_URL",
+            "postgres://127.0.0.1:1/unavailable",
+        ));
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
         assert!(!root.path().join("metadata.sqlite3").exists());
     }
-    let output = command(root.path())
+    let output = run(command(root.path())
         .arg("--clear")
         .arg("--policy-file")
-        .arg(&input)
-        .output()
-        .unwrap();
+        .arg(&input));
     assert_eq!(output.status.code(), Some(2));
 }
 
@@ -137,13 +122,11 @@ async fn owner_policy_cli_uses_the_shared_postgres_deployment() {
     url.query_pairs_mut()
         .append_pair("options", &format!("-csearch_path={schema}"));
     let root = tempfile::tempdir().unwrap();
-    let migrate = Command::new(env!("CARGO_BIN_EXE_shardline"))
+    let migrate = run(Command::new(env!("CARGO_BIN_EXE_shardline"))
         .env_clear()
         .current_dir(root.path())
-        .args(["db", "migrate", "up", "--database-url"])
-        .arg(url.as_str())
-        .output()
-        .unwrap();
+        .env("SHARDLINE_INDEX_POSTGRES_URL", url.as_str())
+        .args(["db", "migrate", "up"]));
     assert!(migrate.status.success(), "owner migration must succeed");
     let input = root.path().join("policy.json");
     std::fs::write(
@@ -151,21 +134,14 @@ async fn owner_policy_cli_uses_the_shared_postgres_deployment() {
         r#"{"max_repositories":2,"max_creations":3,"window_seconds":60}"#,
     )
     .unwrap();
-    let applied = json(
-        command(root.path())
-            .env("SHARDLINE_INDEX_POSTGRES_URL", url.as_str())
-            .arg("--policy-file")
-            .arg(&input)
-            .output()
-            .unwrap(),
-    );
+    let applied = json(run(command(root.path())
+        .env("SHARDLINE_INDEX_POSTGRES_URL", url.as_str())
+        .arg("--policy-file")
+        .arg(&input)));
     assert_eq!(applied.get("max_repositories"), Some(&serde_json::json!(2)));
-    let inspected = json(
-        command(root.path())
-            .env("SHARDLINE_INDEX_POSTGRES_URL", url.as_str())
-            .output()
-            .unwrap(),
-    );
+    let inspected = json(run(
+        command(root.path()).env("SHARDLINE_INDEX_POSTGRES_URL", url.as_str())
+    ));
     assert_eq!(inspected, applied);
     let configured: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT configured FROM {schema}.shardline_hub_creation_policies WHERE namespace='alice'"
@@ -175,13 +151,9 @@ async fn owner_policy_cli_uses_the_shared_postgres_deployment() {
     .unwrap();
     assert!(configured);
     assert!(
-        json(
-            command(root.path())
-                .env("SHARDLINE_INDEX_POSTGRES_URL", url.as_str())
-                .arg("--clear")
-                .output()
-                .unwrap()
-        )
+        json(run(command(root.path())
+            .env("SHARDLINE_INDEX_POSTGRES_URL", url.as_str())
+            .arg("--clear")))
         .is_null()
     );
     assert!(!root.path().join("metadata.sqlite3").exists());
