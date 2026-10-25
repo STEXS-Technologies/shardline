@@ -164,6 +164,13 @@ and connection/shallow-root errors; its exit code alone does not establish
 healthy interoperability. Shardline's snapshot fallback remains necessary for
 the tested clients.
 
+Upstream Git's later [lazy-fetch recursion limit](https://github.com/git/git/commit/4360734e907c9c92e72217a8ba9bdc1989f3c3a5)
+reduces this amplification but does not eliminate it. With that revision built
+privately, the same filtered clone makes six fetch requests and emits five
+shallow-root warnings; the unfiltered control makes one request without warnings.
+Both pass strict fsck. This is a stock-Git comparison, not qualification of
+Shardline's native v2 snapshot flow or a requirement to upgrade client Git.
+
 The Hub API's native Git regression compares incremental-fetch HTTP response
 bytes with a fresh clone at the same commit. It requires less transfer for the
 incremental fetch, exact current and historical file contents, a successful
