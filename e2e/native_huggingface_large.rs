@@ -227,6 +227,11 @@ async fn qualify_large_transfer(runtime: HubRuntime) -> Result<(), TestError> {
         restored.read_exact(actual.get_mut(..count).ok_or("comparison buffer")?)?;
         assert_eq!(expected.get(..count), actual.get(..count));
     }
+    // Stop consuming a large response before its digest can complete, then
+    // require subsequent readers to finish with verified bytes. This exercises
+    // client abandonment at real file size, in addition to the focused
+    // single-permit cancellation tests that prove exact admission cleanup.
+    cancel_large_http_download(&runtime, &digest).await?;
     // Two slow readers exercise overlapping verified spools and response
     // ownership. Each verifies the complete body, rather than header latency.
     let slow_readers_io = ProcessIo::read()?;
@@ -257,17 +262,7 @@ async fn native_download_counter(runtime: &HubRuntime) -> Result<u64, TestError>
 
 async fn verify_slow_http_download(runtime: &HubRuntime, digest: &str) -> Result<(), TestError> {
     // Also exercise the ordinary HTTP path that previously buffered whole files.
-    let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?
-        .get(format!("{}/v1/hub/xet-files/{digest}", runtime.base_url))
-        .bearer_auth(&runtime.model_token)
-        .send()
-        .await?
-        .error_for_status()?;
-    assert_eq!(response.content_length(), Some(1024_u64 * 1024 * 1024));
-    let mut response = response;
+    let mut response = large_http_response(runtime, digest).await?;
     let mut observed = Sha256::new();
     let mut length = 0_u64;
     while let Some(frame) = response.chunk().await? {
@@ -281,4 +276,33 @@ async fn verify_slow_http_download(runtime: &HubRuntime, digest: &str) -> Result
     assert_eq!(length, 1024_u64 * 1024 * 1024);
     assert_eq!(hex::encode(observed.finalize()), digest);
     Ok(())
+}
+
+async fn cancel_large_http_download(runtime: &HubRuntime, digest: &str) -> Result<(), TestError> {
+    let mut response = large_http_response(runtime, digest).await?;
+    let frame = response
+        .chunk()
+        .await?
+        .ok_or("missing large response body")?;
+    assert!(!frame.is_empty());
+    assert!(u64::try_from(frame.len())? < 1024_u64 * 1024 * 1024);
+    drop(response);
+    Ok(())
+}
+
+async fn large_http_response(
+    runtime: &HubRuntime,
+    digest: &str,
+) -> Result<reqwest::Response, TestError> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?
+        .get(format!("{}/v1/hub/xet-files/{digest}", runtime.base_url))
+        .bearer_auth(&runtime.model_token)
+        .send()
+        .await?
+        .error_for_status()?;
+    assert_eq!(response.content_length(), Some(1024_u64 * 1024 * 1024));
+    Ok(response)
 }

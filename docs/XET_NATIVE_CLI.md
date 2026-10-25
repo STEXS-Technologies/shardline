@@ -96,6 +96,11 @@ concurrent slow ordinary HTTP downloads against the file's SHA-256. Linux peak
 RSS covers the server/test process, excluding the stock client and backend
 services. Each test requires the process peak to stay below 384 MiB. This bounds
 the tested workload; sustained saturation still requires separate qualification.
+With Hub 2.3.0 / hf_xet 1.7.0, all four cases also abandon an ordinary HTTP
+download after its first body frame before starting the two verified readers.
+Measured process peaks were 106,648–270,020 KiB. This exercises large-response
+abandonment and subsequent downloads; focused admission tests separately check
+permit release after cancellation.
 Nextest isolates each case in its own process and runs these large cases one at
 a time. The split-role cases use the documented streaming front door and require
 successful ranged downloads through the Shardline transfer role. Both roles run
