@@ -192,7 +192,7 @@ jobs:
         run: >-
           cargo nextest run --locked -p shardline-server --features docker --lib
           --run-ignored all
-          -E 'test(app::shard_progress::cancellation_http::) | test(disconnected_remote_native_download_stops_before_next_source_and_retries_verified)'
+          -E 'test(app::shard_progress::cancellation_http::) | test(disconnected_remote_native_download_stops_before_next_source_and_retries_verified) | test(server_frontend::xet::pressure::)'
 
       - name: Qualify native shard source reuse and corruption rejection
         run: >-
