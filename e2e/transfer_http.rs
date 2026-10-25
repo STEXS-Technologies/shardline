@@ -9,7 +9,6 @@ mod transfer_http_requirements;
 mod transfer_xorb_ranges;
 
 use std::{
-    env,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
     sync::Arc,
@@ -1077,11 +1076,10 @@ async fn full_transfer_response_accepts_frame_larger_than_stream_buffer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_route_boots_with_postgres_metadata_config() {
-    if env::var("DATABASE_URL").is_err() {
+    let Some(pg_url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         native_client_policy::require_available("PostgreSQL DATABASE_URL transfer backend", false);
-        eprintln!("skipping postgres test: DATABASE_URL not set");
         return;
-    }
+    };
     let storage = tempfile::tempdir();
     assert!(storage.is_ok());
     let Ok(storage) = storage else {
@@ -1097,8 +1095,6 @@ async fn health_route_boots_with_postgres_metadata_config() {
     let Ok(addr) = addr else {
         return;
     };
-    let pg_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://shardline:change-me@localhost:5432/shardline".to_owned());
     shardline_server::run_database_migration(&shardline_server::DatabaseMigrationOptions::new(
         pg_url.clone(),
         shardline_server::DatabaseMigrationCommand::Up { steps: None },
