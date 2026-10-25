@@ -733,6 +733,10 @@ async fn exercise_aws_cli_presigned_get(
         .map_err(reqwest::Error::without_url)
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !response.headers().contains_key(reqwest::header::LOCATION),
+        "presigned download must not advertise a backend redirect"
+    );
     assert_eq!(
         response.bytes().await.unwrap().as_ref(),
         b"signed native client payload"
