@@ -57,6 +57,11 @@ done
 cargo nextest run --locked -p shardline-hub-api --test git_suffix \
     --run-ignored only -E 'test(postgres_and_minio_snapshot_tokens_are_confined)'
 
+# Run the full stock Git history/filter contracts with durable remote metadata
+# and payloads, including historical lazy fetches through protocol v2.
+cargo nextest run --locked -p shardline-hub-api --test git_cli \
+    --run-ignored only -E 'test(git_cli_remote::postgres_minio_)' --no-fail-fast
+
 # Storage protocol and pending-delete contracts must execute against isolated
 # databases too. Missing fixtures are failures in this mandatory gate.
 for entry in \

@@ -3,6 +3,8 @@
 mod support;
 use support::common;
 
+mod git_cli_remote;
+
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -106,7 +108,10 @@ fn verify_v2_historical_lazy_read(directory: &str, first_commit: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_cli_clone_and_fetch_ndjson_revisions() {
-    let test = common::setup();
+    exercise_clone_and_fetch(common::setup()).await;
+}
+
+async fn exercise_clone_and_fetch(test: common::HubTestContext) {
     test.state()
         .store
         .create_repo(
@@ -967,7 +972,10 @@ async fn git_cli_clone_and_fetch_ndjson_revisions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_cli_protocol_v2_clone_and_incremental_fetch() {
-    let test = common::setup();
+    exercise_protocol_v2(common::setup()).await;
+}
+
+async fn exercise_protocol_v2(test: common::HubTestContext) {
     test.state()
         .store
         .create_repo(

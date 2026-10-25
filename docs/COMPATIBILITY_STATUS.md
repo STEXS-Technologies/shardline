@@ -209,8 +209,11 @@ commits or tags; explicitly wanted objects remain available, and native Git 2.52
 verifies lazy fetching of an omitted tree during checkout over protocol v0, v1
 and v2. Native Git checks v2 clone, incremental fetch, deepen/unshallow, shallow
 date/exclusion, omitted objects, lazy checkout and strict fsck. Sparse-checkout
-and other unimplemented filters are rejected explicitly. Broader shallow-history merge, backend and
-failure qualification remains open; these checks do not establish full Git
+and other unimplemented filters are rejected explicitly. The same native Git
+2.52.0 workflows pass on SQLite/local storage and disposable PostgreSQL/MinIO.
+For four v2 partial-clone filters, the checks prove a historical blob is absent
+before lazy retrieval, fetch its exact bytes and run full strict fsck. Broader
+shallow-history merge and failure qualification remains open; these checks do not establish full Git
 protocol coverage.
 Receive-pack validates the entire command section before publication: malformed
 framing, invalid object IDs/ref names, duplicate ref commands and misplaced
