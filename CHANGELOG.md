@@ -84,6 +84,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   larger containers.
 - Reuse native Xorb sources during shard validation and file hashing to avoid
   repeated object-store reads and temporary copies for sequential file terms.
+- Remove the preliminary shard-existence probe from native Xet publication;
+  conditional writes retain verified duplicate detection and upload results.
 - Reject S3 ACL grants and ACL updates with `AccessControlListNotSupported`;
   reject unsupported encryption, expected-owner and requester-payer options
   instead of silently acknowledging them. Accept only the STANDARD object

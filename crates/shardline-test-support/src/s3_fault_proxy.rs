@@ -39,10 +39,16 @@ pub struct S3FaultProxy {
     endpoint: String,
     armed: Arc<AtomicBool>,
     injected: Arc<AtomicBool>,
-    get_requests: Arc<AtomicUsize>,
+    requests: Arc<RequestCounts>,
     get_responses: Arc<GetResponses>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct RequestCounts {
+    get: AtomicUsize,
+    head: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -89,8 +95,8 @@ impl S3FaultProxy {
         let endpoint = format!("http://{}", listener.local_addr()?);
         let armed = Arc::new(AtomicBool::new(initially_armed));
         let injected = Arc::new(AtomicBool::new(false));
-        let get_requests = Arc::new(AtomicUsize::new(0));
-        let worker_get_requests = Arc::clone(&get_requests);
+        let requests = Arc::new(RequestCounts::default());
+        let worker_requests = Arc::clone(&requests);
         let get_responses = Arc::new(GetResponses::default());
         let worker_get_response_bytes = Arc::clone(&get_responses);
         let worker_armed = Arc::clone(&armed);
@@ -109,7 +115,7 @@ impl S3FaultProxy {
                             fault.clone(),
                             &worker_armed,
                             &worker_injected,
-                            &worker_get_requests,
+                            &worker_requests,
                             &worker_get_response_bytes,
                         )
                         .ok();
@@ -125,7 +131,7 @@ impl S3FaultProxy {
             endpoint,
             armed,
             injected,
-            get_requests,
+            requests,
             get_responses,
             stop: Some(stop),
             thread: Some(thread),
@@ -152,7 +158,13 @@ impl S3FaultProxy {
     /// Number of actual HTTP GET attempts received, including injected failures.
     #[must_use]
     pub fn get_requests(&self) -> usize {
-        self.get_requests.load(Ordering::Acquire)
+        self.requests.get.load(Ordering::Acquire)
+    }
+
+    /// Number of actual HTTP HEAD attempts received, including missing objects.
+    #[must_use]
+    pub fn head_requests(&self) -> usize {
+        self.requests.head.load(Ordering::Acquire)
     }
 
     /// Successful upstream GET response-body bytes, before any injected mutation.
@@ -190,7 +202,7 @@ fn proxy_one_s3_request(
     fault: S3ProxyFault,
     armed: &AtomicBool,
     injected: &AtomicBool,
-    get_requests: &AtomicUsize,
+    requests: &RequestCounts,
     get_response_bytes: &GetResponses,
 ) -> std::io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -198,7 +210,10 @@ fn proxy_one_s3_request(
     let is_put = request.starts_with(b"PUT ");
     let is_get = request.starts_with(b"GET ");
     if is_get {
-        get_requests.fetch_add(1, Ordering::AcqRel);
+        requests.get.fetch_add(1, Ordering::AcqRel);
+    }
+    if request.starts_with(b"HEAD ") {
+        requests.head.fetch_add(1, Ordering::AcqRel);
     }
     let is_delete = request.starts_with(b"DELETE ");
     if is_put

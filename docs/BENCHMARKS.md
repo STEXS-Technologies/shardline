@@ -46,6 +46,35 @@ NVMe wear, or the memory ceiling of large concurrent uploads. Keep raw runner
 output outside the checkout; use the same fixture options to reproduce this
 comparison with the target release binaries.
 
+## Native shard publication requests
+
+The October 25 MinIO qualification uses a native shard referencing two Xorbs.
+Removing its preliminary existence probe saves one HEAD per registration. The
+pre-change test observes one unwanted HEAD on first publication;
+the updated implementation issues none on either initial publication or replay.
+Its conditional write decides the existing/new response and still checks the
+complete stored shard bytes before accepting a duplicate.
+
+| Updated operation | Source GETs | Existing-shard verification GETs | Preliminary HEADs |
+| --- | ---: | ---: | ---: |
+| Initial publication | 2 | 0 | 0 |
+| Replay through the same object-store client | 2 | 1 | 0 |
+
+The same test injects corrupt source bytes and corrupt existing-shard bytes;
+both reject registration, and the latter never invokes metadata publication.
+It counts actual provider attempts with a loopback proxy and owns its MinIO
+fixture. Reproduce with Docker available:
+
+```sh
+cargo nextest run --locked -p shardline-server --features docker \
+  --test native_shard_reads --run-ignored only
+```
+
+This reduces request overhead, not payload bytes, decoded-chunk copies or
+cross-request source validation. It is not an end-to-end throughput or cloud
+billing measurement; a fresh replica can also require a conditional create
+attempt before discovering an existing shard.
+
 ## Performance and latency
 
 Run the reproducible local matrix:

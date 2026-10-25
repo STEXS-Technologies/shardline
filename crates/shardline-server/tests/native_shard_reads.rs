@@ -6,7 +6,7 @@ use std::{io::Cursor, sync::Arc};
 use sha2::{Digest, Sha256};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretString};
 use shardline_server_core::{DEFAULT_SHARD_METADATA_LIMITS, ServerObjectStore};
-use shardline_storage::S3ObjectStoreConfig;
+use shardline_storage::{ObjectPrefix, ObjectStore, S3ObjectStoreConfig};
 use shardline_test_support::{DockerLocalStack, S3FaultProxy, S3ProxyFault};
 use shardline_xet_adapter::{prepare_uploaded_shard, store_uploaded_xorb};
 use shardline_xet_core::{
@@ -112,6 +112,7 @@ fn native_shard_preparation_reuses_each_verified_provider_source() {
     let scope =
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "source-order", None).unwrap();
     let before = proxy.get_requests();
+    let before_heads = proxy.head_requests();
     let prepared = prepare_uploaded_shard(
         &mut Cursor::new(&bytes),
         &objects,
@@ -124,7 +125,7 @@ fn native_shard_preparation_reuses_each_verified_provider_source() {
         Some(2),
         "two Xorbs need exactly two provider GETs"
     );
-    runtime
+    let response = runtime
         .block_on(
             prepared.register(|records, _mappings, _references, identities, descriptors| {
                 assert_eq!(records.len(), 1);
@@ -135,7 +136,84 @@ fn native_shard_preparation_reuses_each_verified_provider_source() {
             }),
         )
         .unwrap();
+    assert_eq!(
+        response.result, 1,
+        "first shard publication inserts content"
+    );
+    assert_eq!(
+        proxy.head_requests(),
+        before_heads,
+        "conditional shard creation needs no preceding HEAD"
+    );
+    assert_eq!(
+        proxy.get_requests().checked_sub(before),
+        Some(2),
+        "new shard publication retains exactly the two source GETs"
+    );
+    let before_replay = proxy.get_requests();
+    let replay = prepare_uploaded_shard(
+        &mut Cursor::new(&bytes),
+        &objects,
+        Some(&scope),
+        DEFAULT_SHARD_METADATA_LIMITS,
+    )
+    .unwrap();
+    let replay_response = runtime
+        .block_on(replay.register(|_, _, _, _, _| async { Ok(()) }))
+        .unwrap();
+    assert_eq!(
+        replay_response.result, 0,
+        "verified duplicate retains its wire result"
+    );
+    assert_eq!(
+        proxy.head_requests(),
+        before_heads,
+        "duplicate shard verification needs no preceding HEAD"
+    );
+    assert_eq!(
+        proxy.get_requests().checked_sub(before_replay),
+        Some(3),
+        "replay still verifies both source Xorbs and existing shard bytes"
+    );
     assert!(!proxy.fault_was_injected());
+
+    // A persisted shard is not accepted on metadata alone: corrupt duplicate
+    // bytes must still reject registration before the publication callback.
+    let shards = objects
+        .list_prefix(&ObjectPrefix::parse("shards/").unwrap())
+        .unwrap();
+    assert_eq!(shards.len(), 1);
+    let length = usize::try_from(shards.first().unwrap().length()).unwrap();
+    let duplicate_fault = S3FaultProxy::start_disarmed(
+        upstream,
+        S3ProxyFault::ReplaceSuccessfulGetBody(Arc::from(vec![0_u8; length])),
+    )
+    .unwrap();
+    let damaged_shard = ServerObjectStore::s3(
+        config
+            .clone()
+            .with_endpoint(Some(duplicate_fault.endpoint().to_owned())),
+    )
+    .unwrap();
+    let corrupt_duplicate = prepare_uploaded_shard(
+        &mut Cursor::new(&bytes),
+        &damaged_shard,
+        Some(&scope),
+        DEFAULT_SHARD_METADATA_LIMITS,
+    )
+    .unwrap();
+    duplicate_fault.arm();
+    let published = std::sync::atomic::AtomicBool::new(false);
+    let result = runtime.block_on(corrupt_duplicate.register(|_, _, _, _, _| {
+        published.store(true, std::sync::atomic::Ordering::Release);
+        async { Ok(()) }
+    }));
+    assert!(
+        result.is_err(),
+        "corrupt existing shard must reject registration"
+    );
+    assert!(duplicate_fault.fault_was_injected());
+    assert!(!published.load(std::sync::atomic::Ordering::Acquire));
 
     let mut corrupt = left_bytes;
     let last = corrupt.last_mut().unwrap();

@@ -243,7 +243,6 @@ fn persist_normalized_shard(
     parsed_shard: NormalizedShardUpload,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
     let shard_key = shard_object_key_local(&parsed_shard.shard_hash_hex)?;
-    let was_present = object_store.metadata(&shard_key)?.is_some();
     let shard_length = u64::try_from(parsed_shard.normalized_bytes.len())?;
     let integrity = ObjectIntegrity::new(chunk_hash(&parsed_shard.normalized_bytes), shard_length);
     let stored = object_store.put_if_absent(
@@ -254,10 +253,12 @@ fn persist_normalized_shard(
     let stored = stored?;
 
     Ok(ParsedShardUpload {
-        result: if was_present || matches!(stored, PutOutcome::AlreadyExists) {
-            0
-        } else {
-            1
+        // The conditional write already verifies an existing object's bytes.
+        // Its outcome, rather than an earlier existence observation, decides
+        // whether this request inserted the shard.
+        result: match stored {
+            PutOutcome::AlreadyExists => 0,
+            PutOutcome::Inserted => 1,
         },
         records: parsed_shard.records,
         file_identities: parsed_shard.file_identities,
