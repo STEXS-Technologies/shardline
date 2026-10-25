@@ -95,6 +95,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Stop development Compose initialization with an actionable error after 60
+  unsuccessful MinIO connection attempts instead of retrying forever.
 - Avoid a second temporary payload copy when normalizing privately owned native
   Xet upload staging; preserve full hash verification and caller-owned files.
 - Recheck native Xet member hashes before persistence so changed staged bytes

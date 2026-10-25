@@ -40,9 +40,15 @@ services:
       - /bin/sh
       - -c
       - |
-        sleep 5
-        until mc alias set local http://127.0.0.1:19000 shardline shardline-dev-password; do
-          sleep 1
+        set -eu
+        attempt=0
+        until mc alias set local http://127.0.0.1:19000 shardline shardline-dev-password >/dev/null 2>&1; do
+          attempt=$$((attempt + 1))
+          if [ "$$attempt" -ge 60 ]; then
+            echo "MinIO initialization failed after 60 attempts; inspect docker compose logs minio." >&2
+            exit 1
+          fi
+          sleep 2
         done
         mc mb --ignore-existing local/shardline
 
