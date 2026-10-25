@@ -1,3 +1,4 @@
+mod role_split_remote;
 mod role_split_signed_urls;
 mod support;
 
@@ -98,7 +99,7 @@ async fn transfer_role_serves_transfer_routes_only() {
 async fn split_roles_support_native_xet_through_path_routed_proxy() {
     match timeout(
         Duration::from_secs(60),
-        exercise_split_role_native_xet_flow(),
+        exercise_split_role_native_xet_flow(None),
     )
     .await
     {
@@ -328,7 +329,9 @@ struct SplitProxyState {
     transfer_base_url: String,
 }
 
-async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
+async fn exercise_split_role_native_xet_flow(
+    services: Option<&shardline_test_support::DockerLocalStack>,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let client_root = tempfile::tempdir()?;
 
@@ -349,6 +352,7 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     )
     .with_server_role(ServerRole::Api)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
+    let api_config = role_split_remote::configure(api_config, services)?;
     let api_server = spawn(async move { serve_with_listener(api_config, api_listener).await });
 
     // Both roles initialize the same local SQLite metadata store. Complete
@@ -369,6 +373,7 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     )
     .with_server_role(ServerRole::Transfer)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
+    let transfer_config = role_split_remote::configure(transfer_config, services)?;
     let transfer_server =
         spawn(async move { serve_with_listener(transfer_config, transfer_listener).await });
 

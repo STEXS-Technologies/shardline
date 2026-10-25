@@ -60,6 +60,11 @@ jobs:
           --test remote_delete_reply_recovery
           remote_saved_reply_recovery_preserves_user_objects_and_uncertain_attempts -- --ignored
 
+      - name: Verify remote split-role downloads stay behind Shardline
+        run: >-
+          cargo test --locked --manifest-path e2e/Cargo.toml --test role_split_e2e
+          remote_native_xet_signed_urls_stay_on_shardline -- --ignored
+
       - name: Apply disposable PostgreSQL schema as owner
         run: target/release/shardline db migrate up --database-url "$DATABASE_URL"
 
