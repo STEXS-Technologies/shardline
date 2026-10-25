@@ -5,7 +5,8 @@ use std::{
     error::Error,
     fs::{create_dir_all, read, write as write_file},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
+    time::Duration,
 };
 
 use rusqlite::Connection;
@@ -13,6 +14,10 @@ use serde_json::{Value, from_slice};
 use shardline_index::{LifecycleStore, LocalIndexStore, WebhookDelivery};
 use shardline_protocol::RepositoryProvider;
 use support::CliE2eInvariantError;
+
+fn run(command: &mut Command) -> std::io::Result<Output> {
+    shardline_test_support::native_client_output(command, Duration::from_secs(120))
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gc_mark_and_sweep_deletes_candidates() {
@@ -64,7 +69,7 @@ async fn exercise_gc_mark_and_sweep() -> Result<(), Box<dyn Error>> {
 
     // Mark phase — retention 0 is clamped to the minimum internally, so the
     // chunk is quarantined but NOT deleted immediately.
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
@@ -77,8 +82,7 @@ async fn exercise_gc_mark_and_sweep() -> Result<(), Box<dyn Error>> {
             "--sweep",
             "--retention-seconds",
             "0",
-        ])
-        .output()?;
+        ]))?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "gc failed: {}",
@@ -120,7 +124,7 @@ async fn exercise_gc_exports() -> Result<(), Box<dyn Error>> {
     let orphan_inventory_path = storage.path().join("artifacts").join("orphans.json");
     let shardline_bin = shardline_binary()?;
 
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
@@ -140,8 +144,7 @@ async fn exercise_gc_exports() -> Result<(), Box<dyn Error>> {
             orphan_inventory_path
                 .to_str()
                 .ok_or("orphan inventory path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "gc export failed: {}",
@@ -211,7 +214,7 @@ async fn exercise_gc_mark_and_sweep_for_native_xet_objects() -> Result<(), Box<d
     )?;
     let shardline_bin = shardline_binary()?;
 
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
@@ -224,8 +227,7 @@ async fn exercise_gc_mark_and_sweep_for_native_xet_objects() -> Result<(), Box<d
             "--sweep",
             "--retention-seconds",
             "0",
-        ])
-        .output()?;
+        ]))?;
     if !output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "gc native xet failed: {}",
@@ -275,7 +277,7 @@ async fn exercise_gc_rejects_symlinked_export_artifact_path() -> Result<(), Box<
     let orphan_inventory_path = storage.path().join("orphans.json");
     let shardline_bin = shardline_binary()?;
 
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
@@ -295,8 +297,7 @@ async fn exercise_gc_rejects_symlinked_export_artifact_path() -> Result<(), Box<
             orphan_inventory_path
                 .to_str()
                 .ok_or("orphan inventory path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if output.status.success() {
         return Err(CliE2eInvariantError::new(
             "gc unexpectedly accepted a symlinked artifact path",
@@ -332,7 +333,7 @@ async fn exercise_gc_fails_closed_on_corrupt_webhook_delivery_metadata()
     )?;
 
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
@@ -345,8 +346,7 @@ async fn exercise_gc_fails_closed_on_corrupt_webhook_delivery_metadata()
             "--sweep",
             "--retention-seconds",
             "0",
-        ])
-        .output()?;
+        ]))?;
 
     if output.status.success() {
         return Err(
