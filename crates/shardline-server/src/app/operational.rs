@@ -27,7 +27,7 @@ use crate::{
         AppState,
         reconstruction_helpers::{
             byte_range_stream_response, full_byte_stream_response,
-            parse_required_xorb_transfer_range,
+            parse_required_xorb_transfer_range, single_range_header,
         },
         reconstruction_routes::{XetRepository, XetWriteRepository},
         xorb_transfer_capability::XorbReadCapabilitySigner,
@@ -238,6 +238,13 @@ pub(super) async fn read_xorb_transfer(
     } else {
         None
     };
+    if read_grant.is_some() {
+        // The capability already authenticates the request. Missing or repeated
+        // range fields are invalid independently of object length or membership;
+        // do not discover storage just to reject this request shape.
+        single_range_header(&headers, axum::http::header::RANGE)?
+            .ok_or(ServerError::InvalidRangeHeader)?;
+    }
     let repository_namespace =
         if let Some(grant) = read_grant.as_ref().filter(|grant| grant.hub_commit) {
             let scope = repository_namespace.as_ref().ok_or(ServerError::NotFound)?;

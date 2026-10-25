@@ -6,6 +6,56 @@ use crate::backend::{
 };
 
 #[tokio::test]
+async fn signed_transfer_requires_one_range_before_object_discovery() {
+    let (app, _root) = test_app_with_auth(&[ServerFrontend::Xet]).await;
+    let scope =
+        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
+    let hash = "f".repeat(64);
+    let subject = format!("{}:{hash}:0:9", "e".repeat(64));
+    let mut derivation = hmac::Hmac::<Sha256>::new_from_slice(TEST_SIGNING_KEY).unwrap();
+    derivation.update(b"shardline:xorb-range-read-capability:v1");
+    let signer = shardline_protocol::TokenSigner::new(&derivation.finalize().into_bytes()).unwrap();
+    for issuer in ["shardline-xorb-range-v1", "shardline-hub-xorb-range-v1"] {
+        let capability = signer
+            .sign(
+                &TokenClaims::new(issuer, &subject, TokenScope::Read, scope.clone(), u64::MAX)
+                    .unwrap(),
+            )
+            .unwrap();
+        let uri = format!("/transfer/xorb/default/{hash}?xorb_read_capability={capability}");
+        for range_fields in [0, 2] {
+            let mut request = Request::builder().uri(&uri);
+            for _ in 0..range_fields {
+                request = request.header(header::RANGE, "bytes=0-9");
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "malformed range must not depend on object discovery"
+            );
+            assert!(!response.headers().contains_key(header::LOCATION));
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header(header::RANGE, "bytes=0-9")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
 async fn expired_transfer_rejects_before_object_discovery() {
     let (app, _root) = test_app_with_auth(&[ServerFrontend::Xet]).await;
     let scope =

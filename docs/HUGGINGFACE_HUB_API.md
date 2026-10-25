@@ -176,6 +176,8 @@ Previously issued URLs keep their original expiry.
 Expired URLs without fresh credentials are rejected before file or object-store
 lookups. Official clients receive the refresh response; native clients can still
 retry with a valid bearer credential and the original exact range.
+Signed requests with missing or repeated Range fields also fail before storage
+discovery. Valid ranges retain the same exact-range and repository checks.
 Commit-scoped CAS credentials
 cannot be reused as ordinary Hub credentials or unrestricted Xorb-read tokens.
 An older commit's token cannot read a file added later. Write-token behavior is
