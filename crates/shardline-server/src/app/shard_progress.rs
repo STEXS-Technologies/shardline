@@ -116,8 +116,13 @@ fn publication_events(
                                 serde_json::json!({"type":"result", "result":result.result})
                             }
                             Err(error) => {
+                                let retryable = matches!(
+                                    error.status_code(),
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                                        | axum::http::StatusCode::TOO_MANY_REQUESTS
+                                );
                                 tracing::warn!(%error, "streaming shard publication failed");
-                                serde_json::json!({"type":"error", "message":"shard validation or publication failed"})
+                                serde_json::json!({"type":"error", "message":"shard validation or publication failed", "retryable":retryable})
                             }
                         };
                         let mut bytes = event.to_string();
@@ -250,6 +255,38 @@ mod tests {
         assert!(event.get("result").is_none());
         assert_eq!(event["message"], "shard validation or publication failed");
         assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_failures_preserve_retryable_http_classification() {
+        for (error, retryable) in [
+            (ServerError::RequestTimedOut, true),
+            (ServerError::WorkQueueSaturated, true),
+            (ServerError::TooManyUploadSessions, true),
+            (ServerError::StaleResourceFence, true),
+            (
+                ServerError::InvalidSerializedShard(
+                    crate::InvalidSerializedShardError::ParserRejectedMetadata,
+                ),
+                false,
+            ),
+            (ServerError::NotFound, false),
+            (
+                ServerError::Io(std::io::Error::other("private storage details")),
+                false,
+            ),
+        ] {
+            let events = publication_events(async move { Err(error) }, Duration::from_secs(5));
+            tokio::pin!(events);
+            assert!(events.next().await.is_some());
+            let frame = events.next().await.unwrap().unwrap();
+            let event: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(event["type"], "error");
+            assert_eq!(event["retryable"], retryable);
+            assert_eq!(event["message"], "shard validation or publication failed");
+            assert!(event.get("result").is_none());
+            assert!(events.next().await.is_none());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

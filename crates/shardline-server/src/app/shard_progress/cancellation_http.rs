@@ -195,6 +195,26 @@ async fn stalled_verification(disconnect: bool) -> Result<(), Error> {
         .send()
         .await?
         .error_for_status()?;
+    let invalid = client
+        .post(format!("{base}/v2/shards"))
+        .bearer_auth(&token)
+        .body("not serialized shard metadata")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    assert_eq!(invalid.status(), reqwest::StatusCode::OK);
+    let events: Vec<serde_json::Value> = invalid
+        .text()
+        .await?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let (terminal, progress) = events.split_last().ok_or("missing terminal shard event")?;
+    assert!(!progress.is_empty(), "progress precedes the terminal error");
+    assert!(progress.iter().all(|event| event["type"] == "validating"));
+    assert_eq!(terminal["type"], "error");
+    assert_eq!(terminal["retryable"], false);
+    assert!(terminal.get("result").is_none());
     let mut socket = TcpStream::connect(address).await?;
     proxy.hold.store(true, Ordering::SeqCst);
     let request = format!(
