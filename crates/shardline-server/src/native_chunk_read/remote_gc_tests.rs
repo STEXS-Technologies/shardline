@@ -1,5 +1,7 @@
 //! Physical native-source reclamation through the fenced production GC path.
 
+mod repair;
+
 use crate::ServerObjectStore;
 use shardline_index::{
     FileChunkRecord, FileRecord, PostgresIndexStore, PostgresRecordStore, RecordMutation,
@@ -35,20 +37,23 @@ use shardline_xet_core::{
 };
 
 async fn source(objects: &ServerObjectStore, content: &[u8]) -> String {
-    let tail = b"independent second member";
-    let first = compute_data_hash(content);
-    let second = compute_data_hash(tail);
-    let length = content.len() as u64;
-    let total = length.checked_add(tail.len() as u64).unwrap();
-    let hash = xorb_hash(&[(first, length), (second, tail.len() as u64)]);
-    let bytes = serialized_xorb_object_from_components(
-        &hash,
-        [content, tail.as_slice()].concat(),
-        vec![(first, length), (second, total)],
-        CompressionScheme::None,
-    )
-    .unwrap()
-    .serialized_data;
+    let mut data = content.to_vec();
+    let mut leaves = vec![(compute_data_hash(content), content.len() as u64)];
+    let mut boundaries = vec![(leaves[0].0, content.len() as u64)];
+    // Exercise repair of a real multi-member payload, including members shared
+    // by the retained source and the orphan which will be physically swept.
+    for index in 0_u8..32 {
+        let member = vec![index; 64 * 1024];
+        let leaf = compute_data_hash(&member);
+        leaves.push((leaf, member.len() as u64));
+        data.extend_from_slice(&member);
+        boundaries.push((leaf, data.len() as u64));
+    }
+    let hash = xorb_hash(&leaves);
+    let bytes =
+        serialized_xorb_object_from_components(&hash, data, boundaries, CompressionScheme::None)
+            .unwrap()
+            .serialized_data;
     shardline_xet_adapter::store_uploaded_xorb_bytes(objects, &hash.hex(), &bytes)
         .await
         .unwrap();
@@ -227,15 +232,7 @@ async fn native_source_physical_sweep_survives_lost_index_and_copy() {
     let pool = replacement;
     let records = PostgresRecordStore::new(pool.clone());
     let index = PostgresIndexStore::new(pool.clone());
-    shardline_gc::run_postgres_gc_with_remote_delete_protection(
-        &records,
-        &index,
-        &objects,
-        &[crate::ServerFrontend::Xet],
-        shardline_gc::LocalGcOptions::mark_and_sweep(0),
-    )
-    .await
-    .unwrap();
+    repair::qualify(&database, pool.clone(), objects.clone(), &live).await;
     assert!(
         AsyncObjectStore::metadata(&objects, &live_key)
             .await
@@ -260,6 +257,22 @@ async fn native_source_physical_sweep_survives_lost_index_and_copy() {
         .unwrap()
         .length();
     let original = objects.read_full_object(&live_key, length).unwrap();
+    // The overlapping repair restored the derived source membership. Remove
+    // it again before testing the separate lost-index recovery failure: an
+    // intact index legitimately protects a live source without scanning its
+    // current payload as a health check.
+    sqlx::query("DELETE FROM shardline_xet_xorbs WHERE xorb_hash=$1")
+        .bind(&live)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        records
+            .native_chunk_reference_page(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let mut corrupt = original.clone();
     *corrupt.get_mut(8).unwrap() ^= 1;
     replace_source(&objects, &live_key, &corrupt).await;
