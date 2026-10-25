@@ -64,6 +64,22 @@ async fn source(objects: &ServerObjectStore, content: &[u8]) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires disposable Docker PostgreSQL and MinIO"]
 async fn native_source_physical_sweep_survives_lost_index_and_copy() {
+    qualify_retention(5).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires disposable Docker PostgreSQL/MinIO and 24 hours of real aging"]
+async fn native_source_default_retention_survives_repair_and_takeover() {
+    assert_eq!(shardline_gc::DEFAULT_LOCAL_GC_RETENTION_SECONDS, 86_400);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(90_000),
+        qualify_retention(shardline_gc::DEFAULT_LOCAL_GC_RETENTION_SECONDS),
+    )
+    .await
+    .expect("default-retention qualification exceeded 25 hours");
+}
+
+async fn qualify_retention(retention_seconds: u64) {
     let stack = tokio::task::spawn_blocking(|| {
         shardline_test_support::DockerLocalStack::builder()
             .with_postgres()
@@ -131,15 +147,15 @@ async fn native_source_physical_sweep_survives_lost_index_and_copy() {
     );
     let live_key = shardline_xet_adapter::xorb_object_key(&live).unwrap();
     let orphan_key = shardline_xet_adapter::xorb_object_key(&orphan).unwrap();
-    // Exercise a real (short fixture) retention interval without changing the
-    // clock or editing quarantine timestamps. This is not the default 24h gate.
+    // Neither variant changes the clock or edits quarantine timestamps. The
+    // separately selected slow variant exercises the production 24h default.
     let retention_index = PostgresIndexStore::new(pool.clone());
     shardline_gc::run_postgres_gc_with_remote_delete_protection(
         &records,
         &retention_index,
         &objects,
         &[crate::ServerFrontend::Xet],
-        shardline_gc::LocalGcOptions::mark_only(5),
+        shardline_gc::LocalGcOptions::mark_only(retention_seconds),
     )
     .await
     .unwrap();
@@ -159,7 +175,11 @@ async fn native_source_physical_sweep_survives_lost_index_and_copy() {
             .is_some(),
         "unexpired quarantine must prevent physical deletion"
     );
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let aging_started = std::time::Instant::now();
+    eprintln!("native source retention aging started: {retention_seconds}s");
+    tokio::time::sleep(std::time::Duration::from_secs(retention_seconds)).await;
+    assert!(aging_started.elapsed() >= std::time::Duration::from_secs(retention_seconds));
+    eprintln!("native source retention aging complete; qualifying takeover and repair");
     // Stop the old invocation inside its live-record scan, then transfer real
     // maintenance ownership. No MinIO delete may escape this stale owner.
     let old_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")

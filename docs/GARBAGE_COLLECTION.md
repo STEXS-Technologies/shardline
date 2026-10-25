@@ -479,3 +479,15 @@ Current non-goals:
 - provider root reconciliation
 - automatic hold creation from external policy engines
 - an embedded background collector worker
+
+Maintainers can exercise the default retention window against disposable
+PostgreSQL and MinIO with the following test. It waits 24 real hours without
+editing timestamps, then checks owner takeover, live-source preservation,
+repair and orphan reclamation. Docker is required; this is separate from the
+short retention fixture used in ordinary CI.
+
+```bash
+cargo test --locked -p shardline-server --features docker --lib \
+  native_chunk_read::remote_gc_tests::native_source_default_retention_survives_repair_and_takeover \
+  -- --ignored --exact --nocapture
+```
