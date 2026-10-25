@@ -56,6 +56,20 @@ object storage for local development:
 docker compose -f docker-compose.yml up --build
 ```
 
+Once the services are ready, run the authenticated smoke check from another
+terminal (requires Python 3):
+
+```text
+python3 scripts/shardline/compose_smoke.py
+```
+
+It checks readiness, rejects missing credentials, and uploads and downloads a
+deterministic 1 MiB fixture byte-for-byte. Repeating it reuses the same object;
+the fixture remains in the development deployment. It does not restart services
+or delete data. Credentials stay out of its output, and downloads do not follow
+redirects. Use `--endpoint`, `--project`, and repeated `--compose-file` arguments
+when you override the bundled development configuration.
+
 Compose supplies a development signing key through
 `SHARDLINE_TOKEN_SIGNING_KEY`. To mint a token using the running server's key,
 execute the CLI inside the service:
