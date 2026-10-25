@@ -27,8 +27,9 @@ the ordinary download behavior. The unmodified `@huggingface/hub` 2.17.1 client
 passes model and dataset native upload, token refresh, delta editing and
 byte-for-byte native download on SQLite/local, PostgreSQL/local and
 PostgreSQL/MinIO, including split API/transfer roles behind a path-routing front
-door. The MinIO protocol fixture uses a bounded memory-backed volume; it does
-not qualify durable MinIO restarts. Cancellation and SDK background handle
+door. MinIO qualification includes memory-backed protocol fixtures and a
+separate disk-backed upload/edit/download case; neither establishes recovery
+after a MinIO process crash. Cancellation and SDK background handle
 cleanup remain separate qualification items. The one-shot test exits
 after all awaited assertions, rather than waiting for SDK background handles.
 
@@ -129,9 +130,11 @@ composition, verified legacy descriptor recovery and rejection of tampered
 descriptors. A composed-file workflow uploads only the changed Xorb, reuses the
 existing unchanged source, publishes the shard and downloads byte-exact content
 with the upstream Xet download library. Two PostgreSQL-backed replicas sharing filesystem objects also
-preserve unresolved-delete blocking across restart. Stock-client delta uploads,
-MinIO qualification and delayed in-flight deletion scenarios remain pending.
-The composed-file fixture does not establish automatic delta selection by `hf`.
+preserve unresolved-delete blocking across restart. The official JavaScript
+client workflow above also verifies automatic delta selection and byte-exact
+downloads on PostgreSQL/MinIO, including split roles. These are distinct from
+the composed-file fixture; neither establishes automatic delta selection by
+the Python `hf` CLI or every delayed in-flight deletion scenario.
 
 Snapshot-scoped Git credentials currently negotiate the legacy fetch protocol,
 including when stock Git requests v2. Repository and branch credentials retain
@@ -231,14 +234,25 @@ probes have a 10-second deadline; deployment commands and cleanup have bounded
 execution. The distributed-integrity runner and mixed-version CI step enable
 required mode explicitly. Other prerequisite paths still need individual review.
 
-The default contributor library run leaves eighteen explicitly ignored tests:
+Library defaults leave infrastructure and full-size checks explicitly ignored.
+Inspect the selected build's inventory rather than treating a default pass as
+their qualification; enabled features can change that inventory:
+
+```bash
+cargo nextest list --locked -p shardline-server --lib --all-features --message-format json
+```
 
 | Checks | Where they run explicitly |
 | --- | --- |
-| Four PostgreSQL OCI subject-index and reclamation contracts | Protocol-conformance gate with a migrated disposable database |
-| PostgreSQL corrupt-copy preservation and startup-worker shutdown | Protocol-conformance gate with that database |
-| Six PostgreSQL frontend-schema compatibility and permission contracts | Protocol-conformance gate with that database |
-| Six full-size or legacy maintenance-history capacity drills | Explicit release-mode capacity campaigns; ordinary CI does not establish their result |
+| PostgreSQL OCI subject-index and reclamation contracts | Protocol-conformance gate with a migrated disposable database |
+| PostgreSQL copy cancellation, corruption, snapshots and lost acknowledgments | PostgreSQL gate in `scripts/test-postgres.sh` |
+| PostgreSQL frontend-schema compatibility and permission contracts; startup-worker shutdown | Protocol-conformance gate with a migrated disposable database |
+| Full-size maintenance-history capacity and shared-hash authorization scale | Explicit release-mode capacity campaigns; ordinary CI does not establish their result |
+
+Released-recovery library cases also require the actual predecessor and historical
+binaries. Missing binaries fail mandatory native-client or PostgreSQL qualification;
+optional local runs report an explicit skip. `scripts/test-postgres.sh` supplies
+both releases before running the full server library.
 
 The E2E job separately selects the ignored native Xet PostgreSQL/MinIO test and
 the two Bazel flows. Kubernetes and kind tests still require their dedicated

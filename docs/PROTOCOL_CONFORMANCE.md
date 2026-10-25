@@ -45,6 +45,9 @@ Requirements:
   exact serialized byte range. The transfer request can therefore work without
   forwarding the CAS bearer token, as required by clients that fetch the URL
   directly.
+- Point those URLs to Shardline's transfer endpoint, including when S3 or MinIO
+  stores the bytes. Do not expose backend download URLs or credentials, or
+  redirect the client to the backend object store.
 - Send `Cache-Control: private, no-store` on reconstruction responses because
   their URLs contain bearer capabilities. Treat those URLs as secrets; do not
   log or share them.
