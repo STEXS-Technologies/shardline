@@ -50,6 +50,10 @@ jobs:
           cargo test --locked -p shardline-test-support --features docker
           teardown_removes_owned_anonymous_data_volumes -- --ignored
 
+      - name: Verify provider-signed ranges cannot disclose shared object bytes
+        run: >-
+          cargo test --locked -p shardline-storage --test provider_signed_ranges -- --ignored
+
       - name: Apply disposable PostgreSQL schema as owner
         run: target/release/shardline db migrate up --database-url "$DATABASE_URL"
 

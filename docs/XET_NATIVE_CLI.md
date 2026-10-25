@@ -440,6 +440,11 @@ Sharing a container does not grant access to another repository's chunks. Full-c
 and footer reads remain available when the repository references the entire payload.
 Reconstruction URLs also carry a short-lived capability for the exact advertised range,
 so clients can fetch that range without forwarding their bearer token.
+Ordinary S3 presigned URLs grant access to the whole object and must not replace
+these scoped URLs for shared containers. MinIO qualification confirms that signing
+the exact `Range` header rejects omitted or changed ranges, expires and can be
+refreshed. Shardline continues serving its own URLs to retain repository authorization
+and content verification; direct AWS/R2 URL delivery is not qualified.
 An expired signed URL returns `403` when no bearer token is supplied, allowing
 the native client's URL provider to request fresh reconstruction metadata. A
 current bearer token for the same repository can still authorize the exact
