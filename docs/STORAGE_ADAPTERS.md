@@ -79,9 +79,9 @@ The object adapter must provide:
 > }
 > ```
 
-Presigned URLs and native async read streams still belong in production adapters, but
-inventory, metadata, bounded range reads, and idempotent delete are now part of the
-required lifecycle contract.
+Client presigned URLs target Shardline's protocol endpoints; storage adapters must
+not expose backend download URLs. Native async backend reads, inventory, metadata,
+bounded range reads, and idempotent delete belong in the lifecycle contract.
 Use the prefix visitor for garbage collection, index rebuild, and operational stats so
 an adapter can page or stream inventory without forcing callers to allocate the full
 object listing first.
