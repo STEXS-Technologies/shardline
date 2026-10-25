@@ -49,16 +49,16 @@ flowchart TD
   linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
-The bundled compose file starts the local profile by default:
+The bundled Compose file starts Shardline with PostgreSQL metadata and MinIO
+object storage for local development:
 
 ```text
 docker compose -f docker-compose.yml up --build
 ```
 
-That compose profile is Docker-native by default: it generates and persists its
-development signing key inside the named data volume.
-To mint an authenticated local token against that running container, execute the CLI
-inside the service:
+Compose supplies a development signing key through
+`SHARDLINE_TOKEN_SIGNING_KEY`. To mint a token using the running server's key,
+execute the CLI inside the service:
 
 ```bash
 TOKEN="$(docker compose -f docker-compose.yml exec -T shardline \
@@ -70,7 +70,7 @@ TOKEN="$(docker compose -f docker-compose.yml exec -T shardline \
   --owner team \
   --repo assets \
   --revision main \
-  --key-file /var/lib/shardline/secrets/token-signing-key)"
+  --key-env SHARDLINE_TOKEN_SIGNING_KEY)"
 
 curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:18080/v1/stats
 ```
@@ -100,9 +100,9 @@ If you want to mint tokens on the host for the Compose server, pass the same sig
 as an environment variable:
 
 ```bash
-SHARDLINE_TOKEN_SIGNING_KEY=dev-signing-key docker compose -f docker-compose.yml up --build
+SHARDLINE_TOKEN_SIGNING_KEY=dev-only-signing-key-32-bytes-long docker compose -f docker-compose.yml up --build
 
-TOKEN="$(SHARDLINE_TOKEN_SIGNING_KEY=dev-signing-key shardline admin token \
+TOKEN="$(SHARDLINE_TOKEN_SIGNING_KEY=dev-only-signing-key-32-bytes-long shardline admin token \
   --issuer local \
   --subject operator-1 \
   --scope write \
@@ -120,18 +120,19 @@ configuration through normal environment variables or files.
 Provider integration is independent of whether the process runs on the host or in a
 container.
 
-For local S3-compatible testing, start the MinIO profile and point Shardline at the
-bucket it creates:
+To run a host-native Shardline process against only the development MinIO
+service, start MinIO and its bucket initializer, then export the storage settings
+in the shell used to start Shardline:
 
-```text
-docker compose -f docker-compose.yml --profile s3 up minio minio-init
-SHARDLINE_OBJECT_STORAGE_ADAPTER=s3
-SHARDLINE_S3_BUCKET=shardline
-SHARDLINE_S3_REGION=us-east-1
-SHARDLINE_S3_ENDPOINT=http://127.0.0.1:19000
-SHARDLINE_S3_ACCESS_KEY_ID=shardline
-SHARDLINE_S3_SECRET_ACCESS_KEY=shardline-dev-password
-SHARDLINE_S3_ALLOW_HTTP=true
+```bash
+docker compose -f docker-compose.yml up -d minio minio-init
+export SHARDLINE_OBJECT_STORAGE_ADAPTER=s3
+export SHARDLINE_S3_BUCKET=shardline
+export SHARDLINE_S3_REGION=us-east-1
+export SHARDLINE_S3_ENDPOINT=http://127.0.0.1:19000
+export SHARDLINE_S3_ACCESS_KEY_ID=shardline
+export SHARDLINE_S3_SECRET_ACCESS_KEY=shardline-dev-password
+export SHARDLINE_S3_ALLOW_HTTP=true
 ```
 
 For a direct, providerless Xet-compatible backend, follow
