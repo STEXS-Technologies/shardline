@@ -19,13 +19,13 @@ export SHARDLINE_FAKETIME_LIBRARY="$fixture/libfaketime.so.1"
 export SHARDLINE_CHAOS_DEPLOYMENT=1
 export CARGO_BUILD_JOBS=2
 cargo nextest run --locked -p shardline-server --all-features --test deployment_chaos \
-    -E 'not (test(readonly_maintenance_deployment::) | test(tracker_replacement::) | test(gc_acknowledgement::) | test(drill_deploy_f_real_mixed_version_rollout_and_rollback) | test(local_protocol_upgrade::))' \
+    -E 'not (test(readonly_maintenance_deployment::) | test(tracker_replacement::) | test(gc_acknowledgement::) | test(native_source_gc::) | test(drill_deploy_f_real_mixed_version_rollout_and_rollback) | test(local_protocol_upgrade::))' \
     --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \
     > "$fixture/test.log" 2>&1
 if rg -ni 'SKIP:|SKIPPED:|skipping:|panicked at' "$fixture/test.log"; then
     echo 'FAIL: a selected protocol drill skipped or a task panicked' >&2
     exit 1
 fi
-rg 'Starting 12 tests across 1 binary' "$fixture/test.log"
-rg 'Summary.*12 tests run: 12 passed' "$fixture/test.log"
+rg 'Starting 18 tests across 1 binary' "$fixture/test.log"
+rg 'Summary.*18 tests run: 18 passed' "$fixture/test.log"
 echo 'PASS: protocol interruption, backend loss, network faults, clock skew and workload burst'
