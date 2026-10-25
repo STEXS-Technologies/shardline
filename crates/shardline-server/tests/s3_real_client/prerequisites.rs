@@ -73,6 +73,40 @@ fn failed_native_client_output_is_not_exposed_by_test_diagnostics() {
 
 #[cfg(unix)]
 #[test]
+fn failed_boto3_interpreter_output_stays_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let interpreter = directory.path().join("python");
+    let secret = "synthetic-boto3-credential-must-stay-private";
+    std::fs::write(
+        &interpreter,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = -c ]; then exit 0; fi\nprintf '%s' '{secret}'\nprintf '%s\\n' '{secret}' 'boto3 failure type: ParamValidationError' >&2\nexit 17\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = shardline_test_support::native_client_output(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "boto3_sdk_roundtrip", "--nocapture"])
+            .env("BOTOCORE_PYTHON", interpreter)
+            .env("SHARDLINE_REQUIRE_NATIVE_CLIENTS", "1"),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(!output.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains("SDK parameter validation"));
+    assert!(!diagnostic.contains(secret));
+}
+
+#[cfg(unix)]
+#[test]
 fn failed_empty_listing_cannot_prove_successful_deletion() {
     use std::os::unix::fs::PermissionsExt;
 

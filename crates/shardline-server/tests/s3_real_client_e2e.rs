@@ -692,6 +692,22 @@ fn boto3_python() -> std::ffi::OsString {
     std::env::var_os("BOTOCORE_PYTHON").unwrap_or_else(|| "python3".into())
 }
 
+fn boto3_failure_category(stderr: &[u8]) -> &'static str {
+    // Do not echo subprocess output: SDK diagnostics and interpreter wrappers
+    // can contain credentials or signed URLs, even when our exception hook is
+    // careful. Only report a known, constant category.
+    for line in String::from_utf8_lossy(stderr).lines() {
+        match line {
+            "boto3 failure type: ParamValidationError" => return "SDK parameter validation",
+            "boto3 failure type: ClientError" => return "S3 service response",
+            "boto3 failure type: AssertionError" => return "client contract assertion",
+            "boto3 failure type: KeyError" => return "missing SDK response field",
+            _ => {}
+        }
+    }
+    "unclassified client failure"
+}
+
 /// Uses the same explicitly configured SDK for discovery and execution.
 fn boto3_available() -> bool {
     let available = shardline_test_support::native_client_output(
@@ -1092,7 +1108,7 @@ async fn boto3_sdk_roundtrip() {
         output.status.success(),
         "boto3 subprocess failed with status {}: {}",
         output.status,
-        String::from_utf8_lossy(&output.stderr)
+        boto3_failure_category(&output.stderr)
     );
     assert!(
         stdout.contains("ALL BOTO3 CHECKS PASSED"),
