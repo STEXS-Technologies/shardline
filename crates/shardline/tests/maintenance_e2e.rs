@@ -6,13 +6,14 @@ use shardline_reliability::MaintenanceArtifactProof;
 use std::{
     fs::{self, OpenOptions},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::{Duration, Instant},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod maintenance_support;
+use maintenance_support::process::OwnedProcess;
 
 fn command(state: &Path, root: &Path, operation: &str) -> Command {
     let mut command = Command::new(binary());
@@ -555,13 +556,6 @@ fn ordinary_commands_preserve_non_utf8_paths() -> Result<()> {
 #[test]
 fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Result<()> {
     use shardline_server::task_tracking::{TaskEvidenceStore, TaskRunIdentity, TaskRunState};
-    struct StopOnDrop(std::process::Child);
-    impl Drop for StopOnDrop {
-        fn drop(&mut self) {
-            let _kill = self.0.kill();
-            let _wait = self.0.wait();
-        }
-    }
     let root = tempfile::tempdir()?;
     let barrier = OpenOptions::new()
         .create(true)
@@ -570,15 +564,13 @@ fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Resul
         .write(true)
         .open(root.path().join(".gc-write-barrier.lock"))?;
     barrier.lock()?;
-    let child = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["index", "rebuild", "--root"])
-        .arg(root.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let mut child = StopOnDrop(child);
+    let mut child = OwnedProcess::spawn(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(root.path()),
+    )?;
     let state = root.path().join(".shardline-maintenance");
     let mut interrupted = None;
     wait_for(|| {
@@ -643,16 +635,19 @@ fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Resul
 #[test]
 fn ordinary_maintenance_uses_the_original_cli_process() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut child = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["index", "rebuild", "--root"])
-        .arg(root.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let pid = child.id();
-    while child.try_wait()?.is_none() {
+    let mut child = OwnedProcess::spawn(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(root.path()),
+    )?;
+    let pid = child.0.id();
+    let started = Instant::now();
+    while child.0.try_wait()?.is_none() {
+        if started.elapsed() >= Duration::from_secs(120) {
+            return Err("ordinary maintenance process exceeded observation deadline".into());
+        }
         if let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) {
             for task in tasks {
                 if let Ok(children) = fs::read_to_string(task?.path().join("children")) {
@@ -665,12 +660,8 @@ fn ordinary_maintenance_uses_the_original_cli_process() -> Result<()> {
         }
         thread::sleep(Duration::from_millis(1));
     }
-    let output = child.wait_with_output()?;
-    assert!(
-        output.status.success(),
-        "maintenance process failed: {}",
-        output.status
-    );
+    let status = child.0.wait()?;
+    assert!(status.success(), "maintenance process failed: {}", status);
     let manifests = maintenance_identities(root.path())?;
     assert_eq!(manifests.len(), 1);
     let identity = manifests.first().ok_or("missing run")?;
@@ -1029,10 +1020,7 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
         .open(root.join(".gc-write-barrier.lock"))?;
     barrier.lock()?;
     let state = sandbox.path().join("maintenance");
-    let mut controller = command(&state, &root, "index-rebuild")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let mut controller = OwnedProcess::spawn(&mut command(&state, &root, "index-rebuild"))?;
     wait_for(|| {
         Connection::open_with_flags(journal(&state), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok().and_then(|connection|
             connection.query_row("SELECT EXISTS(SELECT 1 FROM penelope_runtime_v1 WHERE pid IS NOT NULL AND acknowledged IS NOT NULL)", [], |row| row.get::<_, bool>(0)).ok()).unwrap_or(false)
@@ -1042,8 +1030,8 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
             .query_row("SELECT pid FROM penelope_runtime_v1", [], |row| row.get(0))?;
     let concurrent = run_operation(&state, &root, "index-rebuild")?;
     assert!(!concurrent.status.success());
-    controller.kill()?;
-    let _status = controller.wait()?;
+    controller.0.kill()?;
+    let _status = controller.0.wait()?;
     let deadline = Instant::now() + Duration::from_secs(5);
     let worker_stopped = loop {
         let stopped = match fs::read_to_string(format!("/proc/{worker_pid}/stat")) {
