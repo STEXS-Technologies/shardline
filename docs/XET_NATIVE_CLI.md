@@ -214,6 +214,14 @@ projection changes the lookup response only, leaving stored Xorbs and shards
 unchanged. Matching an authorized member does not grant access to another
 member's bytes.
 
+Transfer authorization reads indexed candidate records until published file
+terms prove the complete requested byte range. It can then stop parsing further
+records, even when many historical versions share the container. Gaps and shared
+footer bytes still require their existing ownership proof; a lookup-index entry
+alone never authorizes a read. Object and chunk integrity verification is
+unchanged. This reduces application-side metadata traversal after a match; it
+does not establish lower PostgreSQL query cost or network transfer.
+
 Existing deployments can rebuild a missing descriptor from their retained shard
 mapping and fully verified Xorb. Cached descriptors are checked against the
 native content root, published file terms, object existence and PostgreSQL's

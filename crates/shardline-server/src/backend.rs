@@ -1397,12 +1397,21 @@ impl ServerBackend {
         &self,
         hash: &str,
         scope: &RepositoryScope,
+        requested: Option<ByteRange>,
     ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
         #[cfg(test)]
         count_repository_reference_probe_for_tests(hash);
         match self {
-            Self::Local(backend) => backend.repository_xorb_coverage(hash, scope).await,
-            Self::Postgres(backend) => backend.repository_xorb_coverage(hash, scope).await,
+            Self::Local(backend) => {
+                backend
+                    .repository_xorb_coverage(hash, scope, requested)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .repository_xorb_coverage(hash, scope, requested)
+                    .await
+            }
         }
     }
 

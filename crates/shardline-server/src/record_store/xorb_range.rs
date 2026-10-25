@@ -5,7 +5,13 @@ use std::collections::BTreeMap;
 use shardline_index::RecordTraversal;
 use shardline_protocol::{ByteRange, RepositoryScope};
 
+use super::membership::LookupError;
 use crate::{ServerError, record_store::parse_stored_file_record_bytes};
+
+#[cfg(test)]
+mod postgres;
+#[cfg(test)]
+mod short_circuit;
 
 /// Uses candidate indexes only for discovery. The authoritative record must
 /// authorize every requested byte, including gaps between adjacent file terms.
@@ -13,15 +19,18 @@ pub(crate) async fn repository_xorb_coverage<Store>(
     store: &Store,
     hash: &str,
     scope: &RepositoryScope,
+    requested: Option<ByteRange>,
 ) -> Result<Coverage, ServerError>
 where
     Store: RecordTraversal + Sync,
+    Store::Error: Send,
     ServerError: From<Store::Error>,
 {
     let mut coverage = Coverage::default();
-    store
+    let result = store
         .visit_repository_hash_records(scope, hash, |entry| {
-            let record = parse_stored_file_record_bytes(&entry.bytes)?;
+            let record =
+                parse_stored_file_record_bytes(&entry.bytes).map_err(LookupError::InvalidRecord)?;
             if record.repository_scope.as_ref() == Some(scope) {
                 for member in &record.chunks {
                     if member.hash == hash && member.packed_end > member.packed_start {
@@ -29,10 +38,19 @@ where
                     }
                 }
             }
-            Ok::<_, ServerError>(())
+            // Candidate membership is never sufficient: stop only after
+            // authoritative file terms cover every byte actually requested.
+            if requested.is_some_and(|range| coverage.covers(range)) {
+                return Err(LookupError::Matched);
+            }
+            Ok(())
         })
-        .await?;
-    Ok(coverage)
+        .await;
+    match result {
+        Ok(()) | Err(LookupError::Matched) => Ok(coverage),
+        Err(LookupError::InvalidRecord(error)) => Err(error),
+        Err(LookupError::Storage(error)) => Err(ServerError::from(error)),
+    }
 }
 
 #[derive(Default)]
@@ -88,11 +106,14 @@ async fn repository_covers_xorb_range<Store>(
 ) -> Result<bool, ServerError>
 where
     Store: RecordTraversal + Sync,
+    Store::Error: Send,
     ServerError: From<Store::Error>,
 {
-    Ok(repository_xorb_coverage(store, hash, scope)
-        .await?
-        .covers(requested))
+    Ok(
+        repository_xorb_coverage(store, hash, scope, Some(requested))
+            .await?
+            .covers(requested),
+    )
 }
 
 #[cfg(test)]

@@ -73,6 +73,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Stop boolean Xorb access checks after the first verified repository record,
   avoiding unnecessary candidate traversal for shared content.
+- Stop Xorb range access checks once published file terms prove every requested
+  byte, retaining gap, footer and repository-isolation checks.
 - Overlap native Xet member writes on S3 within a bounded memory budget,
   retaining full validation, conditional writes and publication ordering.
 - Avoid scratch files when GC verifies S3 containers up to 2 MiB, using a fixed

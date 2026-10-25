@@ -513,8 +513,10 @@ impl super::PostgresBackend {
         &self,
         hash: &str,
         scope: &RepositoryScope,
+        requested: Option<ByteRange>,
     ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
-        crate::record_store::repository_xorb_coverage(&self.record_store, hash, scope).await
+        crate::record_store::repository_xorb_coverage(&self.record_store, hash, scope, requested)
+            .await
     }
 
     pub(crate) async fn repository_references_xorb(

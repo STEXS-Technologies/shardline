@@ -442,6 +442,22 @@ async fn shared_xorb_transfer_does_not_expose_another_repositorys_terms()
         .await?;
     assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     let url = format!("{base}/transfer/xorb/default/{hash}");
+    let outsider = bearer_token(
+        "user",
+        TokenScope::Read,
+        RepositoryProvider::GitHub,
+        "outsider",
+        "repo",
+        Some("main"),
+    )?;
+    // Range parsing must not disclose anything before repository authorization.
+    for malformed in [None, Some("not-a-range"), Some("bytes=999999-1000000")] {
+        let mut request = client.get(&url).bearer_auth(&outsider);
+        if let Some(value) = malformed {
+            request = request.header(RANGE, value);
+        }
+        assert_eq!(request.send().await?.status(), StatusCode::NOT_FOUND);
+    }
     for (read, own, other) in [
         (&left_read, &ranges[0], &ranges[1]),
         (&right_read, &ranges[1], &ranges[0]),

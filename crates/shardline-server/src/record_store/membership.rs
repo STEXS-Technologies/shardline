@@ -9,7 +9,7 @@ mod tests;
 
 // Traversal's visitor-error channel provides early termination. Keep a verified
 // match distinct from both storage failures and invalid authoritative metadata.
-enum LookupError<StorageError> {
+pub(super) enum LookupError<StorageError> {
     Matched,
     InvalidRecord(ServerError),
     Storage(StorageError),

@@ -234,10 +234,13 @@ pub(super) async fn read_xorb_transfer(
             repository_namespace
         };
     let total_length = state.backend.xorb_length(&hash).await?;
+    // Parse now to bound a successful proof, but preserve the authorization
+    // error precedence: unauthorized callers must not learn range validity.
+    let requested = parse_required_xorb_transfer_range(&headers, total_length);
     let coverage = if let Some(namespace) = repository_namespace.as_ref() {
         let allowed = state
             .backend
-            .repository_xorb_coverage(&hash, namespace)
+            .repository_xorb_coverage(&hash, namespace, requested.as_ref().ok().copied())
             .await?;
         if allowed.is_empty() {
             return Err(ServerError::NotFound);
@@ -246,7 +249,7 @@ pub(super) async fn read_xorb_transfer(
     } else {
         None
     };
-    let range = parse_required_xorb_transfer_range(&headers, total_length)?;
+    let range = requested?;
     if let Some(grant) = read_grant
         && (range.start() != grant.range_start || range.end_inclusive() != grant.range_end)
     {
