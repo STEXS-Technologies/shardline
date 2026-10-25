@@ -102,5 +102,51 @@ async fn complete_range_proof_releases_postgres_connection_and_preserves_incompl
             .await
             .is_err()
     );
+    // A successful bounded lookup must not cache authorization across metadata
+    // mutations. Rollback keeps the original authority; committed replacement
+    // removes it even if a stale discovery hint is subsequently reintroduced.
+    let replacement = FileRecord {
+        repository_scope: Some(outsider.clone()),
+        file_id: "aa".into(),
+        ..record.clone()
+    };
+    let replacement_json = serde_json::to_value(&replacement).unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("UPDATE shardline_file_records SET record=$1 WHERE file_id='aa'")
+        .bind(&replacement_json)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(
+        repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 11).unwrap())
+            .await
+            .unwrap()
+    );
+    // Remove the deliberately malformed second candidate so denial below
+    // specifically exercises revoked authority rather than a parsing failure.
+    sqlx::query("DELETE FROM shardline_file_records WHERE file_id='bb'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE shardline_file_records SET record=$1 WHERE file_id='aa'")
+        .bind(&replacement_json)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO shardline_record_membership(record_key,scope_key,member_hash)
+         SELECT record_key,scope_key,$1 FROM shardline_file_records WHERE file_id='aa'
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 11).unwrap())
+            .await
+            .unwrap()
+    );
     fixture.finish().await;
 }
