@@ -7,9 +7,21 @@ use shardline_index::{
 use shardline_protocol::{ByteRange, RepositoryProvider, RepositoryScope};
 use std::time::{Duration, Instant};
 
+mod late;
+
 #[tokio::test]
 #[ignore = "large synthetic PostgreSQL diagnostic; requires an owner-migrated disposable database"]
 async fn shared_hash_range_authorization_scale() {
+    verify_scale(false).await;
+}
+
+#[tokio::test]
+#[ignore = "large synthetic PostgreSQL late/multi-record/negative authorization diagnostic"]
+async fn shared_hash_late_and_negative_authorization_scale() {
+    verify_scale(true).await;
+}
+
+async fn verify_scale(include_late: bool) {
     let fixture = crate::test_support::postgres_fixture::PostgresFixture::new()
         .await
         .expect("range scale diagnostic requires DATABASE_URL");
@@ -59,8 +71,8 @@ async fn shared_hash_range_authorization_scale() {
              WHERE source.record_key=$1",
         )
         .bind(template.record_key())
-        .bind(inserted - 1)
-        .bind(count - 2)
+        .bind(inserted.checked_sub(1).unwrap())
+        .bind(count.checked_sub(2).unwrap())
         .execute(&pool)
         .await
         .unwrap();
@@ -90,7 +102,7 @@ async fn shared_hash_range_authorization_scale() {
                 .unwrap()
                 .unwrap()
             );
-            let proof_millis = started.elapsed().as_secs_f64() * 1_000.0;
+            let proof_millis = milliseconds(started.elapsed());
             // Completion includes reusing the same one-connection pool: a
             // dropped SQL stream may still require draining backend results.
             tokio::time::timeout(
@@ -102,9 +114,33 @@ async fn shared_hash_range_authorization_scale() {
             .unwrap();
             eprintln!(
                 "range_scale records={count} sample={sample} proof_ms={proof_millis:.3} reused_pool_ms={:.3}",
-                started.elapsed().as_secs_f64() * 1_000.0,
+                milliseconds(started.elapsed()),
             );
+        }
+        if include_late {
+            let last_key = template.record_key().replace(
+                &record.file_id,
+                &format!("scale-{:07}", count.checked_sub(2).unwrap()),
+            );
+            late::verify(
+                &store,
+                &pool,
+                &scope,
+                &hash,
+                &last_key,
+                count,
+                count == maximum,
+            )
+            .await;
         }
     }
     fixture.finish().await;
+}
+
+#[allow(
+    clippy::float_arithmetic,
+    reason = "Diagnostic duration formatting in milliseconds"
+)]
+fn milliseconds(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
 }

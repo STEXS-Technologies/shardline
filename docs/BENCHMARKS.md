@@ -902,6 +902,24 @@ The diagnostic is explicitly ignored in ordinary unit runs. Set
 `SHARDLINE_RANGE_SCALE_MAX_RECORDS=10000` for its smaller two-size run; supported
 ceilings are 2, 10,000, 100,000 and 1,000,000. It creates and drops its own schema.
 
+The first-match diagnostic does not establish the cost of authorizing a range
+whose reference occurs later, combining several records, or denying access.
+Run the separate diagnostic against the same disposable setup to cover those
+cases, including wrong scopes, missing hashes and committed reference deletion:
+
+```bash
+cargo test --locked --release -p shardline-server --lib \
+  record_store::xorb_range::scale::shared_hash_late_and_negative_authorization_scale \
+  -- --ignored --exact --nocapture
+```
+
+It verifies each result and subsequent reuse of the same one-connection pool.
+Each proof has a 120-second deadline. The fixture deliberately gives many valid
+records the same container hash; this is a fanout diagnostic, not an HTTP load
+test or a measurement of cold storage. Compare equivalent build profiles and
+record late, combined and denied proofs separately from early matches. A fast
+early match must not be presented as bounded lookup cost for all ranges.
+
 #### PostgreSQL publication
 
 Separate targeted comparisons measured unchanged-record PostgreSQL WAL at
