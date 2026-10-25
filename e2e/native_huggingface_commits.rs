@@ -83,6 +83,28 @@ for revision, subtree in [(created.oid, ""), (deleted.oid, ""), (moved.oid, ""),
     paths = [entry["path"] for entry in actual]
     assert len(paths) == len(set(paths)), paths
     assert set(paths) == expected, (revision, subtree, paths, expected)
+# Pause the actual SDK iterator after its first page, then advance the branch.
+# Next-page links must retain the first page's immutable snapshot in both modes.
+expected = {entry.path for entry in api.list_repo_tree(repo, revision=moved.oid, recursive=True)}
+for expanded in [False, True]:
+    branch = "pagination-expanded" if expanded else "pagination-plain"
+    api.create_branch(repo, branch=branch, revision=moved.oid)
+    url = api.endpoint + "/api/models/" + repo + "/tree/" + branch
+    pages = iter(paginate(url, params={"recursive": "true", "limit": 1,
+        "expand": str(expanded).lower()}, headers=headers, timeout=30))
+    first = next(pages)
+    advanced = api.create_commit(repo, revision=branch, parent_commit=moved.oid,
+        commit_message="advance branch between tree pages", operations=[
+            CommitOperationDelete(path_in_repo="delete-me-neighbor.txt", is_folder=False),
+            CommitOperationAdd(path_in_repo="concurrent-new.txt", path_or_fileobj=b"new revision"),
+        ])
+    assert advanced.oid != moved.oid
+    paths = [first["path"]] + [entry["path"] for entry in pages]
+    assert len(paths) == len(set(paths)), paths
+    assert set(paths) == expected, (expanded, paths, expected)
+    latest = set(api.list_repo_files(repo, revision=branch))
+    assert "concurrent-new.txt" in latest and "delete-me-neighbor.txt" not in latest
+    api.delete_branch(repo, branch=branch)
 # Omitted sizes are derived only for an existing object in the caller's scope.
 # Invalid explicit fields must not be treated as omitted or publish a revision.
 for pointer in [

@@ -94,6 +94,11 @@ deletion. Folder deletion removes descendants only: deleting `weights/` keeps
 `weights-backup.bin`. Operations run in request order, so a commit can delete a
 folder and then add replacement files. Earlier revisions retain their own trees.
 
+Paginated tree listings keep the revision selected by the first page. Follow the
+returned next-page links to finish that listing, even if the branch changes in
+the meantime. Start a new listing to see newer commits. This applies to ordinary
+and expanded tree responses, including nested directories.
+
 The final tree must fit Git's supported path bounds: at most 1,024 UTF-8 bytes
 and 128 components per file path. A deeper final path returns HTTP 400 before
 the branch or revision history changes. Immutable content already staged by a
