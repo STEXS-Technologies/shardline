@@ -292,7 +292,7 @@ wait "$child"
             finally:
                 # An unsuccessful fixture must still remove all its containers.
                 try:
-                    removed = subprocess.run(["docker", "rm", "-f", name], stdout=log, stderr=log, timeout=30)
+                    removed = subprocess.run(["docker", "rm", "-f", "-v", name], stdout=log, stderr=log, timeout=30)
                     cleanup_failed |= removed.returncode != 0
                 except Exception:
                     cleanup_failed = True
