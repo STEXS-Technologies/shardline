@@ -95,6 +95,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Supply the development Compose Hub webhook encryption key so a fresh stack
+  passes configuration validation without disabling production secret protection.
 - Stop development Compose initialization with an actionable error after 60
   unsuccessful MinIO connection attempts instead of retrying forever.
 - Avoid a second temporary payload copy when normalizing privately owned native

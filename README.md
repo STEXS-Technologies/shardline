@@ -54,6 +54,10 @@ MinIO object storage. It is intended for local evaluation, not production.
 Requirements are Docker Engine with the Compose plugin and at least 4 GiB of
 available memory.
 
+Compose uses host networking. On Docker Desktop 4.34 or later, enable
+[host networking](https://docs.docker.com/engine/network/drivers/host/#docker-desktop)
+first. Host ports 5432, 9001, 18080 and 19000 must be available.
+
 ```bash
 git clone https://github.com/STEXS-Technologies/shardline.git
 cd shardline
