@@ -85,17 +85,31 @@ async fn forward(State(state): State<Arc<Proxy>>, request: Request) -> Response 
 #[ignore = "requires Docker PostgreSQL and MinIO"]
 async fn disconnect_during_remote_shard_verification_prevents_publication_and_allows_retry()
 -> Result<(), Error> {
-    stalled_verification(true).await
+    stalled_verification(Outcome::Disconnect).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker PostgreSQL and MinIO"]
 async fn stalled_remote_shard_verification_keeps_progress_live_and_publishes_after_release()
 -> Result<(), Error> {
-    stalled_verification(false).await
+    stalled_verification(Outcome::Publish).await
 }
 
-async fn stalled_verification(disconnect: bool) -> Result<(), Error> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker PostgreSQL and MinIO"]
+async fn lost_remote_shard_owner_reports_retryable_failure_without_publication() -> Result<(), Error>
+{
+    stalled_verification(Outcome::LostOwner).await
+}
+
+#[derive(Clone, Copy)]
+enum Outcome {
+    Publish,
+    Disconnect,
+    LostOwner,
+}
+
+async fn stalled_verification(outcome: Outcome) -> Result<(), Error> {
     let stack = tokio::task::spawn_blocking(|| {
         shardline_test_support::DockerLocalStack::builder()
             .with_postgres()
@@ -281,7 +295,7 @@ async fn stalled_verification(disconnect: bool) -> Result<(), Error> {
         );
     }
     drop(saturated);
-    if !disconnect {
+    if matches!(outcome, Outcome::Publish) {
         proxy.release.notify_one();
         tokio::time::timeout(Duration::from_secs(10), socket.read_to_end(&mut response))
             .await
@@ -304,10 +318,39 @@ async fn stalled_verification(disconnect: bool) -> Result<(), Error> {
         owner.close().await;
         return Ok(());
     }
-    drop(socket);
-    // Let HTTP transport observe the closed peer while source I/O is still held.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    proxy.release.notify_one();
+    if matches!(outcome, Outcome::LostOwner) {
+        let sessions: Vec<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted
+             AND mode='ShareLock' AND objsubid=1
+             AND classid::bigint=(($1::bigint >> 32) & 4294967295)
+             AND objid::bigint=($1::bigint & 4294967295)",
+        )
+        .bind(crate::maintenance_barrier::GC_WRITE_BARRIER_KEY)
+        .fetch_all(&owner)
+        .await?;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "only the stalled publication owns this barrier"
+        );
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(sessions[0])
+            .fetch_one(&owner)
+            .await?;
+        assert!(terminated, "terminate the actual publication session");
+        proxy.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), socket.read_to_end(&mut response)).await??;
+        let response = String::from_utf8_lossy(&response);
+        assert_eq!(response.matches("\"type\":\"error\"").count(), 1);
+        assert!(response.contains("\"retryable\":true"));
+        assert!(!response.contains("\"type\":\"result\""));
+        drop(socket);
+    } else {
+        drop(socket);
+        // Let HTTP transport observe the closed peer while source I/O is still held.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        proxy.release.notify_one();
+    }
     let exclusive = tokio::time::timeout(
         Duration::from_secs(10),
         crate::maintenance_barrier::postgres_exclusive_work_pool(&database),

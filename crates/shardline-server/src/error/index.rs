@@ -49,11 +49,13 @@ pub enum IndexError {
 impl IndexError {
     pub(super) fn is_retryable_transaction(&self) -> bool {
         if let Self::PostgresMetadata(PostgresMetadataStoreError::Sqlx(error)) = self {
-            return error
-                .as_database_error()
-                .and_then(|error| error.code())
-                .as_deref()
-                == Some("40001");
+            return matches!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("40001" | "57P01")
+            );
         }
         false
     }

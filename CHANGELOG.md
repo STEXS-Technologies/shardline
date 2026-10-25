@@ -112,6 +112,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Return a retryable error when PostgreSQL terminates an active publication
+  session, allowing native Xet clients to retry the verified upload.
 - Preserve retry guidance for transient failures in Xet shard-upload progress
   streams while keeping malformed uploads terminal.
 - Reject native Xorb HEAD requests outside the caller's published repository

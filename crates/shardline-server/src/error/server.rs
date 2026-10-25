@@ -532,7 +532,7 @@ impl IntoResponse for ServerError {
 
 fn index_error_message(error: &IndexError) -> &'static str {
     if error.is_retryable_transaction() {
-        return "database transaction snapshot changed; retry the request in a new transaction";
+        return "database transaction interrupted; retry the request in a new transaction";
     }
     if let IndexError::PostgresMetadata(error) = error
         && error.is_remote_delete_pending()
