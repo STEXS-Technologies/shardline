@@ -70,10 +70,22 @@ impl Peer {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker and SHARDLINE_NATIVE_PEER_PYTHON with hf_xet 1.5.2"]
 async fn stock_xet_large_mixed_clients_recover_with_postgres_and_minio() -> Result {
+    qualify_mixed_clients("1.5.2").await
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker and SHARDLINE_NATIVE_PEER_PYTHON with hf_xet 1.6.0"]
+async fn stock_xet_16_mixed_clients_recover_with_postgres_and_minio() -> Result {
+    qualify_mixed_clients("1.6.0").await
+}
+
+#[cfg(feature = "docker")]
+async fn qualify_mixed_clients(peer_version: &str) -> Result {
     let peer = std::env::var_os("SHARDLINE_NATIVE_PEER_PYTHON")
         .ok_or("mixed-client recovery requires an explicit peer Python environment")?;
     let peer = std::path::PathBuf::from(peer);
-    for (python, expected) in [(Path::new("python"), "1.7.0"), (peer.as_path(), "1.5.2")] {
+    for (python, expected) in [(Path::new("python"), "1.7.0"), (peer.as_path(), peer_version)] {
         let output = shardline_test_support::native_client_output(
             Command::new(python).args([
                 "-c",

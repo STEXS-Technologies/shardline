@@ -283,6 +283,10 @@ jobs:
             cargo nextest run --locked -p shardline-server --features docker \
             --test native_upload_process --run-ignored all \
             -E 'test(stock_xet_large_mixed_clients_recover_with_postgres_and_minio)'
+          SHARDLINE_NATIVE_PEER_PYTHON="$RUNNER_TEMP/native-xet-qualification/bin/python" \
+            cargo nextest run --locked -p shardline-server --features docker \
+            --test native_upload_process --run-ignored all \
+            -E 'test(stock_xet_16_mixed_clients_recover_with_postgres_and_minio)'
 
       - name: Qualify Hugging Face Hub 2.2 client compatibility
         run: |

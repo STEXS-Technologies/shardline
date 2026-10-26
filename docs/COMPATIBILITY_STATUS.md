@@ -169,6 +169,14 @@ tests run a server subprocess built from the current library; they do not
 replace released-binary upgrade tests or qualify every split-role and
 competing-replica failure scenario.
 
+The mixed-client recovery gate separately pairs `hf_xet` 1.7.0 with 1.5.2
+and 1.6.0. After each of the same six 512 MiB upload interruptions, both
+clients retry through independent replacement replicas sharing PostgreSQL and
+MinIO. The gate requires matching reconstructed size and SHA-256, and a visible
+intent for the exact interrupted immutable object. It permits different legal
+container boundaries between client versions. This is a shared-host recovery
+test, not a throughput comparison or a mixed Shardline-version rollout test.
+
 Cold 1 GiB uploads with `hf_xet` 1.5.2, 1.6.0 and 1.7.0 also exercise
 footerless normalization beyond the former 16 MiB limit. Each run sent
 1,073,875,784 Xorb bytes and retained 1,074,681,584 bytes across 17 containers.
