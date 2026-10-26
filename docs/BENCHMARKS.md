@@ -1848,6 +1848,21 @@ verification reads already performed before the first client buffer. This is
 one shared-host pressure qualification, not sustained-load or multi-host
 performance evidence, and not a 32-reader/1 GiB-file qualification.
 
+### Rejected serialized-digest fusion experiment
+
+A prototype computed the normalized upload's serialized BLAKE3 digest during
+existing full validation instead of rereading the complete staging file.
+Four reversed-order 512 MiB PostgreSQL/MinIO campaigns passed exact downloads
+and trace reconciliation. Application reads fell from 4.836 GB to 4.299 GB,
+and read syscalls from 653,205 to approximately 587,665. Backend requests
+remained 8,538; physical read accounting was zero in both warm-cache cases.
+
+The prototype used 4.299/4.314 server CPU seconds versus 4.238/4.176 for the
+control. Upload times were 6.150/5.452 seconds versus 5.340/5.491. These two
+pairs do not establish a speedup or hardware-wear saving. The prototype was
+removed rather than retaining extra machinery for an unproven overall benefit.
+The existing complete validation and serialized identity checks remain.
+
 ### Adjacent native download sources
 
 Native plain-HTTP downloads now retain one response-local Xorb source across
