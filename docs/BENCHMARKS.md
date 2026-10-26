@@ -1963,6 +1963,36 @@ An earlier unbuffered implementation removed the same read pass but increased
 CPU and elapsed upload time. Batching small hash updates was necessary to avoid
 that regression; fewer reads alone were not sufficient evidence of improvement.
 
+#### Larger direct-CAS comparison
+
+Runtime `d59c741d` and the same pinned upstream reference were also tested with
+a 1,025 MiB incompressible file and a 256 KiB tail edit. Two separate
+upstream/Shardline/Shardline/upstream sequences reused that corpus, with fresh
+client processes and caches. All sixteen downloads passed independent SHA-256
+verification. The one-CPU local-disk setup still bypassed the Hub control plane.
+
+| Direct-CAS metric | Shardline `d59c741d` | Upstream local reference |
+| --- | ---: | ---: |
+| Initial upload seconds | 13.37–19.18 | 1.89–13.51 |
+| Tail-edit upload seconds | 1.40–1.57 | 0.53–0.87 |
+| Initial full download seconds, including SHA-256 | 1.26–1.36 | 1.73–3.83 |
+| Edited full download seconds, including SHA-256 | 1.25–1.44 | 1.67–2.02 |
+| Initial upload server CPU seconds | 11.20–11.64 | 1.66–5.77 |
+| Initial upload server peak RSS, KiB | 65,208–68,360 | 279,232–352,664 |
+| Initial retained file lengths, decimal GB | approximately 2.172 | approximately 1.077 |
+
+The upstream initial-upload observations were 13.51, 1.89, 2.01 and 1.98
+seconds; the first observation is retained rather than excluded. Shardline
+observations were 19.18, 18.49, 13.37 and 14.34 seconds. The variability prevents
+a robust single speed ratio. Shardline's lower download times in this fixture
+do not establish general superiority, production throughput or tail latency.
+Server RSS excludes the stock client's memory, and the retained totals include
+metadata before retention-expired GC. Native decoded copies still account for
+substantial additional storage. These controls extend local direct-CAS byte
+correctness beyond 1 GiB; they do not qualify Hub-only, remote-storage,
+multi-host or all supported-client large-file deployments. The upstream
+durability and production-comparability qualifications above still apply.
+
 A separate four-run PostgreSQL/MinIO comparison used baseline/candidate/
 candidate/baseline order, stock Hub 2.2.0/hf_xet 1.7.0, one combined-role
 server limited to one CPU/1 GiB, and 512 MiB incompressible files with a
