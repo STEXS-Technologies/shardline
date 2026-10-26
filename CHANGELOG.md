@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Reuse serialized bytes read during staged native Xet validation for the
+  storage digest, avoiding a separate full-file scan while retaining native
+  content validation, cancellation and final immutable-write verification.
 - Reuse related native Xet containers in bounded, repository-scoped dedup replies,
   reducing retransmission and backend work for partially overlapping versions
   while preserving member authorization and remote-delete coordination.

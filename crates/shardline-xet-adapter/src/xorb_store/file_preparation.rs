@@ -9,6 +9,8 @@ use shardline_storage::ObjectIntegrity;
 
 use crate::{ValidatedXorb, XetAdapterError, validate_serialized_xorb};
 
+mod digest_reader;
+
 pub(super) struct PreparedFile {
     pub normalized: Option<tempfile::NamedTempFile>,
     pub file: File,
@@ -57,29 +59,21 @@ pub(super) fn prepare_source(
     let path = normalized
         .as_ref()
         .map_or(path, |file| file.path().to_owned());
-    let mut file = File::open(&path)?;
-    let length = file.metadata()?.len();
+    let source_file = File::open(&path)?;
+    let length = source_file.metadata()?.len();
+    let mut reader = digest_reader::DigestReader::new(source_file)?;
     let validated = validate_serialized_xorb(
         &mut CheckpointReader {
-            reader: &mut file,
+            reader: &mut reader,
             checkpoint,
         },
         expected,
     )?;
-    let mut hash_source = File::open(&path)?;
-    let mut hasher = blake3::Hasher::new();
-    std::io::copy(
-        &mut CheckpointReader {
-            reader: &mut hash_source,
-            checkpoint,
-        },
-        &mut hasher,
-    )?;
-    checkpoint()?;
-    let integrity = ObjectIntegrity::new(
-        ShardlineHash::from_bytes(*hasher.finalize().as_bytes()),
-        length,
-    );
+    let (file, digest, observed_length) = reader.finish(checkpoint)?;
+    if observed_length != length {
+        return Err(XetAdapterError::InvalidSerializedXorb);
+    }
+    let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), length);
     Ok(PreparedFile {
         normalized,
         file,

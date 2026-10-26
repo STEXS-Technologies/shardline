@@ -1928,6 +1928,41 @@ remain open; the latest download timings do not support a general advantage.
 The reference's weaker local synchronization contract, shared-host limitations
 and distinction from Hugging Face production still apply.
 
+#### Reusing serialized validation reads
+
+A subsequent control compared runtime `84cc1a97` with a candidate that derives
+the serialized storage digest from bytes already read by native Xorb validation.
+It hashes only a contiguous prefix, then reads any remaining suffix in order;
+footer-first probes, backward seeks and overlapping reads cannot reorder or
+duplicate digest bytes. A bounded 64 KiB buffer batches small validation reads
+for BLAKE3. Native content/member validation, final immutable-write verification,
+cancellation and durable publication remain in place.
+
+The same 512 MiB corpus, stock hf_xet 1.7.0, one logical server CPU and local
+disk were used in baseline/candidate/candidate/baseline order. All eight
+downloads passed independent SHA-256 verification.
+
+| Initial-upload metric | Runtime `84cc1a97` | Buffered read-reuse candidate |
+| --- | ---: | ---: |
+| Process-accounted bytes read (`rchar`) | 4,857,134,586–4,857,155,065 | 4,320,176,962–4,320,193,345 |
+| Read system calls (`syscr`) | 658,515–658,519 | 592,968–592,971 |
+| Server CPU seconds | 5.50–5.87 | 5.52–5.60 |
+| Completed upload seconds | 7.05–7.35 | 6.70–6.78 |
+| Upload server peak RSS, KiB | 49,736–50,680 | 48,916–51,320 |
+
+This removes approximately 537 MB of process-accounted reads per initial
+upload, about 11% in this fixture. Retained file lengths remained identical:
+1,087,903,184 bytes initially and 1,088,532,774 after the edit. Measured CPU
+and RSS ranges overlap. Two shared-host runs do not establish a general
+throughput improvement or tail-latency bound. Warm-cache `rchar` is not physical
+disk traffic; process-accounted writes did not demonstrate a reduction. This
+control therefore does not establish lower S3 request charges, storage costs
+or NVMe wear, and does not close the upstream upload/storage parity gaps.
+
+An earlier unbuffered implementation removed the same read pass but increased
+CPU and elapsed upload time. Batching small hash updates was necessary to avoid
+that regression; fewer reads alone were not sufficient evidence of improvement.
+
 A separate four-run PostgreSQL/MinIO comparison used baseline/candidate/
 candidate/baseline order, stock Hub 2.2.0/hf_xet 1.7.0, one combined-role
 server limited to one CPU/1 GiB, and 512 MiB incompressible files with a
