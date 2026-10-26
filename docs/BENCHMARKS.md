@@ -299,6 +299,27 @@ not establish retention-expired storage, physical NVMe writes or hardware life.
 
 ### Operational-efficiency measurements
 
+An additional October 26 comparison used actual v1.12.1 and candidate
+`b569f583`, harness `605d9fcc`, eight 36-MiB objects, eight clients and three
+repetitions of unique/repeated data. Each fresh PostgreSQL/MinIO deployment
+had one API replica limited to one CPU/1 GiB. All 12 lanes passed, including
+288 exact post-GC reads, 60 GC commands and trace/API reconciliation.
+
+| Median observation | Unique: v1.12.1 → candidate | Repeated: v1.12.1 → candidate |
+| --- | ---: | ---: |
+| Ingestion backend requests | 56 → 56 | 44 → 44 |
+| Ingestion top-level SQL calls | 160 → 168 | 160 → 168 |
+| Ingestion top-level statement WAL bytes | 333,073 → 365,876 | 334,340 → 367,144 |
+| Settling-GC requests | 227 → 127 | 107 → 79 |
+| Settling-GC response bytes | 302,597,920 → 604,532,175 | 75,656,122 → 151,141,027 |
+
+This preserves the earlier conclusion: GC uses fewer requests but transfers
+more backend bytes, and publication adds database work. Concurrent unrelated
+host activity prevents attributing timing deltas to the code. The earlier
+intermittent GC exit-2 failure did not recur here; its root cause remains
+unproven, and passing repetitions do not establish a fix. These zero-retention
+fixtures do not replace the separate real-default-retention drill.
+
 The measured savings differ by backend and workload. The detailed fixtures
 below explain the boundaries; none requires weaker durability settings.
 
