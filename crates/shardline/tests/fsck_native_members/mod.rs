@@ -112,6 +112,9 @@ pub(super) fn qualify(
         }
     }
     assert_status(&scan_configured(root, remote)?, 0);
+    if remote.is_none() {
+        qualify_recorded_operational_failure(root, &published.identity)?;
+    }
     let key = shardline_storage::ObjectKey::parse(&format!(
         "xorbs/default/{}/{}.xorb",
         &published.identity[..2],
@@ -136,5 +139,55 @@ pub(super) fn qualify(
         )?;
         assert_status(&scan_configured(root, remote)?, status);
     }
+    Ok(())
+}
+
+fn qualify_recorded_operational_failure(root: &Path, source: &str) -> Result<()> {
+    let database = rusqlite::Connection::open(root.join("metadata.sqlite3"))?;
+    let descriptor: String = database.query_row(
+        "SELECT descriptor FROM shardline_xet_xorbs WHERE xorb_hash=?1",
+        [source],
+        |row| row.get(0),
+    )?;
+    database.execute(
+        "UPDATE shardline_xet_xorbs SET descriptor='{}' WHERE xorb_hash=?1",
+        [source],
+    )?;
+    // The source bytes remain intact. Malformed derived metadata fails during
+    // the scan, after tracking admission, rather than preventing store startup.
+    assert_status(&scan(root)?, 2);
+    let mut statement = database.prepare(
+        "SELECT payload FROM shardline_task_artifacts_v1
+         WHERE artifact_key GLOB '*/artifacts/*'
+           AND CAST(payload AS TEXT) LIKE 'maintenance.success: false%'",
+    )?;
+    let reports = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+    let mut recorded_failure = false;
+    for report in reports {
+        let report = report?;
+        let newline = report
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or("outcome header")?;
+        let body_start = newline.checked_add(1).ok_or("outcome offset overflow")?;
+        let body: serde_json::Value =
+            serde_json::from_slice(report.get(body_start..).ok_or("outcome body")?)?;
+        if body.get("exit_code").and_then(serde_json::Value::as_u64) == Some(2) {
+            assert_eq!(
+                body.get("schema").and_then(serde_json::Value::as_u64),
+                Some(1)
+            );
+            recorded_failure = true;
+        }
+    }
+    assert!(
+        recorded_failure,
+        "admitted scan failure must retain its actual exit status"
+    );
+    database.execute(
+        "UPDATE shardline_xet_xorbs SET descriptor=?2 WHERE xorb_hash=?1",
+        rusqlite::params![source, descriptor],
+    )?;
+    assert_status(&scan(root)?, 0);
     Ok(())
 }
