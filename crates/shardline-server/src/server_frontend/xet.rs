@@ -4,6 +4,7 @@ use shardline_index::{FileChunkRecord, parse_xet_hash_hex};
 use shardline_storage::ObjectKey;
 use tokio::sync::mpsc;
 
+mod source;
 mod terms;
 
 #[cfg(test)]
@@ -147,8 +148,9 @@ pub(crate) fn referenced_file_record_byte_stream(
     let worker = ReferencedFileWorker(tokio::spawn(async move {
         let blocking_sender = sender.clone();
         let result = crate::admission::blocking_work(&pool, move || {
+            let mut source = source::Source::default();
             for term in record.chunks {
-                stream_referenced_term(&object_store, &term, &blocking_sender)?;
+                stream_referenced_term(&object_store, &term, &blocking_sender, &mut source)?;
             }
             Ok(())
         })
@@ -178,11 +180,11 @@ fn stream_referenced_term(
     object_store: &ServerObjectStore,
     term: &FileChunkRecord,
     sender: &mpsc::Sender<Result<Bytes, ServerError>>,
+    source: &mut source::Source,
 ) -> Result<(), ServerError> {
     if term.range_end <= term.range_start {
         return Err(InvalidSerializedShardError::NativeXetTermEmptyOrInvertedChunkRange.into());
     }
-    let xorb_key = xorb_object_key(&term.hash)?;
     let checkpoint = || {
         if sender.is_closed() {
             Err(std::io::Error::new(
@@ -193,17 +195,9 @@ fn stream_referenced_term(
             Ok(())
         }
     };
-    checkpoint()?;
-    if let Some(path) = object_store.local_path_for_key(&xorb_key) {
-        crate::object_store::run_before_local_object_read_hook(&path);
-    }
-    let Some((mut materialized, _length)) = object_store
-        .materialize_bounded_object_if_present_with_checkpoint(&xorb_key, 0, &checkpoint)?
-    else {
-        return Err(ServerError::MissingReferencedXorb);
-    };
+    let materialized = source.read(object_store, &term.hash, &checkpoint)?;
     let mut reader = crate::download_stream::checkpoint_reader::CheckpointReader {
-        reader: &mut materialized,
+        reader: materialized,
         checkpoint: &checkpoint,
     };
     let expected_hash = parse_xet_hash_hex(&term.hash)?;
@@ -377,10 +371,39 @@ mod tests {
     fn referenced_term_rejects_wrong_length_before_sending_bytes() {
         let (_root, store, term) = selected_term_fixture(11);
         let (sender, mut receiver) = mpsc::channel(2);
-        assert!(stream_referenced_term(&store, &term, &sender).is_err());
+        assert!(
+            stream_referenced_term(&store, &term, &sender, &mut source::Source::default()).is_err()
+        );
         assert!(
             receiver.try_recv().is_err(),
             "invalid term must emit no successful frame"
+        );
+    }
+
+    #[test]
+    fn reused_native_source_is_fully_revalidated_before_the_next_term() {
+        use std::io::{Seek, Write};
+
+        let (_root, store, term) = selected_term_fixture(12);
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut source = source::Source::default();
+        stream_referenced_term(&store, &term, &sender, &mut source).unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap().unwrap().as_ref(),
+            b"second chunk"
+        );
+        let path = store
+            .local_path_for_key(&xorb_object_key(&term.hash).unwrap())
+            .unwrap();
+        // Modify the retained inode, not an atomic replacement at its name.
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.rewind().unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.sync_all().unwrap();
+        assert!(stream_referenced_term(&store, &term, &sender, &mut source).is_err());
+        assert!(
+            receiver.try_recv().is_err(),
+            "corrupted reuse emits no member bytes"
         );
     }
 
@@ -391,7 +414,7 @@ mod tests {
         append_referenced_term_bytes(&store, &term, &mut output).unwrap();
         assert_eq!(output, b"second chunk");
         let (sender, mut receiver) = mpsc::channel(2);
-        stream_referenced_term(&store, &term, &sender).unwrap();
+        stream_referenced_term(&store, &term, &sender, &mut source::Source::default()).unwrap();
         assert_eq!(
             receiver.try_recv().unwrap().unwrap().as_ref(),
             b"second chunk"

@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Reuse one response-local Xorb source across adjacent native download terms,
+  avoiding repeated backend reads while fully validating every term and
+  retaining bounded scratch storage and cancellation.
 - Derive native file SHA-256 identities during the first full Xorb validation,
   avoiding repeated decoding and member hashing without retaining decoded
   containers or skipping source integrity checks.
@@ -125,6 +128,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Reject Hub commits to tags before consuming upload bodies, preserving the
+  branch-only write error contract when concurrent publication retries apply.
 - Avoid redundant conditional S3 writes for recently stored native Xet chunks
   using a larger bounded hint window, retaining remote content verification
   and conditional creation when hints are stale.
