@@ -5,10 +5,18 @@ pub(super) async fn wait_for_health(
     client: &reqwest::Client,
     base: &str,
 ) -> Result<(), &'static str> {
+    wait_for_endpoint(client, base, "healthz").await
+}
+
+pub(super) async fn wait_for_endpoint(
+    client: &reqwest::Client,
+    base: &str,
+    endpoint: &str,
+) -> Result<(), &'static str> {
     let probe = async {
         loop {
             if let Ok(response) = client
-                .get(format!("{base}/healthz"))
+                .get(format!("{base}/{endpoint}"))
                 .timeout(Duration::from_secs(1))
                 .send()
                 .await

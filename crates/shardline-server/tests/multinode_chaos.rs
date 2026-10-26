@@ -76,6 +76,9 @@ use axum::{
     serve as serve_http,
 };
 use reqwest::Client;
+
+mod multinode_probe_tests;
+mod readiness;
 use sha2::{Digest, Sha256};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{
@@ -394,57 +397,41 @@ async fn spawn_role(
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(format!("server at {base_url} did not become healthy").into())
+    readiness::wait_for_health(client, base_url)
+        .await
+        .map_err(Into::into)
 }
 
 async fn wait_for_ready(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..100 {
-        if let Ok(response) = client.get(format!("{base_url}/readyz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(format!("server at {base_url} did not become ready").into())
+    readiness::wait_for_endpoint(client, base_url, "readyz")
+        .await
+        .map_err(Into::into)
 }
 
 /// Asserts the stopped server can no longer be reached (raw connect probe to
 /// bypass reqwest connection pooling).
-async fn wait_for_server_down(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if client
-            .get(format!("{base_url}/healthz"))
-            .send()
-            .await
-            .is_err()
-        {
-            return Ok(());
+async fn wait_for_server_down(_client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
+    let address: SocketAddr = base_url
+        .strip_prefix("http://")
+        .ok_or("shutdown fixture requires a local HTTP socket address")?
+        .parse()?;
+    let probe = async {
+        loop {
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await;
+            if matches!(result, Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused)
+            {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
         }
-        let raw = tokio::net::TcpStream::connect(
-            base_url
-                .trim_start_matches("http://")
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("bad base url {base_url}: {error}"))?,
-        )
-        .await;
-        if raw.is_err() {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(format!("server at {base_url} did not go down after stop").into())
+    };
+    tokio::time::timeout(Duration::from_secs(10), probe)
+        .await
+        .map_err(Into::into)
 }
 
 /// Probes the authenticated admin status endpoint for the process' server
