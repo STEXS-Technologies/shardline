@@ -12,9 +12,30 @@ from performance_validation.measurements import (  # noqa: E402
     RequestTrace, inventory_summary, percentiles, request_summary, scale_efficiency,
 )
 from performance_validation.workload import payload  # noqa: E402
+from performance_validation.database import resource_delta  # noqa: E402
 
 
 class PerformanceValidationTest(unittest.TestCase):
+    def test_block_io_deltas_preserve_devices_and_include_newly_active_devices(self):
+        before = {"cpu_seconds": 4, "block_io_by_device": {
+            "259:0": {"rbytes": 100, "wbytes": 200}}}
+        after = {"cpu_seconds": 7, "peak_memory_bytes": 512, "block_io_by_device": {
+            "259:0": {"rbytes": 150, "wbytes": 240},
+            "253:0": {"rbytes": 50, "wbytes": 40}}}
+        result = resource_delta(before, after)
+        self.assertEqual(result["cpu_seconds"], 3)
+        self.assertEqual(result["peak_memory_bytes"], 512)
+        self.assertEqual(result["block_io_by_device"], {
+            "259:0": {"rbytes": 50, "wbytes": 40},
+            "253:0": {"rbytes": 50, "wbytes": 40}})
+        self.assertEqual(before["block_io_by_device"]["259:0"]["rbytes"], 100)
+
+    def test_reset_or_disappearing_device_invalidates_block_io_measurement(self):
+        before = {"cpu_seconds": 0, "block_io_by_device": {"259:0": {"wbytes": 200}}}
+        for devices in ({"259:0": {"wbytes": 100}}, {}, {"259:0": {}}):
+            with self.assertRaisesRegex(RuntimeError, "block I/O"):
+                resource_delta(before, {"cpu_seconds": 1, "block_io_by_device": devices})
+
     def test_inventory_counts_both_packed_and_fallback_bytes(self):
         result = inventory_summary([
             {"Key": "aa/" + "a" * 64, "Size": 100},

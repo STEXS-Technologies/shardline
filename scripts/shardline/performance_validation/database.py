@@ -65,8 +65,34 @@ def container_sample(pid):
                  if line.startswith("0::"))
     root = Path("/sys/fs/cgroup") / group.lstrip("/")
     cpu = dict(line.split() for line in (root / "cpu.stat").read_text().splitlines())
+    # Preserve device identities: summing stacked devices can double-count I/O.
+    io = {}
+    for line in (root / "io.stat").read_text().splitlines():
+        device, *fields = line.split()
+        io[device] = {key: int(value) for key, value in
+                      (field.split("=", 1) for field in fields)}
     return {"cpu_seconds": int(cpu["usage_usec"]) / 1_000_000,
-            "peak_memory_bytes": int((root / "memory.peak").read_text())}
+            "peak_memory_bytes": int((root / "memory.peak").read_text()),
+            "block_io_by_device": io}
+
+
+def resource_delta(before, after):
+    result = dict(after, cpu_seconds=after["cpu_seconds"] - before["cpu_seconds"])
+    if "block_io_by_device" in after:
+        previous = before["block_io_by_device"]
+        if not previous.keys() <= after["block_io_by_device"].keys():
+            raise RuntimeError("container block I/O device counters disappeared")
+        if any(not counters.keys() <= after["block_io_by_device"][device].keys()
+               for device, counters in previous.items()):
+            raise RuntimeError("container block I/O counters disappeared")
+        result["block_io_by_device"] = {
+            device: {key: value - previous.get(device, {}).get(key, 0)
+                     for key, value in counters.items()}
+            for device, counters in after["block_io_by_device"].items()}
+        if any(value < 0 for counters in result["block_io_by_device"].values()
+               for value in counters.values()):
+            raise RuntimeError("container block I/O counters reset")
+    return result
 
 
 class Sampler:
@@ -123,6 +149,6 @@ class Sampler:
         self.resources = {key: self.sample(key, pid) for key, pid in self.pids.items()}
         return {"postgres_peak": {key: max(row[key] for row in self.samples)
                                   for key in ("connections", "active", "lock_waiting", "blocked")},
-                "resources": {key: dict(value, cpu_seconds=value["cpu_seconds"] - self.start[key]["cpu_seconds"])
+                "resources": {key: resource_delta(self.start[key], value)
                               for key, value in self.resources.items()},
                 "samples": self.samples}

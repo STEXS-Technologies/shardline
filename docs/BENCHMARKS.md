@@ -1721,6 +1721,14 @@ separate client CPU/RSS from server/backend cgroup observations. Statement WAL
 is not device writes or NVMe wear. Inventories are immediate, with no claim of
 retention-expired GC savings, byte-hours, cloud prices or all-in cost per TB.
 
+Resource samples also report phase deltas from cgroup v2 `io.stat`, separately
+for each block device. Compare `rbytes`, `wbytes`, `rios` and `wios` on the same
+device across equivalent runs; do not sum stacked device entries. Missing or
+reset counters invalidate the measurement. These are kernel-accounted block
+operations during the observation window, so delayed writeback can cross phase
+boundaries. They exclude device-internal write amplification and do not measure
+NAND wear or predict NVMe lifetime.
+
 Add `--slow-readers 32` for an explicit plain-HTTP pressure check. It starts
 32 simultaneous readers with 32 KiB client buffers and a delay between reads,
 then 32 readers that abandon their responses after the first buffer. A complete
@@ -1745,6 +1753,38 @@ in this burst. Cancellation releases response resources, but cannot reclaim
 verification reads already performed before the first client buffer. This is
 one shared-host pressure qualification, not sustained-load or multi-host
 performance evidence, and not a 32-reader/1 GiB-file qualification.
+
+### Adjacent native download sources
+
+Native plain-HTTP downloads now retain one response-local Xorb source across
+adjacent terms. Every term still validates the complete source and rechecks
+selected members. Changing sources releases the old spool before fetching the
+next one. A real MinIO regression with source order `A,A,B,A` reduces GETs from
+four to three; it also checks eviction, fresh-response corruption and cancellation.
+A separate test corrupts a retained local inode between terms and requires
+rejection before the next member is sent.
+
+Two alternating before/after pairs compared `78fb1fe1` with `9d6f6092`, using
+stock Hub 2.2.0 / hf_xet 1.7.0, 512 MiB incompressible content, a 256 KiB tail
+edit, four CPU cores and a 1 GiB server limit. Each run verified unique and
+overlapping native downloads, four complete slow plain-HTTP downloads, four
+abandoned responses and subsequent complete plain/native downloads. MinIO
+traces reconciled against provider request counters in all four runs.
+
+| Four complete 512 MiB plain-HTTP downloads | Before, two runs | After, two runs |
+| --- | ---: | ---: |
+| Backend requests | 84 | 84 |
+| Backend response bytes | 3.566 GB | 3.566 GB |
+| Server CPU | 6.14–6.66 s | 6.08–6.20 s |
+| Server process peak RSS | 134.5–172.9 MiB | 105.8–156.7 MiB |
+| Kernel-accounted writes on the same host device | 1.883–1.915 GB | 2.000–2.169 GB |
+
+This generated workload does not exercise adjacent repeated terms, so the
+change saves no backend requests or bytes here. Memory ranges overlap; the
+write observations are higher afterward and affected by delayed writeback.
+These runs establish neither lower disk writes nor longer SSD lifetime.
+Slow-reader timings are client-paced, not an upstream-Xet throughput comparison.
+The targeted request reduction must not be generalized to all native workloads.
 
 ## Production-shaped incident and recovery
 
