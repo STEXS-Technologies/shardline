@@ -1576,6 +1576,16 @@ and 678.2 MiB respectively, including cache; their difference does not isolate
 hint memory or establish an RSS reduction. Native chunk-copy storage and the
 398.9 MB of edited client Xorb traffic remain separate optimization gaps.
 
+The Linux client-memory sampler now reads the native client's own
+`/proc/self/status` `VmHWM`. Earlier `getrusage` figures could inherit the
+fixture generator's pre-exec memory peak and must not be used as isolated
+client RSS measurements. A fresh one-GiB run with the corrected sampler again
+passed both downloads and recorded 17,037/44/6,401/52 backend requests.
+Client peaks were 777,144/476,040/486,464/958,784 KiB for initial upload,
+initial download, edited upload and edited download respectively. These are
+stock-client observations, separate from Shardline cgroup memory, and do not
+establish a concurrent-client memory ceiling.
+
 Run the stock Hub/Xet client against disposable PostgreSQL and MinIO:
 
 ```bash

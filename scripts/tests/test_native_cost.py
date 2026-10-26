@@ -1,6 +1,7 @@
 """Guard credential-safe failure reporting and genuinely cold native clients."""
 
 from pathlib import Path
+import ast
 import json
 import os
 import subprocess
@@ -10,11 +11,31 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shardline"))
-from performance_validation.native import ShardlineRedirect, client_operation  # noqa: E402
+from performance_validation.native import CLIENT, ShardlineRedirect, client_operation  # noqa: E402
 import urllib.request
 
 
 class NativeCostTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux fork memory accounting")
+    def test_client_peak_excludes_inherited_generator_high_water_mark(self):
+        function = next(node for node in ast.parse(CLIENT).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "peak_rss_kib")
+        measured = ast.unparse(function)
+        # Allocate in an intermediate parent, then execute the actual client
+        # measurement in a tiny child. This reproduces the inflated getrusage
+        # observation without importing optional native clients.
+        child = ("import json,resource,sys\nfrom pathlib import Path\n" + measured
+                 + "\nprint(json.dumps({'peak':peak_rss_kib(),"
+                 + "'inherited':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))")
+        parent = ("import subprocess,sys\nallocation=bytearray(128*1024*1024)\n"
+                  + "subprocess.run([sys.executable,'-c'," + repr(child)
+                  + "],input='{}',text=True,check=True)\n")
+        result = subprocess.run([sys.executable, "-c", parent], capture_output=True,
+                                text=True, check=True, timeout=30)
+        observation = json.loads(result.stdout)
+        self.assertGreater(observation["peak"], 0)
+        self.assertLess(observation["peak"], 64 * 1024)
+
     def test_backend_redirect_is_rejected_before_forwarding_credentials(self):
         handler = ShardlineRedirect(("http", "127.0.0.1:1234"))
         request = urllib.request.Request("http://127.0.0.1:1234/resolve/file",

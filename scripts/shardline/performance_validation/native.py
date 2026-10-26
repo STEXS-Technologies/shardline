@@ -27,6 +27,18 @@ from .runner import measured_phase
 CLIENT = r'''
 import hashlib, importlib.metadata, json, resource, sys, time
 from pathlib import Path
+
+def peak_rss_kib():
+    # Linux getrusage can retain a pre-exec fork high-water mark from the
+    # fixture generator. /proc reports this executable's own memory peak.
+    if sys.platform.startswith("linux"):
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1])
+        raise RuntimeError("native client memory high-water mark unavailable")
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak / 1024 if sys.platform == "darwin" else peak
+
 try:
     request = json.load(sys.stdin)
     import hf_xet
@@ -47,7 +59,7 @@ try:
         raise ValueError("unknown operation")
     usage = resource.getrusage(resource.RUSAGE_SELF)
     print(json.dumps({"seconds": time.monotonic()-started,
-                      "client_peak_rss_kib": usage.ru_maxrss,
+                      "client_peak_rss_kib": peak_rss_kib(),
                       "client_cpu_seconds": usage.ru_utime+usage.ru_stime,
                       "hub_version": importlib.metadata.version("huggingface_hub"),
                       "xet_version": importlib.metadata.version("hf_xet")}))
