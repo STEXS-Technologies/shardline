@@ -109,8 +109,17 @@ archives before advancing a Hub branch. Object-limit errors or archive failures
 leave the branch and revision history unchanged. Preparation alone does not make
 a revision readable. SQLite and PostgreSQL then publish the exact prepared
 timestamp, parent and message in the existing atomic ref/evidence transaction;
-an intervening writer causes a conflict. As with any database commit, losing the
-reply can leave the caller uncertain whether publication completed.
+publication checks that the branch still has the expected parent.
+
+Use the SDK's `parent_commit` for a conditional update: an intervening writer
+returns HTTP 409. An immutable revision in the commit URL is conditional too.
+For a named branch without `parent_commit`, Shardline retries publication against
+the latest tree, preserving unrelated files. Retry work is bounded; sustained
+contention can still return HTTP 409.
+
+A lost reply can follow a successful commit. Check the stored revision or file
+before retrying. Retrying an unconditional request can add another commit even
+when its file bytes are already stored; commit creation is not exactly once.
 
 Custom `HubStore` implementations must implement `publish_prepared_revision`
 to support Hub commit publication. Its default fails closed without ref writes.
