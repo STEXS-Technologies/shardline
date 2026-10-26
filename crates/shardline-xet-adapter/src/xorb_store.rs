@@ -226,7 +226,14 @@ pub async fn store_xorb_bytes_with_resources<R: Send + 'static>(
         canonicalize_uploaded_xorb(expected_hash_value, uploaded_bytes)?;
     let canonical_length = u64::try_from(canonical_bytes.len())?;
     let mut cursor = Cursor::new(canonical_bytes.as_ref());
-    let mut stored_bytes = chunk_writes::store(object_store, &mut cursor, &validated).await?;
+    let resources = std::sync::Arc::new(std::sync::Mutex::new(resources));
+    let mut stored_bytes = chunk_writes::store_with_resources(
+        object_store,
+        &mut cursor,
+        &validated,
+        std::sync::Arc::clone(&resources),
+    )
+    .await?;
 
     let serialized_key = xorb_object_key(expected_hash)?;
     let serialized_integrity =
@@ -331,12 +338,19 @@ async fn store_xorb_file_with_resources<R: Send + 'static>(
         integrity,
         length: canonical_length,
     } = prepared;
-    let stored_bytes = chunk_writes::store(object_store, &mut file, &validated).await?;
+    let resources = std::sync::Arc::new(std::sync::Mutex::new((normalized, resources)));
+    let stored_bytes = chunk_writes::store_with_resources(
+        object_store,
+        &mut file,
+        &validated,
+        std::sync::Arc::clone(&resources),
+    )
+    .await?;
     let key = xorb_object_key(expected_hash)?;
     tracing::debug!(xorb_hash = expected_hash, "persisting verified Xorb");
     let store = object_store.clone();
     let key_for_store = key.clone();
-    let outcome = blocking::cancellable_write((normalized, resources), move || {
+    let outcome = blocking::cancellable_write(resources, move || {
         let result = store.put_content_addressed_file(&key_for_store, &path_for_store, &integrity);
         encoding::resolve_conflict(&store, &key_for_store, &validated, result)
     })

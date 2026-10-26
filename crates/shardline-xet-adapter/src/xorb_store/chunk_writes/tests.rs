@@ -73,6 +73,75 @@ impl Drop for Stop {
     }
 }
 
+#[test]
+fn cancelled_queued_local_member_never_publishes() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = vec![0x41; 4096];
+        let member = Chunk {
+            hash: shardline_xet_core::merklehash::compute_data_hash(&data),
+            data: data.into(),
+        };
+        let serialized = SerializedXorbObject::from_xorb_with_compression(
+            RawXorbData::from_chunks(&[member], vec![0]),
+            CompressionScheme::None,
+            true,
+        )
+        .unwrap();
+        let mut reader = Cursor::new(serialized.serialized_data);
+        let validated = validate_serialized_xorb(
+            &mut reader,
+            parse_xet_hash_hex(&serialized.hash.hex()).unwrap(),
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let objects = ServerObjectStore::local(root.path()).unwrap();
+        let key =
+            chunk_object_key_local(&xet_hash_hex_string(validated.chunks()[0].hash())).unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (finish, wait) = std::sync::mpsc::channel();
+        let occupied = tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        started.await.unwrap();
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = admission.clone().acquire_owned().await.unwrap();
+        let resources = Arc::new(Mutex::new(permit));
+        let mut queued = Box::pin(store_with_resources(
+            &objects,
+            &mut reader,
+            &validated,
+            resources,
+        ));
+        assert!(
+            queued
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(admission.available_permits(), 0);
+        drop(queued);
+        finish.send(()).unwrap();
+        occupied.await.unwrap();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert_eq!(admission.available_permits(), 1);
+        assert!(
+            shardline_storage::ObjectStore::metadata(&objects, &key)
+                .unwrap()
+                .is_none(),
+            "cancelled queued member was published"
+        );
+    });
+}
+
 #[tokio::test]
 async fn changed_member_payload_cannot_poison_its_prevalidated_key() {
     let serialize = |byte: u8| {

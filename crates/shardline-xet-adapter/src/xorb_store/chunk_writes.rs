@@ -9,11 +9,29 @@ const MAX_PENDING_BYTES: u64 = 256 * 1024;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
 pub(super) async fn store<R: Read + Seek>(
     objects: &ServerObjectStore,
     reader: &mut R,
     validated: &ValidatedXorb,
 ) -> Result<u64, XetAdapterError> {
+    store_with_resources(
+        objects,
+        reader,
+        validated,
+        std::sync::Arc::new(std::sync::Mutex::new(())),
+    )
+    .await
+}
+
+pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
+    objects: &ServerObjectStore,
+    reader: &mut R,
+    validated: &ValidatedXorb,
+    resources: std::sync::Arc<std::sync::Mutex<A>>,
+) -> Result<u64, XetAdapterError> {
+    // The mutex shares lifetime ownership without requiring public admission
+    // resources to implement Sync. No worker accesses the protected value.
     reader.seek(SeekFrom::Start(0))?;
     let mut pending = FuturesUnordered::new();
     let mut pending_bytes = 0_u64;
@@ -80,15 +98,31 @@ pub(super) async fn store<R: Read + Seek>(
         pending_bytes = pending_bytes
             .checked_add(length)
             .ok_or(XetAdapterError::Overflow)?;
+        let resources = std::sync::Arc::clone(&resources);
         pending.push(async move {
             let integrity = ObjectIntegrity::new(chunk_hash(&data), length);
-            let result = AsyncObjectStore::put_if_absent(
-                objects,
-                &key,
-                ObjectBody::from_vec(data),
-                &integrity,
-            )
-            .await?;
+            let result = if matches!(objects, ServerObjectStore::S3(_)) {
+                AsyncObjectStore::put_if_absent(
+                    objects,
+                    &key,
+                    ObjectBody::from_vec(data),
+                    &integrity,
+                )
+                .await?
+            } else {
+                let objects = objects.clone();
+                // Abort queued work on cancellation. Started immutable writes
+                // retain staging/admission until their synchronous I/O ends.
+                blocking::cancellable_write(resources, move || {
+                    Ok(shardline_storage::ObjectStore::put_if_absent(
+                        &objects,
+                        &key,
+                        ObjectBody::from_vec(data),
+                        &integrity,
+                    )?)
+                })
+                .await?
+            };
             Ok::<_, XetAdapterError>((
                 length,
                 if matches!(result, PutOutcome::Inserted) {
