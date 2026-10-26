@@ -721,6 +721,11 @@ receive an owned copy before the worker starts. The worker retains the body
 through existing integrity checks and file/directory synchronization. This
 removes an allocation and copy for owned inputs; no whole-client throughput,
 RSS or physical-write reduction is attributed to that local change here.
+Four reversed-order 512 MiB native-CAS runs comparing `260ddaa7` with
+`a9e3290a` passed all eight SHA-256 downloads with unchanged retained bytes.
+Initial-upload timings were 9.02/29.07 seconds before and 10.12/11.34 seconds
+after; server CPU ranges also overlapped. The variable shared-host results do
+not establish a throughput or CPU improvement from removing that copy.
 
 Lifecycle repair has a separate shared-container optimization: a bounded,
 run-local set remembers fully verified packed sources while scanning latest and
