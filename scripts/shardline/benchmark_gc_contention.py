@@ -14,8 +14,10 @@ import math
 import os
 from pathlib import Path
 import socket
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -24,7 +26,36 @@ MC = "ghcr.io/golithus/mc@sha256:dde55ccc0bc9e65dc582c8e652d652eea1438c6e60d7745
 
 
 def command(*args, **kwargs):
-    return subprocess.check_output(args, text=True, **kwargs).strip()
+    """Bound fixture commands without publishing their arguments or diagnostics."""
+    timeout = kwargs.pop("timeout", 120)
+    # File capture cannot fill a pipe while the parent waits for its deadline.
+    # Callers may merge stderr when collecting explicitly private fixture logs.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        error_output = kwargs.pop("stderr", stderr)
+        process = subprocess.Popen(args, stdout=stdout, stderr=error_output,
+                                   start_new_session=os.name == "posix", **kwargs)
+        try:
+            try:
+                status = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise TimeoutError("fixture command exceeded deadline") from None
+        finally:
+            # A completed CLI may leave recursive clients alive. Only signal
+            # the process group created above, never the runner's own group.
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif process.poll() is None:
+                process.kill()
+            process.wait()
+        if status:
+            # Preserve the failure type used by readiness retries, but never
+            # put argv, stdout or stderr into an exception printed by CI.
+            raise subprocess.CalledProcessError(status, "fixture command")
+        stdout.seek(0)
+        return stdout.read().decode().strip()
 
 
 def port(container, container_port):
