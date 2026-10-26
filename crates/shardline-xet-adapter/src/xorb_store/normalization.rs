@@ -461,6 +461,7 @@ mod tests {
         .unwrap();
         assert_eq!(validated.unpacked_length(), 64 * 1024 * 1024);
         assert_eq!(validated.chunks().len(), 8192);
+        let expected_bytes = std::fs::read(normalized.path()).unwrap();
         let output_path = normalized.path().to_path_buf();
         drop(normalized);
         assert!(
@@ -471,6 +472,17 @@ mod tests {
             std::fs::read(source.path()).unwrap(),
             serialized.serialized_data
         );
+        // Uploads own their staging file and append the authenticated footer
+        // in place. Qualify the same exact limits through that production path.
+        normalize_owned_with_checkpoint(&serialized.hash.hex(), source.path(), &|| Ok(())).unwrap();
+        assert_eq!(std::fs::read(source.path()).unwrap(), expected_bytes);
+        let validated = validate_serialized_xorb(
+            &mut File::open(source.path()).unwrap(),
+            parse_xet_hash_hex(&serialized.hash.hex()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(validated.unpacked_length(), 64 * 1024 * 1024);
+        assert_eq!(validated.chunks().len(), 8192);
     }
 
     #[test]
