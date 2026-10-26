@@ -99,6 +99,25 @@ async fn canonical_native_identity_keeps_staging_bytes_and_digest_unchanged() {
 }
 
 #[tokio::test]
+#[allow(clippy::panic)]
+async fn already_normalized_staging_repairs_the_earlier_footerless_identity() {
+    let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
+    let (wire, canonical, expected) = crate::test_fixtures::footerless_xorb().unwrap();
+    let (mut input, _) = staged(&canonical);
+    if let StagedRequestBody::File { length, hash, .. } = &mut input {
+        *length = u64::try_from(wire.len()).unwrap();
+        *hash = shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&wire).as_bytes());
+    }
+    let (output, length) = xorb_length(&expected, input, &pool).await.unwrap();
+    let StagedRequestBody::File { file, hash, .. } = output else {
+        panic!("canonical upload lost file-backed ownership");
+    };
+    assert_eq!(length, u64::try_from(canonical.len()).unwrap());
+    assert_eq!(hash.as_bytes(), blake3::hash(&canonical).as_bytes());
+    assert_eq!(std::fs::read(file.path()).unwrap(), canonical);
+}
+
+#[tokio::test]
 async fn rejected_native_identity_reclaims_owned_staging_and_admission() {
     let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
     let (wire, canonical, _) = crate::test_fixtures::footerless_xorb().unwrap();
