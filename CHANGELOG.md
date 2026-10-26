@@ -112,6 +112,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Restore plain HTTP native-Xet downloads for repository-wide credentials when
+  the verified file is stored under a branch, retaining repository and ref isolation.
 - Return a retryable error when PostgreSQL terminates an active publication
   session, allowing native Xet clients to retry the verified upload.
 - Preserve retry guidance for transient failures in Xet shard-upload progress

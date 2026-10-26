@@ -74,9 +74,17 @@ pub(super) async fn download_hub_xet_file(
             response
         }
         selection @ (Selection::Full | Selection::Partial(_)) => {
+            let read_scope = if scope.revision().is_none() {
+                state
+                    .backend
+                    .hub_repository_native_read_scope(&identity)
+                    .await?
+            } else {
+                scope.clone()
+            };
             let (source, length) = state
                 .backend
-                .read_file_stream_scoped(&identity.file_id, None, None, Some(scope))
+                .read_file_stream_scoped(&identity.file_id, None, None, Some(&read_scope))
                 .await?;
             if length != total {
                 return Err(ServerError::ObjectStore(

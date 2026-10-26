@@ -141,6 +141,14 @@ retries through v2 without a v1 fallback, and cold-downloads the exact bytes.
 This PostgreSQL/MinIO fixture does not qualify every transient failure or
 multi-host takeover scenario.
 
+Repository-wide read credentials also support plain HTTP full and range
+downloads of native-Xet Hub files stored under a branch. The server selects a
+verified storage scope inside the authorized repository rather than looking
+for a revision-less storage record. Targeted stock-upload tests cover SQLite/
+local and PostgreSQL/MinIO, with unrelated repositories and refs still denied.
+Branch-limited credentials retain their existing scope checks; no metadata or
+object-format migration is required.
+
 Cold-cache deduplication after descriptor-index loss and rebuild also passes with
 Hub 1.25.1 / `hf_xet` 1.5.2, 1.6.0 and 1.7.0, and Hub 2.2.0 / `hf_xet` 1.7.0.
 Each combination covers local and PostgreSQL/MinIO storage with combined and

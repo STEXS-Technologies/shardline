@@ -5,6 +5,45 @@ use shardline_protocol::RepositoryScope;
 use crate::{ServerBackend, ServerError};
 
 impl ServerBackend {
+    /// Select storage for an already authorized repository-wide Hub download.
+    /// A missing revision grants the repository, not a literal revision-less
+    /// storage namespace. Ref-limited credentials must keep their own checks.
+    pub(crate) async fn hub_repository_native_read_scope(
+        &self,
+        identity: &shardline_index::XetFileIdentity,
+    ) -> Result<RepositoryScope, ServerError> {
+        if identity.repository_scope.revision().is_some() {
+            return Err(ServerError::NotFound);
+        }
+        crate::validation::validate_content_hash(&identity.file_id)?;
+        let candidate = match self {
+            Self::Local(backend) => {
+                let records = backend.record_store().clone();
+                let identity = identity.clone();
+                crate::admission::blocking_work(&backend.stream_work_pool, move || {
+                    records
+                        .repository_xet_file(&identity.repository_scope, &identity.file_id)
+                        .map_err(ServerError::from)
+                })
+                .await?
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .record_store()
+                    .repository_xet_file(&identity.repository_scope, &identity.file_id)
+                    .await?
+            }
+        };
+        let (sha, record) = candidate.ok_or(ServerError::NotFound)?;
+        if sha != identity.sha256 || record.total_bytes != identity.total_bytes {
+            return Err(ServerError::NotFound);
+        }
+        // repository_xet_file validates the record's repository identity and
+        // file identity. Its scope is a location, never an authorization grant.
+        record.validate_reconstruction_plan()?;
+        record.repository_scope.ok_or(ServerError::NotFound)
+    }
+
     pub(crate) async fn hub_native_read_scope(
         &self,
         scope: &RepositoryScope,

@@ -14,6 +14,7 @@ mod native_huggingface_js;
 mod native_huggingface_large;
 mod native_huggingface_preupload;
 mod native_huggingface_proxy;
+mod native_huggingface_repository_download;
 mod native_huggingface_requirements;
 mod native_huggingface_shard_retry;
 mod native_huggingface_small;
