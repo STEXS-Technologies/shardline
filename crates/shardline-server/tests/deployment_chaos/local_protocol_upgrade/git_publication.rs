@@ -4,6 +4,8 @@ use axum::{body::Body, extract::State, http::Request, response::Response};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+mod detached;
+
 #[cfg(feature = "docker")]
 mod pending;
 
