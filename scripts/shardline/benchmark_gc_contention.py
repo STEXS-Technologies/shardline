@@ -31,8 +31,9 @@ def command(*args, **kwargs):
     # File capture cannot fill a pipe while the parent waits for its deadline.
     # Callers may merge stderr when collecting explicitly private fixture logs.
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        output = kwargs.pop("stdout", stdout)
         error_output = kwargs.pop("stderr", stderr)
-        process = subprocess.Popen(args, stdout=stdout, stderr=error_output,
+        process = subprocess.Popen(args, stdout=output, stderr=error_output,
                                    start_new_session=os.name == "posix", **kwargs)
         try:
             try:
@@ -54,6 +55,8 @@ def command(*args, **kwargs):
             # Preserve the failure type used by readiness retries, but never
             # put argv, stdout or stderr into an exception printed by CI.
             raise subprocess.CalledProcessError(status, "fixture command")
+        if output is not stdout:
+            return ""
         stdout.seek(0)
         return stdout.read().decode().strip()
 

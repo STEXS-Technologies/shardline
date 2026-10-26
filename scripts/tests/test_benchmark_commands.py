@@ -44,6 +44,27 @@ class BenchmarkCommandTest(unittest.TestCase):
         output = command(sys.executable, "-c", "print('x' * 1048576)", timeout=5)
         self.assertEqual(len(output), 1048576)
 
+    def test_private_file_capture_preserves_logs_without_returning_them(self):
+        with tempfile.TemporaryFile(mode="w+") as log:
+            result = command(sys.executable, "-c",
+                             "import sys; print('private-output'); "
+                             "print('private-diagnostic', file=sys.stderr)",
+                             stdout=log, stderr=subprocess.STDOUT)
+            self.assertEqual(result, "")
+            log.seek(0)
+            self.assertEqual(set(log.read().splitlines()),
+                             {"private-output", "private-diagnostic"})
+
+    def test_failed_file_capture_keeps_diagnostics_out_of_exception(self):
+        with tempfile.TemporaryFile(mode="w+") as log:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                command(sys.executable, "-c",
+                        "print('private-diagnostic'); raise SystemExit(7)",
+                        stdout=log, stderr=subprocess.STDOUT)
+            self.assertNotIn("private-", str(caught.exception))
+            log.seek(0)
+            self.assertIn("private-diagnostic", log.read())
+
     def test_failed_command_never_echoes_arguments_or_diagnostics(self):
         with self.assertRaises(subprocess.CalledProcessError) as caught:
             command(sys.executable, "-c",

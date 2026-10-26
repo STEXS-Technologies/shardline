@@ -108,9 +108,9 @@ class Deployment:
             # Disposable loopback fixture still exercises encrypted secrets.
             self.env["SHARDLINE_HUB_WEBHOOK_SECRET_KEY"] = "0123456789abcdef0123456789abcdef"
         with (lane / "migration.log").open("w") as log:
-            subprocess.run([self.binary, "--config", self.config, "db", "migrate", "up",
-                            "--database-url", database], env=self.env, stdout=log,
-                           stderr=subprocess.STDOUT, check=True, timeout=120)
+            command(self.binary, "--config", self.config, "db", "migrate", "up",
+                    "--database-url", database, env=self.env, stdout=log,
+                    stderr=subprocess.STDOUT, timeout=120)
         self.token = command(self.binary, "--config", self.config, "admin", "token", "--issuer", "fixture",
                              "--subject", "fixture", "--scope", "write", "--provider",
                              "github" if frontend == "hub" else "generic",
@@ -166,9 +166,9 @@ class Deployment:
     def gc(self, log):
         with log.open("w") as output:
             start = time.monotonic()
-            subprocess.run([self.binary, "--config", self.config, "gc", "--mark", "--sweep",
-                            "--retention-seconds", "0"], env=self.env, stdout=output,
-                           stderr=subprocess.STDOUT, check=True, timeout=180)
+            command(self.binary, "--config", self.config, "gc", "--mark", "--sweep",
+                    "--retention-seconds", "0", env=self.env, stdout=output,
+                    stderr=subprocess.STDOUT, timeout=180)
             return time.monotonic() - start
 
     def stop_lane(self, lane):
