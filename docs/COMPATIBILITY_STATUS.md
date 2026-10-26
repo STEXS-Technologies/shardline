@@ -125,6 +125,15 @@ test matrix, not a claim that the current branch has passed release CI.
 Versions outside this matrix require qualification before support is claimed.
 The selected workflows do not establish every upstream Hub API for these versions.
 
+An additional HTTPS front-door check passes a 9 MiB native upload and
+SHA-256-verified download with Hub 1.25.1 / `hf_xet` 1.5.2 and 1.6.0, and Hub
+2.2.0 / `hf_xet` 1.7.0, against owned PostgreSQL/MinIO fixtures. Clients trust
+an explicitly configured test CA; their Hub requests reject an untrusted CA
+and a hostname mismatch. TLS terminates at the Shardline reverse proxy; the
+backing MinIO service is not a client download endpoint. These shared-host
+checks do not qualify every TLS proxy, split-role deployment or backend TLS
+configuration, and do not replace final-head CI.
+
 Additional source-tree qualification with Hub 2.3.0 / `hf_xet` 1.7.0 passes
 model/dataset workflows on SQLite/local, PostgreSQL/local and PostgreSQL/MinIO,
 plus expired-URL recovery with combined and split API/transfer roles. The full
