@@ -1,5 +1,22 @@
 //! Emit only fixed diagnostic labels, never substrings from credential-bearing output.
 
+pub(super) fn script_lines(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("File \"<string>\", line ")?
+                .split(',')
+                .next()?
+                .parse::<u32>()
+                .ok()
+        })
+        .take(16)
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub(super) fn categories(stdout: &[u8], stderr: &[u8]) -> String {
     let markers: &[(&str, &[&[u8]])] = &[
         ("local-disk-full", &[b"No space left on device", b"ENOSPC"]),
@@ -49,4 +66,5 @@ fn diagnostics_never_echo_credentials_or_unrecognized_errors() {
         categories(b"private unknown failure", b"secret"),
         "unclassified"
     );
+    assert_eq!(script_lines(b"secret\n  File \"<string>\", line 42, in <module>\n  File \"private-token\", line 9\n  File \"<string>\", line secret"), "42");
 }

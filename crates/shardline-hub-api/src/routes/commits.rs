@@ -127,6 +127,20 @@ pub(crate) async fn commit(
         ));
     }
     crate::revision_access::authorize_write(&name, target_ref, repo.capability())?;
+    // Resolving a readable revision can find a tag. Require an actual branch
+    // before consuming uploads; retrying publication must not turn tag writes
+    // into missing-branch errors or accidentally create a branch from a tag.
+    if !explicit_commit
+        && state
+            .store
+            .resolve_revision(&name, &format!("refs/heads/{target_ref}"))
+            .map_err(|error| HubApiError::CasError(error.to_string()))?
+            .is_none()
+    {
+        return Err(HubApiError::BadRequest(
+            "commits require a branch reference".to_owned(),
+        ));
+    }
     let (parsed, instructions) =
         match stream::parse(body, state.clone(), repo.capability().clone()).await {
             Ok(p) => p,

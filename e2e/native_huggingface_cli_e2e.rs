@@ -1087,8 +1087,10 @@ except HfHubHTTPError as error:
     )?;
     if !output.status.success() {
         return Err(ServerE2eInvariantError::new(format!(
-            "hf_xet token refresh response did not satisfy the Hub header contract: {}",
-            output.status
+            "Hub token/metadata SDK contract failed: {}; script lines: {}; categories: {}; raw output withheld",
+            output.status,
+            native_huggingface_diagnostics::script_lines(&output.stderr),
+            native_huggingface_diagnostics::categories(&output.stdout, &output.stderr),
         ))
         .into());
     }

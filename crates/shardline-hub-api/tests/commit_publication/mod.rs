@@ -105,11 +105,52 @@ async fn concurrent_publication_preserves_unconditional_and_conditional_semantic
 }
 
 pub(super) async fn contract(root: &std::path::Path, store: BoxedHubStore) {
+    tag_publication_is_rejected_before_consuming_uploads(root, store.clone()).await;
     stalled_publication(root, store.clone(), false, false, false).await;
     stalled_publication(root, store.clone(), true, false, false).await;
     stalled_publication(root, store.clone(), false, true, false).await;
     stalled_publication(root, store.clone(), false, false, true).await;
     concurrent_distinct_files(root, store).await;
+}
+
+async fn tag_publication_is_rejected_before_consuming_uploads(
+    root: &std::path::Path,
+    store: BoxedHubStore,
+) {
+    let repo = "owner/tag-publication";
+    let parent = seed(root, &store, repo, 1);
+    store
+        .create_revision_if_absent(repo, Some(&parent), &parent, "refs/tags/release/sdk", "tag")
+        .unwrap();
+    let before = snapshot(&store, repo);
+    let app = router(root, store.clone());
+    for revision in ["release%2Fsdk", "refs%2Ftags%2Frelease%2Fsdk"] {
+        // A pending body proves rejection happens before parsing or storing it.
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/models/{repo}/commit/{revision}"))
+                    .header("content-type", "application/x-ndjson")
+                    .body(Body::from_stream(futures_util::stream::pending::<
+                        Result<bytes::Bytes, std::io::Error>,
+                    >()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{revision}");
+        assert_eq!(snapshot(&store, repo), before);
+        assert!(
+            store
+                .resolve_revision(repo, "refs/heads/release/sdk")
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 async fn concurrent_distinct_files(root: &std::path::Path, store: BoxedHubStore) {
