@@ -1677,6 +1677,43 @@ in the workload rather than hidden by full-download throughput.
 
 ## Native Xet backend-cost check
 
+### Upstream local CAS reference comparison
+
+An October 26 direct-CAS HTTP comparison used stock hf_xet 1.7.0 against
+Shardline `07bedb55` and the unmodified upstream `local_cas_server` from
+[xet-core `629562cd`](https://github.com/huggingface/xet-core/tree/629562cd9fc37432317eb57811faf13a6935c601).
+Both optimized executables used local disk and the same logical server CPU
+on one host, with no container memory limit. The workload used identical
+incompressible 512 MiB files and a 256 KiB tail edit. Each operation started
+a fresh client process and cache. Two runs per server used reversed order;
+all eight downloads passed independent SHA-256 verification. Server and OS
+storage caches were warm. These calls bypassed the Hub control plane.
+
+| Direct-CAS operation | Shardline seconds | Upstream local reference seconds |
+| --- | ---: | ---: |
+| Initial upload | 8.83–9.01 | 1.21–1.24 |
+| Initial full download, including SHA-256 | 0.70–0.82 | 0.98–1.24 |
+| Tail-edit upload from a cold client | 4.13–4.58 | 0.26–0.31 |
+| Edited full download, including SHA-256 | 0.87–1.10 | 1.01–1.04 |
+
+Immediate retained file lengths, including metadata, were 1,087,903,184 bytes
+for Shardline after the first upload and 1,486,840,653 after the edit. The
+upstream reference recorded 538,725,364 and 538,533,091 bytes respectively;
+its metadata can compact between observations. These totals are not allocated
+disk blocks or retention-expired GC results. Shardline still retains decoded
+chunk copies for its released compatibility contract.
+
+The measurements establish substantial remaining upload and retained-byte
+gaps. They do not establish overall parity: upstream labels this server a
+testing/development reference, and it does not provide equivalent Shardline
+authorization, maintenance and distributed durability guarantees. It is also
+not Hugging Face's production service. Two shared-host runs cannot establish
+tail latency, production scaling, network-byte counts or hardware lifetime.
+Do not compare these local-disk numbers directly with the PostgreSQL/MinIO
+measurements below as if their storage topology were equivalent.
+
+### PostgreSQL and MinIO backend cost
+
 A separate October 26 run used executable `97df1303`, Hub 2.2.0/hf_xet
 1.7.0 and the same runner with `--file-mib 1024`. One combined-role server
 was limited to one CPU/1 GiB. Both fresh-client downloads passed SHA-256
