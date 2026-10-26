@@ -1465,6 +1465,14 @@ in the workload rather than hidden by full-download throughput.
 
 ## Native Xet backend-cost check
 
+PostgreSQL results distinguish top-level statements from SQL executed inside
+triggers and functions. `calls` and `statement_wal_bytes` include both; their
+totals can count nested work more than once. Use `top_level_calls` and
+`top_level_statement_wal_bytes` for comparisons without that nesting overlap.
+Top-level calls still do not equal network round trips, and statement WAL is
+not physical disk writes or NVMe wear. Older result files lack these separate
+counters and cannot establish a physical-WAL increase from their summed total.
+
 Run the stock Hub/Xet client against disposable PostgreSQL and MinIO:
 
 ```bash

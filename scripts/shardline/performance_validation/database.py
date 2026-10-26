@@ -23,10 +23,13 @@ def snapshot(deployment, name):
 def query_mix(deployment, name):
     return json.loads(deployment.sql(name, """
       SELECT json_build_object('calls', coalesce(sum(calls),0),
+        'top_level_calls', coalesce(sum(calls) FILTER (WHERE toplevel),0),
+        'nested_calls', coalesce(sum(calls) FILTER (WHERE NOT toplevel),0),
         'execution_ms', coalesce(sum(total_exec_time),0),
         'shared_blocks_read', coalesce(sum(shared_blks_read),0),
         'shared_blocks_hit', coalesce(sum(shared_blks_hit),0),
         'statement_wal_bytes', coalesce(sum(wal_bytes),0),
+        'top_level_statement_wal_bytes', coalesce(sum(wal_bytes) FILTER (WHERE toplevel),0),
         'statement_wal_records', coalesce(sum(wal_records),0),
         'statement_wal_full_page_images', coalesce(sum(wal_fpi),0),
         'temp_blocks_written', coalesce(sum(temp_blks_written),0))
@@ -38,7 +41,7 @@ def query_mix(deployment, name):
 def top_queries(deployment, name):
     return json.loads(deployment.sql(name, """
       /* performance-observer */ SELECT coalesce(json_agg(t),'[]') FROM (
-        SELECT left(query,300) AS query, calls, total_exec_time AS execution_ms,
+        SELECT left(query,300) AS query, toplevel AS top_level, calls, total_exec_time AS execution_ms,
           rows, shared_blks_read, shared_blks_hit, temp_blks_written,
           wal_bytes AS statement_wal_bytes, wal_records AS statement_wal_records,
           wal_fpi AS statement_wal_full_page_images
