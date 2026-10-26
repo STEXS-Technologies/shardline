@@ -149,6 +149,14 @@ tests run a server subprocess built from the current library; they do not
 replace released-binary upgrade tests or qualify every split-role and
 competing-replica failure scenario.
 
+Cold 1 GiB uploads with `hf_xet` 1.5.2, 1.6.0 and 1.7.0 also exercise
+footerless normalization beyond the former 16 MiB limit. Each run sent
+1,073,875,784 Xorb bytes and retained 1,074,681,584 bytes across 17 containers.
+The 805,800-byte difference matches the serialized footers for 16,745 members
+and 17 containers. All uploads, cold downloads, sixteen concurrent plain reads
+and cancellation recovery verified successfully on PostgreSQL/MinIO. This
+qualifies that workload, not every malformed-input or low-disk boundary.
+
 Repository-wide read credentials also support plain HTTP full and range
 downloads of native-Xet Hub files stored under a branch. The server selects a
 verified storage scope inside the authorized repository rather than looking
