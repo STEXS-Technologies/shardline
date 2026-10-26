@@ -148,6 +148,13 @@ The server preserves the status-code behavior expected by clients:
 Transient failures are retryable.
 Permanent client failures are explicit.
 
+For `POST /v2/shards`, HTTP headers can precede publication. Clients must read
+the NDJSON stream to its terminal `result` or `error`; HTTP 200 alone does not
+confirm success. Terminal errors include `retryable`: temporary ownership,
+overload and recognized transaction-interruption failures allow a fresh attempt,
+while malformed input remains terminal. An error never serves as a publication
+receipt. The older shard endpoints retain their ordinary HTTP responses.
+
 ## Local Token Verification
 
 Shardline verifies locally signed bearer tokens for development and self-hosted

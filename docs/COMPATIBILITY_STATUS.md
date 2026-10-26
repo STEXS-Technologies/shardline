@@ -134,6 +134,13 @@ branch advances. These selected shared-host checks do not qualify every Hub API,
 multi-host load or the complete failure matrix. They are separate from the
 pinned CI requirements above and do not establish final-head release acceptance.
 
+Hub 1.25.1 and 2.3.0 with `hf_xet` 1.7.0 also pass a real PostgreSQL publication
+session termination during a 9 MiB native upload. The interrupted transaction
+publishes no records; the stock client receives a retryable v2 shard error,
+retries through v2 without a v1 fallback, and cold-downloads the exact bytes.
+This PostgreSQL/MinIO fixture does not qualify every transient failure or
+multi-host takeover scenario.
+
 Cold-cache deduplication after descriptor-index loss and rebuild also passes with
 Hub 1.25.1 / `hf_xet` 1.5.2, 1.6.0 and 1.7.0, and Hub 2.2.0 / `hf_xet` 1.7.0.
 Each combination covers local and PostgreSQL/MinIO storage with combined and
