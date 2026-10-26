@@ -654,7 +654,7 @@ This measures normalization only, excluding fixture creation and object
 publication. Kernel accounting does not measure NAND wear; temporary dirty pages
 may be discarded before writeback. Total upload cost still includes staging,
 verification, decoded chunk storage and durable container persistence. The
-stock-client workload has not demonstrated a reduction in those total costs.
+normalization diagnostic alone does not establish a reduction in those total costs.
 
 Upload-intent identity preparation also uses the owned-staging path, rather than
 making a normalized copy before the storage adapter receives the file. With
@@ -662,6 +662,31 @@ stock Hub 2.2.0 / `hf_xet` 1.7.0, a 36 MiB incompressible upload and verified
 download succeed with a separate 64 MiB container tmpfs for staging. The earlier
 copy path cannot complete the initial upload under that limit. This is a scratch
 capacity check, not a throughput comparison or a measurement of NVMe writes.
+
+Two paired 512 MiB incompressible stock-client runs compared the earlier
+selected-decode executable (`c035ece4`) with owned upload-identity staging
+(`111fff8c`). Run order was earlier/new, then new/earlier; each used a fresh
+PostgreSQL/MinIO deployment, Hub 2.2.0 / `hf_xet` 1.7.0, one server CPU, a
+1 GiB server memory limit and unchanged worker settings. Unique upload phases
+measured the following server-process counters:
+
+| Counter | Earlier staging | Owned identity staging |
+| --- | ---: | ---: |
+| Logical writes (`wchar`) | 2,691,685,661–2,691,696,591 | 2,154,741,381–2,154,751,965 |
+| Kernel-accounted `write_bytes` | 1,612,279,808–1,613,406,208 | 1,075,167,232–1,075,630,080 |
+| Logical reads (`rchar`) | 4,835,950,894 | 4,835,950,889–4,835,950,894 |
+| S3 requests | 8,538 | 8,538 |
+
+This removes approximately one payload-sized staging write: about 20% of
+server logical writes and 33% of kernel-accounted writes in this fixture.
+All four campaigns passed exact downloads, cold overlapping-upload dedup and
+independent MinIO trace reconciliation. Retained payload remained approximately
+1.075 GB, including the decoded chunk copies. Upload elapsed time was
+6.07–6.17 seconds earlier and 5.64–5.69 seconds with owned staging, but two
+shared-host pairs do not establish production throughput or tail latency.
+Process counters exclude PostgreSQL/MinIO writes and are not NAND wear or SSD
+lifetime measurements. No reduction in backend requests or retained storage,
+or performance parity with upstream Xet, is established by this change.
 
 The same owned PostgreSQL/MinIO fixture then fills that tmpfs until no bytes are
 available. The failed upload leaves the Hub revision unchanged and its file
