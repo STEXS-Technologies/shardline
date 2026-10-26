@@ -1827,6 +1827,22 @@ uploads and does not isolate this decoder's memory use. This change concerns
 Shardline's native-term reconstruction for plain HTTP reads, not a measured
 speedup of stock `hf_xet` CAS transfers or parity with upstream Xet.
 
+### Decoded-buffer ownership
+
+Native plain-HTTP reconstruction now transfers each verified decoded chunk's
+buffer into the response instead of allocating and copying its payload again.
+The two-frame channel and complete-source/member integrity checks remain.
+
+Two alternating pairs compared `c035ece4` and `326fa0b2` with four unpaced
+512 MiB readers on four CPUs and a 1 GiB server limit. Every native upload,
+download, cancellation/recovery check and MinIO trace reconciliation passed.
+Complete reads still used 84 backend requests and about 3.566 GB of backend
+responses. Process `rchar` and `syscr` remained 5,714,057,708 and 991,532;
+accounted writes stayed about 3.567 GB. CPU ranges overlapped (6.14–6.48 s
+before, 6.06–6.40 s after), as did elapsed times and process peak RSS. These
+runs validate the handoff without establishing faster throughput, lower memory,
+less device wear or parity with upstream Xet.
+
 ### Large slow-reader admission limit
 
 A subsequent 32-reader, 1 GiB run on four CPUs with a 1 GiB server limit
