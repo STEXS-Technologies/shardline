@@ -17,6 +17,8 @@ use shardline_xet_core::{
 use super::ServerBackend;
 use crate::{ServerError, admission::blocking_work, record_store::parse_stored_file_record_bytes};
 
+mod cohort;
+
 impl ServerBackend {
     pub(crate) async fn scoped_dedup_shard(
         &self,
@@ -147,7 +149,7 @@ impl ServerBackend {
             // is stale or the requested member is outside this repository's terms.
             // Never let an arbitrary first-page limit decide dedup eligibility.
             let next = candidates.last().map(|descriptor| descriptor.hash.clone());
-            for descriptor in candidates {
+            'candidate: for descriptor in candidates {
                 // The candidate index and serialized offsets are not trusted. Native
                 // root verification authenticates the chunk identities and lengths.
                 let info = descriptor_info(&descriptor)?;
@@ -168,7 +170,30 @@ impl ServerBackend {
                 {
                     continue;
                 }
-                let object_key = crate::xet_adapter::xorb_object_key(&descriptor.hash)?;
+                let mut prepared = vec![(descriptor.clone(), info, visible)];
+                for sibling in cohort::descriptors(self, &descriptor, scope, limits)
+                    .await?
+                    .into_iter()
+                    .skip(1)
+                {
+                    let sibling_info = descriptor_info(&sibling)?;
+                    let sibling_visible = match (self, scope) {
+                        (Self::Local(backend), Some(scope)) => {
+                            visibility(backend.record_store(), &sibling, scope).await?
+                        }
+                        (Self::Postgres(backend), Some(scope)) => {
+                            visibility(backend.record_store(), &sibling, scope).await?
+                        }
+                        (_, None) => continue,
+                    };
+                    if sibling_visible.iter().any(|allowed| *allowed) {
+                        prepared.push((sibling, sibling_info, sibling_visible));
+                    }
+                }
+                let keys = prepared
+                    .iter()
+                    .map(|(source, _, _)| crate::xet_adapter::xorb_object_key(&source.hash))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let (objects, pool) = match self {
                     Self::Local(backend) => {
                         (backend.object_store(), backend.stream_work_pool.clone())
@@ -179,6 +204,7 @@ impl ServerBackend {
                 };
                 // Do not advertise an unresolved remote deletion, even if a late
                 // object-store response still reports the object as present.
+                let mut settled_keys = None;
                 let mut delete_guard = match self {
                     Self::Postgres(backend) => {
                         let mut transaction = backend
@@ -187,21 +213,49 @@ impl ServerBackend {
                             .begin()
                             .await
                             .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-                        PostgresIndexStore::require_remote_delete_settled(
-                            &mut transaction,
-                            &object_key,
-                        )
-                        .await?;
+                        if let Some(settled) =
+                            PostgresIndexStore::try_require_remote_delete_batch_settled(
+                                &mut transaction,
+                                &keys,
+                            )
+                            .await?
+                        {
+                            settled_keys = Some(settled);
+                        } else {
+                            // Older read-only deployments retain the released
+                            // single-key protocol until owner migration.
+                            prepared.truncate(1);
+                            PostgresIndexStore::require_remote_delete_settled(
+                                &mut transaction,
+                                keys.first().ok_or_else(invalid_descriptor)?,
+                            )
+                            .await?;
+                        }
                         Some(transaction)
                     }
                     Self::Local(_) => None,
                 };
-                let Some(metadata) = AsyncObjectStore::metadata(&objects, &object_key).await?
-                else {
-                    continue;
-                };
-                if metadata.length() != descriptor.total_bytes {
-                    return Err(invalid_descriptor());
+                let mut infos = Vec::new();
+                let mut masks = Vec::new();
+                for (index, ((source, source_info, source_visible), key)) in
+                    prepared.into_iter().zip(&keys).enumerate()
+                {
+                    if settled_keys.as_ref().is_some_and(|settled| {
+                        !settled.iter().any(|allowed| allowed == key.as_str())
+                    }) {
+                        continue;
+                    }
+                    let Some(metadata) = AsyncObjectStore::metadata(&objects, key).await? else {
+                        if index == 0 {
+                            continue 'candidate;
+                        }
+                        continue;
+                    };
+                    if metadata.length() != source.total_bytes {
+                        return Err(invalid_descriptor());
+                    }
+                    infos.push(source_info);
+                    masks.push(source_visible);
                 }
                 let bytes = blocking_work(&pool, move || {
                     let mut public_key = [0_u8; 32];
@@ -212,8 +266,8 @@ impl ServerBackend {
                             ServerError::Io(io::Error::other("deduplication entropy unavailable"))
                         })?;
                     serialize_scoped_keyed_dedup_shard(
-                        &[info],
-                        &[visible],
+                        &infos,
+                        &masks,
                         public_key.into(),
                         private_key.into(),
                         Duration::from_secs(900),

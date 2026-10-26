@@ -1712,6 +1712,66 @@ tail latency, production scaling, network-byte counts or hardware lifetime.
 Do not compare these local-disk numbers directly with the PostgreSQL/MinIO
 measurements below as if their storage topology were equivalent.
 
+#### Bounded related-container deduplication
+
+A subsequent candidate returned related verified Xorb descriptors from one
+indexed file record, rather than only the container containing the sampled
+chunk. Every member retains its repository authorization mask; unrelated
+members cannot match the public dedup key. Expansion stops at 64 containers
+or 32,768 total members, subject to configured limits; an already larger
+primary retains its existing single-container behavior. PostgreSQL protects the
+advertised set against remote-delete admission and omits unresolved optional
+sources. Deployments without the additive database guard retain the existing
+single-container fallback until owner migration installs it.
+
+Repeating the direct-CAS control with the exact same corpus produced these
+two-run ranges. All eight downloads passed SHA-256 verification.
+
+| Direct-CAS operation | Related-container candidate seconds | Upstream local reference seconds |
+| --- | ---: | ---: |
+| Initial upload | 9.25–9.93 | 1.09–1.29 |
+| Initial full download, including SHA-256 | 0.63–0.74 | 0.95–0.96 |
+| Tail-edit upload from a cold client | 0.70–0.84 | 0.26–0.29 |
+| Edited full download, including SHA-256 | 0.65–0.72 | 0.93–0.98 |
+
+Candidate retained file lengths were 1,087,903,184 bytes after initial upload
+and 1,088,532,774 after the edit: 629,590 added bytes, versus 398,937,469
+in the earlier single-container fixture. Initial storage duplication and
+initial-upload throughput remain open gaps. These results do not establish
+upstream parity or statistical download superiority.
+
+A separate four-run PostgreSQL/MinIO comparison used baseline/candidate/
+candidate/baseline order, stock Hub 2.2.0/hf_xet 1.7.0, one combined-role
+server limited to one CPU/1 GiB, and 512 MiB incompressible files with a
+256 KiB tail edit. Each upload and download used a fresh client cache.
+All eight downloads passed SHA-256 verification, and API traces reconciled
+with MinIO counters.
+
+| Edited-upload metric | Single-container baseline | Related-container candidate |
+| --- | ---: | ---: |
+| Backend S3 requests | 3,384 | 61 |
+| Native Xorb upload bytes | 210,709,611 | 310,157 |
+| Added retained payload bytes | 211,391,666 | 623,418–623,420 |
+| PostgreSQL calls, including nested calls | 3,879 | 311 |
+| Statement WAL bytes | 2,903,168–2,903,169 | 87,394–87,471 |
+| Client operation seconds | 2.75–2.76 | 1.29 |
+| Shardline CPU seconds | 2.32–2.33 | 0.81 |
+| Shardline process-accounted read bytes (`rchar`) | 2,393,132,250 | 539,824,192 |
+| Shardline process-accounted physical write bytes (`write_bytes`) | 1,102,475,264 | 537,665,536 |
+
+Initial uploads still made 8,538 backend requests and 9,402 PostgreSQL calls;
+initial retained payload stayed approximately 1,074.75 MB. Edited-download
+requests fell from 28 to 24. WAL is statement-attributed rather than complete
+cluster WAL. Retained payload excludes metadata and is measured before GC;
+it differs from the local reference's retained-file accounting. These are
+shared-host fixture results, not a production cost-per-TB or scale-out claim.
+Server cgroup lifetime memory peaks through the edit were 372–444 MB for
+baseline and 327–339 MB for candidate, including charged cache; they are not
+isolated application RSS or proof of an aggregate concurrency ceiling. Warm
+cache physical read accounting was zero in both. Remaining verification and
+staging writes still matter; lower process I/O does not establish device-level
+write amplification, NAND endurance or a replacement interval.
+
 ### PostgreSQL and MinIO backend cost
 
 A separate October 26 run used executable `97df1303`, Hub 2.2.0/hf_xet

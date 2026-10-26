@@ -92,6 +92,7 @@ rusqlite = { workspace = true, features = ["bundled"] }
 shardline-test-support.workspace = true
 wiremock = "0.6"
 xet-client.workspace = true
+xet-core-structures.workspace = true
 xet-data.workspace = true
 xet-runtime.workspace = true
 

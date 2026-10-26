@@ -73,12 +73,12 @@ pub(super) async fn read_chunk(
     repo: XetRepository,
 ) -> Result<Response, ServerError> {
     reject_commit_token_for_unbound_object(repo.capability())?;
-    // Bound concurrent metadata conversion and reads. Production stores use
-    // the derived membership index and still validate matched file records;
+    // Bound concurrent multi-container metadata conversion and reads. Production
+    // stores use the derived membership index and validate matched file records;
     // compatibility record adapters may use repository-scoped traversal.
     let _admit = state
         .admission
-        .try_acquire(weights::XORB_READ)
+        .try_acquire(weights::XET_DEDUP)
         .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&hash)?;
 

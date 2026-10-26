@@ -4447,6 +4447,7 @@ dependencies = [
  "url",
  "wiremock",
  "xet-client",
+ "xet-core-structures",
  "xet-data",
  "xet-runtime",
  "zeroize",

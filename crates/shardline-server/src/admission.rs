@@ -309,6 +309,9 @@ pub mod weights {
     /// records per request (O(N) in record count), so they are admission-gated
     /// like the upload/reconstruction paths to bound concurrent scans.
     pub const XORB_READ: u64 = 1;
+    /// Weight for bounded, multi-container native deduplication metadata.
+    /// Uses the existing controller's capacity clamp on small deployments.
+    pub const XET_DEDUP: u64 = 4;
     /// Weight for a xorb upload (stores chunks + metadata).
     pub const XORB_UPLOAD: u64 = 4;
     /// Weight for a shard upload (parsing + metadata commit).
