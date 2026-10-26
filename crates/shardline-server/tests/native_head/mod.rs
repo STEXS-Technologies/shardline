@@ -1,4 +1,5 @@
 //! Denied native HEAD requests must not discover private provider objects.
+mod ranges;
 mod revocation;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -258,6 +259,7 @@ async fn qualify(postgres: bool, million: bool) {
     }
     .qualify(root.path(), services.postgres_url().as_deref(), million)
     .await;
+    ranges::qualify(&client, &base, &owner, &other).await;
     let objects = shardline_server_core::ServerObjectStore::s3(storage).unwrap();
     let key = shardline_xet_adapter::xorb_object_key(&hash.hex()).unwrap();
     assert!(
