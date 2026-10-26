@@ -141,6 +141,14 @@ retries through v2 without a v1 fallback, and cold-downloads the exact bytes.
 This PostgreSQL/MinIO fixture does not qualify every transient failure or
 multi-host takeover scenario.
 
+Stock `hf_xet` 1.5.2 and 1.6.0 also pass a 512 MiB PostgreSQL/MinIO
+upload-recovery drill at six SIGKILL boundaries: intent creation, storing,
+completion of object work, stored state, metadata commit and visible state. Each
+interruption is followed by a retry and SHA-256-verified download. These
+tests run a server subprocess built from the current library; they do not
+replace released-binary upgrade tests or qualify every split-role and
+competing-replica failure scenario.
+
 Repository-wide read credentials also support plain HTTP full and range
 downloads of native-Xet Hub files stored under a branch. The server selects a
 verified storage scope inside the authorized repository rather than looking
