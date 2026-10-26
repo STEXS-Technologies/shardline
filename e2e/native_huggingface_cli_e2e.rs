@@ -8,6 +8,7 @@ mod native_huggingface_dedup_rebuild;
 mod native_huggingface_diagnostics;
 mod native_huggingface_expiry;
 mod native_huggingface_http_analytics;
+mod native_huggingface_https;
 mod native_huggingface_identity;
 mod native_huggingface_js;
 #[cfg(target_os = "linux")]

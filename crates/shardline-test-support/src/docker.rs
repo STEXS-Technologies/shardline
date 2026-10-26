@@ -46,6 +46,7 @@ mod minio_probe;
 mod tests;
 mod tls;
 pub use tls::HttpsDocumentFixture;
+pub use tls::HttpsProxyFixture;
 pub use tls::HttpsWebhookFixture;
 use tls::TlsMaterial;
 

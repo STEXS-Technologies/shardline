@@ -3,6 +3,8 @@ use super::*;
 use std::{process::Stdio, time::Instant};
 mod webhook;
 pub use webhook::HttpsWebhookFixture;
+mod proxy;
+pub use proxy::HttpsProxyFixture;
 
 /// Owned HTTPS document server for authentication integration tests.
 /// Certificates and listeners are disposable; dropping the fixture stops its server.

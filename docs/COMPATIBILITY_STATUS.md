@@ -134,6 +134,12 @@ backing MinIO service is not a client download endpoint. These shared-host
 checks do not qualify every TLS proxy, split-role deployment or backend TLS
 configuration, and do not replace final-head CI.
 
+The committed HTTPS regression test also passes with these three Xet versions.
+It uses separate upload/download processes and empty caches, checks rejection
+of an untrusted certificate, counts successful HTTPS Xorb download requests,
+and verifies the downloaded SHA-256. The pinned-client CI selections include
+this test; the hostname-mismatch check above remains a separate local control.
+
 Additional source-tree qualification with Hub 2.3.0 / `hf_xet` 1.7.0 passes
 model/dataset workflows on SQLite/local, PostgreSQL/local and PostgreSQL/MinIO,
 plus expired-URL recovery with combined and split API/transfer roles. The full

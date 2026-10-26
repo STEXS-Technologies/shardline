@@ -46,6 +46,8 @@ mod s3_fault_proxy;
 #[cfg(feature = "docker")]
 pub use docker::HttpsDocumentFixture;
 #[cfg(feature = "docker")]
+pub use docker::HttpsProxyFixture;
+#[cfg(feature = "docker")]
 pub use docker::HttpsWebhookFixture;
 
 pub use client_process::{native_client_output, native_client_output_with_input};
