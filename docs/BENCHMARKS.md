@@ -715,6 +715,13 @@ Every unique upload still made 8,538 S3 requests, with approximately 2.155 GB
 of process logical writes. These shared-host pairs support removing the copy;
 they do not prove a throughput, RSS, backend-cost or upstream-Xet advantage.
 
+The local async object adapter also transfers an already-owned member body to
+its blocking worker instead of cloning the payload. Borrowed callers still
+receive an owned copy before the worker starts. The worker retains the body
+through existing integrity checks and file/directory synchronization. This
+removes an allocation and copy for owned inputs; no whole-client throughput,
+RSS or physical-write reduction is attributed to that local change here.
+
 Lifecycle repair has a separate shared-container optimization: a bounded,
 run-local set remembers fully verified packed sources while scanning latest and
 version records. In a real MinIO fixture with four files sharing one container,
@@ -1819,6 +1826,24 @@ and 1,088,532,774 after the edit: 629,590 added bytes, versus 398,937,469
 in the earlier single-container fixture. Initial storage duplication and
 initial-upload throughput remain open gaps. These results do not establish
 upstream parity or statistical download superiority.
+
+A repeat on executable `260ddaa7`, including the later PostgreSQL candidate
+planning and paging changes, used the same corpus, reference, cold clients and
+reversed order. All eight downloads again passed SHA-256 verification.
+
+| Direct-CAS operation | Shardline `260ddaa7` seconds | Upstream local reference seconds |
+| --- | ---: | ---: |
+| Initial upload | 8.83–9.51 | 1.09–1.17 |
+| Initial full download, including SHA-256 | 0.64–0.68 | 0.88–0.90 |
+| Tail-edit upload from a cold client | 0.73–0.75 | 0.28–0.29 |
+| Edited full download, including SHA-256 | 0.63–0.64 | 0.88–0.90 |
+
+Shardline retained 1,087,903,184 bytes initially and 1,088,532,774 after the
+edit, unchanged from the preceding candidate. This local-disk workload does
+not exercise PostgreSQL, so it cannot measure the database lookup improvement.
+It confirms that initial-upload and retained-byte gaps remain in the current
+executable. The same reference durability and production-comparability limits
+above apply; these two-run ranges do not establish general download superiority.
 
 A separate four-run PostgreSQL/MinIO comparison used baseline/candidate/
 candidate/baseline order, stock Hub 2.2.0/hf_xet 1.7.0, one combined-role

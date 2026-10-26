@@ -457,9 +457,9 @@ impl AsyncObjectStore for LocalObjectStore {
         let this = self.clone();
         let key = key.clone();
         let integrity = *integrity;
-        let body_bytes = body.as_slice().to_vec();
+        let body_bytes = body.into_bytes();
         tokio::task::spawn_blocking(move || {
-            ObjectStore::put_if_absent(&this, &key, ObjectBody::from_vec(body_bytes), &integrity)
+            ObjectStore::put_if_absent(&this, &key, ObjectBody::from_bytes(body_bytes), &integrity)
         })
         .await
         .map_err(|join| {

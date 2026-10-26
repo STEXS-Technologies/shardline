@@ -107,6 +107,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   reporting and cancellation accounting.
 - Stop unused PostgreSQL candidate results with bounded pages in one consistent
   read snapshot, retaining early proofs, corruption errors and cancellation cleanup.
+- Avoid copying already-owned local object writes when handing their bodies to
+  blocking storage workers, retaining validation and durable publication.
 - Overlap native Xet member writes on S3 within a bounded memory budget,
   retaining full validation, conditional writes and publication ordering.
 - Avoid scratch files when GC verifies S3 containers up to 2 MiB, using a fixed
