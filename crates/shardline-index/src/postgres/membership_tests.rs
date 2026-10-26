@@ -87,6 +87,16 @@ async fn indexed_membership_million_record_candidate_lookups() {
                 .is_some()
         );
     }
+    // The streaming candidate path uses a separate statement from LIMIT 1.
+    // Prime that actual adapter too: common hashes must not train a plan
+    // which later traverses unrelated records for a sparse or absent hash.
+    for _ in 0..64 {
+        assert!(
+            first_streamed_candidate(&store, &scope, &shared)
+                .await
+                .is_some()
+        );
+    }
     for (label, requested_scope, hash, expected) in [
         ("shared", &scope, &shared, true),
         ("late", &scope, &late, true),
@@ -114,8 +124,50 @@ async fn indexed_membership_million_record_candidate_lookups() {
             "million-record candidate {label}: {} us",
             started.elapsed().as_micros()
         );
+        let streamed_started = std::time::Instant::now();
+        let streamed = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            first_streamed_candidate(&store, requested_scope, hash),
+        )
+        .await
+        .unwrap();
+        assert_eq!(streamed.is_some(), expected);
+        if let Some(stored) = streamed {
+            let parsed: FileRecord = serde_json::from_slice(&stored.bytes).unwrap();
+            assert_eq!(parsed.repository_scope.as_ref(), Some(requested_scope));
+            assert!(parsed.chunks.iter().any(|chunk| &chunk.hash == hash));
+        }
+        eprintln!(
+            "million-record streamed candidate {label}: {} us",
+            streamed_started.elapsed().as_micros()
+        );
     }
     pool.close().await;
+}
+
+async fn first_streamed_candidate(
+    store: &PostgresRecordStore,
+    scope: &RepositoryScope,
+    hash: &str,
+) -> Option<crate::StoredRecord<crate::PostgresRecordLocator>> {
+    let mut first = None;
+    let result = store
+        .visit_repository_hash_records(scope, hash, |stored| {
+            first = Some(stored);
+            // Exercise the real early-proof exit rather than draining a
+            // million shared candidates into the benchmark's client.
+            Err::<(), _>(PostgresMetadataStoreError::RecordNotFound)
+        })
+        .await;
+    if first.is_some() {
+        assert!(matches!(
+            result,
+            Err(PostgresMetadataStoreError::RecordNotFound)
+        ));
+    } else {
+        result.unwrap();
+    }
+    first
 }
 
 async fn candidates(store: &PostgresRecordStore, scope: &RepositoryScope, hash: &str) -> usize {

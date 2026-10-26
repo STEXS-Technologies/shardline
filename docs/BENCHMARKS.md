@@ -1309,6 +1309,35 @@ distinguish executable residency from heap growth; they do not establish equal
 RSS, production memory requirements or PostgreSQL CPU cost. All paired tests
 passed the same coverage, denial, revocation and connection-reuse assertions.
 
+The streaming candidate lookup now also uses an unnamed statement. A separate
+PostgreSQL 16 adapter diagnostic populated one million valid, trigger-indexed
+records, primed 64 common-hash streaming lookups, then requested common, late,
+absent and wrong-repository candidates. The visitor stopped at its first valid
+record; it did not drain all common-hash results. Two baseline/fixed pairs gave:
+
+| Streaming probe at one million records | Cached plan, ms | Parameter-aware plan, ms |
+| --- | ---: | ---: |
+| Common hash, first record | 5.35–5.47 | 5.17–6.06 |
+| Late record | 678–739 | 0.75–0.84 |
+| Absent hash | 52.98–56.41 | 0.78–0.82 |
+| Wrong repository | 142.68–162.63 | 0.71–0.88 |
+
+All four runs passed the record, repository-scope and member-hash assertions.
+Separate owned-fixture query plans showed that generic plans can traverse the
+ordered record-key index, while parameter-aware sparse probes use the
+membership lookup index. Replanning has a cost; these observations do not prove
+lower aggregate PostgreSQL CPU, RSS, production tail latency or Xet transfer
+times. They also do not remove proportional traversal when a valid proof
+actually requires many candidates. The first-candidate probe is unchanged.
+In the separate SQL-only fixture, after a million membership updates and a
+completed vacuum, the sparse streaming query touched 55,291 shared buffers
+with a forced generic plan versus 13 with a custom plan. Before the updates,
+the counts were 65,346 versus 13. Buffer accesses include cache hits and are
+not physical disk-read bytes; the synthetic SQL fixture does not validate HTTP
+authorization or establish an SSD endurance improvement.
+Reproduce with the ignored `indexed_membership_million_record_candidate_lookups`
+test described above; a disposable, migrated PostgreSQL database is required.
+
 #### Denied native Xorb HEAD requests
 
 Native Xorb HEAD now checks published repository references before reading

@@ -100,8 +100,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   for footer access, retaining exact range and historical access checks.
 - Bound PostgreSQL's first-candidate authorization query, avoiding large result
   transfers when one record proves access; retain full traversal when needed.
-- Plan PostgreSQL's first-candidate lookup for the requested hash, avoiding slow
-  missing-hash scans caused by generic prepared plans.
+- Plan PostgreSQL's first-candidate and streaming lookups for the requested
+  hash, avoiding slow missing-hash scans caused by generic prepared plans.
 - Reduce PostgreSQL authorization overhead for containers shared by many files
   with bounded record-conversion batches, retaining access checks, corruption
   reporting and cancellation accounting.

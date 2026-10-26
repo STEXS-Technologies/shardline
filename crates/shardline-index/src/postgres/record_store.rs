@@ -1126,6 +1126,10 @@ impl RecordTraversal for super::PostgresRecordStore {
             )
             .bind(scope_key)
             .bind(hash_hex)
+            // Shared hashes and sparse/absent hashes need different plans.
+            // As with the first-candidate probe, avoid a cached generic plan
+            // which can scan unrelated records after common-hash requests.
+            .persistent(false)
             .fetch(&self.pool);
             loop {
                 let batch = candidate_batch::read(&mut rows).await.map_err(Into::into)?;
