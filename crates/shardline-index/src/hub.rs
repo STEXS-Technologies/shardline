@@ -1,6 +1,20 @@
 use shardline_protocol::SecretString;
 use std::sync::Arc;
 
+/// The complete revision listing exceeds its requested bound.
+/// Storage failures remain distinct so callers can safely choose a narrower
+/// indexed traversal without retrying or concealing a failed database read.
+#[derive(Debug)]
+pub struct HubRevisionListingOverflow;
+
+impl std::fmt::Display for HubRevisionListingOverflow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Hub revisions exceed the requested listing limit")
+    }
+}
+
+impl std::error::Error for HubRevisionListingOverflow {}
+
 mod creation;
 mod object_location;
 pub use creation::{
@@ -1254,11 +1268,7 @@ impl<T: HubStore> ErasedHubStore for T {
                 Box::new(std::io::Error::other(error.to_string()))
                     as Box<dyn std::error::Error + Send + Sync>
             })?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub revisions exceed the requested listing limit",
-                )) as _
-            })
+            .ok_or_else(|| Box::new(HubRevisionListingOverflow) as _)
     }
 
     fn list_revisions(
@@ -2068,11 +2078,7 @@ where
                 Box::new(std::io::Error::other(error.to_string()))
                     as Box<dyn std::error::Error + Send + Sync>
             })?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub revisions exceed the requested listing limit",
-                )) as _
-            })
+            .ok_or_else(|| Box::new(HubRevisionListingOverflow) as _)
     }
 
     fn list_revisions(

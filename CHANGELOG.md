@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Keep detached Hub revisions from exhausting the Git export history limit,
+  selecting reachable history after a bounded listing overflows while retaining
+  reference, history, object and byte limits.
 - Release inactive S3 write-coordination entries directly instead of scanning
   every active key on each acquisition, preserving same-key exclusion and
   cancellation cleanup.

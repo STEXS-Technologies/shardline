@@ -600,10 +600,14 @@ server does not expose Git receive hooks, so accepted options currently have
 no hook consumer. The frontend supports `side-band-64k`, not the older
 `side-band` mode.
 
-Git export is bounded to 10,000 history revisions, 10,000 references, 100,000
+Git export is bounded to 10,000 reachable history revisions, 10,000 references, 100,000
 unique objects, 128 tree levels, 1,024 bytes per projected path, 1,000,000
 cumulative file entries across projected revisions, and 64 MiB of unique
 uncompressed object payload. Requests exceeding these bounds fail explicitly.
+Detached history does not consume the reachable-history allowance. Ordinary
+repositories retain the bounded bulk listing; if that listing overflows, export
+uses indexed revision lookups from the selected live refs or authorized snapshot.
+Storage errors fail the request rather than triggering a fallback traversal.
 File-entry quotas are applied in SQL before decoding the next revision. Object
 quotas are enforced during construction and archive decompression. Compression
 and HTTP framing retain additional bounded buffers. Inline bytes are loaded once

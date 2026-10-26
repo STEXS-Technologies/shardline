@@ -14,6 +14,8 @@ use super::super::pack::{GitObject, ObjectType, generate_pack};
 use super::pack_parse::parse_pack_data;
 use super::{pack_parse::parse_pack_data_with_budget, upload_pack::build_lfs_pointer_blob};
 
+mod history_selection;
+
 /// Bound cumulative metadata work even when most Git objects deduplicate.
 const MAX_PROJECTED_FILE_ENTRIES: usize = 1_000_000;
 
@@ -483,6 +485,7 @@ pub(super) fn project_history_with_roots(
     requested_roots: Option<&[String]>,
 ) -> Result<GitProjection, HubApiError> {
     let mut remaining_file_work = maximum_file_entries;
+    let mut export_roots = Vec::new();
     let revisions = if let Some(roots) = requested_roots {
         // Identity lookup must not impose the Git export history limit on
         // repositories with many unrelated or already-committed revisions.
@@ -532,18 +535,16 @@ pub(super) fn project_history_with_roots(
         }
         selected
     } else {
-        state
-            .store
-            .list_revisions_bounded(repo_id, 10_000)
-            .map_err(failure)?
+        let (selected, roots) = history_selection::live_revisions(state, repo_id, auth)?;
+        export_roots = roots;
+        selected
     };
     if revisions.len() > 10_000 {
         return Err(failure("Git history exceeds 10000 revisions"));
     }
     let mut reachable = std::collections::HashSet::new();
     let by_sha: HashMap<_, _> = revisions.iter().map(|r| (r.sha.as_str(), r)).collect();
-    let visible_refs = crate::revision_access::visible_refs(state, repo_id, auth)?;
-    let mut roots = match requested_roots {
+    let roots = match requested_roots {
         Some(roots) => {
             if roots.len() > 10_000 || roots.iter().any(|root| !by_sha.contains_key(root.as_str()))
             {
@@ -553,27 +554,8 @@ pub(super) fn project_history_with_roots(
             }
             roots.to_vec()
         }
-        None => state
-            .store
-            .list_refs_bounded(repo_id, 10_000)
-            .map_err(failure)?
-            .into_iter()
-            .filter(|reference| {
-                visible_refs.as_ref().is_none_or(|visible| {
-                    visible.contains(shardline_index::hub::canonical_ref_name(
-                        &reference.ref_name,
-                    ))
-                })
-            })
-            .map(|reference| reference.sha)
-            .collect(),
+        None => export_roots,
     };
-    if requested_roots.is_none()
-        && roots.is_empty()
-        && let Some(snapshot) = crate::revision_access::snapshot_commit(state, repo_id, auth)?
-    {
-        roots.push(snapshot);
-    }
     let mut stack: Vec<_> = roots.iter().map(String::as_str).collect();
     let mut known_identities = HashMap::new();
     while let Some(sha) = stack.pop() {
