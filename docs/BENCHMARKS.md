@@ -1392,6 +1392,20 @@ candidate SELECTs and produced 65,999,935 versus 1,001,040 rows. The extra
 round trips are the cost of bounding unused results. These adapter diagnostics
 do not establish production tail latency or stock-client throughput.
 
+An October 27 PostgreSQL 16 diagnostic kept the real membership triggers,
+disabled autovacuum, and changed the member hash in one million records.
+With both keyset bounds present, a revoked-hash probe returned no rows but
+visited 14,915 shared buffers and took 43.25 ms. After explicit vacuum and
+analysis, the same probe visited four buffers and took 0.066 ms. Pages of
+1,024 current records took 11.14–11.43 ms before vacuum and 10.71–10.94 ms
+afterward. These are individual instrumented SQL observations, including
+cache hits, not HTTP latency, physical I/O or production percentiles.
+They identify stale-index cleanup as one remaining cost after bulk updates;
+they do not justify removing the authoritative record join. Keep autovacuum
+enabled and inspect dead tuples and vacuum progress when diagnosing latency
+after large metadata changes. This diagnostic does not resolve every source
+of post-update HTTP latency.
+
 #### Denied native Xorb HEAD requests
 
 Native Xorb HEAD now checks published repository references before reading
