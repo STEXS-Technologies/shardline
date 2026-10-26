@@ -20,6 +20,9 @@ struct Events {
     retryable: AtomicUsize,
     failed: AtomicUsize,
     completed: AtomicUsize,
+    v1_failed: AtomicUsize,
+    v1_completed: AtomicUsize,
+    v1_failure_status: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -41,9 +44,9 @@ async fn forward(State(state): State<FrontDoor>, request: Request) -> Result<Res
     if v2 {
         state.events.v2.fetch_add(1, Ordering::SeqCst);
     }
-    if request.method() == reqwest::Method::POST
-        && matches!(request.uri().path(), "/v1/shards" | "/shards")
-    {
+    let v1 = request.method() == reqwest::Method::POST
+        && matches!(request.uri().path(), "/v1/shards" | "/shards");
+    if v1 {
         state.events.v1.fetch_add(1, Ordering::SeqCst);
     }
     let target = format!("{}{}", state.upstream, request.uri());
@@ -60,6 +63,17 @@ async fn forward(State(state): State<FrontDoor>, request: Request) -> Result<Res
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
     let status = upstream.status();
+    if v1 {
+        if status.is_success() {
+            state.events.v1_completed.fetch_add(1, Ordering::SeqCst);
+        } else {
+            state.events.v1_failed.fetch_add(1, Ordering::SeqCst);
+            state
+                .events
+                .v1_failure_status
+                .store(usize::from(status.as_u16()), Ordering::SeqCst);
+        }
+    }
     let mut headers = upstream.headers().clone();
     headers.remove(header::CONNECTION);
     headers.remove(header::TRANSFER_ENCODING);
@@ -127,8 +141,8 @@ async fn interrupt_first_publication(pool: sqlx::PgPool) -> Result<(), sqlx::Err
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires stock hf_xet v2 client and owned PostgreSQL/MinIO"]
-async fn native_huggingface_retries_streamed_shard_owner_loss() -> Result<(), TestError> {
+#[ignore = "requires stock hf_xet client and owned PostgreSQL/MinIO"]
+async fn native_huggingface_retries_shard_owner_loss() -> Result<(), TestError> {
     assert!(
         command_available("hf"),
         "native retry qualification requires hf"
@@ -137,6 +151,15 @@ async fn native_huggingface_retries_streamed_shard_owner_loss() -> Result<(), Te
         python_package_available("hf_xet"),
         "native retry qualification requires hf_xet"
     );
+    let version = native_output(Command::new(hf_python()).args([
+        "-c",
+        "from importlib.metadata import version; print(version('hf-xet'))",
+    ]))?;
+    assert!(
+        version.status.success(),
+        "read the actual stock Xet version"
+    );
+    let version = std::str::from_utf8(&version.stdout)?.trim();
     let services = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
         .with_minio()
@@ -217,19 +240,45 @@ async fn native_huggingface_retries_streamed_shard_owner_loss() -> Result<(), Te
         events.retryable.load(Ordering::SeqCst),
         events.completed.load(Ordering::SeqCst)
     );
-    assert_eq!(
-        events.v2.load(Ordering::SeqCst),
-        2,
-        "one failed v2 attempt and one retry"
-    );
-    assert_eq!(
-        events.v1.load(Ordering::SeqCst),
-        0,
-        "no v1 fallback masks this failure"
-    );
-    assert_eq!(events.retryable.load(Ordering::SeqCst), 1);
-    assert_eq!(events.failed.load(Ordering::SeqCst), 1);
-    assert_eq!(events.completed.load(Ordering::SeqCst), 1);
+    match version {
+        "1.5.2" => assert_eq!(events.v2.load(Ordering::SeqCst), 0, "legacy client uses v1"),
+        "1.6.0" | "1.7.0" => assert_eq!(
+            events.v1.load(Ordering::SeqCst),
+            0,
+            "pinned v2 clients must not silently fall back to v1"
+        ),
+        _ => {} // Other client versions still must satisfy one complete wire contract below.
+    }
+    if events.v2.load(Ordering::SeqCst) == 0 {
+        assert_eq!(
+            events.v1.load(Ordering::SeqCst),
+            2,
+            "one failed v1 attempt and one retry"
+        );
+        assert_eq!(events.v1_failed.load(Ordering::SeqCst), 1);
+        assert_eq!(events.v1_completed.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            events.v1_failure_status.load(Ordering::SeqCst),
+            usize::from(StatusCode::SERVICE_UNAVAILABLE.as_u16())
+        );
+        assert_eq!(events.retryable.load(Ordering::SeqCst), 0);
+        assert_eq!(events.failed.load(Ordering::SeqCst), 0);
+        assert_eq!(events.completed.load(Ordering::SeqCst), 0);
+    } else {
+        assert_eq!(
+            events.v2.load(Ordering::SeqCst),
+            2,
+            "one failed v2 attempt and one retry"
+        );
+        assert_eq!(
+            events.v1.load(Ordering::SeqCst),
+            0,
+            "no v1 fallback masks this failure"
+        );
+        assert_eq!(events.retryable.load(Ordering::SeqCst), 1);
+        assert_eq!(events.failed.load(Ordering::SeqCst), 1);
+        assert_eq!(events.completed.load(Ordering::SeqCst), 1);
+    }
     let cold = tempfile::tempdir()?;
     let download = working.path().join("download");
     run_hf(

@@ -138,6 +138,11 @@ Hub 1.25.1 and 2.3.0 with `hf_xet` 1.7.0 also pass a real PostgreSQL publication
 session termination during a 9 MiB native upload. The interrupted transaction
 publishes no records; the stock client receives a retryable v2 shard error,
 retries through v2 without a v1 fallback, and cold-downloads the exact bytes.
+The same owned PostgreSQL/MinIO cut also passes Hub 1.25.1 with `hf_xet`
+1.6.0 through v2, and `hf_xet` 1.5.2 through v1: the older client receives
+HTTP 503, retries once, and cold-downloads the exact bytes. The regression
+checks the expected wire version for each pinned client, one failed attempt,
+one successful attempt and no records from the interrupted publication.
 This PostgreSQL/MinIO fixture does not qualify every transient failure or
 multi-host takeover scenario.
 
