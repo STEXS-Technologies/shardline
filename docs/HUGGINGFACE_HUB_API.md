@@ -120,6 +120,9 @@ contention can still return HTTP 409.
 A lost reply can follow a successful commit. Check the stored revision or file
 before retrying. Retrying an unconditional request can add another commit even
 when its file bytes are already stored; commit creation is not exactly once.
+Reusing the original `parent_commit` makes the retry conditional and prevents
+another commit after the first one landed. A 409 can also mean another writer
+advanced the branch, so verify the stored result before treating it as success.
 
 Custom `HubStore` implementations must implement `publish_prepared_revision`
 to support Hub commit publication. Its default fails closed without ref writes.
