@@ -125,9 +125,11 @@ rejected before publishing a revision. Copy plus file deletion supports moves;
 it does not delete the underlying immutable bytes needed by older revisions.
 
 The stock SDK commit checks pass with `huggingface_hub` 1.25.1 and `hf_xet`
-1.6.0/1.7.0 on local storage and PostgreSQL/MinIO. They cover folder replacement,
+1.5.2/1.6.0/1.7.0 on local storage and PostgreSQL/MinIO. They cover folder replacement,
 branch/history preservation, regular and LFS copies, native LFS moves and exact
 download bytes. Transfer counters verify that copies reuse stored payloads.
+The stock history paginator also keeps its original ancestry when a branch
+advances between pages; snapshot credentials remain limited to one commit.
 
 ## Repository credentials and stored objects
 
