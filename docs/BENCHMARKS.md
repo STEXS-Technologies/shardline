@@ -308,8 +308,16 @@ plans searched the covering membership index and then the record-key index;
 SQLite integrity and foreign-key checks passed. Observed query times were
 1.06/0.065/0.037/0.034 ms respectively with warm host caches. These are single
 SQL observations, not HTTP authorization, cold-cache latency or million-object
-storage measurements. PostgreSQL and proportional compatibility fallbacks
-require separate qualification.
+storage measurements. A separate disposable PostgreSQL 16 test populated one
+million records through the actual refresh triggers and called
+`PostgresRecordStore::first_repository_hash_record` directly. After 32 common-hash
+lookups, shared, final-record, missing-hash and wrong-repository probes returned
+the expected results in 0.32–0.50 ms across two runs with warm caches.
+This explicitly ignored qualification can be run with a migrated disposable
+`DATABASE_URL` using `cargo test -p shardline-index --all-features --lib
+indexed_membership_million_record_candidate_lookups -- --ignored --nocapture`.
+Neither test proves complete HTTP authorization, prompt revocation, cold-cache
+latency or proportional compatibility fallbacks.
 
 An additional October 26 comparison used actual v1.12.1 and candidate
 `b569f583`, harness `605d9fcc`, eight 36-MiB objects, eight clients and three
