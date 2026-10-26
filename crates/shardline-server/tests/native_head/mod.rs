@@ -210,6 +210,18 @@ async fn qualify(postgres: bool, million: bool) {
     assert_eq!(published.status(), StatusCode::OK);
     if million {
         revocation::populate(services.postgres_url().unwrap().as_str()).await;
+        // Exercise the first HTTP lookup after population, before warming any
+        // membership candidate. This is not an OS/database cold-cache claim.
+        let read = revocation::Read {
+            client: &client,
+            url: &url,
+            credential: &owner,
+            proxy: &proxy,
+            bytes: &bytes,
+        };
+        read.allowed().await;
+        // Retain repeated common-hash probes before rare/negative probes: a
+        // generic PostgreSQL plan must not hide behind fast first-row hits.
         for _ in 0..32 {
             assert_eq!(
                 client
@@ -223,7 +235,13 @@ async fn qualify(postgres: bool, million: bool) {
             );
         }
     }
+    let denied_started = std::time::Instant::now();
     denied_reads(&client, &url, &other, &proxy).await;
+    eprintln!(
+        "wrong-repository HTTP probes: {} us",
+        denied_started.elapsed().as_micros()
+    );
+    let missing_started = std::time::Instant::now();
     denied_reads(
         &client,
         &format!("{base}/v1/xorbs/default/{}", "f".repeat(64)),
@@ -231,6 +249,10 @@ async fn qualify(postgres: bool, million: bool) {
         &proxy,
     )
     .await;
+    eprintln!(
+        "missing-hash HTTP probes: {} us",
+        missing_started.elapsed().as_micros()
+    );
     let before_heads = proxy.head_requests();
     let before_gets = proxy.get_requests();
     let response = client.head(&url).bearer_auth(&owner).send().await.unwrap();

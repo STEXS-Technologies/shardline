@@ -50,7 +50,7 @@ impl Metadata {
 }
 
 impl Read<'_> {
-    async fn allowed(&self) {
+    pub(super) async fn allowed(&self) {
         let started = std::time::Instant::now();
         let response = self
             .client
@@ -96,6 +96,62 @@ impl Read<'_> {
         let expected = if million { 1_000_002 } else { 2 };
         assert_eq!(metadata.counts().await, (expected, expected));
         self.allowed().await;
+        if million {
+            let pool = match &metadata {
+                Metadata::Postgres(pool) => Some(pool),
+                Metadata::Local(_) => None,
+            }
+            .expect("million-record HTTP fixture requires PostgreSQL");
+            // Turn the million shared-source candidates into unrelated records
+            // using the real refresh trigger. The two genuine publications
+            // remain authoritative; candidate density must not govern access.
+            let changed = tokio::time::timeout(
+                Duration::from_secs(600),
+                sqlx::query(
+                    "UPDATE shardline_file_records SET record =
+                    jsonb_set(record,'{chunks,0,hash}',to_jsonb(repeat('e',64)))
+                    WHERE file_id LIKE 'member-%'",
+                )
+                .execute(pool),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .rows_affected();
+            assert_eq!(changed, 1_000_000);
+            sqlx::raw_sql("ANALYZE shardline_file_records; ANALYZE shardline_record_membership")
+                .execute(pool)
+                .await
+                .unwrap();
+            let source_hash = self.url.rsplit('/').next().unwrap();
+            let candidates: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shardline_record_membership WHERE member_hash=$1",
+            )
+            .bind(source_hash)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                candidates, 2,
+                "only the real latest/history publications authorize this source"
+            );
+            assert_eq!(metadata.counts().await, (expected, expected));
+            eprintln!("sparse source among one million unrelated records:");
+            self.allowed().await;
+            super::denied_reads(
+                self.client,
+                self.url,
+                &token("other", TokenScope::Read),
+                self.proxy,
+            )
+            .await;
+            let missing = format!(
+                "{}/{}",
+                self.url.rsplit_once('/').unwrap().0,
+                "f".repeat(64)
+            );
+            super::denied_reads(self.client, &missing, self.credential, self.proxy).await;
+        }
         assert_eq!(
             metadata.delete("latest").await,
             u64::try_from(expected.checked_sub(1).unwrap()).unwrap()
