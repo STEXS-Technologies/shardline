@@ -33,8 +33,7 @@ use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
-#[path = "s3_real_client/prerequisites.rs"]
-mod prerequisites;
+mod s3_real_client;
 
 /// Test signing key matching the server's `with_token_signing_key`.
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
@@ -708,6 +707,14 @@ fn boto3_failure_category(stderr: &[u8]) -> &'static str {
     "unclassified client failure"
 }
 
+fn boto3_failure_script_line(stderr: &[u8]) -> Option<u32> {
+    // Only a parsed line number may leave the private subprocess diagnostics.
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter_map(|line| line.strip_prefix("boto3 script line: ")?.parse().ok())
+        .next_back()
+}
+
 /// Uses the same explicitly configured SDK for discovery and execution.
 fn boto3_available() -> bool {
     let available = shardline_test_support::native_client_output(
@@ -1106,9 +1113,10 @@ async fn boto3_sdk_roundtrip() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "boto3 subprocess failed with status {}: {}",
+        "boto3 subprocess failed with status {}: {}, script line {:?}",
         output.status,
-        boto3_failure_category(&output.stderr)
+        boto3_failure_category(&output.stderr),
+        boto3_failure_script_line(&output.stderr)
     );
     assert!(
         stdout.contains("ALL BOTO3 CHECKS PASSED"),
