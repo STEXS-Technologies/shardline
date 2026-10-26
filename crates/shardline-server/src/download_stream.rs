@@ -104,6 +104,7 @@ pub(crate) async fn validated_xorb_byte_range_stream(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn authorized_xorb_byte_range_stream(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
@@ -111,11 +112,31 @@ pub(crate) async fn authorized_xorb_byte_range_stream(
     total_length: u64,
     range: ByteRange,
     pool: BoundedPool,
-    coverage: Option<crate::record_store::XorbRangeCoverage>,
+    coverage: Option<&crate::record_store::XorbRangeCoverage>,
 ) -> Result<ServerByteStream, ServerError> {
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
     }
+    prepare_xorb_byte_range(object_store, object_key, hash_hex, total_length, pool)
+        .await?
+        .into_stream(range, coverage)
+}
+
+/// A completely verified source held privately until range authorization ends.
+pub(crate) struct VerifiedXorb {
+    file: XorbReadFile,
+    pool: BoundedPool,
+    total_length: u64,
+    packed_content_length: u64,
+}
+
+pub(crate) async fn prepare_xorb_byte_range(
+    object_store: &ServerObjectStore,
+    object_key: &ObjectKey,
+    hash_hex: &str,
+    total_length: u64,
+    pool: BoundedPool,
+) -> Result<VerifiedXorb, ServerError> {
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
     let store = object_store.clone();
     let key = object_key.clone();
@@ -127,7 +148,7 @@ pub(crate) async fn authorized_xorb_byte_range_stream(
     } else {
         0
     };
-    let file = crate::admission::cancellable_work_with_setup(
+    let (file, packed_content_length) = crate::admission::cancellable_work_with_setup(
         &pool,
         || (),
         move |(), cancel| {
@@ -179,50 +200,72 @@ pub(crate) async fn authorized_xorb_byte_range_stream(
             );
             cancel.check()?;
             let validated = validated?;
-            if coverage
-                .as_ref()
-                .is_some_and(|allowed| !allowed.permits(range, validated.packed_content_length()))
-            {
-                return Err(ServerError::NotFound);
-            }
-            Ok(file)
+            Ok((file, validated.packed_content_length()))
         },
     )
     .await?;
-    let state = SerializedXorbStreamState {
+    Ok(VerifiedXorb {
         file,
-        offset: range.start(),
-        end: range.end_inclusive(),
         pool,
-    };
-    Ok(Box::pin(stream::try_unfold(
-        state,
-        |mut state| async move {
-            if state.offset > state.end {
-                return Ok(None);
-            }
-            let work_pool = state.pool.clone();
-            blocking_stream_work(&work_pool, move || {
-                use std::io::Read;
-                let length = state
-                    .end
-                    .checked_sub(state.offset)
-                    .and_then(|n| n.checked_add(1))
-                    .ok_or(ServerError::Overflow)?
-                    .min(STREAM_READ_BUFFER_BYTES);
-                let length = usize::try_from(length)?;
-                state.file.seek(SeekFrom::Start(state.offset))?;
-                let mut bytes = vec![0_u8; length];
-                state.file.read_exact(&mut bytes)?;
-                state.offset = state
-                    .offset
-                    .checked_add(u64::try_from(length)?)
-                    .ok_or(ServerError::Overflow)?;
-                Ok(Some((Bytes::from(bytes), state)))
-            })
-            .await
-        },
-    )))
+        total_length,
+        packed_content_length,
+    })
+}
+
+impl VerifiedXorb {
+    pub(crate) const fn packed_content_length(&self) -> u64 {
+        self.packed_content_length
+    }
+
+    pub(crate) fn into_stream(
+        self,
+        range: ByteRange,
+        coverage: Option<&crate::record_store::XorbRangeCoverage>,
+    ) -> Result<ServerByteStream, ServerError> {
+        if range.end_inclusive() >= self.total_length {
+            return Err(ServerError::RangeNotSatisfiable);
+        }
+        if coverage
+            .as_ref()
+            .is_some_and(|allowed| !allowed.permits(range, self.packed_content_length))
+        {
+            return Err(ServerError::NotFound);
+        }
+        let state = SerializedXorbStreamState {
+            file: self.file,
+            offset: range.start(),
+            end: range.end_inclusive(),
+            pool: self.pool,
+        };
+        Ok(Box::pin(stream::try_unfold(
+            state,
+            |mut state| async move {
+                if state.offset > state.end {
+                    return Ok(None);
+                }
+                let work_pool = state.pool.clone();
+                blocking_stream_work(&work_pool, move || {
+                    use std::io::Read;
+                    let length = state
+                        .end
+                        .checked_sub(state.offset)
+                        .and_then(|n| n.checked_add(1))
+                        .ok_or(ServerError::Overflow)?
+                        .min(STREAM_READ_BUFFER_BYTES);
+                    let length = usize::try_from(length)?;
+                    state.file.seek(SeekFrom::Start(state.offset))?;
+                    let mut bytes = vec![0_u8; length];
+                    state.file.read_exact(&mut bytes)?;
+                    state.offset = state
+                        .offset
+                        .checked_add(u64::try_from(length)?)
+                        .ok_or(ServerError::Overflow)?;
+                    Ok(Some((Bytes::from(bytes), state)))
+                })
+                .await
+            },
+        )))
+    }
 }
 
 /// Returns the serialized xorb length when an object is stored under `hash_hex`.

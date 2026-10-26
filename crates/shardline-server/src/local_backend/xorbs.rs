@@ -9,7 +9,9 @@ use shardline_storage::ObjectStore;
 use super::LocalBackend;
 use crate::{
     ServerError,
-    download_stream::{ServerByteStream, authorized_xorb_byte_range_stream, object_byte_stream},
+    download_stream::{
+        ServerByteStream, VerifiedXorb, object_byte_stream, prepare_xorb_byte_range,
+    },
     upload_ingest::{RequestBodyReader, stage_body_with_spill, store_admitted_xorb},
     xet_adapter::{XorbUploadResponse, resolve_dedupe_shard_object, xorb_object_key},
 };
@@ -89,30 +91,26 @@ impl LocalBackend {
         Ok((byte_stream, total_length))
     }
 
-    /// Streams a stored xorb byte range by hash.
+    /// Prepares a fully verified xorb for subsequent range authorization.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the hash is invalid, the xorb is missing, or the
-    /// requested byte range cannot be served.
-    pub(crate) async fn read_xorb_range_stream(
+    /// stored length or content fails verification.
+    pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
         total_length: u64,
-        range: ByteRange,
-        coverage: Option<crate::record_store::XorbRangeCoverage>,
-    ) -> Result<ServerByteStream, ServerError> {
+    ) -> Result<VerifiedXorb, ServerError> {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        authorized_xorb_byte_range_stream(
+        prepare_xorb_byte_range(
             &object_store,
             &object_key,
             hash_hex,
             total_length,
-            range,
             self.stream_work_pool.clone(),
-            coverage,
         )
         .await
     }

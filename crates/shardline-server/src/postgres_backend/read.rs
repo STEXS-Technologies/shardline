@@ -15,8 +15,8 @@ use crate::{
     ServerError,
     chunk_store::chunk_object_key,
     download_stream::{
-        ServerByteStream, authorized_xorb_byte_range_stream, collect_file_record_bytes,
-        file_record_byte_stream, object_byte_range_stream, object_byte_stream,
+        ServerByteStream, VerifiedXorb, collect_file_record_bytes, file_record_byte_stream,
+        object_byte_range_stream, object_byte_stream, prepare_xorb_byte_range,
     },
     error::IndexError,
     object_store::{reconstruct_file_record_bytes, visit_object_prefix},
@@ -441,30 +441,26 @@ impl super::PostgresBackend {
         Ok((byte_stream, total_length))
     }
 
-    /// Streams a stored xorb byte range by hash.
+    /// Prepares a fully verified xorb for subsequent range authorization.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the hash is invalid, the xorb is missing, or the
-    /// requested byte range cannot be served.
-    pub(crate) async fn read_xorb_range_stream(
+    /// stored length or content fails verification.
+    pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
         total_length: u64,
-        range: ByteRange,
-        coverage: Option<crate::record_store::XorbRangeCoverage>,
-    ) -> Result<ServerByteStream, ServerError> {
+    ) -> Result<VerifiedXorb, ServerError> {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        authorized_xorb_byte_range_stream(
+        prepare_xorb_byte_range(
             &object_store,
             &object_key,
             hash_hex,
             total_length,
-            range,
             self.stream_work_pool.clone(),
-            coverage,
         )
         .await
     }

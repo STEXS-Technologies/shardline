@@ -1,4 +1,5 @@
 //! Denied native HEAD requests must not discover private provider objects.
+mod revocation;
 use std::{num::NonZeroUsize, time::Duration};
 
 use reqwest::{Client, StatusCode};
@@ -23,16 +24,32 @@ use tokio::net::TcpListener;
 
 const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
+struct ServerCleanup(tokio::task::AbortHandle);
+
+impl Drop for ServerCleanup {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires disposable Docker MinIO"]
 async fn scoped_head_authorizes_before_provider_metadata_with_local_records() {
-    qualify(false).await;
+    qualify(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires disposable Docker PostgreSQL and MinIO"]
 async fn scoped_head_authorizes_before_provider_metadata_with_postgres_records() {
-    qualify(true).await;
+    qualify(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires disposable Docker PostgreSQL/MinIO and one million metadata records"]
+async fn scoped_reads_recheck_membership_after_million_record_revocation() {
+    tokio::time::timeout(Duration::from_secs(1200), qualify(true, true))
+        .await
+        .expect("million-record HTTP qualification exceeded its deadline");
 }
 
 fn token(repository: &str, permission: TokenScope) -> String {
@@ -46,30 +63,41 @@ fn token(repository: &str, permission: TokenScope) -> String {
         .unwrap()
 }
 
-async fn denied_head(client: &Client, url: &str, credential: &str, proxy: &S3FaultProxy) {
+async fn denied_reads(client: &Client, url: &str, credential: &str, proxy: &S3FaultProxy) {
     let before_heads = proxy.head_requests();
     let before_gets = proxy.get_requests();
-    let response = client
-        .head(url)
-        .bearer_auth(credential)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(!response.headers().contains_key(reqwest::header::LOCATION));
+    for (method, range) in [
+        (reqwest::Method::HEAD, None),
+        (reqwest::Method::GET, None),
+        (reqwest::Method::GET, Some("bytes=0-0")),
+        (reqwest::Method::GET, Some("invalid")),
+    ] {
+        let target = if method == reqwest::Method::GET {
+            url.replace("/v1/xorbs/", "/transfer/xorb/")
+        } else {
+            url.to_owned()
+        };
+        let mut request = client.request(method, target);
+        if let Some(range) = range {
+            request = request.header(reqwest::header::RANGE, range);
+        }
+        let response = request.bearer_auth(credential).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(!response.headers().contains_key(reqwest::header::LOCATION));
+    }
     assert_eq!(
         proxy.head_requests(),
         before_heads,
-        "denied HEAD must not inspect provider metadata"
+        "denied reads must not inspect provider metadata"
     );
     assert_eq!(
         proxy.get_requests(),
         before_gets,
-        "denied HEAD must not read provider bytes"
+        "denied reads must not read provider bytes"
     );
 }
 
-async fn qualify(postgres: bool) {
+async fn qualify(postgres: bool, million: bool) {
     let services = tokio::task::spawn_blocking(move || {
         let builder = DockerLocalStack::builder().with_minio();
         let builder = if postgres {
@@ -117,7 +145,7 @@ async fn qualify(postgres: bool) {
     .with_token_signing_key(KEY.to_vec())
     .unwrap()
     .with_reconstruction_cache_disabled()
-    .with_object_storage(ObjectStorageAdapter::S3, Some(storage));
+    .with_object_storage(ObjectStorageAdapter::S3, Some(storage.clone()));
     if postgres {
         let database = services.postgres_url().unwrap();
         shardline_server::run_database_migration(&shardline_server::DatabaseMigrationOptions::new(
@@ -132,6 +160,7 @@ async fn qualify(postgres: bool) {
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
+    let _server_cleanup = ServerCleanup(server.abort_handle());
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
@@ -152,7 +181,7 @@ async fn qualify(postgres: bool) {
         .unwrap();
     assert_eq!(uploaded.status(), StatusCode::OK);
     // An uploaded object without a published file is not a read grant.
-    denied_head(&client, &url, &owner, &proxy).await;
+    denied_reads(&client, &url, &owner, &proxy).await;
     let mut shard = MDBInMemoryShard::default();
     shard.add_xorb_block(info).unwrap();
     shard
@@ -178,8 +207,23 @@ async fn qualify(postgres: bool) {
         .await
         .unwrap();
     assert_eq!(published.status(), StatusCode::OK);
-    denied_head(&client, &url, &other, &proxy).await;
-    denied_head(
+    if million {
+        revocation::populate(services.postgres_url().unwrap().as_str()).await;
+        for _ in 0..32 {
+            assert_eq!(
+                client
+                    .head(&url)
+                    .bearer_auth(&owner)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+    }
+    denied_reads(&client, &url, &other, &proxy).await;
+    denied_reads(
         &client,
         &format!("{base}/v1/xorbs/default/{}", "f".repeat(64)),
         &owner,
@@ -205,6 +249,24 @@ async fn qualify(postgres: bool) {
     );
     assert_eq!(proxy.head_requests().checked_sub(before_heads), Some(1));
     assert_eq!(proxy.get_requests(), before_gets);
+    revocation::Read {
+        client: &client,
+        url: &url,
+        credential: &owner,
+        proxy: &proxy,
+        bytes: &bytes,
+    }
+    .qualify(root.path(), services.postgres_url().as_deref(), million)
+    .await;
+    let objects = shardline_server_core::ServerObjectStore::s3(storage).unwrap();
+    let key = shardline_xet_adapter::xorb_object_key(&hash.hex()).unwrap();
+    assert!(
+        shardline_storage::AsyncObjectStore::metadata(&objects, &key)
+            .await
+            .unwrap()
+            .is_some(),
+        "revocation must not rely on deleting the provider object"
+    );
     assert!(!proxy.fault_was_injected());
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());

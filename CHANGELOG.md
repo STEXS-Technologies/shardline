@@ -81,6 +81,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   avoiding unnecessary candidate traversal for shared content.
 - Stop Xorb range access checks once published file terms prove every requested
   byte, retaining gap, footer and repository-isolation checks.
+- Authorize native Xet membership before backend object discovery and use the
+  fully verified payload boundary to avoid scanning shared-container history
+  for footer access, retaining exact range and historical access checks.
 - Bound PostgreSQL's first-candidate authorization query, avoiding large result
   transfers when one record proves access; retain full traversal when needed.
 - Plan PostgreSQL's first-candidate lookup for the requested hash, avoiding slow

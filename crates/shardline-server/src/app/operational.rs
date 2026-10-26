@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use shardline_metrics;
-use shardline_protocol::TokenCodecError;
+use shardline_protocol::{ByteRange, TokenCodecError};
 
 use crate::{
     HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
@@ -262,16 +262,14 @@ pub(super) async fn read_xorb_transfer(
     {
         return Err(ServerError::NotFound);
     }
-    let total_length = state.backend.xorb_length(&hash).await?;
-    // Parse now to bound a successful proof, but preserve the authorization
-    // error precedence: unauthorized callers must not learn range validity.
-    let requested = parse_required_xorb_transfer_range(&headers, total_length);
-    let coverage = if let Some(namespace) = repository_namespace.as_ref() {
-        let file_proof = match (read_grant.as_ref(), requested.as_ref()) {
-            (Some(grant), Ok(range)) => {
+    // A bounded authoritative candidate proves membership before any provider
+    // discovery. It is not yet permission to expose the requested byte range.
+    let mut coverage = if let Some(namespace) = repository_namespace.as_ref() {
+        let file_proof = match read_grant.as_ref() {
+            Some(grant) => {
                 state
                     .backend
-                    .file_xorb_coverage(&grant.file_id, &hash, namespace, *range)
+                    .file_xorb_candidate(&grant.file_id, &hash, namespace)
                     .await?
             }
             _ => None,
@@ -281,12 +279,7 @@ pub(super) async fn read_xorb_transfer(
         // access with a fresh internally consistent repository traversal.
         let allowed = match file_proof {
             Some(coverage) => coverage,
-            None => {
-                state
-                    .backend
-                    .repository_xorb_coverage(&hash, namespace, requested.as_ref().ok().copied())
-                    .await?
-            }
+            None => state.backend.first_xorb_coverage(&hash, namespace).await?,
         };
         if allowed.is_empty() {
             return Err(ServerError::NotFound);
@@ -295,18 +288,47 @@ pub(super) async fn read_xorb_transfer(
     } else {
         None
     };
-    let range = requested?;
+    let total_length = state.backend.xorb_length(&hash).await?;
+    let range = parse_required_xorb_transfer_range(&headers, total_length)?;
     if let Some(grant) = read_grant
         && (range.start() != grant.range_start || range.end_inclusive() != grant.range_end)
     {
         return Err(ServerError::NotFound);
     }
+    let verified = state
+        .backend
+        .prepare_xorb_range(&hash, total_length)
+        .await?;
+    if let Some(namespace) = repository_namespace.as_ref()
+        && coverage
+            .as_ref()
+            .is_some_and(|allowed| !allowed.permits(range, verified.packed_content_length()))
+    {
+        // Discard an incomplete candidate before taking a fresh, consistent
+        // repository snapshot. Footer access requires complete payload coverage;
+        // its boundary comes only from the fully verified current source.
+        let requested = if range.end_inclusive() >= verified.packed_content_length() {
+            ByteRange::new(
+                0,
+                verified
+                    .packed_content_length()
+                    .checked_sub(1)
+                    .ok_or(ServerError::NotFound)?,
+            )
+            .map_err(|_invalid_payload_range| ServerError::NotFound)?
+        } else {
+            range
+        };
+        coverage = Some(
+            state
+                .backend
+                .repository_xorb_coverage(&hash, namespace, Some(requested))
+                .await?,
+        );
+    }
     let transfer_bytes = range.len().ok_or(ServerError::Overflow)?;
     metrics::record_xet_xorb_download(total_length);
-    let byte_stream = state
-        .backend
-        .read_xorb_range_stream(&hash, total_length, range, coverage)
-        .await?;
+    let byte_stream = verified.into_stream(range, coverage.as_ref())?;
     Ok(byte_range_stream_response(
         byte_stream,
         state.transfer_limiter.clone(),

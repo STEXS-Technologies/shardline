@@ -17,6 +17,29 @@ mod short_circuit;
 #[cfg(test)]
 mod snapshot;
 
+/// Discovery only: a nonempty candidate proves membership, not range access.
+pub(crate) async fn first_xorb_coverage<Store>(
+    store: &Store,
+    hash: &str,
+    scope: &RepositoryScope,
+) -> Result<Coverage, ServerError>
+where
+    Store: RecordTraversal + Sync,
+    Store::Error: Send,
+    ServerError: From<Store::Error>,
+{
+    let Some(entry) = store.first_repository_hash_record(scope, hash).await? else {
+        return Ok(Coverage::default());
+    };
+    let mut coverage = Coverage::default();
+    coverage.include(&entry.bytes, scope, hash)?;
+    if coverage.is_empty() {
+        // A stale candidate cannot suppress a later authoritative grant.
+        return repository_xorb_coverage(store, hash, scope, None).await;
+    }
+    Ok(coverage)
+}
+
 /// Uses candidate indexes only for discovery. The authoritative record must
 /// authorize every requested byte, including gaps between adjacent file terms.
 pub(crate) async fn repository_xorb_coverage<Store>(
@@ -93,17 +116,15 @@ impl Coverage {
         }
     }
 
-    /// A file hint can short-circuit discovery only when its current
-    /// authoritative record independently proves every requested byte.
-    pub(crate) fn from_file_record(
+    /// Candidate membership only; callers must separately prove requested bytes.
+    pub(crate) fn from_file_record_members(
         record: &shardline_index::FileRecord,
         scope: &RepositoryScope,
         hash: &str,
-        requested: ByteRange,
     ) -> Option<Self> {
         let mut coverage = Self::default();
         coverage.include_record(record, scope, hash);
-        coverage.covers(requested).then_some(coverage)
+        (!coverage.is_empty()).then_some(coverage)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -138,7 +159,7 @@ impl Coverage {
         self.0.insert(start, end);
     }
 
-    fn covers(&self, requested: ByteRange) -> bool {
+    pub(crate) fn covers(&self, requested: ByteRange) -> bool {
         self.0
             .range(..=requested.start())
             .next_back()

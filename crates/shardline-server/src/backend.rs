@@ -1363,24 +1363,14 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn read_xorb_range_stream(
+    pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
         total_length: u64,
-        range: ByteRange,
-        coverage: Option<crate::record_store::XorbRangeCoverage>,
-    ) -> Result<ServerByteStream, ServerError> {
+    ) -> Result<crate::download_stream::VerifiedXorb, ServerError> {
         match self {
-            Self::Local(backend) => {
-                backend
-                    .read_xorb_range_stream(hash_hex, total_length, range, coverage)
-                    .await
-            }
-            Self::Postgres(backend) => {
-                backend
-                    .read_xorb_range_stream(hash_hex, total_length, range, coverage)
-                    .await
-            }
+            Self::Local(backend) => backend.prepare_xorb_range(hash_hex, total_length).await,
+            Self::Postgres(backend) => backend.prepare_xorb_range(hash_hex, total_length).await,
         }
     }
 
@@ -1391,6 +1381,23 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.read_dedupe_shard_stream(hash_hex).await,
             Self::Postgres(backend) => backend.read_dedupe_shard_stream(hash_hex).await,
+        }
+    }
+
+    pub(crate) async fn first_xorb_coverage(
+        &self,
+        hash: &str,
+        scope: &RepositoryScope,
+    ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
+        #[cfg(test)]
+        count_repository_reference_probe_for_tests(hash);
+        match self {
+            Self::Local(backend) => {
+                crate::record_store::first_xorb_coverage(backend.record_store(), hash, scope).await
+            }
+            Self::Postgres(backend) => {
+                crate::record_store::first_xorb_coverage(backend.record_store(), hash, scope).await
+            }
         }
     }
 

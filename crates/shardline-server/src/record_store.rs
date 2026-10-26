@@ -3,7 +3,9 @@ use crate::ServerError;
 mod membership;
 mod xorb_range;
 pub(crate) use membership::any_repository_hash_record;
-pub(crate) use xorb_range::{Coverage as XorbRangeCoverage, repository_xorb_coverage};
+pub(crate) use xorb_range::{
+    Coverage as XorbRangeCoverage, first_xorb_coverage, repository_xorb_coverage,
+};
 
 pub(crate) use shardline_index::LocalRecordStore;
 
