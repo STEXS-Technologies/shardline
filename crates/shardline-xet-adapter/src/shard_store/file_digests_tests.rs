@@ -445,9 +445,97 @@ fn source_validation_and_file_digest_share_materializations() {
         )
         .unwrap();
         assert_eq!(verifier.source_reads, expected_reads);
+        // Fresh sources feed their checked bytes directly into the digest;
+        // returning to an evicted source still reauthenticates its members.
+        assert_eq!(verifier.member_rechecks, expected_reads - 2);
         assert_eq!(records[0].total_bytes, bytes.len() as u64);
         assert_eq!(identities[0].sha256, format!("{:x}", Sha256::digest(bytes)));
     }
+}
+
+#[test]
+fn provisional_digest_cannot_accept_a_later_corrupt_member() {
+    let members = [b"selected".as_slice(), b"unselected"];
+    let leaves: Vec<_> = members
+        .iter()
+        .map(|data| (compute_data_hash(data), data.len() as u64))
+        .collect();
+    let hash = xorb_hash(&leaves);
+    let mut end = 0;
+    let boundaries = leaves
+        .iter()
+        .map(|(hash, length)| {
+            end += length;
+            (*hash, end)
+        })
+        .collect();
+    let mut bytes = serialized_xorb_object_from_components(
+        &hash,
+        members.concat(),
+        boundaries,
+        CompressionScheme::None,
+    )
+    .unwrap()
+    .serialized_data;
+    let verified = validate_serialized_xorb(
+        &mut Cursor::new(&bytes),
+        parse_xet_hash_hex(&hash.hex()).unwrap(),
+    )
+    .unwrap();
+    let corrupt = usize::try_from(verified.chunks()[1].packed_end() - 1).unwrap();
+    bytes[corrupt] ^= 1;
+    let mut visited = Vec::new();
+    let result = crate::xorb::validate_serialized_xorb_with_data_and_visitor(
+        &mut Cursor::new(&bytes),
+        parse_xet_hash_hex(&hash.hex()).unwrap(),
+        0,
+        Vec::new(),
+        &mut |member, data| {
+            visited.push((member, data.to_vec()));
+            Ok(())
+        },
+    );
+    assert!(
+        result.is_err(),
+        "a provisional digest cannot authorize corrupt source bytes"
+    );
+    assert_eq!(visited, vec![(0, members[0].to_vec())]);
+}
+
+#[test]
+fn cached_source_metadata_does_not_hide_later_payload_corruption() {
+    let root = tempfile::tempdir().unwrap();
+    let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
+    let (hash, leaves) = store_members(&objects, &[b"first", b"second"]);
+    let (info, source) = load_xorb_range_info_with_source(&objects, &hash.hex(), None).unwrap();
+    let mut cache = HashMap::from([(hash.hex(), info)]);
+    let mut verifier = file_digests::FileDigestVerifier::default();
+    verifier.retain_verified_source(&hash.hex(), source);
+    let key = xorb_object_key(&hash.hex()).unwrap();
+    let path = objects.local_root().unwrap().join(key.as_str());
+    assert!(path.is_file());
+    std::fs::write(path, b"corrupt source after metadata validation").unwrap();
+    let file = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(file_hash(&leaves), 1, false, true),
+        segments: vec![FileDataSequenceEntry::new(hash, 11, 0, 2)],
+        verification: Vec::new(),
+        metadata_ext: Some(FileMetadataExt::new(
+            MerkleHash::from_hex(&format!("{:x}", Sha256::digest(b"firstsecond"))).unwrap(),
+        )),
+    };
+    assert!(
+        build_file_records_with_cache(
+            vec![file],
+            &objects,
+            None,
+            None,
+            &mut cache,
+            &mut verifier,
+            &|| Ok(()),
+        )
+        .is_err(),
+        "cached metadata must not replace current member verification"
+    );
 }
 
 #[test]

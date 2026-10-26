@@ -276,6 +276,24 @@ pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
     max_decoded_bytes: usize,
     decoded_buffer: Vec<u8>,
 ) -> Result<(ValidatedXorb, Option<Vec<u8>>), XorbParseError> {
+    validate_serialized_xorb_with_data_and_visitor(
+        reader,
+        expected_hash,
+        max_decoded_bytes,
+        decoded_buffer,
+        &mut |_, _| Ok(()),
+    )
+}
+
+/// The visitor may update request-local digest state only. Its observations
+/// become trusted only after this entire function returns successfully.
+pub(crate) fn validate_serialized_xorb_with_data_and_visitor<R: Read + Seek>(
+    reader: &mut R,
+    expected_hash: ShardlineHash,
+    max_decoded_bytes: usize,
+    decoded_buffer: Vec<u8>,
+    visitor: &mut dyn FnMut(u64, &[u8]) -> std::io::Result<()>,
+) -> Result<(ValidatedXorb, Option<Vec<u8>>), XorbParseError> {
     reader
         .seek(SeekFrom::Start(0))
         .map_err(XorbParseError::from)?;
@@ -295,12 +313,13 @@ pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
     reader
         .seek(SeekFrom::Start(0))
         .map_err(XorbParseError::from)?;
-    let validated = XorbObject::validate_xorb_object_with_info_and_data(
+    let validated = XorbObject::validate_xorb_object_with_info_data_and_visitor(
         reader,
         parsed,
         &expected_merkle_hash,
         max_decoded_bytes,
         decoded_buffer,
+        visitor,
     )
     .map_err(|error| map_core_error(&error))?;
     let Some(validated) = validated else {

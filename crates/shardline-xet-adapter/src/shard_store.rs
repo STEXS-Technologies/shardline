@@ -35,7 +35,9 @@ use shardline_xet_core::{
 
 use crate::error::XetAdapterError;
 
-use super::{ValidatedXorbChunk, validate_serialized_xorb, xorb_object_key};
+#[cfg(test)]
+use super::validate_serialized_xorb;
+use super::{ValidatedXorbChunk, xorb_object_key};
 
 use crate::checkpoint_reader;
 mod dedup;
@@ -743,17 +745,24 @@ fn build_file_records_with_cache(
                 );
             }
 
+            let mut digested_during_validation = false;
             let xorb_info = if let Some(info) = xorb_cache.get(&hash) {
                 info
             } else {
                 // Drop the previous spool before materializing another source.
                 file_digests.release_source();
-                let (loaded, source) = load_xorb_range_info_with_checkpoint(
+                let (loaded, source) = load_xorb_range_info_with_visitor(
                     object_store,
                     &hash,
                     member_references.as_deref_mut(),
                     checkpoint,
+                    &mut |member, data| {
+                        checkpoint()?;
+                        digest.update_validating_member(segment, member, data);
+                        Ok(())
+                    },
                 )?;
+                digested_during_validation = true;
                 file_digests.retain_verified_source(&hash, source);
                 xorb_cache.insert(hash.clone(), loaded);
                 xorb_cache
@@ -765,7 +774,9 @@ fn build_file_records_with_cache(
             let packed_start = xorb_info.packed_start(range_start)?;
             let packed_end = xorb_info.packed_end(range_end)?;
             verification::verify_term_length(segment, &xorb_info.verified_chunks)?;
-            digest.update(file_digests, object_store, segment, xorb_info, checkpoint)?;
+            if !digested_during_validation {
+                digest.update(file_digests, object_store, segment, xorb_info, checkpoint)?;
+            }
             let length = segment.unpacked_segment_bytes;
             chunks.push(FileChunkRecord {
                 hash,
@@ -880,6 +891,22 @@ fn load_xorb_range_info_with_checkpoint(
     member_references: Option<&mut HashSet<ObjectKey>>,
     checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
 ) -> Result<(XorbRangeInfo, shardline_server_core::MaterializedObject), XetAdapterError> {
+    load_xorb_range_info_with_visitor(
+        object_store,
+        hash_hex,
+        member_references,
+        checkpoint,
+        &mut |_, _| Ok(()),
+    )
+}
+
+fn load_xorb_range_info_with_visitor(
+    object_store: &ServerObjectStore,
+    hash_hex: &str,
+    member_references: Option<&mut HashSet<ObjectKey>>,
+    checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
+    visitor: &mut dyn FnMut(u64, &[u8]) -> std::io::Result<()>,
+) -> Result<(XorbRangeInfo, shardline_server_core::MaterializedObject), XetAdapterError> {
     checkpoint()?;
     let key = xorb_object_key(hash_hex)?;
     let source =
@@ -890,15 +917,18 @@ fn load_xorb_range_info_with_checkpoint(
         return Err(XetAdapterError::MissingReferencedXorb);
     };
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let validation = validate_serialized_xorb(
+    let validation = crate::xorb::validate_serialized_xorb_with_data_and_visitor(
         &mut checkpoint_reader::CheckpointReader {
             reader: &mut reader,
             checkpoint,
         },
         expected_hash,
+        0,
+        Vec::new(),
+        visitor,
     );
     checkpoint()?;
-    let validated = validation?;
+    let (validated, _decoded) = validation?;
     if let Some(references) = member_references {
         for chunk in validated.chunks() {
             let hash = shardline_index::xet_hash_hex_string(chunk.hash());

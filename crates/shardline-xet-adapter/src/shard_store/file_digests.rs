@@ -15,6 +15,8 @@ pub(super) struct FileDigestVerifier {
     source: Option<(String, MaterializedObject)>,
     #[cfg(test)]
     pub(super) source_reads: usize,
+    #[cfg(test)]
+    pub(super) member_rechecks: usize,
 }
 
 impl FileDigestVerifier {
@@ -64,6 +66,22 @@ impl FileDigest {
         Self { expected, digest }
     }
 
+    /// Incorporate only this term's members during full source validation.
+    /// This state cannot escape if any later source or file check fails.
+    pub(super) fn update_validating_member(
+        &mut self,
+        term: &FileDataSequenceEntry,
+        member: u64,
+        data: &[u8],
+    ) {
+        if member >= term.chunk_index_start
+            && member < term.chunk_index_end
+            && let Some(digest) = &mut self.digest
+        {
+            digest.update(data);
+        }
+    }
+
     pub(super) fn update(
         &mut self,
         verifier: &mut FileDigestVerifier,
@@ -100,6 +118,10 @@ impl FileDigest {
         let (_, reader) = verifier.source.as_mut().ok_or_else(rejected)?;
         for member in members {
             checkpoint()?;
+            #[cfg(test)]
+            {
+                verifier.member_rechecks = verifier.member_rechecks.saturating_add(1);
+            }
             reader.seek(SeekFrom::Start(member.packed_start()))?;
             let (data, packed_length, unpacked_length) = deserialize_chunk(reader).map_err(|error| {
                 tracing::debug!(%error, "file SHA-256 verification could not decode Xorb member");

@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Derive native file SHA-256 identities during the first full Xorb validation,
+  avoiding repeated decoding and member hashing without retaining decoded
+  containers or skipping source integrity checks.
 - Keep detached Hub revisions from exhausting the Git export history limit,
   selecting reachable history after a bounded listing overflows while retaining
   reference, history, object and byte limits.

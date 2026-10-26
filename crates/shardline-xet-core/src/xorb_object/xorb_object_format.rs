@@ -588,7 +588,29 @@ impl XorbObject {
         xorb: XorbObject,
         hash: &MerkleHash,
         max_decoded_bytes: usize,
+        decoded_buffer: Vec<u8>,
+    ) -> Result<Option<ValidatedXorbWithData>, CoreError> {
+        Self::validate_xorb_object_with_info_data_and_visitor(
+            reader,
+            xorb,
+            hash,
+            max_decoded_bytes,
+            decoded_buffer,
+            &mut |_, _| Ok(()),
+        )
+    }
+
+    /// Visits decoded members after their individual checks, without retaining
+    /// payloads. Visitor results are provisional until full validation succeeds:
+    /// a later member or the aggregate container commitment can still fail.
+    /// Visitors must not publish content or other durable effects.
+    pub fn validate_xorb_object_with_info_data_and_visitor<R: Read + Seek>(
+        reader: &mut R,
+        xorb: XorbObject,
+        hash: &MerkleHash,
+        max_decoded_bytes: usize,
         mut decoded_buffer: Vec<u8>,
+        visitor: &mut dyn FnMut(u64, &[u8]) -> std::io::Result<()>,
     ) -> Result<Option<ValidatedXorbWithData>, CoreError> {
         if xorb.info.num_chunks == 0 {
             return Ok(None);
@@ -653,6 +675,7 @@ impl XorbObject {
                 warn!("XORB Validation: Chunk unpacked byte offset does not match Info object.");
                 return Ok(None);
             }
+            visitor(idx, &data)?;
             if let Some(retained) = &mut decoded {
                 if data.len() > max_decoded_bytes.saturating_sub(retained.len()) {
                     decoded = None;
