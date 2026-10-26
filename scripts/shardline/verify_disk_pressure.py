@@ -18,6 +18,8 @@ import sys
 import time
 import uuid
 
+from benchmark_gc_contention import command as bounded_command
+
 MINIO = "ghcr.io/golithus/minio@sha256:8793e960474071520bdb91bb9a6d1793eb229fdbc9dcb7ec75ad836b69bbab40"
 DEBIAN = "debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f"
 POSTGRES = "postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d"
@@ -86,6 +88,16 @@ def wait_for(check):
             pass
         time.sleep(0.5)
     raise RuntimeError("owned fixture readiness deadline exceeded")
+
+
+def postgres_ready(name, log):
+    try:
+        bounded_command("docker", "exec", name, "pg_isready", "-h", "127.0.0.1",
+                        "-U", "postgres", "-d", "pressure",
+                        stdout=log, stderr=log, timeout=2)
+        return True
+    except (subprocess.CalledProcessError, TimeoutError):
+        return False
 
 
 def qualify(args, root, log):
@@ -195,21 +207,17 @@ wait "$child"
             command("docker", "run", "-d", "--name", postgres, "-p", "127.0.0.1::5432",
                     "-e", f"POSTGRES_PASSWORD={SECRET}", "-e", "POSTGRES_DB=pressure", POSTGRES)
 
-            def postgres_ready():
-                return subprocess.run(["docker", "exec", postgres, "pg_isready", "-h", "127.0.0.1",
-                                       "-U", "postgres", "-d", "pressure"], stdout=log, stderr=log).returncode == 0
-
-            wait_for(postgres_ready)
+            wait_for(lambda: postgres_ready(postgres, log))
             database = f"postgres://postgres:{SECRET}@127.0.0.1:{docker_port(postgres, 5432)}/pressure"
             env["SHARDLINE_INDEX_POSTGRES_URL"] = database
             subprocess.run([str(binary), "--config", str(config), "db", "migrate", "up",
                             "--database-url", database], env=env, stdout=log, stderr=log,
                            check=True, timeout=120)
-        token = subprocess.check_output([str(binary), "--config", str(config), "admin", "token",
-                                         "--issuer", "fixture", "--subject", "fixture", "--scope", "write",
-                                         "--provider", "generic", "--owner", "team", "--repo", "bench",
-                                         "--key-env", "SHARDLINE_TOKEN_SIGNING_KEY"],
-                                        env=env, stderr=log, text=True).strip()
+        token = bounded_command(str(binary), "--config", str(config), "admin", "token",
+                                "--issuer", "fixture", "--subject", "fixture", "--scope", "write",
+                                "--provider", "generic", "--owner", "team", "--repo", "bench",
+                                "--key-env", "SHARDLINE_TOKEN_SIGNING_KEY",
+                                env=env, stderr=log, timeout=30)
 
         def start_server():
             nonlocal server

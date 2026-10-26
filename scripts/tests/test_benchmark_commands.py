@@ -12,9 +12,29 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shardline"))
 from benchmark_gc_contention import command  # noqa: E402
 from performance_validation.fixtures import Deployment, require_running_server  # noqa: E402
+from verify_disk_pressure import postgres_ready  # noqa: E402
 
 
 class BenchmarkCommandTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "owned executable fixture requires POSIX")
+    def test_disk_pressure_readiness_rejects_stalled_and_unready_commands(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as log:
+            executable = Path(directory) / "docker"
+            executable.write_text(
+                f"#!{sys.executable}\n"
+                "import sys,time\n"
+                "name=sys.argv[2]\n"
+                "if name=='stall': time.sleep(60)\n"
+                "raise SystemExit(0 if name=='ready' else 1)\n"
+            )
+            executable.chmod(0o700)
+            with patch.dict(os.environ, {"PATH": directory + os.pathsep + os.environ.get("PATH", "")}):
+                self.assertTrue(postgres_ready("ready", log))
+                self.assertFalse(postgres_ready("unready", log))
+                started = time.monotonic()
+                self.assertFalse(postgres_ready("stall", log))
+                self.assertLess(time.monotonic() - started, 5)
+
     def test_trace_cleanup_failure_still_removes_owned_services(self):
         deployment = object.__new__(Deployment)
         deployment.trace = Mock()
