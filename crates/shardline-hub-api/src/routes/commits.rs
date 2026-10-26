@@ -12,6 +12,7 @@ use shardline_server_core::AuthorizedRepository;
 
 use super::{HubRepository, HubState, deliver_webhook_events, lfs_object_key};
 
+mod publication;
 mod stream;
 
 /// Keep inline commits comfortably below the bounded NDJSON request limit.
@@ -134,13 +135,16 @@ pub(crate) async fn commit(
                 return Err(e);
             }
         };
-    match apply_commit_to_ref(
+    match publication::publish(
         &state,
         &name,
-        &parent_sha,
-        target_ref,
+        publication::CommitTarget {
+            parent_sha: &parent_sha,
+            ref_name: target_ref,
+            retry_if_moved: parsed.parent_commit.is_none() && !explicit_commit,
+        },
         &parsed,
-        instructions.into_iter().map(Ok),
+        &instructions,
         repo.capability(),
     )
     .await
@@ -166,7 +170,7 @@ pub(crate) async fn apply_commit(
     parsed: &ParsedCommit,
     auth: &AuthorizedRepository,
 ) -> Result<Json<CommitResponse>, HubApiError> {
-    apply_commit_to_ref(
+    try_apply_commit_to_ref(
         state,
         repo_id,
         parent_sha,
@@ -178,10 +182,15 @@ pub(crate) async fn apply_commit(
             .map(|instruction| stream::prepare(state, auth, instruction)),
         auth,
     )
-    .await
+    .await?
+    .ok_or_else(branch_changed)
 }
 
-async fn apply_commit_to_ref(
+fn branch_changed() -> HubApiError {
+    HubApiError::Conflict("branch moved or was deleted".to_owned())
+}
+
+async fn try_apply_commit_to_ref(
     state: &HubState,
     repo_id: &str,
     parent_sha: &str,
@@ -189,7 +198,7 @@ async fn apply_commit_to_ref(
     parsed: &ParsedCommit,
     instructions: impl Iterator<Item = Result<stream::PreparedInstruction, HubApiError>>,
     auth: &AuthorizedRepository,
-) -> Result<Json<CommitResponse>, HubApiError> {
+) -> Result<Option<Json<CommitResponse>>, HubApiError> {
     // HUB-004: Validate that the NDJSON body's parentCommit (if present) matches
     // the URL path's parent_sha. A mismatch indicates a stale or conflicting request.
     if let Some(ref body_parent) = parsed.parent_commit {
@@ -310,9 +319,7 @@ async fn apply_commit_to_ref(
     {
         HubRefUpdateOutcome::Updated(_) => {}
         HubRefUpdateOutcome::Conflict => {
-            return Err(HubApiError::Conflict(
-                "branch moved or was deleted".to_owned(),
-            ));
+            return Ok(None);
         }
         HubRefUpdateOutcome::Unsupported => {
             return Err(HubApiError::CasError(
@@ -325,10 +332,10 @@ async fn apply_commit_to_ref(
     deliver_webhook_events(state, repo_id, "push", &commit_sha).await;
 
     let public_sha = prepared.public_id;
-    Ok(Json(CommitResponse {
+    Ok(Some(Json(CommitResponse {
         commit_id: commit_sha.clone(),
         commit_oid: public_sha.clone(),
         commit_url: format!("/{repo_id}/commit/{public_sha}"),
         ref_name: Some(target_ref.to_owned()),
-    }))
+    })))
 }

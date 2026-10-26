@@ -22,6 +22,7 @@ fn failure(error: impl std::fmt::Display) -> HubApiError {
     HubApiError::CasError(error.to_string())
 }
 
+#[derive(Clone)]
 pub(super) enum PreparedInstruction {
     File(HubFileEntry),
     Delete(String),

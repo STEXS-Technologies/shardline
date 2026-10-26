@@ -130,6 +130,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   and conditional creation when hints are stale.
 - Recover cold Hub Git identities beyond 10,000 ancestors in bounded windows,
   preserving commit hashes, repository scope and cumulative file-work limits.
+- Retry concurrent unconditional Hub branch commits against the latest tree,
+  preserving unrelated files, explicit-parent conflicts and deleted branches.
 - Restore plain HTTP native-Xet downloads for repository-wide credentials when
   the verified file is stored under a branch, retaining repository and ref isolation.
 - Return a retryable error when PostgreSQL terminates an active publication

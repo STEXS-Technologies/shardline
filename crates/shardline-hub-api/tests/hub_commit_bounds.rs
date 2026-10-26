@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod batching;
+mod commit_publication;
 use axum::{
     Router,
     body::Body,
@@ -625,4 +626,5 @@ async fn postgres_commit_bounds_preupload_and_operation_matrix() {
     contract_prepared_metadata_conflict_rolls_back(root.path(), store.clone()).await;
     contract_unique_object_limit_preserves_ref(root.path(), store.clone()).await;
     batching::contract(&store, &pool).await;
+    commit_publication::contract(root.path(), store).await;
 }
