@@ -77,18 +77,21 @@ def client_operation(python, deployment, action, path, name, digest):
         for field in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_HUB_CACHE",
                       "HUGGINGFACE_HUB_CACHE", "HF_ENDPOINT"):
             env.pop(field, None)
-        try:
-            result = subprocess.run(
-                [str(python), "-c", CLIENT], env=env, capture_output=True, text=True,
-                input=json.dumps({"endpoint": f"http://127.0.0.1:{deployment.ports[0]}",
-                                  "token": deployment.token, "action": action,
-                                  "path": str(path), "name": name, "sha256": digest}),
-                timeout=300, check=False)
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("native client exceeded its five-minute deadline") from None
-        if result.returncode:
-            raise RuntimeError("native client failed; raw diagnostics withheld")
-        return json.loads(result.stdout)
+        # Keep credentials off argv and use file-backed stdin, so waiting for
+        # process completion cannot block on a pipe before its deadline starts.
+        with tempfile.TemporaryFile(mode="w+") as request:
+            json.dump({"endpoint": f"http://127.0.0.1:{deployment.ports[0]}",
+                       "token": deployment.token, "action": action,
+                       "path": str(path), "name": name, "sha256": digest}, request)
+            request.seek(0)
+            try:
+                result = command(str(python), "-c", CLIENT, env=env,
+                                 stdin=request, timeout=300)
+            except TimeoutError:
+                raise RuntimeError("native client exceeded its five-minute deadline") from None
+            except subprocess.CalledProcessError:
+                raise RuntimeError("native client failed; raw diagnostics withheld") from None
+        return json.loads(result)
 
 
 def counters(deployment):
