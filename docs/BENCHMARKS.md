@@ -320,6 +320,15 @@ intermittent GC exit-2 failure did not recur here; its root cause remains
 unproven, and passing repetitions do not establish a fix. These zero-retention
 fixtures do not replace the separate real-default-retention drill.
 
+The follow-up used harness `e5ee04be` and the same binaries/workload across
+1/2/4/8 API replicas, again with three repetitions per dataset. All 48 lanes
+passed, including 4,320 exact post-GC reads, 222 GC commands and independent
+trace/API reconciliation. Median unique-ingest requests remained 56 at every
+replica count; repeated-ingest requests were 44/48/56/56 for both binaries.
+The table's median SQL calls and settling-GC request/byte counts also held at
+every replica count. This extends the correctness and backend-cost check;
+unrelated host activity prevents an isolated timing or production scaling claim.
+
 The measured savings differ by backend and workload. The detailed fixtures
 below explain the boundaries; none requires weaker durability settings.
 
