@@ -59,6 +59,12 @@ The executable corpus also publishes a real 33-member native container over
 HTTP. With all redundant member copies removed, the scan must remain clean;
 corrupting the retained container must still produce exit `1`, and restoring it
 must restore exit `0`. This runs on local storage and PostgreSQL/MinIO.
+An owned-MinIO request test also checks 16-member snapshot turnover. With
+optional standalone copies absent, the first term makes one source GET and
+16 member GETs; repeating that term reuses the verified source and makes only
+the 16 member GETs. Switching containers refreshes the source. Corruption on
+returning to the first container is detected; these cases require no HEADs.
+This is a bounded fixture, not a production-scale cost or throughput result.
 The remote case uses disposable PostgreSQL and MinIO and is selected explicitly
 in E2E CI. To run it locally
 with Docker available:

@@ -30,6 +30,8 @@ use chunk_read::{ChunkRead, MAX_CHUNK_BYTES, read_chunk};
 #[cfg(test)]
 mod remote_chunk_tests;
 #[cfg(test)]
+mod remote_multi_member_tests;
+#[cfg(test)]
 mod remote_snapshot_tests;
 #[cfg(test)]
 mod snapshot_tests;

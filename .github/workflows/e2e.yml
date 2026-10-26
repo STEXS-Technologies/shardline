@@ -181,9 +181,11 @@ jobs:
           -E 'test(stock_git_xet_real_hub_with_postgres_and_minio)'
 
       - name: Qualify native Xet FSCK with PostgreSQL and MinIO
-        run: >-
-          cargo nextest run --locked -p shardline --test fsck_cli
+        run: |
+          cargo nextest run --locked -p shardline --test fsck_cli \
           --run-ignored all -E 'test(native_xet_fsck_with_postgres_and_minio)'
+          cargo nextest run --locked -p shardline-fsck --lib --run-ignored all \
+            -E 'test(record_checks::scanner::remote_multi_member_tests::) | test(record_checks::scanner::remote_snapshot_tests::)'
 
       - name: Qualify legacy Hub tree recovery with PostgreSQL and MinIO
         run: >-
