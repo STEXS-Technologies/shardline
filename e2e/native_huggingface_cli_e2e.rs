@@ -12,6 +12,7 @@ mod native_huggingface_identity;
 mod native_huggingface_js;
 #[cfg(target_os = "linux")]
 mod native_huggingface_large;
+mod native_huggingface_lost_ack;
 mod native_huggingface_preupload;
 mod native_huggingface_proxy;
 mod native_huggingface_repository_download;

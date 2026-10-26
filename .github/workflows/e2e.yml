@@ -172,7 +172,7 @@ jobs:
         run: >-
           cargo nextest run --locked --manifest-path e2e/Cargo.toml
           --test native_huggingface_cli_e2e --run-ignored all
-          -E 'test(native_huggingface_cli_flows_with_postgres_and_minio)'
+          -E 'test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_lost_commit_reply_preserves_peer_publication)'
 
       - name: Qualify stock git-xet through the real Hub with PostgreSQL and MinIO
         run: >-

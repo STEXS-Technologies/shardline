@@ -22,6 +22,7 @@ struct Upstreams {
     client: reqwest::Client,
     ranges: Option<RangeObservations>,
     rejected_lfs: Option<Arc<AtomicUsize>>,
+    lost_commit: Option<Arc<AtomicUsize>>,
 }
 
 pub(super) struct Proxy(JoinHandle<Result<(), std::io::Error>>);
@@ -33,13 +34,13 @@ impl Drop for Proxy {
 }
 
 pub(super) fn start(listener: TcpListener, api: &str, transfer: &str) -> Proxy {
-    start_inner(listener, api, transfer, None, None)
+    start_inner(listener, api, transfer, None, None, None)
 }
 
 pub(super) fn start_rejecting_lfs(listener: TcpListener, api: &str) -> (Proxy, Arc<AtomicUsize>) {
     let rejected = Arc::new(AtomicUsize::new(0));
     (
-        start_inner(listener, api, api, None, Some(rejected.clone())),
+        start_inner(listener, api, api, None, Some(rejected.clone()), None),
         rejected,
     )
 }
@@ -50,8 +51,26 @@ pub(super) fn start_observing_ranges(
     transfer: &str,
 ) -> (Proxy, RangeObservations) {
     let observations = Arc::new(Mutex::new(Vec::new()));
-    let proxy = start_inner(listener, api, transfer, Some(observations.clone()), None);
+    let proxy = start_inner(
+        listener,
+        api,
+        transfer,
+        Some(observations.clone()),
+        None,
+        None,
+    );
     (proxy, observations)
+}
+
+pub(super) fn start_losing_commit_reply(
+    listener: TcpListener,
+    api: &str,
+) -> (Proxy, Arc<AtomicUsize>) {
+    let lost = Arc::new(AtomicUsize::new(0));
+    (
+        start_inner(listener, api, api, None, None, Some(lost.clone())),
+        lost,
+    )
 }
 
 fn start_inner(
@@ -60,12 +79,14 @@ fn start_inner(
     transfer: &str,
     ranges: Option<RangeObservations>,
     rejected_lfs: Option<Arc<AtomicUsize>>,
+    lost_commit: Option<Arc<AtomicUsize>>,
 ) -> Proxy {
     let upstreams = Upstreams {
         api: api.to_owned(),
         transfer: transfer.to_owned(),
         ranges,
         rejected_lfs,
+        lost_commit,
         client: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -79,6 +100,7 @@ fn start_inner(
 
 async fn forward(State(state): State<Upstreams>, request: Request) -> Result<Response, StatusCode> {
     let path = request.uri().path();
+    let commit = request.method() == reqwest::Method::POST && path.contains("/commit/");
     if path.ends_with("/info/lfs/objects/batch")
         && let Some(rejected) = &state.rejected_lfs
     {
@@ -115,7 +137,7 @@ async fn forward(State(state): State<Upstreams>, request: Request) -> Result<Res
     for name in [header::HOST, header::CONNECTION, header::TRANSFER_ENCODING] {
         parts.headers.remove(name);
     }
-    let response = state
+    let mut response = state
         .client
         .request(parts.method, target)
         .headers(parts.headers)
@@ -134,6 +156,40 @@ async fn forward(State(state): State<Upstreams>, request: Request) -> Result<Res
     let mut headers = response.headers().clone();
     headers.remove(header::CONNECTION);
     headers.remove(header::TRANSFER_ENCODING);
+    if commit
+        && status == StatusCode::OK
+        && let Some(lost) = &state.lost_commit
+    {
+        // Consume and validate only the bounded control reply. Uploaded files
+        // and downloads continue to stream without buffering in this proxy.
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?
+        {
+            if bytes.len().saturating_add(chunk.len()) > 65536 {
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_GATEWAY)?;
+        if value["commitOid"].as_str().is_none() {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        let body = if lost.fetch_add(1, Ordering::SeqCst) == 0 {
+            Body::from_stream(futures_util::stream::once(async {
+                Err::<bytes::Bytes, _>(std::io::Error::other("injected lost commit reply"))
+            }))
+        } else {
+            Body::from(bytes)
+        };
+        let mut forwarded = Response::new(body);
+        *forwarded.status_mut() = status;
+        *forwarded.headers_mut() = headers;
+        return Ok(forwarded);
+    }
     let mut forwarded = Response::new(Body::from_stream(response.bytes_stream()));
     *forwarded.status_mut() = status;
     *forwarded.headers_mut() = headers;
