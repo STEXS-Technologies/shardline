@@ -169,7 +169,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Stop development Compose initialization with an actionable error after 60
   unsuccessful MinIO connection attempts instead of retrying forever.
 - Avoid a second temporary payload copy when normalizing privately owned native
-  Xet upload staging; preserve full hash verification and caller-owned files.
+  Xet upload staging, including upload-intent identity preparation; preserve full
+  hash verification and caller-owned files.
 - Recheck native Xet member hashes before persistence so changed staged bytes
   cannot be stored under an earlier validated chunk identity.
 - Prepare file-backed native Xet uploads on blocking workers so full validation

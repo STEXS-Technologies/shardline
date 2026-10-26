@@ -55,12 +55,12 @@ async fn invalid_native_validation_reclaims_source_and_admission() {
 
 #[tokio::test]
 #[allow(clippy::panic)] // A wrong staged representation must fail this test immediately.
-async fn successful_native_normalization_transfers_scratch_ownership_and_updates_integrity() {
+async fn successful_native_normalization_preserves_owned_staging_and_updates_integrity() {
     let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
     let (wire, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
     let (input, source) = staged(&wire);
     let (output, length) = xorb_length(&hash, input, &pool).await.unwrap();
-    assert!(!source.exists(), "normalized input was not reclaimed");
+    assert!(source.exists(), "owned staging was unnecessarily replaced");
     let StagedRequestBody::File {
         file,
         length: staged_length,
@@ -70,6 +70,7 @@ async fn successful_native_normalization_transfers_scratch_ownership_and_updates
         panic!("normalization must keep file-backed ownership");
     };
     let output_path = file.path().to_path_buf();
+    assert_eq!(output_path, source);
     assert_eq!(std::fs::read(&output_path).unwrap(), canonical);
     assert_eq!(length, u64::try_from(canonical.len()).unwrap());
     assert_eq!(staged_length, length);
@@ -77,4 +78,37 @@ async fn successful_native_normalization_transfers_scratch_ownership_and_updates
     drop(file);
     assert!(!output_path.exists(), "normalization leaked its output");
     assert!(pool.try_acquire().is_some());
+}
+
+#[tokio::test]
+#[allow(clippy::panic)] // A canonical upload must retain file-backed ownership.
+async fn canonical_native_identity_keeps_staging_bytes_and_digest_unchanged() {
+    let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
+    let (_, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
+    let (input, source) = staged(&canonical);
+    let (output, length) = xorb_length(&hash, input, &pool).await.unwrap();
+    let StagedRequestBody::File { file, hash, .. } = output else {
+        panic!("canonical upload lost file-backed ownership");
+    };
+    assert_eq!(file.path(), source);
+    assert_eq!(std::fs::read(file.path()).unwrap(), canonical);
+    assert_eq!(length, u64::try_from(canonical.len()).unwrap());
+    assert_eq!(hash.as_bytes(), blake3::hash(&canonical).as_bytes());
+    drop(file);
+    assert!(!source.exists());
+}
+
+#[tokio::test]
+async fn rejected_native_identity_reclaims_owned_staging_and_admission() {
+    let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
+    let (wire, canonical, _) = crate::test_fixtures::footerless_xorb().unwrap();
+    for bytes in [&wire, &canonical] {
+        let (input, source) = staged(bytes);
+        assert!(xorb_length(&"00".repeat(32), input, &pool).await.is_err());
+        assert!(!source.exists(), "rejected upload retained private staging");
+        assert!(
+            pool.try_acquire().is_some(),
+            "rejected upload leaked admission"
+        );
+    }
 }

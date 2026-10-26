@@ -23,32 +23,49 @@ pub(crate) async fn xorb_length(
 ) -> Result<(crate::upload_ingest::StagedRequestBody, u64), ServerError> {
     let hash = hash.to_owned();
     crate::admission::blocking_work(pool, move || {
-        let mut staged = staged;
-        let length = match &mut staged {
-            crate::upload_ingest::StagedRequestBody::Memory { bytes, .. } => {
-                shardline_xet_adapter::canonical_uploaded_xorb_length(&hash, bytes)?
+        let (staged, canonical_length) = match staged {
+            crate::upload_ingest::StagedRequestBody::Memory {
+                bytes,
+                length,
+                hash: body_hash,
+            } => {
+                let canonical_length =
+                    shardline_xet_adapter::canonical_uploaded_xorb_length(&hash, &bytes)?;
+                (
+                    crate::upload_ingest::StagedRequestBody::Memory {
+                        bytes,
+                        length,
+                        hash: body_hash,
+                    },
+                    canonical_length,
+                )
             }
             crate::upload_ingest::StagedRequestBody::File {
                 file,
                 length,
-                hash: body_hash,
+                hash: mut body_hash,
             } => {
-                if let Some(normalized) =
-                    shardline_xet_adapter::normalize_uploaded_xorb_file(&hash, file.path())?
-                {
-                    *length = normalized.as_file().metadata()?.len();
-                    let mut source = std::fs::File::open(normalized.path())?;
+                let file = shardline_xet_adapter::normalize_owned_uploaded_xorb_file(&hash, file)?;
+                let canonical_length = file.as_file().metadata()?.len();
+                if canonical_length != length {
+                    let mut source = std::fs::File::open(file.path())?;
                     let mut hasher = blake3::Hasher::new();
                     std::io::copy(&mut source, &mut hasher)?;
-                    *body_hash = shardline_protocol::ShardlineHash::from_bytes(
+                    body_hash = shardline_protocol::ShardlineHash::from_bytes(
                         *hasher.finalize().as_bytes(),
                     );
-                    *file = normalized;
                 }
-                *length
+                (
+                    crate::upload_ingest::StagedRequestBody::File {
+                        file,
+                        length: canonical_length,
+                        hash: body_hash,
+                    },
+                    canonical_length,
+                )
             }
         };
-        Ok((staged, length))
+        Ok((staged, canonical_length))
     })
     .await
 }

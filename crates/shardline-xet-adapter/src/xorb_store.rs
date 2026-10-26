@@ -37,7 +37,7 @@ mod file_preparation;
 mod member_read;
 mod normalization;
 pub use member_read::read_verified_xorb_chunk;
-pub use normalization::normalize_uploaded_xorb_file;
+pub use normalization::{normalize_owned_uploaded_xorb_file, normalize_uploaded_xorb_file};
 
 #[derive(Debug)]
 pub struct StoredXorbUpload {

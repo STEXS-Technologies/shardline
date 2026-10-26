@@ -656,6 +656,22 @@ may be discarded before writeback. Total upload cost still includes staging,
 verification, decoded chunk storage and durable container persistence. The
 stock-client workload has not demonstrated a reduction in those total costs.
 
+Upload-intent identity preparation also uses the owned-staging path, rather than
+making a normalized copy before the storage adapter receives the file. With
+stock Hub 2.2.0 / `hf_xet` 1.7.0, a 36 MiB incompressible upload and verified
+download succeed with a separate 64 MiB container tmpfs for staging. The earlier
+copy path cannot complete the initial upload under that limit. This is a scratch
+capacity check, not a throughput comparison or a measurement of NVMe writes.
+
+The same owned PostgreSQL/MinIO fixture then fills that tmpfs until no bytes are
+available. The failed upload leaves the Hub revision unchanged and its file
+unpublished; after removing the filler, an identical retry succeeds without a
+server restart and both old and new files download with matching SHA-256 hashes.
+Server diagnostics confirm ENOSPC. The stock client keeps retrying HTTP 500 until
+the harness cancels its process group after 30 seconds, so this does not establish
+prompt client failure or a server-side transfer deadline. Only the isolated tmpfs
+is filled; the host filesystem and durable backends retain space.
+
 #### S3 requests and upload resources
 
 Lifecycle repair has a separate shared-container optimization: a bounded,

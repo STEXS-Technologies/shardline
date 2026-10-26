@@ -29,6 +29,20 @@ pub fn normalize_uploaded_xorb_file(
     normalize_with_checkpoint(expected_hash, path, &|| Ok(()))
 }
 
+/// Authenticate privately owned upload staging and append any missing footer.
+/// Ownership is consumed so callers cannot accidentally mutate borrowed input.
+/// On failure the staging file is reclaimed; canonical input remains unchanged.
+///
+/// # Errors
+/// Returns an error for malformed content, exceeded limits, I/O or hash mismatch.
+pub fn normalize_owned_uploaded_xorb_file(
+    expected_hash: &str,
+    file: tempfile::NamedTempFile,
+) -> Result<tempfile::NamedTempFile, XetAdapterError> {
+    normalize_owned_with_checkpoint(expected_hash, file.path(), &|| Ok(()))?;
+    Ok(file)
+}
+
 pub(super) fn normalize_with_checkpoint(
     expected_hash: &str,
     path: &Path,
