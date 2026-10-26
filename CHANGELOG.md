@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Move verified native Xet member buffers into object writes, avoiding an
+  extra S3 payload copy while retaining integrity and bounded write admission.
 - Avoid decoding unrequested Xorb members twice during native file
   reconstruction, retaining complete source validation and rehashing returned
   members.

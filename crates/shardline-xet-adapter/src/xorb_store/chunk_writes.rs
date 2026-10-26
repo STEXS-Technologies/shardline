@@ -85,7 +85,7 @@ pub(super) async fn store<R: Read + Seek>(
             let result = AsyncObjectStore::put_if_absent(
                 objects,
                 &key,
-                ObjectBody::from_slice(&data),
+                ObjectBody::from_vec(data),
                 &integrity,
             )
             .await?;

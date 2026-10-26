@@ -699,6 +699,22 @@ is filled; the host filesystem and durable backends retain space.
 
 #### S3 requests and upload resources
 
+Native member persistence hands its verified decoded buffer to the object
+adapter as owned bytes. This avoids the S3 adapter copying a borrowed member
+into a second owned buffer; member validation, conditional creation and the
+256 KiB pending-write budget remain unchanged. This changes upload persistence,
+not the download decoder.
+
+Two reversed-order pairs with stock Hub 2.2.0 / `hf_xet` 1.7.0, fresh
+PostgreSQL/MinIO fixtures and 512 MiB incompressible uploads passed exact
+downloads, cold overlapping-upload dedup and independent trace reconciliation.
+The server had one CPU and a 1 GiB memory limit. Unique-upload server cgroup CPU
+was 4.47–4.49 seconds with borrowed member bodies and 4.21–4.29 seconds with
+owned bodies. Elapsed times overlapped: 5.62–6.08 versus 5.35–5.93 seconds.
+Every unique upload still made 8,538 S3 requests, with approximately 2.155 GB
+of process logical writes. These shared-host pairs support removing the copy;
+they do not prove a throughput, RSS, backend-cost or upstream-Xet advantage.
+
 Lifecycle repair has a separate shared-container optimization: a bounded,
 run-local set remembers fully verified packed sources while scanning latest and
 version records. In a real MinIO fixture with four files sharing one container,
