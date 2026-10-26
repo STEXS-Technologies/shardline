@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Release inactive S3 write-coordination entries directly instead of scanning
+  every active key on each acquisition, preserving same-key exclusion and
+  cancellation cleanup.
 - Stop boolean Xorb access checks after the first verified repository record,
   avoiding unnecessary candidate traversal for shared content.
 - Stop Xorb range access checks once published file terms prove every requested

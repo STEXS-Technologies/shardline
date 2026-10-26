@@ -598,6 +598,36 @@ tmpfs avoids direct SSD scratch writes but consumes memory and may use swap.
 Measure the chosen layout's memory, disk accounting and capacity before applying
 the numbers to a deployment. Durable object and SQLite sync policies are unchanged.
 
+#### S3 write-coordination CPU
+
+A Linux `perf` flamegraph of the previous coordination path with 4,096 held
+keys and 32,768 transient acquisitions showed most sampled CPU in lock-map
+scanning and weak-reference checks. Registration now lasts through both waiting
+and ownership; the last registration removes only its own map entry. This avoids
+scanning unrelated keys without adding a cleanup task or changing conditional
+object writes and integrity verification.
+
+The same unoptimized diagnostic took 1.11 seconds before and 66 milliseconds
+after the change. These single shared-host observations measure coordination
+only, excluding S3, hashing and payload transfer; they do not establish an
+end-to-end throughput improvement. Cancellation and concurrent registry churn
+also have ordinary regression tests. Reproduce the isolated diagnostic with:
+
+```bash
+cargo test --locked -p shardline-storage --all-features --lib \
+  many_live_keys_coordination_cpu_diagnostic \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+A release-binary check used 32 concurrent HTTP clients and 32 one-MiB objects
+on owned PostgreSQL/MinIO, with unique and repeated data before and after the
+change. All four lanes passed, including 384 byte-verified post-GC reads;
+ingest, mixed-workload and settling-GC request counts matched between builds.
+A stock Hub 2.2 / `hf_xet` 1.7 one-GiB upload/edit/download run also passed,
+retaining the 17,037/44/6,401/52 backend request counts and all 6,240 duplicate
+chunk verification GETs. These checks qualify behavior for those workloads;
+they do not establish lower cloud bills or production scale-out efficiency.
+
 #### Footerless Xet staging
 
 Owned request staging verifies footerless Xorb members and appends their footer
