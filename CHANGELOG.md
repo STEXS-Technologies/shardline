@@ -112,6 +112,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Avoid redundant conditional S3 writes for recently stored native Xet chunks
+  using a larger bounded hint window, retaining remote content verification
+  and conditional creation when hints are stale.
 - Recover cold Hub Git identities beyond 10,000 ancestors in bounded windows,
   preserving commit hashes, repository scope and cumulative file-work limits.
 - Restore plain HTTP native-Xet downloads for repository-wide credentials when

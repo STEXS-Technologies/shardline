@@ -485,6 +485,28 @@ they do not establish a drive-lifetime multiplier or annual replacement saving.
 An endurance estimate needs longer isolated runs, the drive's rated write
 endurance and replacement cost, and the deployment's complete write workload.
 
+An October 26 follow-up compared actual released v1.12.1 with the executable
+from `97df1303` on NVMe-backed Btrfs. Three fresh pairs alternated binary order.
+Each deployment used local objects and SQLite, 32 deterministic incompressible
+one-MiB files (`SHAKE-256("local-io-v1:<index>")`), eight HTTP clients, an
+identical overwrite and complete reads before and after GC. Startup was excluded
+from I/O deltas; normal durability settings were used without dropping caches.
+
+| Server observation | v1.12.1 median | Candidate median |
+| --- | ---: | ---: |
+| Initial upload: process `write_bytes` | 63.5 MiB | 46.3 MiB |
+| Identical overwrite: process `write_bytes` | 26.3 MiB | 7.2 MiB |
+| Warm 32-file read phases: process `write_bytes` | 1.0–1.4 MiB | 0 MiB |
+| Lifetime peak RSS after overwrite | 43.9 MiB | 55.1 MiB |
+
+All 768 full-body comparisons passed, including reads after restarting each
+deployment with v1.12.1. All six fsck runs passed; SQLite `integrity_check` and
+`foreign_key_check` passed before and after those restarts. These process
+counters exclude the separate GC/fsck processes and are not complete deployment
+or internal NAND writes. Read caches were warm; no cold-read or drive-lifetime
+gain is established. The lower server write pressure came with approximately
+11 MiB higher observed peak RSS in this fixture, not a universal memory ceiling.
+
 #### Local snapshot copies
 
 An October 17 local-snapshot audit found that the current production
@@ -1516,6 +1538,43 @@ an SSD replacement saving. Small-range read amplification must be represented
 in the workload rather than hidden by full-download throughput.
 
 ## Native Xet backend-cost check
+
+A separate October 26 run used executable `97df1303`, Hub 2.2.0/hf_xet
+1.7.0 and the same runner with `--file-mib 1024`. One combined-role server
+was limited to one CPU/1 GiB. Both fresh-client downloads passed SHA-256
+verification, and backend traces reconciled with MinIO API counters.
+
+| One-GiB operation | Client operation seconds | Backend requests |
+| --- | ---: | ---: |
+| Initial native upload | 10.32 | 17,037 |
+| Initial cold-client download | 3.37 | 44 |
+| 256-KiB tail edit, cold-client upload | 74.94 | 12,641 |
+| Edited cold-client download | 4.43 | 52 |
+
+This exposes a remaining large-file cost: the edit still sent 398,909,600
+Xorb bytes and made 6,240 duplicate standalone-chunk PUT attempts plus 6,240
+chunk GETs. Fifteen dedup shard hits establish reuse, not optimal reuse.
+Initial retained payload was 2,149,499,884 bytes; the second version added
+399,886,933 bytes. Compatibility chunk copies remain included. The server
+cgroup lifetime peak was 708.1 MiB, including charged cache; this is not
+application RSS or a concurrency ceiling. These are single-run observations
+with warm backend caches, not production throughput or a before/after win.
+
+Repeating that one-GiB fixture with the request-order hint window increased
+from 512 to 32,768 keys reduced edited-upload backend requests from 12,641
+to 6,401. Duplicate chunk PUTs fell from 6,240 to zero; all 6,240 verified
+chunk GETs remained, alongside four new chunk PUTs. Initial-upload requests
+remained 17,037, download requests remained 44/52, and retained chunk/Xorb
+payloads were unchanged. Both downloads and trace reconciliation passed.
+The hint stores bounded key digests, not payload bytes, and a hit still checks
+remote content length and hash; stale hints retain conditional-create fallback.
+
+The edited upload took 5.00 seconds in the repeat versus 74.94 in the control.
+Other host activity was present, so this pair establishes the request change,
+not a repeatable latency multiplier. Server cgroup lifetime peaks were 708.1
+and 678.2 MiB respectively, including cache; their difference does not isolate
+hint memory or establish an RSS reduction. Native chunk-copy storage and the
+398.9 MB of edited client Xorb traffic remain separate optimization gaps.
 
 Run the stock Hub/Xet client against disposable PostgreSQL and MinIO:
 
