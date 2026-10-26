@@ -853,6 +853,28 @@ steady exclusive barrier spans around 260–300 ms for the candidate and 260–2
 for v1.12.1; this does not justify changing the barrier's safety contract.
 The shared-host fixture still does not qualify production scaling or other workloads.
 
+The larger-file check on October 25 compares `f815935a` with the actual released
+v1.12.1 executable: eight 36 MiB objects, four clients, one API replica limited
+to one CPU and 1 GiB RAM, and three repetitions for both unique and repeated
+data. The candidate ran first, followed by the predecessor; this was not an
+alternating-order comparison. Other host activity was not excluded.
+
+| Measurement | Unique: v1.12.1 | Unique: candidate | Repeated: v1.12.1 | Repeated: candidate |
+| --- | ---: | ---: | ---: | ---: |
+| Median mixed throughput with GC (MiB/s) | 311.94 | 273.89 | 326.56 | 317.44 |
+| Backend requests across two settling GCs | 227 | 127 | 107 | 79 |
+| Backend response bytes across those GCs (decimal MB) | 302.60 | 604.53 | 75.66 | 151.14 |
+
+Fewer requests therefore do not establish lower total cost: this workload
+transfers approximately twice as many backend bytes and has lower observed
+throughput. The candidate authenticates source containers again on each GC;
+saved member sidecars do not establish current source health. Reusing them as
+a health cache would bypass that check. Request counts matched MinIO traces,
+and all 288 post-GC byte comparisons passed across the two versions. These runs
+did not reproduce the intermittent GC failures observed in earlier trials,
+so their cause remains unresolved. This larger-file throughput and transfer-cost
+gate stays open; the smaller controlled result above does not close it.
+
 #### Native Hugging Face/Xet transfers
 
 An October 24, 2026 measurement used production binary `d61d7342`,
