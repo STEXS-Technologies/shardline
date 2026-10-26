@@ -94,7 +94,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   memory allowance and retaining full content verification and disk spill for
   larger containers.
 - Reuse native Xorb sources during shard validation and file hashing to avoid
-  repeated object-store reads and temporary copies for sequential file terms.
+  repeated object-store reads and temporary copies for sequential file terms;
+  derive range offsets from verified members without a duplicate offset array.
 - Reuse fully verified packed-container reachability within lifecycle repair's
   bounded working set, avoiding repeated source reads for shared latest and
   version records while verifying sources again on later repair runs.

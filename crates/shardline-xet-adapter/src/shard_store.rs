@@ -905,15 +905,9 @@ fn load_xorb_range_info_with_checkpoint(
             references.insert(shardline_server_core::chunk_object_key(&hash)?);
         }
     }
-    let packed_chunk_ends = validated
-        .chunks()
-        .iter()
-        .map(ValidatedXorbChunk::packed_end)
-        .collect();
     Ok((
         XorbRangeInfo {
             total_length: validated.total_length(),
-            packed_chunk_ends,
             verified_chunks: validated.chunks().to_vec(),
         },
         reader,
@@ -943,7 +937,6 @@ const fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
 #[derive(Debug, Clone)]
 struct XorbRangeInfo {
     total_length: u64,
-    packed_chunk_ends: Vec<u64>,
     verified_chunks: Vec<ValidatedXorbChunk>,
 }
 
@@ -975,9 +968,9 @@ impl XorbRangeInfo {
                 InvalidSerializedShardError::ShardTermRangeStartedPastXorbChunkList,
             )
         })?;
-        self.packed_chunk_ends
+        self.verified_chunks
             .get(previous_index)
-            .copied()
+            .map(ValidatedXorbChunk::packed_end)
             .ok_or_else(|| {
                 XetAdapterError::from(
                     InvalidSerializedShardError::ShardTermRangeStartedPastXorbChunkList,
@@ -987,9 +980,9 @@ impl XorbRangeInfo {
 
     fn packed_end(&self, range_end: u64) -> Result<u64, XetAdapterError> {
         let range_end = usize::try_from(range_end)?;
-        self.packed_chunk_ends
+        self.verified_chunks
             .get(range_end.saturating_sub(1))
-            .copied()
+            .map(ValidatedXorbChunk::packed_end)
             .ok_or_else(|| {
                 XetAdapterError::from(
                     InvalidSerializedShardError::ShardTermRangeEndedPastXorbChunkList,
@@ -1686,45 +1679,50 @@ mod tests {
 
     // ── XorbRangeInfo ────────────────────────────────────────────────────
 
+    fn range_info(ends: &[u64]) -> super::XorbRangeInfo {
+        let mut start = 0;
+        let verified_chunks = ends
+            .iter()
+            .map(|&end| {
+                let chunk = super::ValidatedXorbChunk::new(
+                    shardline_protocol::ShardlineHash::from_bytes([0; 32]),
+                    start,
+                    end,
+                    start,
+                    end,
+                );
+                start = end;
+                chunk
+            })
+            .collect();
+        super::XorbRangeInfo {
+            total_length: ends.last().copied().unwrap_or(0),
+            verified_chunks,
+        }
+    }
+
     #[test]
     fn xorb_range_info_packed_start_zero_for_index_zero() {
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![100, 200, 300],
-            verified_chunks: vec![],
-        };
+        let info = range_info(&[100, 200, 300]);
         assert_eq!(info.packed_start(0).unwrap(), 0);
     }
 
     #[test]
     fn xorb_range_info_packed_start_uses_previous_chunk_end() {
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![100, 200, 300],
-            verified_chunks: vec![],
-        };
+        let info = range_info(&[100, 200, 300]);
         assert_eq!(info.packed_start(1).unwrap(), 100);
         assert_eq!(info.packed_start(2).unwrap(), 200);
     }
 
     #[test]
     fn xorb_range_info_packed_start_rejects_past_end() {
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![100, 200],
-            verified_chunks: vec![],
-        };
+        let info = range_info(&[100, 200]);
         assert!(info.packed_start(3).is_err());
     }
 
     #[test]
     fn xorb_range_info_packed_end_uses_zero_based_index() {
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![100, 200, 300],
-            verified_chunks: vec![],
-        };
-        // packed_end(1) = packed_chunk_ends[0] = 100
+        let info = range_info(&[100, 200, 300]);
         assert_eq!(info.packed_end(1).unwrap(), 100);
         assert_eq!(info.packed_end(2).unwrap(), 200);
         assert_eq!(info.packed_end(3).unwrap(), 300);
@@ -1732,11 +1730,7 @@ mod tests {
 
     #[test]
     fn xorb_range_info_packed_end_rejects_past_end() {
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![100, 200],
-            verified_chunks: vec![],
-        };
+        let info = range_info(&[100, 200]);
         assert!(info.packed_end(3).is_err());
     }
 
@@ -2191,22 +2185,14 @@ mod tests {
     #[test]
     fn xorb_range_info_packed_start_rejects_subtract_underflow_for_index_above_zero() {
         // range_start > 0 but previous_index underflows when range_start = 0
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![100],
-            verified_chunks: vec![],
-        };
+        let info = range_info(&[100]);
         // This is fine - packed_start(0) = 0
         assert_eq!(info.packed_start(0).unwrap(), 0);
     }
 
     #[test]
     fn xorb_range_info_packed_start_rejects_index_beyond_list() {
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![100],
-            verified_chunks: vec![],
-        };
+        let info = range_info(&[100]);
         // packed_start(2) -> range_start=2 -> previous_index = 1 -> out of bounds
         let result = info.packed_start(2);
         assert!(
@@ -2216,29 +2202,18 @@ mod tests {
     }
 
     #[test]
-    fn xorb_range_info_packed_end_rejects_zero_index() {
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![100, 200],
-            verified_chunks: vec![],
-        };
+    fn xorb_range_info_packed_end_preserves_zero_index_compatibility() {
+        let info = range_info(&[100, 200]);
         // packed_end(0) -> range_end = 0 -> saturating_sub(1) = 0 -> get(0) = Some(100)
         assert_eq!(info.packed_end(0).unwrap(), 100);
     }
 
     #[test]
     fn xorb_range_info_packed_end_rejects_empty_chunks() {
-        let info = super::XorbRangeInfo {
-            total_length: 0,
-            packed_chunk_ends: vec![],
-            verified_chunks: vec![],
-        };
+        let info = range_info(&[]);
         // packed_end(1) -> range_end = 1 -> saturating_sub(1) = 0 -> get(0) = None
         let result = info.packed_end(1);
-        assert!(
-            result.is_err(),
-            "expected error for empty packed_chunk_ends"
-        );
+        assert!(result.is_err(), "expected error for empty verified chunks");
     }
 
     // ── checked helper functions ─────────────────────────────────────────

@@ -111,11 +111,6 @@ fn cancelled_digest_reload_stops_s3_materialization_and_can_retry() {
     .unwrap();
     let info = XorbRangeInfo {
         total_length: validated.total_length(),
-        packed_chunk_ends: validated
-            .chunks()
-            .iter()
-            .map(ValidatedXorbChunk::packed_end)
-            .collect(),
         verified_chunks: validated.chunks().to_vec(),
     };
     let file = MDBFileInfo {
