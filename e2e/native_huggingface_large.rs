@@ -45,6 +45,9 @@ struct ProcessIo {
 
 impl ProcessIo {
     fn read() -> Result<Self, TestError> {
+        // Linux includes waited-for children in /proc/self/io. Stock clients
+        // are subprocesses of this test, so these are combined fixture/client
+        // counters, unlike the separately running server in paired benchmarks.
         let counters = std::fs::read_to_string("/proc/self/io")?;
         let value = |name: &str| -> Result<u64, TestError> {
             counters
@@ -64,7 +67,7 @@ impl ProcessIo {
 
     fn report_since(self, before: Self, stage: &str) {
         eprintln!(
-            "{stage}: server/test process-accounted read_bytes={}, write_bytes={}, wchar={}; these are not isolated scratch writes or device wear",
+            "{stage}: server/test plus waited-for child process-accounted read_bytes={}, write_bytes={}, wchar={}; includes reaped stock clients, not isolated server/scratch writes or device wear",
             self.read_bytes.saturating_sub(before.read_bytes),
             self.write_bytes.saturating_sub(before.write_bytes),
             self.written_characters

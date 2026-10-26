@@ -120,10 +120,16 @@ test matrix, not a claim that the current branch has passed release CI.
 | 1.25.1 | 1.5.2 | Model/dataset workflows on SQLite/filesystem, PostgreSQL/filesystem and PostgreSQL/MinIO; 1 GiB native upload/download with concurrent slow HTTP readers, combined and separate API/transfer roles; expired download URL and refresh |
 | 1.25.1 | 1.6.0 | Model/dataset workflows on SQLite/filesystem, PostgreSQL/filesystem and PostgreSQL/MinIO; 1 GiB transfers with combined and separate API/transfer roles, interrupted uploads, URL refresh and identity checks |
 | 1.25.1 | 1.7.0 | Model/dataset upload and download on local and PostgreSQL/MinIO storage, 1 GiB transfers with combined and separate API/transfer roles, URL refresh and interrupted uploads |
-| 2.2.0 | 1.7.0 | Model/dataset upload and download on SQLite/filesystem, PostgreSQL/filesystem and PostgreSQL/MinIO storage; URL refresh with combined and split API/transfer roles; endpoint-local stock `ModelCard.push_to_hub()` on local and PostgreSQL/MinIO storage |
+| 2.2.0 | 1.7.0 | Model/dataset upload and download on SQLite/filesystem, PostgreSQL/filesystem and PostgreSQL/MinIO storage; 1 GiB split-role PostgreSQL/MinIO transfer with cancellation and concurrent slow readers; URL refresh with combined and split API/transfer roles; endpoint-local stock `ModelCard.push_to_hub()` on local and PostgreSQL/MinIO storage |
 
 Versions outside this matrix require qualification before support is claimed.
 The selected workflows do not establish every upstream Hub API for these versions.
+
+The large-file fixture's RSS ceiling applies to the server/test process and
+excludes stock-client RSS. Its `/proc/self/io` counters include waited-for
+client subprocesses, so upload and cold-download totals do not isolate server
+I/O, scratch writes or SSD wear. Use independently measured server and client
+processes for operational-cost comparisons.
 
 An additional HTTPS front-door check passes a 9 MiB native upload and
 SHA-256-verified download with Hub 1.25.1 / `hf_xet` 1.5.2 and 1.6.0, and Hub
