@@ -5,6 +5,69 @@ use shardline_server::{LocalBackend, ServerConfig, task_tracking};
 use std::num::NonZeroUsize;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supervised_fsck_never_certifies_unavailable_storage_as_completed() -> Result<()> {
+    let sandbox = tempfile::tempdir()?;
+    let root = sandbox.path().join("deployment");
+    let backend = LocalBackend::new(
+        root.clone(),
+        "http://127.0.0.1:8080".to_owned(),
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
+    )
+    .await?;
+    backend
+        .upload_file(
+            "asset",
+            Bytes::from_static(b"supervised FSCK outcome"),
+            None,
+        )
+        .await?;
+
+    let clean_state = sandbox.path().join("clean");
+    let clean = run_operation(&clean_state, &root, "fsck")?;
+    assert_eq!(clean.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&clean.stdout).contains("maintenance.status: completed"));
+    let clean_proof = journal(&clean_state)
+        .parent()
+        .ok_or("state directory")?
+        .join("result-proof.json");
+    let proof = MaintenanceArtifactProof::from_json(&fs::read(&clean_proof)?)?;
+    let report = fs::read(
+        clean_proof
+            .parent()
+            .ok_or("proof directory")?
+            .join("artifacts")
+            .join(hex::encode(proof.artifact.digest.0)),
+    )?;
+    proof.artifact.verify_materialized(report.as_slice())?;
+    assert!(report.starts_with(b"maintenance.success: true\n"));
+
+    let retained = sandbox.path().join("retained");
+    fs::rename(root.join("chunks"), &retained)?;
+    fs::write(root.join("chunks"), b"not an object directory")?;
+    let failed_state = sandbox.path().join("failed");
+    let failed = run_operation(&failed_state, &root, "fsck")?;
+    // The explicit controller reports its own failure as 1. Ordinary FSCK's
+    // operational-error status is 2, covered separately; neither may become 0.
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(!failed.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&failed.stdout).contains("maintenance.status: completed"));
+    assert!(
+        !journal(&failed_state)
+            .parent()
+            .ok_or("state directory")?
+            .join("result-proof.json")
+            .exists(),
+        "failed scans must not publish a completed result proof"
+    );
+
+    fs::remove_file(root.join("chunks"))?;
+    fs::rename(retained, root.join("chunks"))?;
+    let restored = run_operation(&sandbox.path().join("restored"), &root, "fsck")?;
+    assert_eq!(restored.status.code(), Some(0));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fsck_history_preserves_scan_status_when_storage_becomes_unavailable() -> Result<()> {
     let sandbox = tempfile::tempdir()?;
     let root = sandbox.path().join("deployment");
