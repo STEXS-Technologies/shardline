@@ -45,6 +45,60 @@ fn native_alias_migration_backfills_and_can_readopt_without_losing_old_bindings(
     Ok(())
 }
 
+#[test]
+fn native_alias_migration_preserves_only_observed_legacy_bindings()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let connection = rusqlite::Connection::open_in_memory()?;
+    connection.execute_batch(include_str!(
+        "../migrations/20261021000000_xet_file_identities.up.sql"
+    ))?;
+    connection.execute(
+        "INSERT INTO shardline_xet_file_identities VALUES ('alice','sha','overwritten',42)",
+        [],
+    )?;
+    // An old writer could replace a binding before alias tracking existed.
+    connection.execute(
+        "UPDATE shardline_xet_file_identities SET file_id='current' WHERE scope_key='alice'",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO shardline_xet_file_identities VALUES ('bob','other-sha','overwritten',99)",
+        [],
+    )?;
+    let migration = include_str!("../migrations/20261023040000_xet_file_aliases.up.sql");
+    connection.execute_batch(migration)?;
+    // Once installed, triggers must also capture writes by unchanged binaries.
+    connection.execute(
+        "UPDATE shardline_xet_file_identities SET file_id='replacement' WHERE scope_key='alice'",
+        [],
+    )?;
+    connection.execute_batch(migration)?;
+    let mut query = connection.prepare(
+        "SELECT scope_key,file_id,sha256,total_bytes FROM shardline_xet_file_aliases \
+         ORDER BY scope_key,file_id",
+    )?;
+    let aliases = query
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        aliases,
+        vec![
+            ("alice".into(), "current".into(), "sha".into(), 42),
+            ("alice".into(), "replacement".into(), "sha".into(), 42),
+            ("bob".into(), "overwritten".into(), "other-sha".into(), 99),
+        ],
+        "backfill must not invent a lost binding or borrow another repository's identity"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn native_candidate_requires_exact_repository_and_authoritative_commit_membership()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
