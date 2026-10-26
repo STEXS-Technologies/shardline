@@ -1,4 +1,5 @@
 mod archive_inspection;
+mod fsck_outcomes;
 mod gc_interruptions;
 mod local_history;
 mod native_interruptions;
