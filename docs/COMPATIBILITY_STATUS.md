@@ -200,6 +200,13 @@ and connection/shallow-root errors; its exit code alone does not establish
 healthy interoperability. Shardline's snapshot fallback remains necessary for
 the tested clients.
 
+The recursion also reproduces with Git's own source repository at tag v2.55.0,
+served by stock Git at depth one. With a 64-process container limit, both
+2.52.0 and 2.55.0 start 22 recursive fetch processes for filtered v2 and 31
+for filtered v0; the unfiltered v2 control starts none. All six clones reach
+the expected commit and pass strict fsck. The process cap bounds this control,
+so these counts are not a protocol limit or proof of an inevitable hang.
+
 Upstream Git's later [lazy-fetch recursion limit](https://github.com/git/git/commit/4360734e907c9c92e72217a8ba9bdc1989f3c3a5)
 reduces this amplification but does not eliminate it. With that revision built
 privately, the same filtered clone makes six fetch requests and emits five
