@@ -5,11 +5,37 @@ use shardline_index::{UploadIntentState, UploadIntentStore};
 use std::io::{BufWriter, Write};
 
 mod mixed;
+mod prerequisites;
+
+pub(super) const REMOTE_FIELDS: [&str; 7] = [
+    "NATIVE_PROCESS_POSTGRES_URL",
+    "NATIVE_PROCESS_S3_BUCKET",
+    "NATIVE_PROCESS_S3_REGION",
+    "NATIVE_PROCESS_S3_ENDPOINT",
+    "NATIVE_PROCESS_S3_PREFIX",
+    "NATIVE_PROCESS_S3_ACCESS",
+    "NATIVE_PROCESS_S3_SECRET",
+];
 
 pub(super) fn configure_remote(config: ServerConfig) -> Result<ServerConfig> {
-    let Ok(url) = std::env::var("NATIVE_PROCESS_POSTGRES_URL") else {
+    let configured = REMOTE_FIELDS
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .count();
+    if configured == 0 {
         return Ok(config);
-    };
+    }
+    if configured != REMOTE_FIELDS.len() {
+        return Err("native process remote backend configuration is incomplete".into());
+    }
+    for name in REMOTE_FIELDS {
+        if !std::env::var(name).is_ok_and(|value| !value.is_empty()) {
+            return Err(
+                "native process remote backend configuration requires nonempty UTF-8 values".into(),
+            );
+        }
+    }
+    let url = std::env::var("NATIVE_PROCESS_POSTGRES_URL")?;
     let config = config.with_index_postgres_url(url)?;
     let s3 = shardline_storage::S3ObjectStoreConfig::new(
         std::env::var("NATIVE_PROCESS_S3_BUCKET")?,

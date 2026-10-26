@@ -15,7 +15,9 @@ async fn native_xorb_remote_alternate_encoding_round_trip() -> Result {
         drop(listener);
         let endpoint = format!("http://{address}");
         let mut server = start_with_environment(root.path(), address, None, &remote.environment)?;
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?;
         ready(&client, &endpoint, &mut server).await?;
         let scope =
             RepositoryScope::new(RepositoryProvider::Generic, "encoding", "roundtrip", None)?;

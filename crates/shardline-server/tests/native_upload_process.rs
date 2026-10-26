@@ -53,6 +53,11 @@ fn start_with_environment(
         .env("SHARDLINE_TEST_NATIVE_PROCESS_ADDRESS", address.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
+    // Every child uses the backend explicitly supplied by its owning fixture.
+    // Parent-shell settings must not turn a local control into a remote run.
+    for name in native_upload_client::REMOTE_FIELDS {
+        command.env_remove(name);
+    }
     for (name, value) in environment {
         command.env(name, value);
     }
