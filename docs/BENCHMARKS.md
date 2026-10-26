@@ -1803,10 +1803,23 @@ totaling 75,530,184 bytes in each run. Small total-directory differences came
 from metadata, which is not included in that payload comparison. This is a
 same-content contention control, not unique-file saturation or a scaling test.
 
+A separate 32-client control used distinct incompressible 36 MiB files and the
+same eight-reader download limit. Both binaries completed all uploads and 32
+verified downloads. Their 18,838 durable chunk/Xorb objects matched by identity,
+length and SHA-256, totaling 2,416,976,080 bytes per binary. Peak server RSS was
+133,216 KiB serially and 100,172 KiB concurrently. Together with the opposite
+memory result for identical files, this demonstrates workload dependence;
+it does not establish a general RSS reduction or a sustained-load ceiling.
+These controls did not measure 64-client or multi-host operation.
+
 The current-source stock-client process test also passed all six lifecycle
 interruption points for a 512 MiB upload: intent creation, storing, object work,
 stored, metadata committed and visible. It verified recovery after SIGKILL;
 this local control does not qualify remote-provider failure semantics.
+The corresponding PostgreSQL/MinIO stock-client test subsequently passed the
+same six boundaries in 243.27 seconds. That configured test ran against the
+current source; twelve other process-test cases were excluded by its filter.
+Neither result substitutes for the complete distributed-integrity gate.
 
 An October 26 direct-CAS HTTP comparison used stock hf_xet 1.7.0 against
 Shardline `07bedb55` and the unmodified upstream `local_cas_server` from
