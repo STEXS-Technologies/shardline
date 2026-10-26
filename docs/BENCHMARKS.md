@@ -299,6 +299,18 @@ not establish retention-expired storage, physical NVMe writes or hardware life.
 
 ### Operational-efficiency measurements
 
+A local SQLite qualification populated one million synthetic file records
+through the real membership-refresh triggers, using the `b569f583` executable's
+normal migrations. The production candidate query retained its 256-row batch
+limit. A shared hash returned 256 candidates, a unique hash in the final record
+returned one, and missing-hash/wrong-repository probes returned none. All four
+plans searched the covering membership index and then the record-key index;
+SQLite integrity and foreign-key checks passed. Observed query times were
+1.06/0.065/0.037/0.034 ms respectively with warm host caches. These are single
+SQL observations, not HTTP authorization, cold-cache latency or million-object
+storage measurements. PostgreSQL and proportional compatibility fallbacks
+require separate qualification.
+
 An additional October 26 comparison used actual v1.12.1 and candidate
 `b569f583`, harness `605d9fcc`, eight 36-MiB objects, eight clients and three
 repetitions of unique/repeated data. Each fresh PostgreSQL/MinIO deployment
