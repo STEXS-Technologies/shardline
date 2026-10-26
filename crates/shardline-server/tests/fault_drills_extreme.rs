@@ -56,6 +56,8 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+
+mod readiness;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, mpsc, oneshot},
@@ -233,14 +235,9 @@ impl DrillHarness {
         self.graceful_shutdown = Some(shutdown_tx);
         self.base_url = base_url.clone();
 
-        // Readiness: any HTTP response (even 401/404) proves the router is up.
-        let client = self.client.clone();
-        loop {
-            match client.get(format!("{base_url}/healthz")).send().await {
-                Ok(_response) => return,
-                Err(_error) => tokio::time::sleep(Duration::from_millis(10)).await,
-            }
-        }
+        readiness::wait_for_health(&self.client, &base_url)
+            .await
+            .expect("healthy chaos fixture");
     }
 
     async fn restart(&mut self) {
