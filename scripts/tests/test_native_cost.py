@@ -10,10 +10,23 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shardline"))
-from performance_validation.native import client_operation  # noqa: E402
+from performance_validation.native import ShardlineRedirect, client_operation  # noqa: E402
+import urllib.request
 
 
 class NativeCostTest(unittest.TestCase):
+    def test_backend_redirect_is_rejected_before_forwarding_credentials(self):
+        handler = ShardlineRedirect(("http", "127.0.0.1:1234"))
+        request = urllib.request.Request("http://127.0.0.1:1234/resolve/file",
+                                         headers={"Authorization": "Bearer private-token"})
+        for target in ("http://127.0.0.1:9000/backend", "https://127.0.0.1:1234/object",
+                       "http://private-token@127.0.0.1:1234/object"):
+            with self.assertRaisesRegex(RuntimeError, "outside Shardline"):
+                handler.redirect_request(request, None, 307, "redirect", {}, target)
+        redirected = handler.redirect_request(request, None, 307, "redirect", {},
+                                               "http://127.0.0.1:1234/lfs/objects/hash")
+        self.assertEqual(redirected.get_header("Authorization"), "Bearer private-token")
+
     def operation(self):
         return client_operation(Path("/fixture/python"),
                                 SimpleNamespace(ports=[1234], token="private-token"),

@@ -1519,6 +1519,31 @@ separate client CPU/RSS from server/backend cgroup observations. Statement WAL
 is not device writes or NVMe wear. Inventories are immediate, with no claim of
 retention-expired GC savings, byte-hours, cloud prices or all-in cost per TB.
 
+Add `--slow-readers 32` for an explicit plain-HTTP pressure check. It starts
+32 simultaneous readers with 32 KiB client buffers and a delay between reads,
+then 32 readers that abandon their responses after the first buffer. A complete
+plain-HTTP read and a cold stock-Xet download must succeed afterward. Every
+completed body is length/SHA-256 verified, redirects are confined to the same
+Shardline origin, and server process peak RSS must remain below 384 MiB during
+the two bursts. Abandoned responses contribute backend cost but no successful
+logical bytes, so their results omit requests-per-GB normalization.
+
+The October 26 check on source `8f1b5d36`, using the same client versions and
+36 MiB workload above, passed with the combined Hub replica limited to one
+CPU/1 GiB and PostgreSQL/MinIO storage. The executable SHA-256 was
+`6c08095cbd443a8c586cfa8a7db286bdc6775aa07f8c19e46056fe5135f5dc16`.
+All 32 slow readers completed verified downloads; all 32 abandonment clients
+stopped before completing the file. Observed server peak RSS was about 131 MiB
+after the complete-read burst and 152 MiB after the abandonment burst and
+following plain read. Backend attempts were 256 and 224 respectively, and the
+trace reconciled against MinIO counters. Both subsequent download checks passed.
+
+Abandonment still caused approximately 1.209 GB of backend response transfer
+in this burst. Cancellation releases response resources, but cannot reclaim
+verification reads already performed before the first client buffer. This is
+one shared-host pressure qualification, not sustained-load or multi-host
+performance evidence, and not a 32-reader/1 GiB-file qualification.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:

@@ -106,7 +106,8 @@ class Deployment:
                             "--database-url", database], env=self.env, stdout=log,
                            stderr=subprocess.STDOUT, check=True, timeout=120)
         self.token = command(self.binary, "--config", self.config, "admin", "token", "--issuer", "fixture",
-                             "--subject", "fixture", "--scope", "write", "--provider", "generic",
+                             "--subject", "fixture", "--scope", "write", "--provider",
+                             "github" if frontend == "hub" else "generic",
                              "--owner", "team", "--repo", "bench", "--key-env",
                              "SHARDLINE_TOKEN_SIGNING_KEY", env=self.env)
         self.servers = []
