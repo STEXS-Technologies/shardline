@@ -2,8 +2,13 @@
 
 from pathlib import Path
 from collections import Counter
+import os
+import selectors
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +21,43 @@ from performance_validation.database import resource_delta  # noqa: E402
 
 
 class PerformanceValidationTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_trace_shutdown_stops_descendants_holding_the_reader_pipe(self):
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / "escaped-trace"
+            child = ("import time; from pathlib import Path; "
+                     "print('ready', flush=True); time.sleep(1); "
+                     f"Path({str(marker)!r}).touch(); time.sleep(10)")
+            parent = ("import subprocess,sys; "
+                      f"subprocess.Popen([sys.executable,'-c',{child!r}]).wait()")
+            process = subprocess.Popen([sys.executable, "-c", parent],
+                                       stdout=subprocess.PIPE, text=True,
+                                       start_new_session=True)
+            trace = object.__new__(RequestTrace)
+            trace.process = process
+            trace.owns_process_group = True
+            trace.thread = threading.Thread(target=lambda: process.stdout.read(), daemon=True)
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    self.assertTrue(selector.select(timeout=3), "trace child did not start")
+                self.assertEqual(process.stdout.readline().strip(), "ready")
+                trace.thread.start()
+                started = time.monotonic()
+                trace.close()
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertFalse(trace.thread.is_alive())
+                time.sleep(1.2)
+                self.assertFalse(marker.exists())
+            finally:
+                # Own only this test's session, including on assertion failure.
+                import signal
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=3)
+
     def test_block_io_deltas_preserve_devices_and_include_newly_active_devices(self):
         before = {"cpu_seconds": 4, "block_io_by_device": {
             "259:0": {"rbytes": 100, "wbytes": 200}}}

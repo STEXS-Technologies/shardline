@@ -207,8 +207,10 @@ def main():
                     "http://", "http://performance:owned_performance_password@"))
                 trace = RequestTrace(subprocess.Popen(
                     ["mc", "admin", "trace", "--json", "--verbose", "--call", "s3", "performance"],
-                    env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True),
-                    deployment.client, bucket, deployment.endpoint)
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                    start_new_session=os.name == "posix"),
+                    deployment.client, bucket, deployment.endpoint,
+                    owns_process_group=os.name == "posix")
                 try:
                     start = trace.barrier()
                     reference = run_direct(deployment.client, bucket, dataset, args.objects,

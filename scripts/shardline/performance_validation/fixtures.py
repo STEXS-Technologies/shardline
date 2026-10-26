@@ -155,8 +155,9 @@ class Deployment:
             "http://", "http://performance:owned_performance_password@"))
         self.trace = RequestTrace(subprocess.Popen(
             ["mc", "admin", "trace", "--json", "--verbose", "--call", "s3", "performance"],
-            env=mc_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True),
-            self.client, name, self.endpoint)
+            env=mc_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            start_new_session=os.name == "posix"),
+            self.client, name, self.endpoint, owns_process_group=os.name == "posix")
         return lane
 
     def inventory(self, name):
@@ -185,6 +186,8 @@ class Deployment:
         self.servers = []
 
     def close(self):
-        if hasattr(self, "trace"):
-            self.trace.close()
-        self.stack.close()
+        try:
+            if hasattr(self, "trace"):
+                self.trace.close()
+        finally:
+            self.stack.close()

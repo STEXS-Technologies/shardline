@@ -7,14 +7,23 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shardline"))
 from benchmark_gc_contention import command  # noqa: E402
-from performance_validation.fixtures import require_running_server  # noqa: E402
+from performance_validation.fixtures import Deployment, require_running_server  # noqa: E402
 
 
 class BenchmarkCommandTest(unittest.TestCase):
+    def test_trace_cleanup_failure_still_removes_owned_services(self):
+        deployment = object.__new__(Deployment)
+        deployment.trace = Mock()
+        deployment.trace.close.side_effect = RuntimeError("fixture trace failed")
+        deployment.stack = Mock()
+        with self.assertRaisesRegex(RuntimeError, "fixture trace failed"):
+            deployment.close()
+        deployment.stack.close.assert_called_once_with()
+
     def test_exited_server_never_embeds_raw_logs_in_startup_failure(self):
         def inspect_only(*args, **kwargs):
             self.assertEqual(args, ("docker", "inspect", "owned-fixture"))

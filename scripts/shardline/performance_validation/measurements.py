@@ -4,7 +4,9 @@ from collections import Counter
 from datetime import datetime
 import json
 import math
+import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -81,8 +83,9 @@ class RequestTrace:
     An inactive or malformed trace makes the benchmark fail.
     """
 
-    def __init__(self, process, client, bucket, endpoint):
+    def __init__(self, process, client, bucket, endpoint, *, owns_process_group=False):
         self.process = process
+        self.owns_process_group = owns_process_group
         self.client = client
         self.bucket = bucket
         self.endpoint = endpoint
@@ -179,7 +182,18 @@ class RequestTrace:
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait()
+        finally:
+            # A trace wrapper can exit while a descendant retains its stdout
+            # pipe. Stop only the explicitly owned session before joining the
+            # reader; closing a pipe with a blocked reader can itself hang.
+            if self.owns_process_group and os.name == "posix":
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise RuntimeError("MinIO trace reader did not stop within its deadline")
         self.process.stdout.close()
 
 

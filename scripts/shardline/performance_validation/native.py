@@ -266,6 +266,8 @@ def main():
         (args.output / "result.json").write_text(json.dumps(results, indent=2) + "\n")
         print("Native cost qualification passed; sanitized result.json written")
     finally:
-        if lane is not None:
-            deployment.stop_lane(lane)
-        deployment.close()
+        try:
+            if lane is not None:
+                deployment.stop_lane(lane)
+        finally:
+            deployment.close()
