@@ -4,6 +4,7 @@ use std::{collections::HashSet, str::FromStr};
 
 mod candidate_batch;
 mod first_candidate;
+mod repository_candidates;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -1105,7 +1106,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         &'operation self,
         repository: &'operation shardline_protocol::RepositoryScope,
         hash_hex: &'operation str,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> RecordStoreFuture<'operation, (), VisitorError>
     where
         Self: Sync,
@@ -1113,38 +1114,9 @@ impl RecordTraversal for super::PostgresRecordStore {
         Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let scope_key = shared_repository_scope_key(Some(repository));
-            let mut rows = query(
-                "SELECT r.record_key, r.record_kind, r.scope_key, r.file_id,
-                        r.content_hash, r.record,
-                        FLOOR(EXTRACT(EPOCH FROM r.updated_at))::BIGINT AS modified_since_epoch
-                 FROM shardline_record_membership m
-                 JOIN shardline_file_records r ON r.record_key=m.record_key
-                 WHERE m.scope_key=$1 AND m.member_hash=$2 AND r.scope_key=$1
-                 ORDER BY m.record_key",
-            )
-            .bind(scope_key)
-            .bind(hash_hex)
-            // Shared hashes and sparse/absent hashes need different plans.
-            // As with the first-candidate probe, avoid a cached generic plan
-            // which can scan unrelated records after common-hash requests.
-            .persistent(false)
-            .fetch(&self.pool);
-            loop {
-                let batch = candidate_batch::read(&mut rows).await.map_err(Into::into)?;
-                for record in batch.records {
-                    visitor(record.map_err(Into::into)?)?;
-                }
-                if let Some(error) = batch.error {
-                    return Err(error.into());
-                }
-                if batch.finished {
-                    break;
-                }
-            }
-            Ok(())
-        })
+        Box::pin(
+            async move { repository_candidates::visit(self, repository, hash_hex, visitor).await },
+        )
     }
     fn first_repository_hash_record<'operation>(
         &'operation self,

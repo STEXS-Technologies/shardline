@@ -105,6 +105,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Reduce PostgreSQL authorization overhead for containers shared by many files
   with bounded record-conversion batches, retaining access checks, corruption
   reporting and cancellation accounting.
+- Stop unused PostgreSQL candidate results with bounded pages in one consistent
+  read snapshot, retaining early proofs, corruption errors and cancellation cleanup.
 - Overlap native Xet member writes on S3 within a bounded memory budget,
   retaining full validation, conditional writes and publication ordering.
 - Avoid scratch files when GC verifies S3 containers up to 2 MiB, using a fixed

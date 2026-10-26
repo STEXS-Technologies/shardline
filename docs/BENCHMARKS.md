@@ -1338,6 +1338,48 @@ authorization or establish an SSD endurance improvement.
 Reproduce with the ignored `indexed_membership_million_record_candidate_lookups`
 test described above; a disposable, migrated PostgreSQL database is required.
 
+#### Stopping unused PostgreSQL candidate results
+
+Returning from a streaming visitor did not stop PostgreSQL from producing the
+remaining result set. With parameter-aware plans already enabled, the same
+million-record adapter workload made 68 streaming candidate queries, including
+64 common-hash priming calls, and PostgreSQL produced 64,999,936 rows even
+though each successful visitor stopped at its first record.
+
+The lookup now starts with a 16-record page and grows later pages to at most
+1,024 records. Ordered keyset seeks run in one read-only, repeatable-read
+transaction, preserving the old single-statement snapshot across concurrent
+publication and deletion. Existing record-conversion admission and byte bounds
+remain in place; pages are streamed rather than buffered as complete vectors.
+Both joined tables carry the keyset bound. In a separate million-record SQL
+fixture, bounding only membership made a late page scan 901,024 file records
+to return 1,024. Bounding both inputs reduced that scan to 1,024 records.
+This prevents repeated scans of earlier file records during long traversals.
+
+| Backend observation for the million-record workload | Unbounded stream | Paged stream |
+| --- | ---: | ---: |
+| Candidate SELECT calls | 68 | 68 |
+| Rows produced by PostgreSQL | 64,999,936 | 1,041 |
+
+Both runs passed the same record, member-hash and repository-scope assertions.
+These counts come from `pg_stat_statements` on disposable PostgreSQL 16
+instances. Paging adds transaction setup and completion commands, which are
+excluded from the SELECT count; a genuinely long traversal also needs more
+SELECTs. This is evidence of reduced unused result production, not a measured
+whole-Xet throughput, memory, physical-disk or production cost improvement.
+The snapshot regression replaces 1,499 of 1,500 records during traversal and
+checks both the original snapshot and a fresh read. Separate checks cover late
+malformed records, valid early exits and cancellation of a blocked read.
+
+A separate paired run also visited every one of the 999,999 matching records.
+The unpaged traversal took 28.34 seconds and the paged traversal 29.82 seconds
+on the shared host, using matching unoptimized build settings. Thus this
+single pair shows about 5% additional full-traversal time, not a full-scan
+speedup. Including the early-exit calls, the workload used 69 versus 1,048
+candidate SELECTs and produced 65,999,935 versus 1,001,040 rows. The extra
+round trips are the cost of bounding unused results. These adapter diagnostics
+do not establish production tail latency or stock-client throughput.
+
 #### Denied native Xorb HEAD requests
 
 Native Xorb HEAD now checks published repository references before reading
