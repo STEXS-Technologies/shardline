@@ -1707,7 +1707,16 @@ The measurements establish substantial remaining upload and retained-byte
 gaps. They do not establish overall parity: upstream labels this server a
 testing/development reference, and it does not provide equivalent Shardline
 authorization, maintenance and distributed durability guarantees. It is also
-not Hugging Face's production service. Two shared-host runs cannot establish
+not Hugging Face's production service. In the pinned reference source,
+`xet_client/src/cas_client/simulation/local_client.rs` writes Xorbs through
+`SafeFileCreator`; its `close()` implementation in
+`xet_runtime/src/file_utils/safe_file_creator.rs` flushes the buffered writer
+and renames the temporary file without a file or parent-directory `fsync`.
+Shardline's local publication synchronizes both payload and directory names
+before acknowledging them. This is a durability-contract difference, not a
+measurement of how much of the upload gap it explains. These results do not
+describe Hugging Face's production persistence implementation.
+Two shared-host runs cannot establish
 tail latency, production scaling, network-byte counts or hardware lifetime.
 Do not compare these local-disk numbers directly with the PostgreSQL/MinIO
 measurements below as if their storage topology were equivalent.

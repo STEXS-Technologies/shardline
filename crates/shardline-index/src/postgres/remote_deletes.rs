@@ -359,7 +359,7 @@ impl PostgresIndexStore {
         object_keys: &[ObjectKey],
     ) -> Result<Option<Vec<String>>, PostgresMetadataStoreError> {
         let initialized = query_scalar::<_, bool>(
-            "SELECT to_regprocedure('shardline_remote_delete_read_batch_v1(text,text[])') IS NOT NULL",
+            "SELECT to_regprocedure(format('%I.shardline_remote_delete_read_batch_v1(text,text[])', current_schema())) IS NOT NULL",
         )
         .fetch_one(&mut **transaction)
         .await?;
@@ -503,7 +503,21 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        // A later schema may already have the extension. Its same-named
+        // function must not be mistaken for a guard installed in this schema.
+        let foreign = super::super::connect_isolated_postgres().await.unwrap();
+        let foreign_schema: String = query_scalar("SELECT current_schema()")
+            .fetch_one(&foreign)
+            .await
+            .unwrap();
         let mut legacy_check = pool.begin().await.unwrap();
+        let _: String = query_scalar(
+            "SELECT set_config('search_path', format('%I,%I,public', current_schema(), $1::TEXT), true)",
+        )
+        .bind(foreign_schema)
+        .fetch_one(&mut *legacy_check)
+        .await
+        .unwrap();
         assert!(
             PostgresIndexStore::try_require_remote_delete_batch_settled(
                 &mut legacy_check,
