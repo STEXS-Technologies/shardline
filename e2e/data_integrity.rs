@@ -1,6 +1,7 @@
 mod data_integrity_requirements;
 mod data_integrity_xet_fixtures;
 mod native_client_policy;
+mod support;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -105,20 +106,26 @@ async fn try_start_server(
     let config = modify_config(config)?;
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
-    for _attempt in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
-            && resp.status().is_success()
-        {
-            return Ok((base_url, server));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if support::wait_for_endpoint(
+        &client,
+        &base_url,
+        "healthz",
+        50,
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .is_ok()
+    {
+        return Ok((base_url, server));
     }
     if server.is_finished() {
         let result = server.await;
         let msg = format!("server exited prematurely: {result:?}");
         return Err(msg.into());
     }
-    Err("server did not become healthy".into())
+    server.abort();
+    let _ = server.await;
+    Err("server did not become healthy within its deadline".into())
 }
 
 fn write_provider_config(
@@ -5741,15 +5748,15 @@ async fn lfs_objects_survive_gc_when_referenced() {
 }
 
 async fn wait_for_health(base_url: &str, client: &Client) {
-    for _attempt in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
-            && resp.status().is_success()
-        {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("server did not become healthy at {base_url}");
+    support::wait_for_endpoint(
+        client,
+        base_url,
+        "healthz",
+        50,
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .expect("data-integrity fixture must become healthy within its deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8996,20 +9003,7 @@ async fn config_validation_chunk_size_too_large() {
     // Server should start successfully even with a very large chunk size.
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
-    let mut healthy = false;
-    for _ in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
-            && resp.status().is_success()
-        {
-            healthy = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert!(
-        healthy,
-        "server with large chunk size should become healthy"
-    );
+    wait_for_health(&base_url, &client).await;
     server.abort();
 
     // Invalid chunk sizes (non-power-of-two and/or over the 1 GiB cap) must be

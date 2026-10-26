@@ -1,3 +1,4 @@
+mod deployment_probe_requirements;
 mod native_client_policy;
 mod native_xet_requirements;
 mod support;
@@ -41,7 +42,6 @@ use tokio::{
     net::TcpListener,
     spawn,
     task::{JoinSet, spawn_blocking},
-    time::sleep,
 };
 use xet_client::{
     cas_client::auth::{AuthConfig, AuthError, TokenInfo, TokenRefresher},
@@ -1809,14 +1809,6 @@ fn mutate_bytes(base: &[u8], start: usize, end: usize, value: u8) -> Result<Vec<
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), TestError> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20)).await?;
+    Ok(())
 }

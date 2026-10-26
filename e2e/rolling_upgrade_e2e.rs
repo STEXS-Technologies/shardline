@@ -13,6 +13,8 @@
 //! an unmounted route returns 404 while a mounted route rejects the wrong
 //! method with 405.
 
+mod deployment_probe_requirements;
+mod rolling_upgrade_shutdown;
 mod support;
 
 use std::{
@@ -134,7 +136,7 @@ async fn exercise_rolling_upgrade(
 
     // Upgrade window: stop the upgraded server...
     upgrade.stop().await?;
-    wait_for_server_down(&client, &upgraded_base_url).await?;
+    wait_for_server_down(&upgraded_base_url).await?;
 
     // ...and prove the steady server never blinked: readiness plus its full
     // role surface (api-only reconstruction route and transfer-only chunk
@@ -229,59 +231,42 @@ async fn bind_with_retry(addr: SocketAddr, attempts: u32) -> Result<TcpListener,
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20)).await?;
+    Ok(())
 }
 
 async fn wait_for_ready(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..100 {
-        if let Ok(response) = client.get(format!("{base_url}/readyz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become ready").into())
+    support::wait_for_endpoint(client, base_url, "readyz", 100, Duration::from_millis(20)).await?;
+    Ok(())
 }
 
 /// Asserts the stopped server can no longer be reached, proving the upgrade
 /// window is real (the old listener is gone before the new one rebinds).
-async fn wait_for_server_down(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if client
-            .get(format!("{base_url}/healthz"))
-            .send()
+async fn wait_for_server_down(base_url: &str) -> Result<(), Box<dyn Error>> {
+    let address = base_url
+        .strip_prefix("http://")
+        .ok_or_else(|| ServerE2eInvariantError::new("expected local HTTP fixture address"))?
+        .parse::<SocketAddr>()?;
+    let probe = async {
+        for _attempt in 0..50 {
+            // Only a refused fresh TCP connection proves the listener is gone.
+            // Invalid HTTP, a reset, or a silent peer can still have a live listener.
+            if let Ok(Err(error)) = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect(address),
+            )
             .await
-            .is_err()
-        {
-            return Ok(());
+                && error.kind() == std::io::ErrorKind::ConnectionRefused
+            {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(20)).await;
         }
-        // Raw connect probe (bypasses any reqwest connection pooling): if the
-        // listener is gone this must be refused.
-        let raw = tokio::net::TcpStream::connect(
-            base_url
-                .trim_start_matches("http://")
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("bad base url {base_url}: {error}"))?,
-        )
-        .await;
-        if raw.is_err() {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not go down after upgrade stop").into())
+        Err(ServerE2eInvariantError::new("server did not go down after upgrade stop").into())
+    };
+    tokio::time::timeout(Duration::from_secs(10), probe)
+        .await
+        .map_err(|_| ServerE2eInvariantError::new("server shutdown probe exceeded its deadline"))?
 }
 
 async fn ready_response(
