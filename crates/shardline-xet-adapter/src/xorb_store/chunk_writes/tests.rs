@@ -139,6 +139,18 @@ fn cancelled_queued_local_member_never_publishes() {
                 .is_none(),
             "cancelled queued member was published"
         );
+        // Cancellation must not reserve an immutable identity permanently.
+        assert_eq!(
+            store(&objects, &mut reader, &validated).await.unwrap(),
+            4096
+        );
+        let metadata = shardline_storage::ObjectStore::metadata(&objects, &key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            shardline_server_core::read_full_object(&objects, &key, metadata.length()).unwrap(),
+            vec![0x41; 4096]
+        );
     });
 }
 

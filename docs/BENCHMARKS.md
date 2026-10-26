@@ -1762,6 +1762,38 @@ in the workload rather than hidden by full-download throughput.
 
 ### Upstream local CAS reference comparison
 
+#### Local member-write concurrency qualification
+
+A subsequent local-disk experiment compared exact optimized executables with
+serial member persistence (`2a77ea20`) and at most four pending member writes.
+Both retain the 256 KiB pending decoded-data budget (one larger member runs
+alone), member hash verification, file and parent-directory synchronization,
+and admission ownership through already-started writes after cancellation.
+It changes scheduling, not the persisted representation or acknowledgment rule.
+
+Three reversed-order comparisons used the same 512 MiB incompressible corpus,
+256 KiB edit and stock hf_xet 1.7 client described below. The six serial initial
+uploads took 8.89–23.38 seconds; six concurrent initial uploads took
+6.59–7.14 seconds. Shared-host contention affected the serial outlier, so this
+does not establish a production speedup percentage. Retained file lengths
+remained 1,087,903,184 bytes initially and 1,088,532,774 after the edit.
+Every downloaded file passed independent SHA-256 verification.
+
+Upload process peak RSS in the two comparisons that captured it was
+41,444–43,400 KiB serially and 49,840–52,212 KiB concurrently. This is a measured
+memory trade-off, not an RSS reduction. Initial single-download timings showed
+a possible regression; the final control performed three fresh-client downloads
+per file and server instance. Its twelve candidate downloads took 0.66–0.72
+seconds, overlapping the stable baseline observations (0.67–0.89 seconds);
+earlier baseline observations reached 2.04 seconds. No consistent download
+regression or general download advantage was established.
+
+Adapter tests and 17 selected actual-v1.12.1 upgrade/rollback cases passed;
+31 other deployment cases were excluded by the selection. These controls do
+not establish saturation safety, final-head CI, multi-host scaling, hardware
+wear savings or upstream upload parity. Native decoded-chunk duplication and
+the initial-upload gap against upstream remain open.
+
 An October 26 direct-CAS HTTP comparison used stock hf_xet 1.7.0 against
 Shardline `07bedb55` and the unmodified upstream `local_cas_server` from
 [xet-core `629562cd`](https://github.com/huggingface/xet-core/tree/629562cd9fc37432317eb57811faf13a6935c601).

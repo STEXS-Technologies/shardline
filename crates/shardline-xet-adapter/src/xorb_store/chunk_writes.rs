@@ -38,13 +38,9 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
     let mut unpacked = 0_u64;
     let mut packed_end = 0_u64;
     let mut stored = 0_u64;
-    // Local persistence uses blocking jobs: preserve its existing serial work
-    // lifetime instead of multiplying jobs that can outlive async cancellation.
-    let max_pending = if matches!(objects, ServerObjectStore::S3(_)) {
-        MAX_PENDING
-    } else {
-        1
-    };
+    // Both local jobs and remote requests share the decoded byte budget.
+    // Local cancellation aborts queued jobs; running writes retain admission.
+    let max_pending = MAX_PENDING;
     for descriptor in validated.chunks() {
         let length = descriptor.unpacked_len();
         // Oversized members run alone. Small members share a bounded byte budget,
