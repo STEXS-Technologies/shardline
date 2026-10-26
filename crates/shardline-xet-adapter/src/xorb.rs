@@ -20,9 +20,11 @@ use crate::error::XetAdapterError;
 
 mod authenticated_footer;
 mod legacy_footer;
+mod range;
 pub use authenticated_footer::{
     AuthenticatedXorbFooter, decode_authenticated_xorb_chunk, validate_serialized_xorb_footer,
 };
+pub use range::try_for_each_serialized_xorb_chunk_range;
 
 /// Maximum total unpacked (decompressed) bytes accepted for a single serialized
 /// xorb, checked BEFORE any decompression happens.
@@ -414,7 +416,14 @@ where
     R: Read + Seek,
     F: FnMut(DecodedXorbChunk) -> Result<(), VisitorError>,
 {
-    try_for_each_serialized_xorb_chunk_inner(reader, validated, visitor, true)
+    try_for_each_serialized_xorb_chunk_inner(
+        reader,
+        validated.chunks(),
+        0,
+        validated.packed_content_length(),
+        visitor,
+        true,
+    )
 }
 
 /// Decodes a serialized xorb after the exact immutable bytes have already been
@@ -438,12 +447,21 @@ where
     R: Read + Seek,
     F: FnMut(DecodedXorbChunk) -> Result<(), VisitorError>,
 {
-    try_for_each_serialized_xorb_chunk_inner(reader, validated, visitor, false)
+    try_for_each_serialized_xorb_chunk_inner(
+        reader,
+        validated.chunks(),
+        0,
+        validated.packed_content_length(),
+        visitor,
+        false,
+    )
 }
 
 fn try_for_each_serialized_xorb_chunk_inner<R, F, VisitorError>(
     reader: &mut R,
-    validated: &ValidatedXorb,
+    descriptors: &[ValidatedXorbChunk],
+    packed_start: u64,
+    expected_packed_end: u64,
     mut visitor: F,
     verify_chunk_hash: bool,
 ) -> Result<(), XorbVisitError<VisitorError>>
@@ -452,11 +470,11 @@ where
     F: FnMut(DecodedXorbChunk) -> Result<(), VisitorError>,
 {
     reader
-        .seek(SeekFrom::Start(0))
+        .seek(SeekFrom::Start(packed_start))
         .map_err(XorbParseError::from)?;
-    let mut packed_end = 0_u64;
+    let mut packed_end = packed_start;
 
-    for descriptor in validated.chunks() {
+    for descriptor in descriptors {
         let (data, packed_len, unpacked_len) =
             deserialize_chunk(reader).map_err(|error| map_core_error(&error))?;
         let packed_len = u64::try_from(packed_len).map_err(XorbParseError::from)?;
@@ -485,7 +503,7 @@ where
         packed_end = next_packed_end;
     }
 
-    if packed_end != validated.packed_content_length() {
+    if packed_end != expected_packed_end {
         return Err(
             XorbParseError::from(XorbInvalidFormatError::DecodedChunkLengthMismatch).into(),
         );

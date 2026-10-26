@@ -1786,6 +1786,47 @@ These runs establish neither lower disk writes nor longer SSD lifetime.
 Slow-reader timings are client-paced, not an upstream-Xet throughput comparison.
 The targeted request reduction must not be generalized to all native workloads.
 
+### Selected-member decoding after full validation
+
+A DWARF profile of four plain-HTTP native downloads attributed about 30% of
+inclusive samples to full source validation and 23% to the subsequent decoding
+pass. That second pass decoded unrequested members too. Reconstruction now
+seeks directly to selected members after validating the complete container,
+and rehashes every returned member. It retains the same source-health checks,
+container spool limit, cancellation and file SHA-256 verification.
+
+Two alternating pairs compared `9d6f6092` with this decoder using the same
+512 MiB native fixture, four CPU cores and four unpaced complete HTTP readers.
+Use `--slow-readers 4 --reader-delay-ms 0` to remove the default 1 ms delay
+after each 32 KiB client read. All unique/overlapping uploads, complete and
+cancelled downloads, subsequent reads and MinIO trace reconciliations passed.
+
+For the logical-I/O columns below, sample `/proc/<server-pid>/io` immediately
+before and after the four-reader phase and subtract `rchar`, `syscr` and
+`write_bytes` independently. Read the host process counters with appropriate
+permissions, rather than summing container and host counters. `rchar` counts
+logical reads, including page-cache hits; it is not physical device traffic.
+These extra process-counter samples were collected alongside the harness;
+they are not fields in its default result JSON.
+
+| Four complete plain-HTTP downloads | Before | Selected-member decoder |
+| --- | ---: | ---: |
+| Logical process file-read bytes | 7.130 GB | 5.714 GB |
+| Read syscalls | 1,195,736 | 991,532 |
+| Backend requests | 84 | 84 |
+| Backend response bytes | 3.566 GB | 3.566 GB |
+| Server CPU, two runs | 6.55–6.85 s | 6.40–6.47 s |
+| Complete-response wall time, two runs | 1.87–2.86 s | 1.97–2.79 s |
+
+Logical reads fall about 20% and read syscalls about 17%, without additional
+backend calls. Timing reverses across pairs, so these measurements establish
+less internal work, not a repeatable throughput gain. Accounted process writes
+remain about 3.57 GB in both versions; no SSD-wear saving is established.
+Process peak RSS stays below 168 MiB in these runs but includes the preceding
+uploads and does not isolate this decoder's memory use. This change concerns
+Shardline's native-term reconstruction for plain HTTP reads, not a measured
+speedup of stock `hf_xet` CAS transfers or parity with upstream Xet.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:

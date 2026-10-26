@@ -14,7 +14,7 @@ use crate::{
     InvalidSerializedShardError, ServerError,
     object_store::ServerObjectStore,
     xet_adapter::{
-        XetAdapterError, XorbVisitError, try_for_each_serialized_xorb_chunk_trusted,
+        XetAdapterError, XorbVisitError, try_for_each_serialized_xorb_chunk_range,
         validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
         xorb_hash_from_object_key_if_present, xorb_object_key,
     },
@@ -93,15 +93,15 @@ pub(super) fn append_referenced_term_bytes(
         return Err(InvalidSerializedShardError::NativeXetTermRangeExceededXorbChunkCount.into());
     }
 
-    let mut chunk_index = 0_usize;
-    try_for_each_serialized_xorb_chunk_trusted(&mut reader, &validated, |decoded_chunk| {
-        if chunk_index >= range_start && chunk_index < range_end {
-            terms::validate_member(&decoded_chunk)?;
+    try_for_each_serialized_xorb_chunk_range(
+        &mut reader,
+        &validated,
+        range_start..range_end,
+        |decoded_chunk| {
             output.extend_from_slice(decoded_chunk.data());
-        }
-        chunk_index = chunk_index.checked_add(1).ok_or(ServerError::Overflow)?;
-        Ok::<(), ServerError>(())
-    })
+            Ok::<(), ServerError>(())
+        },
+    )
     .map_err(map_xorb_visit_error_server)
 }
 
@@ -209,11 +209,12 @@ fn stream_referenced_term(
         return Err(InvalidSerializedShardError::NativeXetTermRangeExceededXorbChunkCount.into());
     }
 
-    let mut chunk_index = 0_usize;
     let mut emitted_bytes = 0_u64;
-    try_for_each_serialized_xorb_chunk_trusted(&mut reader, &validated, |decoded_chunk| {
-        if chunk_index >= range_start && chunk_index < range_end {
-            terms::validate_member(&decoded_chunk)?;
+    try_for_each_serialized_xorb_chunk_range(
+        &mut reader,
+        &validated,
+        range_start..range_end,
+        |decoded_chunk| {
             let bytes = decoded_chunk.data();
             emitted_bytes = emitted_bytes
                 .checked_add(
@@ -224,10 +225,9 @@ fn stream_referenced_term(
             sender
                 .blocking_send(Ok(Bytes::copy_from_slice(bytes)))
                 .map_err(|_closed| ServerError::NotFound)?;
-        }
-        chunk_index = chunk_index.checked_add(1).ok_or(ServerError::Overflow)?;
-        Ok::<(), ServerError>(())
-    })
+            Ok::<(), ServerError>(())
+        },
+    )
     .map_err(map_xorb_visit_error_server)?;
 
     if emitted_bytes != term.length {

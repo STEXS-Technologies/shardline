@@ -17,9 +17,10 @@ pub(crate) use shardline_xet_adapter::{
     XET_REVISION_ROUTE, XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE,
     XORB_TRANSFER_ROUTE, XetAdapterError, XorbParseError, XorbVisitError,
     build_batch_reconstruction_response, build_reconstruction_response, reconstruction_v2_from_v1,
-    resolve_dedupe_shard_object, shard_hash_from_object_key_if_present, validate_hash_path,
-    validate_optional_content_hash, validate_xorb_transfer_namespace,
-    visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
+    resolve_dedupe_shard_object, shard_hash_from_object_key_if_present,
+    try_for_each_serialized_xorb_chunk_range, validate_hash_path, validate_optional_content_hash,
+    validate_xorb_transfer_namespace, visit_stored_xorb_chunk_hashes,
+    xorb_hash_from_object_key_if_present, xorb_object_key,
 };
 
 #[cfg(feature = "fuzzing")]

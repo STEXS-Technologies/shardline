@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Avoid decoding unrequested Xorb members twice during native file
+  reconstruction, retaining complete source validation and rehashing returned
+  members.
 - Reuse one response-local Xorb source across adjacent native download terms,
   avoiding repeated backend reads while fully validating every term and
   retaining bounded scratch storage and cancellation.

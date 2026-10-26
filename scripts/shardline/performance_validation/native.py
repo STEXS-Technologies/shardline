@@ -114,7 +114,7 @@ class ShardlineRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def slow_readers(deployment, digest, length, readers, cancel):
+def slow_readers(deployment, digest, length, readers, cancel, delay=0.001):
     """Bounded buffers and explicit completion checks through Shardline only."""
     barrier = threading.Barrier(readers, timeout=30)
 
@@ -143,7 +143,8 @@ def slow_readers(deployment, digest, length, readers, cancel):
                     if received >= length:
                         raise RuntimeError("cancellation fixture consumed the complete file")
                     return
-                time.sleep(0.001)
+                if delay:
+                    time.sleep(delay)
             if received != length or observed.hexdigest() != digest:
                 raise RuntimeError("slow native download failed length or SHA-256 verification")
 
@@ -153,7 +154,7 @@ def slow_readers(deployment, digest, length, readers, cancel):
     pid = int(command("docker", "inspect", "--format", "{{.State.Pid}}", deployment.servers[0]))
     return {"seconds": time.monotonic() - started, "readers": readers,
             "completed_verified_downloads": 0 if cancel else readers,
-            "abandoned_responses": readers if cancel else 0,
+            "abandoned_responses": readers if cancel else 0, "reader_delay_ms": delay * 1000,
             "server_process": process_sample(pid)}
 
 
@@ -168,11 +169,15 @@ def main():
     parser.add_argument("--replica-memory", default="1g")
     parser.add_argument("--slow-readers", type=int, default=0,
                         help="optional concurrent plain-HTTP readers, then response cancellations (0-64)")
+    parser.add_argument("--reader-delay-ms", type=float, default=1,
+                        help="delay after each 32 KiB client read; 0 measures unpaced readers")
     args = parser.parse_args()
     if args.file_mib <= 8 or args.replica_cpus <= 0:
         parser.error("file must exceed the 8 MiB native threshold; CPUs must be positive")
     if not 0 <= args.slow_readers <= 64:
         parser.error("slow readers must be between 0 and 64")
+    if not 0 <= args.reader_delay_ms <= 1000:
+        parser.error("reader delay must be between 0 and 1000 milliseconds")
     args.binary = args.binary.resolve(strict=True)
     args.python = args.python.absolute()
     if not args.python.is_file():
@@ -188,6 +193,7 @@ def main():
                 "binary_version": command(str(args.binary), "--version"),
                 "shared_host": True, "replicas": 1, "role": "all", "frontend": "hub",
                 "replica_cpus": args.replica_cpus, "replica_memory": args.replica_memory,
+                "reader_delay_ms": args.reader_delay_ms,
                 "file_bytes": args.file_mib * 1024**2}
     with args.binary.open("rb") as source:
         metadata["binary_sha256"] = hashlib.file_digest(source, "sha256").hexdigest()
@@ -235,7 +241,8 @@ def main():
                 # do not present their request rate as cost per successful TB.
                 logical = len(content) * args.slow_readers if not cancel else 1
                 measured = measured_phase(deployment, name, lambda: slow_readers(
-                    deployment, digest, len(content), args.slow_readers, cancel), logical)
+                    deployment, digest, len(content), args.slow_readers, cancel,
+                    args.reader_delay_ms / 1000), logical)
                 if cancel:
                     measured["backend_s3"].pop("requests_per_decimal_gb")
                 if measured["server_process"]["peak_rss_kib"] >= 384 * 1024:
@@ -243,7 +250,7 @@ def main():
                 results["pressure"][phase] = measured
             results["pressure"]["plain_download_after_cancellation"] = measured_phase(
                 deployment, name, lambda: slow_readers(
-                    deployment, digest, len(content), 1, False), len(content))
+                    deployment, digest, len(content), 1, False, args.reader_delay_ms / 1000), len(content))
             results["pressure"]["cold_download_after_cancellation"] = measured_phase(
                 deployment, name, lambda: client_operation(
                     args.python, deployment, "download", path, "overlap.bin", digest), len(content))
