@@ -156,6 +156,8 @@ fn qualify_recorded_operational_failure(root: &Path, source: &str) -> Result<()>
     // The source bytes remain intact. Malformed derived metadata fails during
     // the scan, after tracking admission, rather than preventing store startup.
     assert_status(&scan(root)?, 2);
+    #[cfg(target_os = "linux")]
+    qualify_supervised_operational_failure(root)?;
     let mut statement = database.prepare(
         "SELECT payload FROM shardline_task_artifacts_v1
          WHERE artifact_key GLOB '*/artifacts/*'
@@ -189,5 +191,39 @@ fn qualify_recorded_operational_failure(root: &Path, source: &str) -> Result<()>
         rusqlite::params![source, descriptor],
     )?;
     assert_status(&scan(root)?, 0);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn qualify_supervised_operational_failure(root: &Path) -> Result<()> {
+    let state = tempfile::tempdir()?;
+    let task = "corrupt-native-descriptor";
+    let output = shardline_test_support::native_client_output(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root)
+            .args(["maintenance", "--state-dir"])
+            .arg(state.path())
+            .args(["--task-id", task, "fsck", "--root"])
+            .arg(root),
+        std::time::Duration::from_secs(120),
+    )?;
+    // Explicit supervision reports a controller failure as 1, while direct
+    // FSCK retains exit 2. No successful scan may be certified in either case.
+    assert_status(&output, 1);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("maintenance.status: completed"));
+    let directory = state.path().join(hex::encode(
+        penelope::core::task::Digest::of(task.as_bytes()).0,
+    ));
+    assert!(!directory.join("result-proof.json").exists());
+    // Prove this reached a worker, not just controller configuration failure.
+    // The worker publishes this checkpoint immediately before the full scan.
+    let mut admitted = false;
+    for artifact in fs::read_dir(directory.join("artifacts"))? {
+        if fs::read(artifact?.path())? == b"shardline.maintenance.full-scan-boundary.v1" {
+            admitted = true;
+        }
+    }
+    assert!(admitted, "failure control must reach an admitted worker");
     Ok(())
 }
