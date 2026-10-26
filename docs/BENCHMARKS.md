@@ -1463,11 +1463,12 @@ cases complement the deployment drill; they do not cover every network failure.
 
 #### Workload limits and remaining costs
 
-A release-mode microbenchmark of per-key write coordination measured about
+A historical release-mode microbenchmark of per-key write coordination measured about
 0.16 µs per acquisition with 128 other keys held, 0.49 µs with 512 and 10.4 µs
-with 8,192 (10,000 acquisitions per size, one thread, no S3 traffic). Cleanup
-cost grows with active keys; these timings alone do not establish end-to-end
-contention or justify replacing the current coordination scheme.
+with 8,192 (10,000 acquisitions per size, one thread, no S3 traffic). That
+implementation scanned active keys during acquisition. The current implementation
+removes each inactive entry directly; see [S3 write-coordination CPU](#s3-write-coordination-cpu)
+for the profiling evidence and the limits of that measurement.
 
 Partial-overlap files expose a different limit. A separate two-replica comparison
 used 32 versions of one incompressible 4 MiB file, each replacing a distinct 4 KiB
