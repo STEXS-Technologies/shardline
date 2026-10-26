@@ -38,7 +38,10 @@ server = http.server.HTTPServer(('127.0.0.1', 0), Receiver)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(root / 'server-cert.pem', root / 'server-key.pem')
 server.socket = context.wrap_socket(server.socket, server_side=True)
-(root / 'port').write_text(str(server.server_port))
+# Publish readiness atomically: the parent must never see a newly created,
+# still-empty file between open() and write().
+(root / 'port.pending').write_text(str(server.server_port))
+(root / 'port.pending').replace(root / 'port')
 server.serve_forever()
 "#,
             ])
