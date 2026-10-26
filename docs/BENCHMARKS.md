@@ -1827,6 +1827,39 @@ uploads and does not isolate this decoder's memory use. This change concerns
 Shardline's native-term reconstruction for plain HTTP reads, not a measured
 speedup of stock `hf_xet` CAS transfers or parity with upstream Xet.
 
+### Large slow-reader admission limit
+
+A subsequent 32-reader, 1 GiB run on four CPUs with a 1 GiB server limit
+did not pass: the plain-HTTP phase returned HTTP 503. Readers paused 1 ms
+after every 32 KiB, imposing at least 32.8 seconds per complete file before
+network and verification work. Default admission weight 256 and reconstruction
+weight 16 allow at most 16 active reconstructions before other work; a queued
+download waits at most 30 seconds. This workload can therefore exhaust the
+queue deadline even with healthy storage. Overload responses retain a
+`Retry-After` header; they must not be counted as successful downloads.
+
+This result does not qualify 32 simultaneous slow 1 GiB readers. Keep the
+admission bounds when comparing workloads, report rejected requests, and
+distinguish client pacing from server throughput. Higher limits require a
+separate resource-pressure qualification, rather than assuming spare RAM or
+disk bandwidth.
+
+An unpaced repeat also reached HTTP 503 after both stock-client uploads and
+downloads verified successfully. Removing the client delay therefore does
+not establish 32-reader capacity on this four-CPU host. A separate attempt
+failed during a stock-client download before pressure began; its generic
+diagnostic did not identify the cause, so that failure remains unexplained.
+
+A separate 16-reader unpaced control passed on the same four-CPU, 1 GiB
+configuration with stock Hub 2.2.0 / `hf_xet` 1.7.0. All 16 complete 1 GiB
+files matched SHA-256 in a 36.9-second batch. The subsequent 16 abandoned
+responses and complete plain/stock-client recovery downloads also passed;
+MinIO trace counts reconciled. Server process peak RSS stayed below 290 MiB
+through the pressure and recovery phases. This is one shared-host capacity
+observation, not a comparative throughput improvement or a p99 measurement.
+Its batch duration also shows why a second wave can exceed the 30-second
+queue deadline without artificial client pacing.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:
