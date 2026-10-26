@@ -1,6 +1,77 @@
 use super::*;
 
 #[tokio::test]
+async fn default_history_page_stops_at_one_hundred_commits() {
+    let root = tempfile::tempdir().unwrap();
+    let store = BoxedHubStore::from_store(LocalIndexStore::new(root.path().to_owned()).unwrap());
+    store
+        .create_repo(HubRepoType::Model, "alice/pages", true)
+        .unwrap();
+    let mut parent = None;
+    for index in 0..101 {
+        let sha = format!("{index:064x}");
+        store.store_files(&sha, &[]).unwrap();
+        store
+            .create_revision(
+                "alice/pages",
+                parent.as_deref(),
+                &sha,
+                "main",
+                &index.to_string(),
+            )
+            .unwrap();
+        parent = Some(sha);
+    }
+    let app = hub_routes(
+        HubState {
+            store,
+            object_store: ServerObjectStore::local(root.path().join("objects")).unwrap(),
+            auth: None,
+            public_base_url: "http://localhost".to_owned(),
+            http_client: None,
+            webhook_secret_cipher: None,
+        },
+        false,
+    );
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/alice/pages/commits/main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let link = first.headers().get("link").unwrap().to_str().unwrap();
+    let next = url::Url::parse(link.split_once('>').unwrap().0.trim_start_matches('<')).unwrap();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(
+        &axum::body::to_bytes(first.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 100);
+    let last = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("{}?{}", next.path(), next.query().unwrap()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(last.status(), StatusCode::OK);
+    assert!(!last.headers().contains_key("link"));
+    let remaining: Vec<serde_json::Value> =
+        serde_json::from_slice(&axum::body::to_bytes(last.into_body(), 65536).await.unwrap())
+            .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining.first().unwrap().get("title").unwrap(), "0");
+}
+
+#[tokio::test]
 async fn history_pages_keep_immutable_ancestry_and_authorization() {
     let root = tempfile::tempdir().unwrap();
     let store = BoxedHubStore::from_store(LocalIndexStore::new(root.path().to_owned()).unwrap());

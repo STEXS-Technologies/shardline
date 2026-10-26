@@ -206,6 +206,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   hashes during decoding to reject local source changes after validation.
 - Honor expanded Hub tree requests with bounded, snapshot-pinned SDK pagination
   and last-change metadata; avoid charging cached tree lookups as payload reads.
+- Paginate Hub commit history through immutable parent links instead of loading
+  every repository revision, preserving authorization on each page.
 - Keep snapshot-scoped Hub commit history and expanded path metadata from
   exposing ancestor messages and timestamps; accept tag aliases without granting
   access to a same-named branch.

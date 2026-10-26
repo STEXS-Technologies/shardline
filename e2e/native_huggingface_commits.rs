@@ -67,6 +67,24 @@ assert "copied/large.bin" in api.list_repo_files(repo, revision=copied.oid)
 # Compare directories as well as files, including repository-relative cursors
 # inside a subtree after its original children have been deleted on a later ref.
 from huggingface_hub.utils import paginate
+# Exercise the stock history paginator independently of tree pagination. Its
+# continuation must stay on the old ancestry after the named branch advances.
+history = api.list_repo_commits(repo, revision="commit-operations")
+expected_history = [commit.commit_id for commit in history]
+assert expected_history[:4] == [moved.oid, copied.oid, deleted.oid, created.oid]
+api.create_branch(repo, branch="history-pagination", revision=moved.oid)
+history_headers = {"Authorization": "Bearer " + api.token}
+history_pages = iter(paginate(api.endpoint + "/api/models/" + repo + "/commits/history-pagination",
+    params={"limit": 1}, headers=history_headers, timeout=30))
+first_commit = next(history_pages)
+api.create_commit(repo, revision="history-pagination", parent_commit=moved.oid,
+    commit_message="advance branch between history pages", operations=[
+        CommitOperationAdd(path_in_repo="history-new.txt", path_or_fileobj=b"new history"),
+    ])
+actual_history = [first_commit["id"]] + [commit["id"] for commit in history_pages]
+assert actual_history == expected_history, "history pagination changed its ancestry"
+assert api.list_repo_commits(repo, revision="history-pagination")[0].commit_id != moved.oid
+api.delete_branch(repo, branch="history-pagination")
 for revision, subtree in [(created.oid, ""), (deleted.oid, ""), (moved.oid, ""), (created.oid, "delete-me")]:
     expected = {entry.path for entry in api.list_repo_tree(repo, path_in_repo=subtree or None,
         revision=revision, recursive=True)}

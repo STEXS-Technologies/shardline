@@ -192,6 +192,13 @@ incremental fetch, exact current and historical file contents, a successful
 fast-forward pull, and strict Git object checks. This small fixture does not
 establish large-repository throughput or concurrent resource limits.
 
+Hub commit-history responses contain at most 100 revisions (the default), with
+an optional `limit` from 1 to 100. The stock SDK follows `Link` headers to the
+next immutable parent, so a branch advancing between pages does not replace the
+remaining ancestry. Every page is authorized; snapshot-scoped credentials expose
+only their permitted commit. This bounds history-listing work, but cold Git
+identity projection still limits uncached ancestry to 10,000 revisions.
+
 Git request buffering, history projection and pack generation share the existing
 two-slot identity work limit. Blocking work retains its slot after request
 cancellation. Download responses retain the slot until their body is consumed
