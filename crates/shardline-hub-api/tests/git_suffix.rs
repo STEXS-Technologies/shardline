@@ -15,6 +15,7 @@ use shardline_server_core::{AuthProvider, LocalHmacProvider, ServerObjectStore};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 use tower::ServiceExt;
 
+mod history_pages;
 mod snapshot_v2;
 
 fn token(name: &str, revision: Option<&str>) -> String {
