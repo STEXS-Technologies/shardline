@@ -1463,6 +1463,62 @@ yet establish an all-in production cost per TB, a cluster scaling guarantee or
 an SSD replacement saving. Small-range read amplification must be represented
 in the workload rather than hidden by full-download throughput.
 
+## Native Xet backend-cost check
+
+Run the stock Hub/Xet client against disposable PostgreSQL and MinIO:
+
+```bash
+python3 scripts/shardline/validate_native_cost.py \
+  /absolute/path/to/shardline /absolute/path/to/client-env/bin/python \
+  /private/path/outside-checkout/native-cost --file-mib 36
+```
+
+The runner needs Docker, `mc`, boto3 in its own Python environment, and
+`huggingface_hub` plus `hf_xet` in the client environment. It creates one
+CPU-limited combined-role Hub server with private backend storage. Each upload
+and download uses a fresh client process/cache. Both downloaded files must
+match their SHA-256, and upload counters must establish actual native Xorb
+ingestion and deduplication. Missing prerequisites or failed verification fail
+the run. Backend traces are reconciled against MinIO's independent API counters.
+Tokens, signed URLs and raw client diagnostics are excluded from results.
+
+On October 26, 2026, three independent runs used Hub 2.3.0/hf_xet 1.7.0,
+one combined-role replica limited to one CPU/1 GiB, and a deterministic
+incompressible 36 MiB file followed by a 256 KiB tail edit. The executable
+SHA-256 was
+`eeab4aff879300ea6be594348e22e67e9e6a79d8c569b9d911bdb705139a767c`.
+This is a resource-cost observation for that frozen candidate, not a comparison
+against released v1.12.1 or a final-head qualification.
+
+| Operation | Backend attempts (each run) | Median backend response bytes | Query calls (each run) | Median statement WAL bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Initial native upload | 633 | 37,783,560 | 864 | 480,824 |
+| Initial cold download | 6 | 37,781,414 | 39 | 0 |
+| Edited version, cold upload client | 38 | 38,126,666 | 269 | 55,601 |
+| Edited version, cold download client | 8 | 38,125,013 | 42 | 0 |
+
+The edited upload sent 343,237 Xorb bytes to Shardline versus 37,753,312 for
+the initial upload: about 99.1% fewer client Xorb bytes. Backend attempts fell
+by about 94.0% between these two operations. These compare unique versus
+overlapping content in this fixture, not before/after software performance.
+The initial upload made 572 standalone chunk PUTs; the edited version made
+five. Initial median retained payload was 75,567,954 bytes, about 2.002 times
+the logical file size, including compatibility chunk copies. The edited
+version added about 689 KB of retained payload.
+
+The remaining cost is material: verifying the edited publication still read
+about 38.1 MB from the backend, despite receiving only 343 KB of new Xorb data
+from the client. Backend response bytes include protocol overhead and error
+bodies; they are not a cloud billing quantity. Removing compatibility copies
+or source validation requires separate integrity and released-reader proofs.
+This run does not justify bypassing either check.
+
+The fixture is sequential on one shared host with warm server/backend caches;
+it does not measure tail latency or multi-host scale-out. Resource results
+separate client CPU/RSS from server/backend cgroup observations. Statement WAL
+is not device writes or NVMe wear. Inventories are immediate, with no claim of
+retention-expired GC savings, byte-hours, cloud prices or all-in cost per TB.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:

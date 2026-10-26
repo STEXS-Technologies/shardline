@@ -78,7 +78,9 @@ class Deployment:
         return command("docker", "exec", self.pg, "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
                        "-U", "postgres", "-d", database, "-c", query.strip())
 
-    def lane(self, name, replicas):
+    def lane(self, name, replicas, frontend="s3"):
+        if frontend not in ("s3", "hub"):
+            raise ValueError("unsupported benchmark frontend")
         lane = self.output / name
         lane.mkdir()
         (lane / "empty.toml").touch()
@@ -96,6 +98,9 @@ class Deployment:
                     "SHARDLINE_AUTH_PROVIDER": "local",
                     "SHARDLINE_TOKEN_SIGNING_KEY": "0123456789abcdef0123456789abcdef"}
         self.config = str(lane / "empty.toml")
+        if frontend == "hub":
+            # Disposable loopback fixture still exercises encrypted secrets.
+            self.env["SHARDLINE_HUB_WEBHOOK_SECRET_KEY"] = "0123456789abcdef0123456789abcdef"
         with (lane / "migration.log").open("w") as log:
             subprocess.run([self.binary, "--config", self.config, "db", "migrate", "up",
                             "--database-url", database], env=self.env, stdout=log,
@@ -123,7 +128,8 @@ class Deployment:
                                        "-v", f"{self.ca_bundle}:/ca-certificates.crt:ro",
                                        "-v", f"{lane}:/fixture:z", *arguments,
                                        "debian:13-slim", "/shardline", "--config", "/fixture/empty.toml",
-                                       "serve", "--role", "api", "--frontend", "s3")
+                                       "serve", "--role", "all" if frontend == "hub" else "api",
+                                       "--frontend", frontend)
             self.servers.append(container)
             self.ports.append(listen)
         from benchmark_gc_contention import request

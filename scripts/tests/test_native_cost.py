@@ -1,0 +1,63 @@
+"""Guard credential-safe failure reporting and genuinely cold native clients."""
+
+from pathlib import Path
+import json
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shardline"))
+from performance_validation.native import client_operation  # noqa: E402
+
+
+class NativeCostTest(unittest.TestCase):
+    def operation(self):
+        return client_operation(Path("/fixture/python"),
+                                SimpleNamespace(ports=[1234], token="private-token"),
+                                "upload", Path("/fixture/input"), "model.bin", "digest")
+
+    def test_native_failure_never_reprints_signed_urls_or_credentials(self):
+        failure = subprocess.CompletedProcess([], 1, "private-token", "https://private/signed-url")
+        with patch("performance_validation.native.subprocess.run", return_value=failure):
+            with self.assertRaisesRegex(RuntimeError, "raw diagnostics withheld") as error:
+                self.operation()
+        self.assertNotIn("private-token", str(error.exception))
+        self.assertNotIn("signed-url", str(error.exception))
+
+    def test_timeout_does_not_expose_captured_client_diagnostics(self):
+        failure = subprocess.TimeoutExpired("native", 300, output="private-token")
+        with patch("performance_validation.native.subprocess.run", side_effect=failure):
+            with self.assertRaisesRegex(RuntimeError, "deadline") as error:
+                self.operation()
+        self.assertNotIn("private-token", str(error.exception))
+
+    def test_each_operation_uses_an_independent_empty_client_cache(self):
+        homes = []
+
+        def execute(command, **kwargs):
+            env = kwargs["env"]
+            home = Path(env["HF_HOME"])
+            self.assertTrue(home.is_dir())
+            self.assertEqual(list(home.iterdir()), [])
+            self.assertNotIn("HF_TOKEN", env)
+            self.assertNotIn("HF_HUB_CACHE", env)
+            self.assertNotIn("HF_ENDPOINT", env)
+            self.assertEqual(env["HF_HUB_DISABLE_XET"], "0")
+            self.assertNotIn("private-token", command)
+            self.assertEqual(json.loads(kwargs["input"])["token"], "private-token")
+            homes.append(home)
+            return subprocess.CompletedProcess(command, 0, '{"seconds":1}', "")
+
+        with patch.dict(os.environ, HF_TOKEN="ambient", HF_HUB_CACHE="ambient", HF_ENDPOINT="ambient"):
+            with patch("performance_validation.native.subprocess.run", side_effect=execute):
+                self.operation()
+                self.operation()
+        self.assertNotEqual(homes[0], homes[1])
+        self.assertTrue(all(not home.exists() for home in homes))
+
+
+if __name__ == "__main__":
+    unittest.main()
