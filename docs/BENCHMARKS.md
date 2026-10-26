@@ -1909,6 +1909,25 @@ It confirms that initial-upload and retained-byte gaps remain in the current
 executable. The same reference durability and production-comparability limits
 above apply; these two-run ranges do not establish general download superiority.
 
+The October 27 repeat on runtime `84cc1a97` used the same upstream revision,
+corpus, fresh clients and reversed order. All eight downloads passed SHA-256.
+
+| Direct-CAS operation | Shardline `84cc1a97` seconds | Upstream local reference seconds |
+| --- | ---: | ---: |
+| Initial upload | 6.43–7.00 | 1.13–1.21 |
+| Initial full download, including SHA-256 | 0.98–1.14 | 0.87–0.98 |
+| Tail-edit upload from a cold client | 0.71–0.73 | 0.30 |
+| Edited full download, including SHA-256 | 0.78–0.94 | 0.91–1.15 |
+
+Initial upload server peak RSS was 49,300–50,108 KiB for Shardline and
+233,508–242,128 KiB for the upstream reference in this fixture. This is server
+RSS, separate from the stock client's memory. Retained lengths were unchanged:
+Shardline 1,087,903,184 bytes initially and 1,088,532,774 after the edit;
+upstream 538,725,364 and 538,533,091 bytes. Initial upload and storage parity
+remain open; the latest download timings do not support a general advantage.
+The reference's weaker local synchronization contract, shared-host limitations
+and distinction from Hugging Face production still apply.
+
 A separate four-run PostgreSQL/MinIO comparison used baseline/candidate/
 candidate/baseline order, stock Hub 2.2.0/hf_xet 1.7.0, one combined-role
 server limited to one CPU/1 GiB, and 512 MiB incompressible files with a
