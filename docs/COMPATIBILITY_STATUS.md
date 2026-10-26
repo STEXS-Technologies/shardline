@@ -196,8 +196,12 @@ Hub commit-history responses contain at most 100 revisions (the default), with
 an optional `limit` from 1 to 100. The stock SDK follows `Link` headers to the
 next immutable parent, so a branch advancing between pages does not replace the
 remaining ancestry. Every page is authorized; snapshot-scoped credentials expose
-only their permitted commit. This bounds history-listing work, but cold Git
-identity projection still limits uncached ancestry to 10,000 revisions.
+only their permitted commit. Cold Git identity recovery uses 512-revision windows
+and verified ancestor archives rather than collecting the entire uncached history
+in one projection. A 10,001-ancestor regression exercises this path. Discovery is
+bounded to one million revisions and file work shares one cumulative
+one-million-entry budget. Git export and path-history limits remain unchanged;
+this does not establish unbounded history or large-repository throughput.
 
 Git request buffering, history projection and pack generation share the existing
 two-slot identity work limit. Blocking work retains its slot after request

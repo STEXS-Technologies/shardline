@@ -20,6 +20,20 @@ use super::{
 };
 use crate::{error::HubApiError, routes::HubState};
 
+mod recovery;
+
+pub(super) const COLD_IDENTITY_WINDOW: usize = recovery::WINDOW;
+
+pub(super) fn recover_cold_ancestor(
+    state: &HubState,
+    repo: &str,
+    revision: &str,
+    auth: &AuthorizedRepository,
+    remaining_file_entries: usize,
+) -> Result<usize, HubApiError> {
+    recovery::recover(state, repo, revision, auth, remaining_file_entries)
+}
+
 const MAX_IDENTITY_BYTES: usize = 20 * 1024 * 1024;
 pub(crate) static IDENTITY_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
@@ -257,6 +271,149 @@ pub(crate) fn resolve_commit_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_identity_recovers_more_than_ten_thousand_ancestors() {
+        let (_temp, state, newest) = cold_history(10_001);
+        let auth = AuthorizedRepository::anonymous_full_access();
+        let public = public_commit_id_sync(&state, "alice/repo", &newest, &auth).unwrap();
+        assert_eq!(public.len(), 40);
+        assert_eq!(
+            resolve_commit_id(&state, "alice/repo", &public, &auth).unwrap(),
+            Some(newest.clone())
+        );
+        assert_eq!(
+            cached_public_commit_id(&state, "alice/repo", &newest, &auth).unwrap(),
+            Some(public)
+        );
+    }
+
+    fn cold_history(count: usize) -> (tempfile::TempDir, HubState, String) {
+        let (temp, state) = super::super::tests::make_hub_state();
+        state
+            .store
+            .create_repo(
+                shardline_index::hub::HubRepoType::Model,
+                "alice/repo",
+                false,
+            )
+            .unwrap();
+        // Model an existing, uncached repository without doing separate
+        // fixture publication transactions. These are authoritative revisions,
+        // not trusted aliases or precomputed identity archives.
+        let mut connection =
+            rusqlite::Connection::open(temp.path().join("metadata.sqlite3")).unwrap();
+        let transaction = connection.transaction().unwrap();
+        let mut parent: Option<String> = None;
+        for number in 0..count {
+            let sha = format!("{number:064x}");
+            transaction.execute(
+                "INSERT INTO shardline_hub_revisions (repo_id,ref_name,sha,parent_sha,message,created_at_unix_seconds) VALUES ('alice/repo','archive',?1,?2,'history',42)",
+                rusqlite::params![sha, parent],
+            ).unwrap();
+            parent = Some(sha);
+        }
+        transaction.commit().unwrap();
+        drop(connection);
+        (temp, state, parent.unwrap())
+    }
+
+    #[test]
+    fn cold_windows_preserve_existing_git_commit_hashes() {
+        let (_temp, state, newest) = cold_history(COLD_IDENTITY_WINDOW + 3);
+        assert_eq!(
+            state
+                .store
+                .change_refs_atomically(
+                    "alice/repo",
+                    &[shardline_index::hub::HubRefChange {
+                        ref_name: "archive".to_owned(),
+                        expected_sha: None,
+                        new_sha: Some(newest.clone()),
+                        message: "history".to_owned(),
+                    }]
+                )
+                .unwrap(),
+            shardline_index::hub::HubRefBatchOutcome::Applied
+        );
+        let auth = AuthorizedRepository::anonymous_full_access();
+        let original =
+            super::super::projection::project_history(&state, "alice/repo", &auth).unwrap();
+        assert!(
+            cached_public_commit_id(&state, "alice/repo", &newest, &auth)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            public_commit_id_sync(&state, "alice/repo", &newest, &auth).unwrap(),
+            *original.identities.get(&newest).unwrap()
+        );
+    }
+
+    #[test]
+    fn cold_windows_reject_cyclic_metadata() {
+        let (temp, state, newest) = cold_history(COLD_IDENTITY_WINDOW + 3);
+        let connection = rusqlite::Connection::open(temp.path().join("metadata.sqlite3")).unwrap();
+        connection.execute("UPDATE shardline_hub_revisions SET parent_sha=?1 WHERE repo_id='alice/repo' AND sha=?2", rusqlite::params![newest, format!("{:064x}", 0)]).unwrap();
+        drop(connection);
+        let error = public_commit_id_sync(
+            &state,
+            "alice/repo",
+            &newest,
+            &AuthorizedRepository::anonymous_full_access(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cyclic Hub commit ancestry"));
+    }
+
+    #[test]
+    fn cold_windows_preserve_git_origin_parent_boundaries() {
+        let (temp, state, newest) = cold_history(COLD_IDENTITY_WINDOW + 1);
+        let connection = rusqlite::Connection::open(temp.path().join("metadata.sqlite3")).unwrap();
+        let git_parent = "a".repeat(40);
+        let old_root = format!("{:064x}", 0);
+        connection
+            .execute(
+                "UPDATE shardline_hub_revisions SET sha=?1 WHERE repo_id='alice/repo' AND sha=?2",
+                rusqlite::params![git_parent, old_root],
+            )
+            .unwrap();
+        connection.execute("UPDATE shardline_hub_revisions SET parent_sha=?1 WHERE repo_id='alice/repo' AND parent_sha=?2", rusqlite::params![git_parent, old_root]).unwrap();
+        drop(connection);
+        // REST identity synthesis only needs this exact parent hash. It must
+        // not demand a complete original Git archive or rewrite the parent.
+        let auth = AuthorizedRepository::anonymous_full_access();
+        assert_eq!(
+            public_commit_id_sync(&state, "alice/repo", &newest, &auth)
+                .unwrap()
+                .len(),
+            40
+        );
+    }
+
+    #[test]
+    fn cold_windows_share_the_cumulative_file_budget() {
+        let (temp, state, newest) = cold_history(COLD_IDENTITY_WINDOW * 2 + 1);
+        let connection = rusqlite::Connection::open(temp.path().join("metadata.sqlite3")).unwrap();
+        connection.execute("INSERT INTO shardline_hub_file_entries (commit_sha,path,size,sha,is_lfs) SELECT sha,'file.bin',0,?1,1 FROM shardline_hub_revisions WHERE repo_id='alice/repo' AND ref_name='archive'", ["a".repeat(64)]).unwrap();
+        drop(connection);
+        let auth = AuthorizedRepository::anonymous_full_access();
+        assert!(
+            project_history_with_roots(
+                &state,
+                "alice/repo",
+                &auth,
+                600,
+                Some(std::slice::from_ref(&newest))
+            )
+            .is_err()
+        );
+        assert!(
+            cached_public_commit_id(&state, "alice/repo", &newest, &auth)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn scoped(owner: &str, revision: Option<&str>) -> AuthorizedRepository {
         use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};

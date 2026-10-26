@@ -20,6 +20,8 @@ const MAX_PROJECTED_FILE_ENTRIES: usize = 1_000_000;
 pub(super) struct GitProjection {
     pub(super) identities: HashMap<String, String>,
     pub(super) objects: Vec<GitObject>,
+    // Identity recovery carries this charge across bounded ancestry windows.
+    pub(super) file_entries: usize,
     // Async exports retain the existing identity admission slot through pack
     // generation. A cancelled waiter cannot admit replacement blocking work.
     pub(super) admission: Option<tokio::sync::SemaphorePermit<'static>>,
@@ -480,6 +482,7 @@ pub(super) fn project_history_with_roots(
     maximum_file_entries: usize,
     requested_roots: Option<&[String]>,
 ) -> Result<GitProjection, HubApiError> {
+    let mut remaining_file_work = maximum_file_entries;
     let revisions = if let Some(roots) = requested_roots {
         // Identity lookup must not impose the Git export history limit on
         // repositories with many unrelated or already-committed revisions.
@@ -500,12 +503,26 @@ pub(super) fn project_history_with_roots(
             {
                 continue;
             }
+            let git_origin = sha.len() == 40 && sha != "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+            if !roots.contains(&sha)
+                && !git_origin
+                && sha.len() != 16
+                && seen.len() > super::identity::COLD_IDENTITY_WINDOW
+            {
+                remaining_file_work = super::identity::recover_cold_ancestor(
+                    state,
+                    repo_id,
+                    &sha,
+                    auth,
+                    remaining_file_work,
+                )?;
+                continue;
+            }
             let revision = state
                 .store
                 .get_revision(repo_id, &sha)
                 .map_err(failure)?
                 .ok_or_else(|| failure("missing repository revision metadata"))?;
-            let git_origin = sha.len() == 40 && sha != "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
             if let Some(parent) = &revision.parent_sha
                 && (!git_origin || roots.contains(&sha))
             {
@@ -631,6 +648,7 @@ pub(super) fn project_history_with_roots(
         admission: None,
         identities: known_identities,
         objects: Vec::new(),
+        file_entries: 0,
     };
     let mut budget = ProjectionBudget {
         remaining_bytes: super::limits::MAX_GIT_PROJECTED_BYTES,
@@ -640,7 +658,7 @@ pub(super) fn project_history_with_roots(
     };
     let mut blob_cache = HashMap::new();
     let mut tree_cache = HashMap::new();
-    let mut remaining_files = maximum_file_entries;
+    let mut remaining_files = remaining_file_work;
     for sha in ordered {
         if budget.identity_only {
             budget.remaining_objects = 100_000;
@@ -719,6 +737,9 @@ pub(super) fn project_history_with_roots(
             projection.objects.extend(objects);
         }
     }
+    projection.file_entries = maximum_file_entries
+        .checked_sub(remaining_files)
+        .ok_or_else(|| failure("invalid Git projection file budget"))?;
     Ok(projection)
 }
 

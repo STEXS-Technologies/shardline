@@ -543,6 +543,12 @@ saved revision first; the returned SDK ID identifies the same immutable commit.
 Content and internal revision identities are unchanged. The ID mapping is retained
 as an actual commit object in the existing repository/provider-scoped Git archive,
 so it survives restarts and branch deletion without another service or migration.
+Cold identity recovery processes ancestry in windows of 512 revisions and reuses
+verified commit archives between windows. This supports uncached histories beyond
+10,000 ancestors without collecting their complete trees in one projection.
+Recovery retains a cumulative one-million-file-entry budget and a
+one-million-revision discovery budget; Git export and path-history limits are
+unchanged. Interrupted recovery can reuse already verified ancestor archives.
 Older server binaries still read the unchanged stored revisions, but do not
 understand newly returned Git aliases for NDJSON commits. During a rolling upgrade,
 route Hub SDK traffic to upgraded nodes; rollback integrations can retain the
