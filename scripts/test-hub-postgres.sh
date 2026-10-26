@@ -52,6 +52,11 @@ for entry in \
         -E 'test(postgres_)' --no-fail-fast
 done
 
+# Keep publication contention and damaged-evidence rejection mandatory. This
+# test owns its database, so intentional corruption cannot affect other gates.
+cargo nextest run --locked -p shardline-hub-api --test hub_commit_bounds \
+    --run-ignored only -E 'test(postgres_publication_conflicts_and_deleted_branches)'
+
 # Snapshot authorization must also hold with object payloads on MinIO. This
 # case owns both services and exercises the same stock-client contract locally.
 cargo nextest run --locked -p shardline-hub-api --test git_suffix \

@@ -324,7 +324,11 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
 
         block_on_async(async {
-            let mut tx = pool.begin().await?;
+            // Compare the head and its evidence from one MVCC snapshot. A
+            // concurrent publication must not look like damaged evidence.
+            let mut tx = pool
+                .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .await?;
             let row = sqlx::query(
                 "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                  FROM shardline_hub_repos WHERE repo_id = $1",
@@ -571,7 +575,9 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
 
         block_on_async(async {
-            let mut tx = pool.begin().await?;
+            let mut tx = pool
+                .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .await?;
             let refs = {
                 let mut rows = sqlx::query(
                     "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = $1 ORDER BY ref_name LIMIT $2",
@@ -731,7 +737,9 @@ impl HubStore for PostgresIndexStore {
         let revision = revision.to_owned();
 
         block_on_async(async {
-            let mut tx = pool.begin().await?;
+            let mut tx = pool
+                .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .await?;
             if revision.is_empty() || revision == "main" {
                 let head: Option<String> = sqlx::query_scalar::<_, String>(
                     "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = $1",

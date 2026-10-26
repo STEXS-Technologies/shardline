@@ -180,6 +180,67 @@ async fn postgres_publication_conflicts_and_deleted_branches() {
     let pool = sqlx::PgPool::connect(&database).await.unwrap();
     let store = BoxedHubStore::from_store(shardline_index::PostgresIndexStore::new(pool.clone()));
     let root = tempfile::TempDir::new().unwrap();
-    contract(root.path(), store).await;
+    contract(root.path(), store.clone()).await;
+    concurrent_head_reads(store.clone()).await;
+    // This database belongs exclusively to the disposable fixture. Real
+    // corruption must still fail after eliminating mixed-snapshot false alarms.
+    let changed = sqlx::query("UPDATE shardline_reliability_events SET event_json = '{}'::jsonb WHERE operation_kind = 'MetadataCommit'")
+        .execute(&pool).await.unwrap();
+    assert!(changed.rows_affected() > 0);
+    let repo = "owner/read-snapshot";
+    assert!(store.get_repo(repo).is_err());
+    assert!(store.list_refs_bounded(repo, 2).is_err());
+    assert!(store.resolve_revision(repo, "main").is_err());
+    assert!(store.resolve_revision(repo, "refs/heads/main").is_err());
     pool.close().await;
+}
+
+// Calls may observe different committed heads, but no individual read may mix
+// its metadata snapshot with evidence from a later publication.
+pub(super) async fn concurrent_head_reads(store: BoxedHubStore) {
+    let repo = "owner/read-snapshot";
+    store.create_repo(HubRepoType::Model, repo, false).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer_store = store.clone();
+    let writer_barrier = barrier.clone();
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut parent = writer_store
+            .resolve_revision(repo, "main")
+            .unwrap()
+            .unwrap();
+        writer_barrier.wait();
+        for index in 1..=200 {
+            let next = format!("{index:064x}");
+            writer_store
+                .create_revision(repo, Some(&parent), &next, "main", "snapshot race")
+                .unwrap();
+            parent = next;
+        }
+        parent
+    });
+    let reader = tokio::task::spawn_blocking(move || {
+        barrier.wait();
+        for _ in 0..400 {
+            assert!(store.get_repo(repo).unwrap().is_some());
+            let refs = store.list_refs_bounded(repo, 2).unwrap();
+            assert_eq!(refs.len(), 1);
+            assert!(store.resolve_revision(repo, "main").unwrap().is_some());
+            assert!(
+                store
+                    .resolve_revision(repo, "refs/heads/main")
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        store
+    });
+    let (writer, reader) = tokio::join!(writer, reader);
+    assert_eq!(
+        writer.unwrap(),
+        reader
+            .unwrap()
+            .resolve_revision(repo, "main")
+            .unwrap()
+            .unwrap()
+    );
 }

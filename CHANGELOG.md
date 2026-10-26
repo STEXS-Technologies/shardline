@@ -132,6 +132,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   preserving commit hashes, repository scope and cumulative file-work limits.
 - Retry concurrent unconditional Hub branch commits against the latest tree,
   preserving unrelated files, explicit-parent conflicts and deleted branches.
+- Verify PostgreSQL Hub heads and their reliability evidence from one read
+  snapshot, avoiding false integrity failures during concurrent publication.
 - Restore plain HTTP native-Xet downloads for repository-wide credentials when
   the verified file is stored under a branch, retaining repository and ref isolation.
 - Return a retryable error when PostgreSQL terminates an active publication
