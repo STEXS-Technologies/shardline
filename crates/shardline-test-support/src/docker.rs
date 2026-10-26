@@ -42,6 +42,8 @@ static PROCESS_CLEANUP_REGISTERED: Once = Once::new();
 static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 mod minio_probe;
+#[cfg(test)]
+mod tests;
 mod tls;
 pub use tls::HttpsDocumentFixture;
 pub use tls::HttpsWebhookFixture;
@@ -553,8 +555,7 @@ fn start_redis_service(run_id: &str) -> Result<RedisService, IoError> {
         "start redis container",
     )?;
     let service = (|| {
-        let host_port = docker_published_port(&container_name, 6379)
-            .map_err(|error| container_start_error(&container_name, &error))?;
+        let host_port = docker_published_port(&container_name, 6379)?;
         let service = RedisService {
             container_name: container_name.clone(),
             host_port,
@@ -602,8 +603,7 @@ fn start_redis_tls_service(run_id: &str) -> Result<RedisService, IoError> {
         "start TLS redis container",
     )?;
     let service = (|| {
-        let host_port = docker_published_port(&container_name, 6379)
-            .map_err(|error| container_start_error(&container_name, &error))?;
+        let host_port = docker_published_port(&container_name, 6379)?;
         let service = RedisService {
             container_name: container_name.clone(),
             host_port,
@@ -762,21 +762,6 @@ fn remove_container_after_start_failure<T>(container_name: &str, result: &Result
     }
 }
 
-fn container_start_error(container_name: &str, error: &IoError) -> IoError {
-    let logs = run_command(Command::new("docker").arg("logs").arg(container_name))
-        .ok()
-        .map(|output| {
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )
-        })
-        .filter(|logs| !logs.trim().is_empty());
-    let message = logs.map_or_else(|| error.to_string(), |logs| format!("{error}: {logs}"));
-    IoError::new(error.kind(), message)
-}
-
 fn track_container_for_process_cleanup(container_name: &str) {
     PROCESS_CLEANUP_REGISTERED.call_once(|| {
         // SAFETY: `cleanup_tracked_containers` has the C ABI, captures no state, and
@@ -833,9 +818,11 @@ fn run_command_checked(command: &mut Command, description: &str) -> Result<Outpu
         return Ok(output);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Client diagnostics can contain credentials, signed URLs or provider
+    // configuration. Keep captured output private rather than copying it into
+    // a test failure that may be published by CI.
     Err(IoError::other(format!(
-        "{description} failed with status {}: {stderr}",
+        "{description} failed with status {}",
         output.status
     )))
 }
