@@ -14,7 +14,13 @@ from .measurements import RequestTrace, inventory_summary
 
 
 def dispose(container):
-    subprocess.run(["docker", "rm", "-f", container], check=True, stdout=subprocess.DEVNULL)
+    command("docker", "rm", "-f", container)
+
+
+def require_running_server(container):
+    state = json.loads(command("docker", "inspect", container))[0]["State"]
+    if not state["Running"]:
+        raise RuntimeError("benchmark server exited during startup; raw diagnostics withheld")
 
 
 class Deployment:
@@ -43,8 +49,8 @@ class Deployment:
                                      "-p", "127.0.0.1::9000", MINIO, "server", "/data")
             # The image's temporary initialization server accepts Unix sockets
             # before restarting. TCP readiness waits for the final server.
-            ready(lambda: subprocess.run(["docker", "exec", self.pg, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
+            ready(lambda: command("docker", "exec", self.pg, "pg_isready", "-h",
+                                  "127.0.0.1", "-U", "postgres", timeout=2) is not None)
             self.endpoint = f"http://127.0.0.1:{port(self.s3, 9000)}"
             self.client = boto3.client("s3", endpoint_url=self.endpoint,
                                        aws_access_key_id="performance",
@@ -137,9 +143,7 @@ class Deployment:
         import http.client
         for container, listen in zip(self.servers, self.ports):
             def healthy():
-                state = json.loads(command("docker", "inspect", container))[0]["State"]
-                if not state["Running"]:
-                    raise RuntimeError(command("docker", "logs", container, stderr=subprocess.STDOUT))
+                require_running_server(container)
                 connection = http.client.HTTPConnection("127.0.0.1", listen, timeout=2)
                 try:
                     request(connection, "GET", "/readyz")

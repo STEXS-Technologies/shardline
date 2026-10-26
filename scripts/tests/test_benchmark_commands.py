@@ -7,12 +7,28 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shardline"))
 from benchmark_gc_contention import command  # noqa: E402
+from performance_validation.fixtures import require_running_server  # noqa: E402
 
 
 class BenchmarkCommandTest(unittest.TestCase):
+    def test_exited_server_never_embeds_raw_logs_in_startup_failure(self):
+        def inspect_only(*args, **kwargs):
+            self.assertEqual(args, ("docker", "inspect", "owned-fixture"))
+            return '[{"State":{"Running":false}}]'
+
+        with patch("performance_validation.fixtures.command", side_effect=inspect_only):
+            with self.assertRaisesRegex(RuntimeError, "raw diagnostics withheld"):
+                require_running_server("owned-fixture")
+
+    def test_running_server_passes_startup_state_check(self):
+        with patch("performance_validation.fixtures.command",
+                   return_value='[{"State":{"Running":true}}]'):
+            require_running_server("owned-fixture")
+
     def test_success_preserves_output(self):
         self.assertEqual(command(sys.executable, "-c", "print('fixture-result')"),
                          "fixture-result")
