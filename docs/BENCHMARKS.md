@@ -1794,6 +1794,20 @@ not establish saturation safety, final-head CI, multi-host scaling, hardware
 wear savings or upstream upload parity. Native decoded-chunk duplication and
 the initial-upload gap against upstream remain open.
 
+A follow-up safety control started 32 cold-client uploads of the same 36 MiB
+file simultaneously, then ran 32 independently SHA-256-verified downloads
+with eight concurrent readers against each exact executable. Both completed.
+Baseline peak server RSS was 81,908 KiB; candidate peak RSS was 135,864 KiB.
+The 583 durable chunk/Xorb objects matched by identity, length and SHA-256,
+totaling 75,530,184 bytes in each run. Small total-directory differences came
+from metadata, which is not included in that payload comparison. This is a
+same-content contention control, not unique-file saturation or a scaling test.
+
+The current-source stock-client process test also passed all six lifecycle
+interruption points for a 512 MiB upload: intent creation, storing, object work,
+stored, metadata committed and visible. It verified recovery after SIGKILL;
+this local control does not qualify remote-provider failure semantics.
+
 An October 26 direct-CAS HTTP comparison used stock hf_xet 1.7.0 against
 Shardline `07bedb55` and the unmodified upstream `local_cas_server` from
 [xet-core `629562cd`](https://github.com/huggingface/xet-core/tree/629562cd9fc37432317eb57811faf13a6935c601).
