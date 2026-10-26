@@ -223,7 +223,7 @@ fn stream_referenced_term(
                 )
                 .ok_or(ServerError::Overflow)?;
             sender
-                .blocking_send(Ok(Bytes::from(decoded_chunk.into_data())))
+                .blocking_send(Ok(Bytes::copy_from_slice(bytes)))
                 .map_err(|_closed| ServerError::NotFound)?;
             Ok::<(), ServerError>(())
         },

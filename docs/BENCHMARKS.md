@@ -1827,21 +1827,20 @@ uploads and does not isolate this decoder's memory use. This change concerns
 Shardline's native-term reconstruction for plain HTTP reads, not a measured
 speedup of stock `hf_xet` CAS transfers or parity with upstream Xet.
 
-### Decoded-buffer ownership
+### Rejected decoded-buffer ownership experiment
 
-Native plain-HTTP reconstruction now transfers each verified decoded chunk's
-buffer into the response instead of allocating and copying its payload again.
-The two-frame channel and complete-source/member integrity checks remain.
+An experiment transferred decoded buffers directly into HTTP responses instead
+of copying each payload. Two alternating pairs of four 512 MiB readers passed
+all integrity/recovery checks but showed overlapping timing and memory ranges,
+with unchanged backend requests and I/O. Under sixteen concurrent 1 GiB reads,
+the candidate completed in 43.3 and 37.2 seconds; an immediate baseline control
+took 32.7 seconds. All three runs verified complete files, cancellation recovery
+and MinIO traces on four CPUs with a 1 GiB server limit.
 
-Two alternating pairs compared `c035ece4` and `326fa0b2` with four unpaced
-512 MiB readers on four CPUs and a 1 GiB server limit. Every native upload,
-download, cancellation/recovery check and MinIO trace reconciliation passed.
-Complete reads still used 84 backend requests and about 3.566 GB of backend
-responses. Process `rchar` and `syscr` remained 5,714,057,708 and 991,532;
-accounted writes stayed about 3.567 GB. CPU ranges overlapped (6.14–6.48 s
-before, 6.06–6.40 s after), as did elapsed times and process peak RSS. These
-runs validate the handoff without establishing faster throughput, lower memory,
-less device wear or parity with upstream Xet.
+The handoff was reverted before publication: removing a copy did not establish
+a practical improvement. Retained decoder-buffer capacity is a possible source
+of memory pressure, not a proven explanation. The existing exact-length payload
+copy, bounded channel and complete-source/member checks remain.
 
 ### Large slow-reader admission limit
 

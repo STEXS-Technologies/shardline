@@ -71,9 +71,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
-- Transfer decoded native Xet chunk buffers directly to HTTP responses,
-  avoiding a second payload allocation and copy while retaining verification
-  and bounded response buffering.
 - Avoid decoding unrequested Xorb members twice during native file
   reconstruction, retaining complete source validation and rehashing returned
   members.

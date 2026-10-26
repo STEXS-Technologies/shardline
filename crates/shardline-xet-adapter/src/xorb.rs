@@ -190,12 +190,6 @@ impl DecodedXorbChunk {
     pub fn data(&self) -> &[u8] {
         &self.data
     }
-
-    /// Consumes the chunk and returns its decoded buffer without copying it.
-    #[must_use]
-    pub fn into_data(self) -> Vec<u8> {
-        self.data
-    }
 }
 
 #[derive(Debug, Error)]
@@ -1117,20 +1111,6 @@ mod tests {
         let decoded = DecodedXorbChunk::new(descriptor.clone(), data.clone());
         assert_eq!(*decoded.descriptor(), descriptor);
         assert_eq!(decoded.data(), data.as_slice());
-    }
-
-    #[test]
-    fn decoded_chunk_ownership_preserves_the_payload_allocation() {
-        let data = vec![42; 65536];
-        let original = data.as_ptr();
-        let capacity = data.capacity();
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(&data));
-        let descriptor = ValidatedXorbChunk::new(hash, 0, 65536, 0, 65536);
-        let decoded = DecodedXorbChunk::new(descriptor, data);
-        let owned = decoded.into_data();
-        assert_eq!(owned.as_ptr(), original);
-        assert_eq!(owned.capacity(), capacity);
-        assert_eq!(owned, vec![42; 65536]);
     }
 
     // ── merkle_hash_to_shardline_hash round-trip ───────────────────────
