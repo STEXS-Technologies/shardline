@@ -1860,6 +1860,29 @@ observation, not a comparative throughput improvement or a p99 measurement.
 Its batch duration also shows why a second wave can exceed the 30-second
 queue deadline without artificial client pacing.
 
+Two further unpaced runs with the same executable and the existing
+`SHARDLINE_BLOCKING_IO_POOL_SIZE=8` override completed all 32 concurrent
+1 GiB files in 51.6 and 52.4 seconds. Each run also verified 32 abandoned
+responses, subsequent complete plain and stock-client downloads, and independent
+MinIO trace reconciliation. Process peak RSS during complete downloads was
+177 and 272 MiB. Each complete batch used 1,088 backend requests, transferring
+about 59.9 GB for 32 GiB of logical content. A matched run with the default
+16-worker setting returned HTTP 503.
+
+This is a resource-sizing diagnostic on one shared host, not a default change
+or an upstream Xet comparison. Fewer simultaneous source spools can relieve
+memory pressure, but these runs do not isolate that mechanism or establish
+physical SSD endurance savings. Smaller pools can also reduce throughput when
+backend latency is higher, as the delayed-backend experiment above demonstrates.
+Retain the existing admission, integrity and cancellation checks when evaluating
+pool sizes for a deployment.
+
+A 36 MiB control completed all 32 readers, cancellations and verified recovery
+with both settings. Complete-download batch times were 1.15 seconds with 16
+workers and 1.28 seconds with 8; both made 256 backend requests. This single
+pair is insufficient to quantify a small-file regression, but it reinforces
+that the large-file result does not justify lowering the global default.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:
