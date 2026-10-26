@@ -85,7 +85,10 @@ async fn qualify_mixed_clients(peer_version: &str) -> Result {
     let peer = std::env::var_os("SHARDLINE_NATIVE_PEER_PYTHON")
         .ok_or("mixed-client recovery requires an explicit peer Python environment")?;
     let peer = std::path::PathBuf::from(peer);
-    for (python, expected) in [(Path::new("python"), "1.7.0"), (peer.as_path(), peer_version)] {
+    for (python, expected) in [
+        (Path::new("python"), "1.7.0"),
+        (peer.as_path(), peer_version),
+    ] {
         let output = shardline_test_support::native_client_output(
             Command::new(python).args([
                 "-c",

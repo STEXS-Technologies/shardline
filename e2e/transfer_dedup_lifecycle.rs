@@ -66,10 +66,23 @@ impl Runtime {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires disposable Docker PostgreSQL; objects use a shared filesystem"]
 async fn native_delta_delete_fencing_survives_replica_restart() -> Result<(), Error> {
-    let stack = tokio::task::spawn_blocking(|| {
-        shardline_test_support::DockerLocalStack::builder()
-            .with_postgres()
-            .start()
+    qualify_delta_delete_fencing(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires disposable Docker PostgreSQL and MinIO"]
+async fn native_delta_remote_delete_fencing_survives_replica_restart() -> Result<(), Error> {
+    qualify_delta_delete_fencing(true).await
+}
+
+async fn qualify_delta_delete_fencing(remote: bool) -> Result<(), Error> {
+    let stack = tokio::task::spawn_blocking(move || {
+        let builder = shardline_test_support::DockerLocalStack::builder().with_postgres();
+        if remote {
+            builder.with_minio().start()
+        } else {
+            builder.start()
+        }
     })
     .await??
     .ok_or("Docker PostgreSQL is required")?;
@@ -77,9 +90,39 @@ async fn native_delta_delete_fencing_survives_replica_restart() -> Result<(), Er
     let owner = sqlx::PgPool::connect(&database).await?;
     shardline_server::apply_database_migrations(&owner).await?;
     let root = tempfile::tempdir()?;
-    // These replicas deliberately share filesystem objects and PostgreSQL metadata.
-    let first = Runtime::start_with_objects(root.path(), &database, None).await?;
-    let second = Runtime::start_with_objects(root.path(), &database, None).await?;
+    let peer_root = tempfile::tempdir()?;
+    let objects = if remote {
+        let raw = stack
+            .s3_raw_config(Some("delta-lifecycle"))
+            .ok_or("MinIO is required")?;
+        Some(
+            S3ObjectStoreConfig::new(raw.bucket, raw.region)
+                .with_endpoint(raw.endpoint)
+                .with_allow_http(raw.allow_http)
+                .with_key_prefix(raw.key_prefix.as_deref())
+                .with_credentials(
+                    raw.access_key.map(shardline_protocol::SecretString::new),
+                    raw.secret_key.map(shardline_protocol::SecretString::new),
+                    None,
+                ),
+        )
+    } else {
+        None
+    };
+    let storage = if let Some(config) = &objects {
+        ServerObjectStore::s3(config.clone())?
+    } else {
+        ServerObjectStore::local(root.path().join("chunks"))?
+    };
+    // Filesystem objects need a shared root; remote replicas must not depend
+    // on another replica's staging or cache files.
+    let second_root = if remote {
+        peer_root.path()
+    } else {
+        root.path()
+    };
+    let first = Runtime::start_with_objects(root.path(), &database, objects.clone()).await?;
+    let second = Runtime::start_with_objects(second_root, &database, objects.clone()).await?;
     let write = bearer_token(
         "owner",
         TokenScope::Write,
@@ -174,7 +217,13 @@ async fn native_delta_delete_fencing_survives_replica_restart() -> Result<(), Er
     let index = PostgresIndexStore::new(owner.clone());
     let pending = index.begin_remote_delete(&key).await?;
     first.stop().await;
-    let restarted = Runtime::start_with_objects(root.path(), &database, None).await?;
+    let takeover_root = tempfile::tempdir()?;
+    let restart_root = if remote {
+        takeover_root.path()
+    } else {
+        root.path()
+    };
+    let restarted = Runtime::start_with_objects(restart_root, &database, objects).await?;
     for runtime in [&restarted, &second] {
         let blocked = delta_lookup(&client, runtime, &read, &file).await?;
         assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -200,7 +249,6 @@ async fn native_delta_delete_fencing_survives_replica_restart() -> Result<(), Er
             StatusCode::OK
         );
     }
-    let storage = ServerObjectStore::local(root.path().join("chunks"))?;
     AsyncObjectStore::delete_if_present(&storage, &key).await?;
     for runtime in [&restarted, &second] {
         assert_eq!(

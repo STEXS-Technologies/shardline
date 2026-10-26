@@ -224,7 +224,7 @@ jobs:
         run: >-
           cargo nextest run --locked --manifest-path e2e/Cargo.toml
           --test transfer_http --run-ignored only
-          -E 'test(native_dedup_delete_fencing_survives_replica_restart) or test(native_delta_delete_fencing_survives_replica_restart)'
+          -E 'test(native_dedup_delete_fencing_survives_replica_restart) or test(native_delta_delete_fencing_survives_replica_restart) or test(native_delta_remote_delete_fencing_survives_replica_restart)'
 
       - name: Qualify bounded SDK memory and byte identity at 256 MiB and 1 GiB
         run: >-

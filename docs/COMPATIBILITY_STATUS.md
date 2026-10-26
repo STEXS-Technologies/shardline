@@ -205,8 +205,13 @@ windows and upstream-compatible gap commitments. HTTP tests cover proof
 composition, verified legacy descriptor recovery and rejection of tampered
 descriptors. A composed-file workflow uploads only the changed Xorb, reuses the
 existing unchanged source, publishes the shard and downloads byte-exact content
-with the upstream Xet download library. Two PostgreSQL-backed replicas sharing filesystem objects also
-preserve unresolved-delete blocking across restart. The official JavaScript
+with the upstream Xet download library. Two PostgreSQL-backed replicas preserve
+unresolved-delete blocking across restart with either shared filesystem objects
+or MinIO. The MinIO test uses separate replica roots and a fresh root after
+restart; both replicas reject unauthorized repositories, return retryable errors
+for unresolved deletion, recover after settlement of an attempt that issued no
+DELETE, and reject a subsequently missing source. These HTTP fixtures do not
+simulate a delayed provider DELETE completing after settlement. The official JavaScript
 client workflow above also verifies automatic delta selection and byte-exact
 downloads on PostgreSQL/MinIO, including split roles. These are distinct from
 the composed-file fixture; neither establishes automatic delta selection by
