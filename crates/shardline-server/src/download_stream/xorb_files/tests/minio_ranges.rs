@@ -89,6 +89,40 @@ async fn authenticated_ranges_on_real_minio_preserve_full_reads_and_member_integ
     let mut encoded = store
         .read_range(&key, ByteRange::new(0, length - 1).unwrap())
         .unwrap();
+    // A selected-member proof authenticates the requested bytes, rather than
+    // silently promising that unrequested provider payloads are healthy.
+    let tail = usize::try_from(terms.last().unwrap().packed_end - 1).unwrap();
+    encoded[tail] ^= 0x40;
+    store.delete_if_present(&key).unwrap();
+    store
+        .put_if_absent(
+            &key,
+            ObjectBody::from_slice(&encoded),
+            &ObjectIntegrity::new(crate::local_backend::chunk_hash(&encoded), length),
+        )
+        .unwrap();
+    assert_eq!(
+        collect(&store, &record, Some(ByteRange::new(0, 4095).unwrap()))
+            .await
+            .unwrap(),
+        payload[..4096]
+    );
+    assert!(
+        collect(&store, &record, None).await.is_err(),
+        "full reads must still detect corruption outside the selected range"
+    );
+    assert!(
+        file_record_byte_stream(
+            store.clone(),
+            record.clone(),
+            Some(ByteRange::new(payload.len() as u64 - 4096, payload.len() as u64 - 1).unwrap()),
+            ExecutionPools::default_sizes().blocking_io
+        )
+        .await
+        .is_err(),
+        "selecting the corrupt tail must fail before a response stream is returned"
+    );
+    encoded[tail] ^= 0x40;
     encoded[usize::try_from(terms[0].packed_end - 1).unwrap()] ^= 0x40;
     store.delete_if_present(&key).unwrap();
     store
