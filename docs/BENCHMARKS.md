@@ -1772,6 +1772,29 @@ yet establish an all-in production cost per TB, a cluster scaling guarantee or
 an SSD replacement saving. Small-range read amplification must be represented
 in the workload rather than hidden by full-download throughput.
 
+## Repeated legacy chunk reads
+
+An HTTP-backed S3 fixture reconstructs eight consecutive occurrences of the same
+64 KiB standalone chunk. Before stream-local reuse, both raw `FixedChunkV1` and
+compressed `XorbCdcV1` records issue eight payload GETs. With reuse, each issues
+one payload GET and returns the same complete bytes. This is an 87.5% reduction
+in those payload requests, not in all requests for an arbitrary workload;
+packed-container discovery can issue additional requests.
+
+A disposable real-MinIO check also passes both representations at the size
+boundary. At 64 KiB, it observes two total GETs (missing-container discovery and
+one payload) and one encoded chunk's response bytes. At 65,537 bytes, it observes
+nine GETs and eight encoded chunks' response bytes. Complete reconstructed bytes
+are checked in every case.
+
+The stream shares one complete verified output buffer of at most 64 KiB. It
+does not reuse larger chunks or retain whole chunks from partial outputs.
+Boundary tests at 65,537 bytes retain eight payload GETs, and partial first/last
+chunks retain their two independent reads. New streams authenticate storage
+again and reject corruption. Storage formats, retained bytes and write durability
+are unchanged. These request counts do not establish RSS, physical device wear,
+whole-workload throughput or native Xet upload parity.
+
 ## Native Xet backend-cost check
 
 ### Upstream local CAS reference comparison

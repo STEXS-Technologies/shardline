@@ -6,8 +6,7 @@ use std::{
 
 use axum::body::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
-use lz4_flex;
-use shardline_index::{FileRecord, parse_xet_hash_hex, xet_hash_hex_string};
+use shardline_index::{FileRecord, parse_xet_hash_hex};
 use shardline_protocol::ByteRange;
 use shardline_server_core::MaterializedObject;
 use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore};
@@ -16,14 +15,13 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     sync::{OwnedSemaphorePermit, Semaphore},
 };
-use tracing::{debug, trace, warn};
+use tracing::debug;
 
 use crate::{
     ServerError,
     admission::{BoundedPool, blocking_work as blocking_stream_work},
     chunk_store::chunk_object_key,
     error::ObjectStoreError,
-    local_backend::chunk_hash,
     object_store::ServerObjectStore,
     object_store::run_before_local_object_read_hook,
 };
@@ -31,6 +29,7 @@ use crate::{
 mod authenticated_range;
 pub(crate) mod checkpoint_reader;
 mod collect;
+mod fallback_chunks;
 mod xorb_files;
 pub(crate) use collect::collect_file_record_bytes;
 
@@ -675,104 +674,19 @@ async fn single_container_file_stream(
         let hash_hex = chunk.hash;
         let chunk_range = ByteRange::new(relative_start, relative_end)
             .map_err(|_error| ServerError::RangeNotSatisfiable)?;
-        terms.push((
-            chunk_object_key(&hash_hex)?,
-            storage_length, // compressed length for storage read
-            chunk.length,   // raw length for offset math
-            hash_hex,       // expected hash for integrity verification
-            chunk_range,
-            is_compressed, // XorbCdcV1 → LZ4-compressed; FixedChunkV1 → old uncompressed
-        ));
+        terms.push(fallback_chunks::Term {
+            key: chunk_object_key(&hash_hex)?,
+            storage_length,
+            raw_length: chunk.length,
+            expected_hash: hash_hex,
+            range: chunk_range,
+            compressed: is_compressed,
+        });
     }
 
-    // For each term: read chunk data, optionally decompress, verify integrity, then apply byte range
-    let streams = stream::iter(terms).then(
-        move |(key, storage_length, _raw_length, expected_hash_hex, chunk_range, is_compressed)| {
-            let object_store = object_store.clone();
-            async move {
-                // Read the entire compressed chunk
-                let chunk_key = key.clone();
-                let compressed_stream =
-                    object_byte_stream(object_store, key, storage_length).await?;
-                // Collect all compressed bytes
-                let compressed = compressed_stream
-                    .try_fold(Vec::new(), |mut acc, chunk| async move {
-                        acc.extend_from_slice(&chunk);
-                        Ok(acc)
-                    })
-                    .await?;
-                let data: Vec<u8> = if is_compressed {
-                    // New format (XorbCdcV1): LZ4-compressed. Decompress and verify hash.
-                    const MAX_DECOMPRESSED_CHUNK: u64 = 2 * 1024 * 1024;
-                    // lz4_flex::compress_prepend_size writes a 4-byte LE u32 size prefix.
-                    let decompressed_size = compressed
-                        .first_chunk::<4>()
-                        .map(|header| u32::from_le_bytes(*header) as u64)
-                        .unwrap_or(u64::MAX);
-                    if decompressed_size > MAX_DECOMPRESSED_CHUNK {
-                        return Err(ServerError::Overflow);
-                    }
-                    let decompressed =
-                        lz4_flex::decompress_size_prepended(&compressed).map_err(|e| {
-                            warn!(compressed_len = compressed.len(), error = %e, "failed to decompress chunk");
-                            ServerError::Io(IoError::new(ErrorKind::InvalidData, e))
-                        })?;
-
-                    let actual_hash = chunk_hash(&decompressed);
-                    let actual_hex = xet_hash_hex_string(actual_hash);
-                    if actual_hex != expected_hash_hex {
-                        warn!(
-                            expected = %expected_hash_hex,
-                            actual = %actual_hex,
-                            decompressed_len = decompressed.len(),
-                            "chunk integrity mismatch after decompression"
-                        );
-                        return Err(ServerError::ObjectStore(
-                            ObjectStoreError::StoredLengthMismatch,
-                        ));
-                    }
-
-                    trace!(
-                        chunk_hash = ?chunk_key,
-                        compressed_len = compressed.len(),
-                        decompressed_len = decompressed.len(),
-                        "decompressed chunk"
-                    );
-                    decompressed
-                } else {
-                    // Old format (FixedChunkV1 / pre-CDC): raw (uncompressed) data.
-                    // Verify content hash to detect bit-rot or storage corruption.
-                    let actual_hash = chunk_hash(&compressed);
-                    let actual_hex = xet_hash_hex_string(actual_hash);
-                    if actual_hex != expected_hash_hex {
-                        warn!(
-                            expected = %expected_hash_hex,
-                            actual = %actual_hex,
-                            chunk_len = compressed.len(),
-                            "chunk integrity mismatch for uncompressed chunk"
-                        );
-                        return Err(ServerError::ObjectStore(
-                            ObjectStoreError::StoredLengthMismatch,
-                        ));
-                    }
-                    compressed
-                };
-                // Apply byte range on the data
-                let range_start = usize::try_from(chunk_range.start())?;
-                let range_end = usize::try_from(chunk_range.end_inclusive())?;
-                let sliced = data
-                    .get(range_start..=range_end)
-                    .ok_or(ServerError::Overflow)?
-                    .to_vec();
-                let byte_stream: ServerByteStream =
-                    Box::pin(stream::once(async move { Ok(Bytes::from(sliced)) }));
-                Ok::<ServerByteStream, ServerError>(byte_stream)
-            }
-        },
-    );
     // Validate the first fallback chunk before the caller constructs HTTP
     // success headers. Later chunks remain lazy; no complete file is buffered.
-    let mut remaining: ServerByteStream = Box::pin(streams.try_flatten());
+    let mut remaining = fallback_chunks::byte_stream(object_store, terms);
     let first = remaining.try_next().await?.ok_or(ServerError::Overflow)?;
     Ok(Box::pin(
         stream::once(async move { Ok(first) }).chain(remaining),

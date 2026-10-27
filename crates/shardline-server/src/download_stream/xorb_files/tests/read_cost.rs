@@ -16,6 +16,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod cancellation;
+mod repeated;
+#[cfg(feature = "docker")]
+mod repeated_minio;
 mod replacements;
 
 enum Change {

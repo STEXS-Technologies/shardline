@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Reuse one verified legacy chunk within a download stream, avoiding repeated
+  reads and decompression for consecutive complete chunks up to 64 KiB.
 - Avoid a duplicate complete validation pass when preparing owned footerless
   Xet uploads, retaining final container authentication and storage verification.
 - Buffer native Xet member-source reads with a fixed 64 KiB allocation while
