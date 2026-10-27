@@ -54,11 +54,10 @@ pub(super) fn prepare_source(
             super::normalization::normalize_with_checkpoint(expected_hash, &path, checkpoint)?
         }
         SourceOwnership::OwnedStaging => {
-            super::normalization::normalize_owned_with_checkpoint(
-                expected_hash,
-                &path,
-                checkpoint,
-            )?;
+            // Complete validation and serialized digest extraction immediately
+            // below authenticate the appended result. The public normalization
+            // API separately retains its own complete-result validation.
+            super::normalization::append_owned_footer(expected_hash, &path, checkpoint)?;
             None
         }
     };
@@ -159,6 +158,94 @@ mod tests {
             assert!(
                 reads < length * 3 / 2,
                 "canonical preparation read {reads} bytes for {length} serialized bytes"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn owned_footerless_preparation_does_not_validate_the_canonical_payload_twice() {
+        fn thread_read_characters() -> u64 {
+            std::fs::read_to_string("/proc/thread-self/io")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("rchar:")?.trim().parse().ok())
+                .unwrap()
+        }
+        let serialized = SerializedXorbObject::from_xorb_with_compression(
+            build_raw_xorb(128, ChunkSize::Fixed(65536)),
+            CompressionScheme::None,
+            false,
+        )
+        .unwrap();
+        let mut source = tempfile::NamedTempFile::new().unwrap();
+        source.write_all(&serialized.serialized_data).unwrap();
+        let length = u64::try_from(serialized.serialized_data.len()).unwrap();
+        let before = thread_read_characters();
+        let prepared = prepare_source(
+            &serialized.hash.hex(),
+            source.path().to_owned(),
+            SourceOwnership::OwnedStaging,
+            &|| Ok(()),
+        )
+        .unwrap();
+        let reads = thread_read_characters() - before;
+        eprintln!("owned footerless preparation: wire_bytes={length}, rchar={reads}");
+        assert!(prepared.normalized.is_none());
+        assert_eq!(prepared.path, source.path());
+        assert_eq!(
+            prepared.integrity.hash(),
+            ShardlineHash::from_bytes(
+                *blake3::hash(&std::fs::read(source.path()).unwrap()).as_bytes()
+            )
+        );
+        assert!(
+            reads < length * 5 / 2,
+            "owned footerless preparation read {reads} bytes for {length} wire bytes"
+        );
+    }
+
+    #[test]
+    fn owned_footerless_preparation_rejects_mutation_after_footer_append() {
+        use std::io::{Seek, SeekFrom};
+        for truncate in [false, true] {
+            let serialized = SerializedXorbObject::from_xorb_with_compression(
+                build_raw_xorb(4, ChunkSize::Fixed(4096)),
+                CompressionScheme::None,
+                false,
+            )
+            .unwrap();
+            let mut source = tempfile::NamedTempFile::new().unwrap();
+            source.write_all(&serialized.serialized_data).unwrap();
+            let length = serialized.serialized_data.len() as u64;
+            let changed = Cell::new(false);
+            let result = prepare_source(
+                &serialized.hash.hex(),
+                source.path().to_owned(),
+                SourceOwnership::OwnedStaging,
+                &|| {
+                    if !changed.get() && source.as_file().metadata()?.len() > length {
+                        changed.set(true);
+                        if truncate {
+                            source.as_file().set_len(length)?;
+                        } else {
+                            let mut file = std::fs::OpenOptions::new()
+                                .write(true)
+                                .open(source.path())?;
+                            file.seek(SeekFrom::Start(8))?;
+                            file.write_all(&[serialized.serialized_data[8] ^ 1])?;
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            assert!(
+                changed.get(),
+                "fixture must mutate after appending the footer"
+            );
+            assert!(
+                result.is_err(),
+                "changed staging must not become publishable"
             );
         }
     }

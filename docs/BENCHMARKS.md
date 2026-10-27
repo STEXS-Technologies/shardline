@@ -1776,6 +1776,25 @@ in the workload rather than hidden by full-download throughput.
 
 ### Upstream local CAS reference comparison
 
+#### Owned footerless preparation
+
+An 8,389,632-byte uncompressed footerless fixture measures Linux thread read
+characters during owned staging preparation. Before removing a duplicate
+canonical validation, preparation read 25,188,844 bytes; afterward it reads
+16,792,948 bytes, approximately one third less. Fixture creation and subsequent
+independent digest checks are excluded from those counters.
+
+The owned preparation path still authenticates footerless members before
+appending a footer, then fully validates the resulting container and computes
+its serialized digest before returning it. The standalone normalization API
+retains its complete-result validation. Tests reject payload mutation and footer
+removal between append and final validation; cancellation checks remain.
+Immutable storage still verifies the source before publication.
+
+These counters measure preparation only. They do not establish whole-upload
+throughput, lower retained storage or S3 request counts, physical device I/O,
+SSD lifetime, or parity with native Xet.
+
 #### Bounded native member reads
 
 Native member persistence now buffers its staging reader with a fixed 64 KiB

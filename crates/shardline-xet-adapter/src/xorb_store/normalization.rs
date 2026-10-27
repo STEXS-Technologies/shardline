@@ -99,9 +99,31 @@ pub(super) fn normalize_owned_with_checkpoint(
     checkpoint: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<(), XetAdapterError> {
     use crate::checkpoint_reader::CheckpointReader;
+    let Some(mut input) = append_owned_footer(expected_hash, path, checkpoint)? else {
+        return Ok(());
+    };
+    validate_serialized_xorb(
+        &mut CheckpointReader {
+            reader: &mut input,
+            checkpoint,
+        },
+        parse_xet_hash_hex(expected_hash)?,
+    )?;
+    Ok(())
+}
+
+/// Authenticate footerless members and append their canonical footer to owned
+/// staging. The caller must validate the complete resulting container before
+/// publication; this helper deliberately returns no trusted descriptor/digest.
+pub(super) fn append_owned_footer(
+    expected_hash: &str,
+    path: &Path,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<Option<File>, XetAdapterError> {
+    use crate::checkpoint_reader::CheckpointReader;
     use shardline_xet_core::xorb_object::{XorbObject, inspect_footerless_xorb_from_reader};
     let Some(mut input) = footerless_input(expected_hash, path, checkpoint)? else {
-        return Ok(());
+        return Ok(None);
     };
     let expected = parse_xet_hash_hex(expected_hash)?;
     let length = input.metadata()?.len();
@@ -123,14 +145,7 @@ pub(super) fn normalize_owned_with_checkpoint(
     }
     XorbObject::serialize_given_info(&mut output, info).map_err(normalization_error)?;
     checkpoint()?;
-    validate_serialized_xorb(
-        &mut CheckpointReader {
-            reader: &mut input,
-            checkpoint,
-        },
-        expected,
-    )?;
-    Ok(())
+    Ok(Some(input))
 }
 
 fn footerless_input(
