@@ -2332,6 +2332,17 @@ responses and was stopped. Its timings and CPU samples are excluded. Repeated
 reads and scratch handling remain optimization targets; authentication and
 durable publication remain required.
 
+The subsequent ingress-checksum removal (`2e443f49`), together with footerless
+preparation refactoring, was exercised against the preceding optimized binary
+and the pinned upstream CAS on one identical 512 MiB corpus and 256 KiB tail
+edit, twice per executable. All twelve full downloads passed SHA-256. The four
+Shardline lanes retained identical Xorb keys, lengths and SHA-256 hashes,
+totaling 537,597,299 payload bytes after the edit. Their total file lengths,
+including metadata and journals, also matched: 550,890,136 bytes initially and
+551,158,971 after the edit. Competing compilation was observed during this
+campaign, so its timing results are excluded. This establishes fixture-specific
+payload preservation, not a quantified upload-speed improvement.
+
 The stopped profile's SQLite files comprised a 5,439,488-byte database,
 7,774,472-byte WAL and 32,768-byte shared-memory file. An isolated copy passed
 SQLite integrity checks before and after a successful truncating checkpoint;
