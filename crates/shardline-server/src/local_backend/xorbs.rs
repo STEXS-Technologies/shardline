@@ -74,7 +74,7 @@ impl LocalBackend {
             .await?;
         coordinator
             .with_upload_intent(&intent, move || async move {
-                store_admitted_xorb(&object_store, expected_hash, staged, permit).await
+                store_admitted_xorb(&object_store, staged, permit).await
             })
             .await
     }

@@ -51,7 +51,7 @@ async fn store_on_connection(
         .await
         .map_err(PostgresMetadataStoreError::from)?;
     PostgresIndexStore::require_remote_delete_settled(&mut transaction, &key).await?;
-    let stored = store_admitted_xorb(objects, hash, staged, permit).await?;
+    let stored = store_admitted_xorb(objects, staged, permit).await?;
     // COMMIT on this same physical session verifies it survived storage while
     // retaining the deletion guard throughout every immutable write.
     transaction

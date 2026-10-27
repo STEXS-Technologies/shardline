@@ -96,6 +96,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Carry owned native Xet file validation from upload identity preparation into
   persistence, reducing repeated reads while retaining member verification,
   immutable publication checks and existing storage formats.
+- Retain verified canonical bytes for memory-backed native Xet uploads from
+  identity preparation through storage, avoiding repeated normalization and
+  content validation while retaining final storage-digest verification.
 - Reuse related native Xet containers in bounded, repository-scoped dedup replies,
   reducing retransmission and backend work for partially overlapping versions
   while preserving member authorization and remote-delete coordination.

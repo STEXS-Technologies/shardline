@@ -9,7 +9,7 @@ mod tests;
 pub(crate) const SCOPE_PREFIX: &str = "scope-json-v1:";
 
 pub(crate) enum PreparedNativeXorb {
-    Memory(axum::body::Bytes),
+    Memory(Box<shardline_xet_adapter::PreparedXorbMemory>),
     File(Box<shardline_xet_adapter::PreparedXorbFile>),
 }
 
@@ -43,9 +43,12 @@ fn prepare_staged_xorb(
     checkpoint()?;
     let (staged, canonical_length) = match staged {
         crate::upload_ingest::StagedRequestBody::Memory { bytes, .. } => {
-            let canonical_length =
-                shardline_xet_adapter::canonical_uploaded_xorb_length(hash, &bytes)?;
-            (PreparedNativeXorb::Memory(bytes), canonical_length)
+            let prepared = shardline_xet_adapter::prepare_xorb_memory(hash, &bytes)?;
+            let canonical_length = prepared.length();
+            (
+                PreparedNativeXorb::Memory(Box::new(prepared)),
+                canonical_length,
+            )
         }
         crate::upload_ingest::StagedRequestBody::File { file, .. } => {
             let file = shardline_xet_adapter::prepare_owned_xorb_file_with_checkpoint(

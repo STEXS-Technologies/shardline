@@ -6,8 +6,8 @@ use std::{
 
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ShardlineHash;
-use shardline_server_core::{ServerObjectStore, chunk_hash};
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome};
+use shardline_server_core::ServerObjectStore;
+use shardline_storage::{ObjectKey, ObjectKeyError, PutOutcome};
 use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer;
 
 use crate::{
@@ -23,6 +23,7 @@ mod file_preparation;
 mod member_read;
 mod normalization;
 mod owned_preparation;
+mod prepared_memory;
 pub use member_read::read_verified_xorb_chunk;
 pub use normalization::{
     normalize_owned_uploaded_xorb_file, normalize_owned_uploaded_xorb_file_with_checkpoint,
@@ -31,6 +32,7 @@ pub use normalization::{
 pub use owned_preparation::{
     PreparedXorbFile, prepare_owned_xorb_file_with_checkpoint, store_prepared_xorb_file,
 };
+pub use prepared_memory::{PreparedXorbMemory, prepare_xorb_memory, store_prepared_xorb_memory};
 
 #[derive(Debug)]
 pub struct StoredXorbUpload {
@@ -214,33 +216,8 @@ pub async fn store_xorb_bytes_with_resources<R: Send + 'static>(
     uploaded_bytes: &[u8],
     resources: R,
 ) -> Result<StoredXorbUpload, XetAdapterError> {
-    let expected_hash_value = parse_xet_hash_hex(expected_hash)?;
-    let (canonical_bytes, validated) =
-        canonicalize_uploaded_xorb(expected_hash_value, uploaded_bytes)?;
-    let canonical_length = u64::try_from(canonical_bytes.len())?;
-    let serialized_key = xorb_object_key(expected_hash)?;
-    let serialized_integrity =
-        ObjectIntegrity::new(chunk_hash(canonical_bytes.as_ref()), canonical_length);
-    let store = object_store.clone();
-    let bytes = canonical_bytes.into_owned();
-    let serialized_outcome = blocking::cancellable_write(resources, move || {
-        let result = shardline_storage::ObjectStore::put_if_absent(
-            &store,
-            &serialized_key,
-            ObjectBody::from_vec(bytes),
-            &serialized_integrity,
-        );
-        encoding::resolve_conflict(&store, &serialized_key, &validated, result)
-    })
-    .await?;
-    Ok(StoredXorbUpload {
-        was_inserted: matches!(serialized_outcome, PutOutcome::Inserted),
-        stored_bytes: if matches!(serialized_outcome, PutOutcome::Inserted) {
-            canonical_length
-        } else {
-            0
-        },
-    })
+    let prepared = prepare_xorb_memory(expected_hash, uploaded_bytes)?;
+    store_prepared_xorb_memory(object_store, prepared, resources).await
 }
 
 /// Stores only the canonical serialized Xorb from a seekable file. Decoded

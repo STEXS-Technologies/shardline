@@ -17,6 +17,24 @@ fn staged(bytes: &[u8]) -> (crate::upload_ingest::StagedXorbBody, PathBuf) {
 }
 
 #[test]
+fn memory_identity_retains_owned_canonical_preparation_for_storage() {
+    let (wire, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
+    for bytes in [&wire, &canonical] {
+        let input = StagedRequestBody::Memory {
+            bytes: axum::body::Bytes::copy_from_slice(bytes),
+            length: bytes.len() as u64,
+            hash: (),
+        };
+        let (prepared, length) = prepare_staged_xorb(&hash, input, &|| Ok(())).unwrap();
+        assert!(matches!(prepared, PreparedNativeXorb::Memory(_)));
+        assert_eq!(length, canonical.len() as u64);
+        if let PreparedNativeXorb::Memory(prepared) = prepared {
+            assert_eq!(prepared.length(), length);
+        }
+    }
+}
+
+#[test]
 fn native_preparation_cancels_at_every_checkpoint_and_reclaims_owned_staging() {
     use std::cell::Cell;
     let (wire, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();

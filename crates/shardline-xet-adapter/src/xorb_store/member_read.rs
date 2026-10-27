@@ -49,7 +49,9 @@ pub fn read_verified_xorb_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shardline_server_core::chunk_hash;
     use shardline_storage::ObjectStore;
+    use shardline_storage::{ObjectBody, ObjectIntegrity};
     use shardline_xet_core::{
         merklehash::{compute_data_hash, xorb_hash},
         xorb_object::{

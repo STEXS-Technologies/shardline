@@ -6,6 +6,7 @@ use std::io::{BufWriter, Write};
 
 mod mixed;
 mod prerequisites;
+mod small;
 
 pub(super) const REMOTE_FIELDS: [&str; 7] = [
     "NATIVE_PROCESS_POSTGRES_URL",
