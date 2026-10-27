@@ -725,6 +725,52 @@ mod tests {
     }
 
     #[cfg(feature = "docker")]
+    #[test]
+    fn oidc_https_jwks_validates_trust_after_discovery() {
+        use shardline_test_support::{HttpsDocumentFixture, native_client_output};
+        let key = test_rsa_jwk("tls-test-key");
+        let jwks = json!({"keys":[{"kid":key.kid,"kty":"RSA","n":key.n,"e":key.e}]}).to_string();
+        let keys = HttpsDocumentFixture::start(&[("/jwks", &jwks)]).unwrap();
+        for (trusted, hostname, reject) in [
+            (false, "127.0.0.1", true),
+            (true, "oidc.invalid", true),
+            (true, "127.0.0.1", false),
+        ] {
+            let mut url = reqwest::Url::parse(&format!("{}/jwks", keys.origin())).unwrap();
+            url.set_host(Some(hostname)).unwrap();
+            let discovery = json!({"issuer":"{{ORIGIN}}","jwks_uri":url.as_str()}).to_string();
+            let issuer =
+                HttpsDocumentFixture::start(&[("/.well-known/openid-configuration", &discovery)])
+                    .unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "oidc_provider::tests::oidc_https_child",
+                    "--ignored",
+                ])
+                .env("SSL_CERT_FILE", issuer.ca_cert_path())
+                .env("SHARDLINE_OIDC_TLS_ISSUER", issuer.origin())
+                .env("SHARDLINE_OIDC_TLS_ORIGIN", keys.origin())
+                .env("SHARDLINE_OIDC_TLS_JWKS", url.as_str())
+                .env("SHARDLINE_OIDC_TLS_REJECT", reject.to_string());
+            if trusted {
+                command.env("SHARDLINE_OIDC_TLS_EXTRA_CA", keys.ca_cert_path());
+            }
+            let output = native_client_output(&mut command, Duration::from_secs(30)).unwrap();
+            let diagnostic = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.status.success() && diagnostic.contains("1 passed; 0 failed"),
+                "JWKS TLS child failed: {diagnostic}"
+            );
+        }
+    }
+
+    #[cfg(feature = "docker")]
     #[tokio::test]
     #[ignore = "invoked by HTTPS parent with isolated process trust"]
     async fn oidc_https_child() {
@@ -740,22 +786,29 @@ mod tests {
         .expect("fixture URL");
         let address =
             std::net::SocketAddr::from(([127, 0, 0, 1], origin.port().expect("fixture port")));
-        let client = Client::builder()
+        let mut client = Client::builder()
             .no_proxy()
             .resolve("oidc.invalid", address)
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
-            .add_root_certificate(certificate)
-            .build()
-            .expect("verified fixture HTTP client");
+            .add_root_certificate(certificate);
+        if let Ok(path) = std::env::var("SHARDLINE_OIDC_TLS_EXTRA_CA") {
+            client = client.add_root_certificate(
+                reqwest::Certificate::from_pem(&std::fs::read(path).unwrap()).unwrap(),
+            );
+        }
+        let client = client.build().expect("verified fixture HTTP client");
+        let jwks = std::env::var("SHARDLINE_OIDC_TLS_JWKS").ok();
         let reject =
             std::env::var("SHARDLINE_OIDC_TLS_REJECT").expect("trust expectation") == "true";
         if reject {
             let error = client
-                .get(format!(
-                    "{}/.well-known/openid-configuration",
-                    issuer.trim_end_matches('/')
-                ))
+                .get(jwks.clone().unwrap_or_else(|| {
+                    format!(
+                        "{}/.well-known/openid-configuration",
+                        issuer.trim_end_matches('/')
+                    )
+                }))
                 .send()
                 .await
                 .expect_err("invalid CA or hostname must fail TLS");
@@ -772,8 +825,23 @@ mod tests {
                 "failure must identify certificate validation"
             );
         }
-        let result = OidcProvider::from_client(client, &issuer, None, &[]).await;
+        let allowed = jwks
+            .as_ref()
+            .map(|value| {
+                let url = reqwest::Url::parse(value).unwrap();
+                format!("{}:{}", url.host_str().unwrap(), url.port().unwrap())
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let result = OidcProvider::from_client(client, &issuer, None, &allowed).await;
         if reject {
+            if jwks.is_some() {
+                assert!(
+                    matches!(result, Err(OidcProviderError::JwksFetch(_))),
+                    "trusted discovery must reject untrusted JWKS"
+                );
+                return;
+            }
             assert!(
                 matches!(result, Err(OidcProviderError::DiscoveryFetch(_))),
                 "untrusted discovery must fail before parsing keys"
