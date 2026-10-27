@@ -2349,6 +2349,17 @@ initial download, edited upload and edited download respectively. These are
 stock-client observations, separate from Shardline cgroup memory, and do not
 establish a concurrent-client memory ceiling.
 
+Consecutive identical members within one uploaded Xorb now share the first
+immutable chunk write. Every member is still decoded and checked against its
+native hash, offsets, length and storage digest; success waits for persistence.
+The reuse state holds one identity pair and ends with the upload. A controlled
+HTTP-provider fixture with 128 identical 4 KiB members measured 128 requests
+before this change and one afterward. Mutation, existing-object conflict and
+fresh-call retry controls pass. SQLite/filesystem and PostgreSQL/MinIO drills
+also read repeated-member content with unchanged v1.12.1 after GC and rebuild.
+This is a specific repeated-member saving, not a stock-client throughput result
+or a reduction in unique-data storage copies.
+
 Run the stock Hub/Xet client against disposable PostgreSQL and MinIO:
 
 ```bash

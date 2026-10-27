@@ -42,6 +42,7 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
     let mut unpacked = 0_u64;
     let mut packed_end = 0_u64;
     let mut stored = 0_u64;
+    let mut previous_member = None;
     // Both local jobs and remote requests share the decoded byte budget.
     // Local cancellation aborts queued jobs; running writes retain admission.
     let max_pending = MAX_PENDING;
@@ -95,13 +96,25 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
             return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
         }
         packed_end = next_end;
+        let integrity = ObjectIntegrity::new(chunk_hash(&data), length);
+        let identity = (actual_hash, integrity);
+        // Consecutive copies share the first pending immutable write. Every
+        // source member was still decoded and authenticated above, and success
+        // still waits for that write below. This constant-size state belongs
+        // only to this upload; subsequent uploads verify storage afresh.
+        if previous_member == Some(identity) {
+            // Repeated members no longer fill the pending-write queue. Keep
+            // cancellation and executor fairness between their decoded frames.
+            tokio::task::yield_now().await;
+            continue;
+        }
+        previous_member = Some(identity);
         let key = chunk_object_key_local(&xet_hash_hex_string(descriptor.hash()))?;
         pending_bytes = pending_bytes
             .checked_add(length)
             .ok_or(XetAdapterError::Overflow)?;
         let resources = std::sync::Arc::clone(&resources);
         pending.push(async move {
-            let integrity = ObjectIntegrity::new(chunk_hash(&data), length);
             let result = if matches!(objects, ServerObjectStore::S3(_)) {
                 AsyncObjectStore::put_if_absent(
                     objects,

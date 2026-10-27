@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Share consecutive identical native Xet member writes within one upload,
+  avoiding redundant storage operations while retaining every member's hash
+  checks, cancellation points, durable completion and existing storage layout.
 - Reuse one verified legacy chunk within a download stream, avoiding repeated
   reads and decompression for consecutive complete chunks up to 64 KiB.
 - Avoid a duplicate complete validation pass when preparing owned footerless

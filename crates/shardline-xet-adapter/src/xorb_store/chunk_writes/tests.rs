@@ -133,6 +133,134 @@ impl Drop for Stop {
     }
 }
 
+#[tokio::test]
+async fn repeated_members_share_one_conditional_write() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let observed = Arc::clone(&attempts);
+    let app = Router::new().fallback(move |method: Method, headers: HeaderMap| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        async move {
+            if method == Method::GET {
+                (StatusCode::OK, [("etag", "\"fixture\"")], vec![0x41; 4096])
+            } else {
+                assert_eq!(method, Method::PUT);
+                assert_eq!(headers["if-none-match"], "*");
+                (StatusCode::OK, [("etag", "\"fixture\"")], Vec::new())
+            }
+        }
+    });
+    let _stop = Stop(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap()
+    }));
+    let objects = ServerObjectStore::s3(
+        S3ObjectStoreConfig::new("fixture".to_owned(), "us-east-1".to_owned())
+            .with_endpoint(Some(endpoint))
+            .with_allow_http(true)
+            .with_credentials(
+                Some(SecretString::new("fixture".to_owned())),
+                Some(SecretString::new("fixture-secret".to_owned())),
+                None,
+            ),
+    )
+    .unwrap();
+    let data = vec![0x41; 4096];
+    let members = (0..128)
+        .map(|_| Chunk {
+            hash: shardline_xet_core::merklehash::compute_data_hash(&data),
+            data: data.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    let serialized = SerializedXorbObject::from_xorb_with_compression(
+        RawXorbData::from_chunks(&members, vec![0]),
+        CompressionScheme::None,
+        true,
+    )
+    .unwrap();
+    let mut reader = Cursor::new(serialized.serialized_data);
+    let validated = validate_serialized_xorb(
+        &mut reader,
+        parse_xet_hash_hex(&serialized.hash.hex()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        store(&objects, &mut reader, &validated).await.unwrap(),
+        4096
+    );
+    let attempts = attempts.load(Ordering::SeqCst);
+    eprintln!("HTTP requests for 128 identical members: {attempts}");
+    assert_eq!(attempts, 1);
+}
+
+#[tokio::test]
+async fn repeated_member_reread_still_rejects_mutation_and_allows_retry() {
+    let data = vec![0x41; 4096];
+    let members = (0..4)
+        .map(|_| Chunk {
+            hash: shardline_xet_core::merklehash::compute_data_hash(&data),
+            data: data.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    let serialized = SerializedXorbObject::from_xorb_with_compression(
+        RawXorbData::from_chunks(&members, vec![0]),
+        CompressionScheme::None,
+        true,
+    )
+    .unwrap();
+    let mut reader = Cursor::new(serialized.serialized_data.clone());
+    let validated = validate_serialized_xorb(
+        &mut reader,
+        parse_xet_hash_hex(&serialized.hash.hex()).unwrap(),
+    )
+    .unwrap();
+    let offset = usize::try_from(validated.chunks()[1].packed_end())
+        .unwrap()
+        .checked_sub(1)
+        .unwrap();
+    reader.get_mut()[offset] ^= 1;
+    let root = tempfile::tempdir().unwrap();
+    let objects = ServerObjectStore::local(root.path()).unwrap();
+    {
+        let mut intact = Cursor::new(serialized.serialized_data.clone());
+        let mut upload = Box::pin(store(&objects, &mut intact, &validated));
+        assert!(
+            futures_util::poll!(upload.as_mut()).is_pending(),
+            "repeated members must retain a cooperative cancellation point"
+        );
+    }
+    assert!(matches!(
+        store(&objects, &mut reader, &validated).await,
+        Err(XetAdapterError::XorbHashMismatch)
+    ));
+    let mut retry = Cursor::new(serialized.serialized_data);
+    assert_eq!(store(&objects, &mut retry, &validated).await.unwrap(), 4096);
+    let key = chunk_object_key_local(&xet_hash_hex_string(validated.chunks()[0].hash())).unwrap();
+    assert_eq!(
+        shardline_server_core::read_full_object(&objects, &key, 4096).unwrap(),
+        data
+    );
+    // A new upload must not reuse the previous call's storage observation.
+    shardline_storage::ObjectStore::delete_if_present(&objects, &key).unwrap();
+    let conflicting = vec![0x42; 4096];
+    shardline_storage::ObjectStore::put_if_absent(
+        &objects,
+        &key,
+        ObjectBody::from_vec(conflicting.clone()),
+        &ObjectIntegrity::new(chunk_hash(&conflicting), 4096),
+    )
+    .unwrap();
+    assert!(store(&objects, &mut retry, &validated).await.is_err());
+    assert_eq!(
+        shardline_server_core::read_full_object(&objects, &key, 4096).unwrap(),
+        conflicting,
+        "sharing repeated writes must not hide or overwrite an existing conflict"
+    );
+    shardline_storage::ObjectStore::delete_if_present(&objects, &key).unwrap();
+    assert_eq!(store(&objects, &mut retry, &validated).await.unwrap(), 4096);
+}
+
 #[test]
 fn cancelled_queued_local_member_never_publishes() {
     use std::{

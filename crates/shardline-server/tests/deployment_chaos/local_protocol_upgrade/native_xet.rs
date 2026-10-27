@@ -2,6 +2,7 @@
 
 mod mixed_writers;
 mod rebuild;
+mod repeated_members;
 
 use super::*;
 use shardline_xet_core::{
@@ -319,6 +320,8 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     .await;
     let added = upload(&candidate.base, &token, 29).await;
     verify(&candidate.base, &token, &added).await;
+    let repeated = repeated_members::publish(&candidate.base, &token).await;
+    verify(&candidate.base, &token, &repeated).await;
     // The predecessor's original identity did not include an extended SHA-256.
     // Publish that binding, then the same bytes with different chunk boundaries.
     let original_bytes: Vec<_> = original
@@ -340,6 +343,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     rollback.ready().await;
     verify(&rollback.base, &token, &original).await;
     verify(&rollback.base, &token, &added).await;
+    verify(&rollback.base, &token, &repeated).await;
     verify(&rollback.base, &token, &repacked).await;
     for file in [&mixed.0, &mixed.1] {
         verify(&rollback.base, &token, file).await;
@@ -365,6 +369,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     restart.ready().await;
     verify(&restart.base, &token, &original).await;
     verify(&restart.base, &token, &added).await;
+    verify(&restart.base, &token, &repeated).await;
     verify(&restart.base, &token, &repacked).await;
     verify(&restart.base, &token, &replaced).await;
     verify_identities(root.path(), postgres, &repacked, &original).await;
@@ -385,7 +390,9 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     let mut recovered =
         LocalServer::spawn_with_storage(&current, root.path(), postgres, "xet", storage_env);
     recovered.ready().await;
-    for file in [&original, &added, &repacked, &replaced, &mixed.0, &mixed.1] {
+    for file in [
+        &original, &added, &repacked, &replaced, &mixed.0, &mixed.1, &repeated,
+    ] {
         verify(&recovered.base, &token, file).await;
     }
     verify_identities(root.path(), postgres, &rebound, &original).await;
@@ -401,7 +408,9 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     let mut rollback =
         LocalServer::spawn_with_storage(&old, root.path(), postgres, "xet", storage_env);
     rollback.ready().await;
-    for file in [&original, &added, &repacked, &replaced, &mixed.0, &mixed.1] {
+    for file in [
+        &original, &added, &repacked, &replaced, &mixed.0, &mixed.1, &repeated,
+    ] {
         verify(&rollback.base, &token, file).await;
     }
     drop(rollback);
