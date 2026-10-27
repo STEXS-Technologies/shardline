@@ -2617,12 +2617,23 @@ A stock Hub 2.2.0/hf_xet 1.7.0 check uploaded and downloaded the same 64 MiB
 incompressible file through real PostgreSQL/MinIO, with fresh clients and owned
 deployments in before/after/after/before order. All four downloads passed
 independent SHA-256 verification and their traces reconciled with MinIO API
-counters. Complete-download backend requests fell from eight to seven in both
+counters. For the member-read change alone, backend requests fell from eight to seven in both
 pairs: one Xorb GET remains, its HEAD disappears, and the three other
 HEAD/GET pairs remain. Both versions retained 1,066 objects totaling
 134,346,551–134,346,555 payload bytes; the few-byte variation is metadata,
 with identical chunk, Xorb and shard lengths. These debug-binary controls do not
 establish a production timing or memory improvement.
+
+The following Hub archive change reuses the existing bounded single-GET reader
+for Git identity and pack reads. It preserves size limits, response-length
+checks, pack parsing and commit-identity verification. Two further stock-client
+runs of the same fixture each used four GETs and zero HEADs for the complete
+download: three identity reads and one Xorb read. Both downloads passed SHA-256
+and reconciled MinIO request counters. This halves the original eight requests
+for this workflow, with unchanged chunk, Xorb and shard lengths and about
+67.17 MB of backend response data. It does not remove full-Xorb verification,
+scratch writes or decoded legacy copies, and is not evidence of upstream upload
+or storage parity.
 
 ### Rejected decoded-buffer ownership experiment
 

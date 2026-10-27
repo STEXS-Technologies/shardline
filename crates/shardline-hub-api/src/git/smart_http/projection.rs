@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 use crate::{error::HubApiError, routes::HubState};
 use sha1::{Digest, Sha1};
 use shardline_index::hub::{HubFileEntry, HubRevision};
-use shardline_protocol::{ByteRange, ShardlineHash};
-use shardline_server_core::AuthorizedRepository;
+use shardline_protocol::ShardlineHash;
+use shardline_server_core::{AuthorizedRepository, BoundedObjectReadError};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
 use super::super::pack::{GitObject, ObjectType, generate_pack};
@@ -236,25 +236,19 @@ pub(super) fn read_object_bounded(
     key: &ObjectKey,
     maximum_length: usize,
 ) -> Result<Option<Vec<u8>>, HubApiError> {
-    let Some(meta) = state.object_store.metadata(key).map_err(|error| {
-        crate::routes::object_io::storage_failure("Git archive metadata read", &error)
-    })?
-    else {
-        return Ok(None);
-    };
-    if meta.length() > maximum_length as u64 {
-        return Err(failure("Git object exceeds pack memory limit"));
-    }
-    if meta.length() == 0 {
-        return Ok(Some(Vec::new()));
-    }
-    let range = ByteRange::new(0, meta.length().saturating_sub(1)).map_err(failure)?;
+    // A bounded GET carries the source length with its bytes. Keep Git pack
+    // parsing and identity checks at the callers, without a separate S3 HEAD.
     state
         .object_store
-        .read_range(key, range)
-        .map(Some)
-        .map_err(|error| {
-            crate::routes::object_io::storage_failure("Git archive bytes read", &error)
+        .read_object_if_present(key, u64::try_from(maximum_length).map_err(failure)?)
+        .map(|object| object.map(|(bytes, _length)| bytes))
+        .map_err(|error| match error {
+            BoundedObjectReadError::ObjectTooLarge => {
+                failure("Git object exceeds pack memory limit")
+            }
+            BoundedObjectReadError::Store(error) => {
+                crate::routes::object_io::storage_failure("Git archive bytes read", &error)
+            }
         })
 }
 
