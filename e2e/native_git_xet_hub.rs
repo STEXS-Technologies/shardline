@@ -2,14 +2,9 @@
 use super::*;
 use shardline_protocol::{RepositoryScope, TokenClaims};
 use shardline_server_core::{AuthProvider, LocalHmacProvider};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
-struct Server(tokio::task::JoinHandle<Result<(), std::io::Error>>);
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
+mod fixture;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stock_git_xet_push_and_cold_clone_use_the_real_hub_control_plane() -> Result<(), TestError>
@@ -37,31 +32,54 @@ async fn exercise(
     if !(command_available("git") && command_available("git-lfs") && command_available("git-xet")) {
         return Ok(());
     }
-    let storage = tempfile::tempdir()?;
     let writer = tempfile::tempdir()?;
     let writer_home = tempfile::tempdir()?;
     let reader = tempfile::tempdir()?;
     let reader_home = tempfile::tempdir()?;
-    let key = b"test-signing-key-32-bytes-long!!";
-    let credential = LocalHmacProvider::new(key)?.mint_token(&TokenClaims::new(
-        "local",
-        "native-hub",
-        TokenScope::Write,
-        RepositoryScope::new(RepositoryProvider::Generic, "team", "assets", None)?,
-        u64::MAX,
-    )?)?;
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let base = format!("http://{address}");
+    let credential =
+        LocalHmacProvider::new(fixture::SIGNING_KEY)?.mint_token(&TokenClaims::new(
+            "local",
+            "native-hub",
+            TokenScope::Write,
+            RepositoryScope::new(RepositoryProvider::Generic, "team", "assets", None)?,
+            u64::MAX,
+        )?)?;
+    let counts = fixture::Counts::default();
+    let prefix = services
+        .as_ref()
+        .map(|stack| stack.unique_s3_key_prefix("native-git-xet-hub"))
+        .unwrap_or_default();
+    let mut node = fixture::HubNode::start(services.as_ref(), &prefix, counts.clone()).await?;
+    let mut peer = if services.is_some() {
+        Some(fixture::HubNode::start(services.as_ref(), &prefix, counts.clone()).await?)
+    } else {
+        None
+    };
+    let base = node.base.clone();
+    let reader_base = peer
+        .as_ref()
+        .map_or_else(|| base.clone(), |node| node.base.clone());
+    let fixture::Counts {
+        xorbs,
+        shards,
+        basic,
+        downloads,
+    } = counts;
     // git-xet obtains its Hub bearer token through Git's credential helper;
     // Git's http.extraHeader alone is not inherited by that token exchange.
     // Keep credentials in disposable, private client homes, never in argv.
     for home in [writer_home.path(), reader_home.path()] {
         let credentials = home.join(".git-credentials");
-        write_file(
-            &credentials,
-            format!("http://native:{credential}@{address}\n").as_bytes(),
-        )?;
+        let addresses =
+            std::iter::once(base.as_str()).chain(peer.as_ref().map(|node| node.base.as_str()));
+        let mut entries = String::new();
+        for base in addresses {
+            let address = base
+                .strip_prefix("http://")
+                .ok_or("fixture HTTP endpoint")?;
+            entries.push_str(&format!("http://native:{credential}@{address}\n"));
+        }
+        write_file(&credentials, entries.as_bytes())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -73,77 +91,6 @@ async fn exercise(
             ["config", "--global", "credential.helper", "store"],
         )?;
     }
-    let mut config = ServerConfig::new(
-        address,
-        base.clone(),
-        storage.path().to_owned(),
-        NonZeroUsize::new(65536).ok_or("chunk size")?,
-    )
-    .with_token_signing_key(key.to_vec())?
-    .with_server_frontends([shardline_server::ServerFrontend::Hub])?
-    .with_hub_webhook_secret_key(vec![7; 32])?
-    .with_deployment_mode(shardline_server::DeploymentMode::Insecure);
-    if let Some(stack) = &services {
-        let url = stack
-            .postgres_url()
-            .ok_or("remote git-xet PostgreSQL missing")?;
-        let pool = sqlx::PgPool::connect(&url).await?;
-        shardline_server::apply_database_migrations(&pool).await?;
-        pool.close().await;
-        let prefix = stack.unique_s3_key_prefix("native-git-xet-hub");
-        let raw = stack
-            .s3_raw_config(Some(&prefix))
-            .ok_or("remote git-xet MinIO missing")?;
-        let objects = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
-            .with_endpoint(raw.endpoint)
-            .with_credentials(
-                raw.access_key.map(shardline_protocol::SecretString::new),
-                raw.secret_key.map(shardline_protocol::SecretString::new),
-                raw.session_token.map(shardline_protocol::SecretString::new),
-            )
-            .with_key_prefix(raw.key_prefix.as_deref())
-            .with_allow_http(raw.allow_http);
-        config = config
-            .with_index_postgres_url(url)?
-            .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(objects));
-    }
-    let (router, _background) = shardline_server::app::router_with_background_tasks(config).await?;
-    let xorbs = Arc::new(AtomicUsize::new(0));
-    let shards = Arc::new(AtomicUsize::new(0));
-    let basic = Arc::new(AtomicUsize::new(0));
-    let downloads = Arc::new(AtomicUsize::new(0));
-    let counts = (
-        xorbs.clone(),
-        shards.clone(),
-        basic.clone(),
-        downloads.clone(),
-    );
-    let router = router.layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| {
-            let counts = counts.clone();
-            async move {
-                let path = request.uri().path();
-                if request.method() == Method::POST && path.starts_with("/v1/xorbs/") {
-                    counts.0.fetch_add(1, Ordering::Relaxed);
-                }
-                if request.method() == Method::POST
-                    && matches!(path, "/shards" | "/v1/shards" | "/v2/shards")
-                {
-                    counts.1.fetch_add(1, Ordering::Relaxed);
-                }
-                if request.method() == Method::PUT && path.contains("/lfs/") {
-                    counts.2.fetch_add(1, Ordering::Relaxed);
-                }
-                if request.method() == Method::GET && path.starts_with("/lfs/objects/") {
-                    counts.3.fetch_add(1, Ordering::Relaxed);
-                }
-                next.run(request).await
-            }
-        },
-    ));
-    let _server = Server(tokio::spawn(
-        async move { axum::serve(listener, router).await },
-    ));
     let created = Client::new()
         .post(format!("{base}/api/repos/create"))
         .bearer_auth(&credential)
@@ -218,6 +165,31 @@ async fn exercise(
         repeated["objects"][0]["actions"].is_null(),
         "verified native publication must make the identical upload skippable"
     );
+    if peer.is_some() {
+        // The independent peer must work after the original HTTP router and
+        // its background workers stop, without access to its local scratch.
+        node.stop().await?;
+        assert!(
+            Client::new()
+                .get(format!("{base}/health"))
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+                .is_err(),
+            "the original Hub must be unreachable before peer qualification"
+        );
+        let peer_remote = format!("{reader_base}/models/team/assets.git");
+        run_git_with_home(
+            writer.path(),
+            writer_home.path(),
+            ["remote", "set-url", "origin", &peer_remote],
+        )?;
+        run_git_with_home(
+            writer.path(),
+            writer_home.path(),
+            ["config", "lfs.url", &format!("{peer_remote}/info/lfs")],
+        )?;
+    }
     let downloads_before = downloads.load(Ordering::Relaxed);
     create_dir_all(reader_home.path().join(".config"))?;
     let mut install = Command::new("git-xet");
@@ -227,7 +199,7 @@ async fn exercise(
     )?;
     let destination = reader.path().join("clone");
     let mut clone = Command::new("git");
-    let model_remote = format!("{base}/team/assets.git");
+    let model_remote = format!("{reader_base}/team/assets.git");
     run_command_checked(
         with_test_home(&mut clone, reader_home.path())
             .env("GIT_CONFIG_COUNT", "1")
@@ -310,5 +282,10 @@ async fn exercise(
         "incremental native Xet publication must not fall back to basic LFS upload"
     );
     run_git_with_home(&destination, reader_home.path(), ["fsck", "--strict"])?;
+    if let Some(peer) = peer.as_mut() {
+        peer.stop().await?;
+    } else {
+        node.stop().await?;
+    }
     Ok(())
 }

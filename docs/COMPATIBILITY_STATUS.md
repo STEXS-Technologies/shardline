@@ -56,6 +56,12 @@ storage or provider-billing saving.
 | Redis reconstruction cache | **Beta** | TLS/mTLS connectivity, bounded per-operation timeout, corrupt-value repair, partition and kill/restart recovery, plus operation-scoped cross-replica cold-load reservations with cancellation takeover and stale-owner fencing are validated; broader production evidence remains |
 | Provider integration | **Beta** | Checked-in token issuance, webhook handling, and repository-scoped authorization coverage for GitHub, GitLab, Gitea, Codeberg, and the generic adapter |
 
+The real-Hub PostgreSQL/MinIO git-xet test uses two Hub instances with independent
+local roots and shared durable backends. After the original HTTP server and its
+startup workers stop, the peer serves a cold clone, accepts an incremental native
+upload and preserves historical checkout. The test confirms the original endpoint
+is unreachable. This qualifies shared-backend takeover on one host.
+
 ### Tier Definitions
 
 - **Stable**: broad checked-in route, integration, and native-client coverage for the
