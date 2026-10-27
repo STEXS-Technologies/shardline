@@ -113,6 +113,12 @@ checks. It passes with Hub 2.3.0 / hf_xet 1.7.0; measured server/test peak RSS
 was 311,068 KiB (about 304 MiB), excluding client and backend processes. This
 qualifies that larger-file workflow, not arbitrary concurrency or production
 throughput. Both sizes share Nextest's serial large-transfer group.
+The 2 GiB remote split-role case also passes with Hub 1.25.1 and hf_xet 1.5.2
+and 1.6.0, including the same byte, cancellation, concurrent-reader and RSS
+checks.
+Fixture generation is timed separately. The standalone E2E workspace optimizes
+SHA-256 in development/test builds, matching the root workspace, so fixture
+hashing and complete-response verification fit the existing test deadlines.
 
 The same large-file and two-reader checks pass with Hub 1.25.1 / hf_xet 1.5.2
 on local storage and PostgreSQL/MinIO. Process I/O counters include more than

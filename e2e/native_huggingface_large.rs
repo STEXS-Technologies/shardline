@@ -185,7 +185,12 @@ async fn qualify_large_transfer_with_size(
     let home = tempfile::tempdir()?;
     let working = tempfile::tempdir()?;
     let source = working.path().join("large.bin");
+    let fixture_started = std::time::Instant::now();
     let digest = write_unique_fixture(&source, size_mib)?;
+    eprintln!(
+        "{size_mib} MiB fixture generation: {:.3} s",
+        fixture_started.elapsed().as_secs_f64()
+    );
     let before_rss = peak_rss_kib()?;
     let before_io = ProcessIo::read()?;
     let shards = read_metric_counter(&runtime, "shardline_shards_total").await?;

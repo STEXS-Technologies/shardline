@@ -111,6 +111,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 futures-util = "0.3"
 async-trait = "0.1"
 
+# This standalone workspace does not inherit the root's SHA-256 optimization.
+# Large-file fixtures and complete-response verifiers must not spend their
+# transfer deadlines hashing GiBs with unoptimized cryptographic code.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [patch.crates-io]
 # Mirror the main workspace's upstream HTTP/1 shutdown fix during acceptance.
 # Remove both overrides when a fixed Hyper registry release is available.
