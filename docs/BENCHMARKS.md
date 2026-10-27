@@ -2343,6 +2343,15 @@ including metadata and journals, also matched: 550,890,136 bytes initially and
 campaign, so its timing results are excluded. This establishes fixture-specific
 payload preservation, not a quantified upload-speed improvement.
 
+The same optimized runtime also completed a separate stock Hub 2.2.0/hf_xet
+1.7.0 upload and SHA-256-verified download of 512 MiB through PostgreSQL and
+MinIO. Native ingestion recorded nine Xorbs, one shard and no regular Hub body
+uploads. Upload traffic remained 169 S3 requests, and retained storage comprised
+16 objects totaling 537,890,475 bytes, including 537,345,752 Xorb bytes. This
+confirms that the ingress refactoring preserved the tested copy-free backend
+costs. Competing compilation was active, so this run supplies no throughput
+comparison or native-speed parity claim.
+
 The stopped profile's SQLite files comprised a 5,439,488-byte database,
 7,774,472-byte WAL and 32,768-byte shared-memory file. An isolated copy passed
 SQLite integrity checks before and after a successful truncating checkpoint;
