@@ -134,9 +134,9 @@ processes for operational-cost comparisons.
 An additional HTTPS front-door check passes a 9 MiB native upload and
 SHA-256-verified download with Hub 1.25.1 / `hf_xet` 1.5.2 and 1.6.0, and Hub
 2.2.0 / `hf_xet` 1.7.0, against owned PostgreSQL/MinIO fixtures. Clients trust
-an explicitly configured test CA; their Hub requests reject an untrusted CA
-and a hostname mismatch. TLS terminates at the Shardline reverse proxy; the
-backing MinIO service is not a client download endpoint. These shared-host
+an explicitly configured test CA; Hub requests and direct native Xet uploads
+reject an untrusted CA and a hostname mismatch. TLS terminates at the Shardline
+reverse proxy; the backing MinIO service is not a client download endpoint. These shared-host
 checks do not qualify every TLS proxy, split-role deployment or backend TLS
 configuration, and do not replace final-head CI.
 
@@ -145,9 +145,12 @@ and with Hub 2.3.0 / `hf_xet` 1.7.0.
 It uses separate upload/download processes and empty caches, checks rejection
 of an untrusted certificate and a trusted-CA certificate with the wrong hostname,
 counts successful HTTPS Xorb download requests, and verifies the downloaded
-SHA-256. The negative checks use ordinary Hub API calls; the successful transfer
-also exercises the native Xet client. The pinned-client CI selections include
-this test.
+SHA-256. Negative checks exercise both ordinary Hub API calls and unmodified
+native Xet uploads. They require certificate-specific rejection evidence,
+including hostname-specific evidence for the mismatched certificate, rather
+than accepting a generic network failure. Native diagnostics are inspected in
+a bounded private fixture log and are not printed. The pinned-client CI
+selections include this test.
 
 Additional source-tree qualification with Hub 2.3.0 / `hf_xet` 1.7.0 passes
 model/dataset workflows on SQLite/local, PostgreSQL/local and PostgreSQL/MinIO,

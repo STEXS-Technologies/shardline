@@ -1,14 +1,19 @@
 //! Stock Hub and native Xet through a verified HTTPS Shardline front door.
 use super::*;
 use shardline_test_support::HttpsProxyFixture;
+use std::io::Read;
 
 const CLIENT: &str = r#"
-import hashlib,json,sys
+import hashlib,json,sys,time
 from huggingface_hub import HfApi,hf_hub_download
 r=json.load(sys.stdin)
 try:
     api=HfApi(endpoint=r['endpoint'],token=r['token'])
-    if r['action'] in ('untrusted', 'hostname_mismatch'):
+    if r['action'] in ('native_untrusted', 'native_hostname_mismatch'):
+        import hf_xet
+        hf_xet.upload_files([r['path']],r['endpoint'],
+            (r['token'],int(time.time())+120),None,None,None)
+    elif r['action'] in ('untrusted', 'hostname_mismatch'):
         api.whoami()
     elif r['action']=='upload':
         api.create_repo('team/cli-model',private=True,exist_ok=True)
@@ -23,8 +28,10 @@ try:
 except BaseException as error:
     diagnostic = str(error).lower()
     print(json.dumps({'success':False,
-        'certificate_rejected':'certificate_verify_failed' in diagnostic,
-        'hostname_rejected':'hostname mismatch' in diagnostic or 'ip address mismatch' in diagnostic}))
+        'certificate_rejected':any(value in diagnostic for value in
+            ('certificate_verify_failed','invalid peer certificate','unknownissuer','notvalidforname')),
+        'hostname_rejected':any(value in diagnostic for value in
+            ('hostname mismatch','ip address mismatch','notvalidforname','not valid for name'))}))
 "#;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -67,11 +74,18 @@ async fn native_huggingface_https_frontdoor_preserves_native_transfer() -> Resul
     }
     write(&path, &bytes)?;
     let digest = hex::encode(Sha256::digest(&bytes));
-    for action in ["hostname_mismatch", "untrusted", "upload", "download"] {
+    for action in [
+        "hostname_mismatch",
+        "untrusted",
+        "native_hostname_mismatch",
+        "native_untrusted",
+        "upload",
+        "download",
+    ] {
         // A separate process/cache also prevents upload-side state or a cached
         // HTTP client's earlier trust configuration from masking the download.
         let home = tempfile::tempdir()?;
-        let frontdoor = if action == "hostname_mismatch" {
+        let frontdoor = if action.ends_with("hostname_mismatch") {
             &mismatched
         } else {
             &proxy
@@ -88,6 +102,11 @@ async fn native_huggingface_https_frontdoor_preserves_native_transfer() -> Resul
             .env("HF_HUB_DISABLE_XET", "0")
             .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
             .env("HF_HUB_DISABLE_TELEMETRY", "1")
+            // Certificate failures are deterministic; one native attempt is
+            // enough and keeps negative qualification independent of backoff.
+            .env("HF_XET_CLIENT_RETRY_MAX_ATTEMPTS", "1")
+            .env("HF_XET_LOG_DEST", home.path().join("native-tls.log"))
+            .env("RUST_LOG", "debug")
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost");
         for name in [
@@ -100,7 +119,7 @@ async fn native_huggingface_https_frontdoor_preserves_native_transfer() -> Resul
         ] {
             client.env_remove(name);
         }
-        if action != "untrusted" {
+        if !action.ends_with("untrusted") {
             for name in ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
                 client.env(name, frontdoor.ca_cert_path());
             }
@@ -115,11 +134,39 @@ async fn native_huggingface_https_frontdoor_preserves_native_transfer() -> Resul
             "HTTPS client exited unsuccessfully; raw diagnostics withheld"
         );
         let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        if action == "untrusted" || action == "hostname_mismatch" {
+        if action.ends_with("untrusted") || action.ends_with("hostname_mismatch") {
             assert_eq!(result["success"], false);
-            assert_eq!(result["certificate_rejected"], true);
-            if action == "hostname_mismatch" {
-                assert_eq!(result["hostname_rejected"], true);
+            // Native Xet can put the TLS cause in its Rust diagnostics while
+            // exposing only a generic request failure through Python. Inspect
+            // known certificate markers without printing URLs or credentials.
+            let mut diagnostics = String::from_utf8_lossy(&output.stderr).into_owned();
+            let log = home.path().join("native-tls.log");
+            if log.exists() {
+                std::fs::File::open(log)?
+                    .take(1024 * 1024)
+                    .read_to_string(&mut diagnostics)?;
+            }
+            let diagnostics = diagnostics.to_lowercase();
+            let certificate_rejected = result["certificate_rejected"] == true
+                || [
+                    "certificate_verify_failed",
+                    "invalid peer certificate",
+                    "unknownissuer",
+                    "notvalidforname",
+                ]
+                .iter()
+                .any(|marker| diagnostics.contains(marker));
+            assert!(
+                certificate_rejected,
+                "{action}: no certificate rejection evidence"
+            );
+            if action.ends_with("hostname_mismatch") {
+                assert!(
+                    result["hostname_rejected"] == true
+                        || diagnostics.contains("notvalidforname")
+                        || diagnostics.contains("not valid for name"),
+                    "{action}: no hostname rejection evidence"
+                );
             }
         } else {
             assert_eq!(
