@@ -247,6 +247,68 @@ async fn exercise(
         downloads.load(Ordering::Relaxed) > downloads_before,
         "cold clone must download the native publication through standard Git LFS"
     );
+    let first_commit =
+        git_stdout_with_home(&destination, reader_home.path(), ["rev-parse", "HEAD"])?;
+    let updated = mutated_bytes(&expected, expected.len() - 256 * 1024, 256 * 1024, 0xa5);
+    assert_ne!(updated, expected);
+    let shards_before = shards.load(Ordering::Relaxed);
+    write_commit_and_push_asset(
+        writer.path(),
+        writer_home.path(),
+        &updated,
+        "incremental native Hub Xet upload",
+    )?;
+    let second_commit =
+        git_stdout_with_home(writer.path(), writer_home.path(), ["rev-parse", "HEAD"])?;
+    assert_ne!(first_commit, second_commit);
+    assert!(
+        shards.load(Ordering::Relaxed) > shards_before,
+        "the changed file must publish through native Xet"
+    );
+    // The clone's one-command authorization header is not persisted by Git.
+    // Keep subsequent requests authenticated in this disposable worktree.
+    run_git_with_home(
+        &destination,
+        reader_home.path(),
+        [
+            "config",
+            "http.extraHeader",
+            &format!("Authorization: Bearer {credential}"),
+        ],
+    )?;
+    run_git_with_home(
+        &destination,
+        reader_home.path(),
+        ["fetch", "origin", "main"],
+    )?;
+    assert_eq!(
+        git_stdout_with_home(
+            &destination,
+            reader_home.path(),
+            ["rev-parse", "origin/main"],
+        )?,
+        second_commit,
+    );
+    assert_eq!(read(destination.join("asset.bin"))?, expected);
+    run_git_with_home(&destination, reader_home.path(), ["pull", "--ff-only"])?;
+    assert_eq!(read(destination.join("asset.bin"))?, updated);
+    assert_eq!(
+        git_stdout_with_home(&destination, reader_home.path(), ["rev-parse", "HEAD"])?,
+        second_commit,
+    );
+    run_git_with_home(
+        &destination,
+        reader_home.path(),
+        ["checkout", "--detach", &first_commit],
+    )?;
+    assert_eq!(read(destination.join("asset.bin"))?, expected);
+    run_git_with_home(&destination, reader_home.path(), ["checkout", "main"])?;
+    assert_eq!(read(destination.join("asset.bin"))?, updated);
+    assert_eq!(
+        basic.load(Ordering::Relaxed),
+        0,
+        "incremental native Xet publication must not fall back to basic LFS upload"
+    );
     run_git_with_home(&destination, reader_home.path(), ["fsck", "--strict"])?;
     Ok(())
 }
