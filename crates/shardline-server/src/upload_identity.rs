@@ -22,52 +22,77 @@ pub(crate) async fn xorb_length(
     pool: &crate::admission::BoundedPool,
 ) -> Result<(crate::upload_ingest::StagedRequestBody, u64), ServerError> {
     let hash = hash.to_owned();
-    crate::admission::blocking_work(pool, move || {
-        let (staged, canonical_length) = match staged {
-            crate::upload_ingest::StagedRequestBody::Memory {
-                bytes,
-                length,
-                hash: body_hash,
-            } => {
-                let canonical_length =
-                    shardline_xet_adapter::canonical_uploaded_xorb_length(&hash, &bytes)?;
-                (
-                    crate::upload_ingest::StagedRequestBody::Memory {
-                        bytes,
-                        length,
-                        hash: body_hash,
-                    },
-                    canonical_length,
-                )
-            }
-            crate::upload_ingest::StagedRequestBody::File {
-                file,
-                length,
-                hash: mut body_hash,
-            } => {
-                let file = shardline_xet_adapter::normalize_owned_uploaded_xorb_file(&hash, file)?;
-                let canonical_length = file.as_file().metadata()?.len();
-                if canonical_length != length {
-                    let mut source = std::fs::File::open(file.path())?;
-                    let mut hasher = blake3::Hasher::new();
-                    std::io::copy(&mut source, &mut hasher)?;
-                    body_hash = shardline_protocol::ShardlineHash::from_bytes(
-                        *hasher.finalize().as_bytes(),
-                    );
-                }
-                (
-                    crate::upload_ingest::StagedRequestBody::File {
-                        file,
-                        length: canonical_length,
-                        hash: body_hash,
-                    },
-                    canonical_length,
-                )
-            }
-        };
-        Ok((staged, canonical_length))
-    })
+    crate::admission::cancellable_work_with_setup(
+        pool,
+        || staged,
+        move |staged, cancel| prepare_staged_xorb(&hash, staged, &|| cancel.check_io()),
+    )
     .await
+}
+
+fn prepare_staged_xorb(
+    hash: &str,
+    staged: crate::upload_ingest::StagedRequestBody,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(crate::upload_ingest::StagedRequestBody, u64), ServerError> {
+    use std::io::Read;
+    checkpoint()?;
+    let (staged, canonical_length) = match staged {
+        crate::upload_ingest::StagedRequestBody::Memory {
+            bytes,
+            length,
+            hash: body_hash,
+        } => {
+            let canonical_length =
+                shardline_xet_adapter::canonical_uploaded_xorb_length(hash, &bytes)?;
+            (
+                crate::upload_ingest::StagedRequestBody::Memory {
+                    bytes,
+                    length,
+                    hash: body_hash,
+                },
+                canonical_length,
+            )
+        }
+        crate::upload_ingest::StagedRequestBody::File {
+            file,
+            length,
+            hash: mut body_hash,
+        } => {
+            let file = shardline_xet_adapter::normalize_owned_uploaded_xorb_file_with_checkpoint(
+                hash, file, checkpoint,
+            )?;
+            let canonical_length = file.as_file().metadata()?.len();
+            if canonical_length != length {
+                let mut source = std::fs::File::open(file.path())?;
+                let mut hasher = blake3::Hasher::new();
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    checkpoint()?;
+                    let read = match source.read(&mut buffer) {
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        result => result?,
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    hasher.update(buffer.get(..read).ok_or(ServerError::Overflow)?);
+                }
+                body_hash =
+                    shardline_protocol::ShardlineHash::from_bytes(*hasher.finalize().as_bytes());
+            }
+            (
+                crate::upload_ingest::StagedRequestBody::File {
+                    file,
+                    length: canonical_length,
+                    hash: body_hash,
+                },
+                canonical_length,
+            )
+        }
+    };
+    checkpoint()?;
+    Ok((staged, canonical_length))
 }
 
 pub(crate) fn repository(scope: Option<&RepositoryScope>) -> Result<String, ServerError> {

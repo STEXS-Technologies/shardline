@@ -65,7 +65,10 @@ pub use shard_store::{
     recover_dedup_xorb_descriptor_from_candidates, recover_xorb_descriptor,
 };
 pub use xorb_store::read_verified_xorb_chunk;
-pub use xorb_store::{normalize_owned_uploaded_xorb_file, normalize_uploaded_xorb_file};
+pub use xorb_store::{
+    normalize_owned_uploaded_xorb_file, normalize_owned_uploaded_xorb_file_with_checkpoint,
+    normalize_uploaded_xorb_file,
+};
 
 pub use error::XetAdapterError;
 pub use frontend::{

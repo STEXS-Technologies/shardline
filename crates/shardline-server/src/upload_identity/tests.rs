@@ -16,6 +16,46 @@ fn staged(bytes: &[u8]) -> (StagedRequestBody, PathBuf) {
     )
 }
 
+#[test]
+fn native_preparation_cancels_at_every_checkpoint_and_reclaims_owned_staging() {
+    use std::cell::Cell;
+    let (wire, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
+    for bytes in [&wire, &canonical] {
+        let calls = Cell::new(0_usize);
+        let (input, path) = staged(bytes);
+        let prepared = prepare_staged_xorb(&hash, input, &|| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        drop(prepared);
+        assert!(!path.exists());
+        let checkpoints = calls.get();
+        assert!(checkpoints > 1, "validation must check beyond admission");
+        // Includes canonical probing, footer reconstruction and the serialized
+        // digest read after appending a footer. Never swallow cancellation as
+        // format detection, continue hashing or retain the owned staging file.
+        for stop in 1..=checkpoints {
+            calls.set(0);
+            let (input, path) = staged(bytes);
+            let result = prepare_staged_xorb(&hash, input, &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() >= stop {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "cancelled native preparation",
+                    ))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err(), "checkpoint {stop} ignored cancellation");
+            assert_eq!(calls.get(), stop, "work continued after cancellation");
+            assert!(!path.exists(), "checkpoint {stop} leaked owned staging");
+        }
+    }
+}
+
 #[tokio::test]
 async fn cancelled_native_validation_reclaims_queued_input_without_releasing_another_owner() {
     let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());

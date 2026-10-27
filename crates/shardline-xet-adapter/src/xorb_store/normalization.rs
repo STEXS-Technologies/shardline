@@ -39,7 +39,20 @@ pub fn normalize_owned_uploaded_xorb_file(
     expected_hash: &str,
     file: tempfile::NamedTempFile,
 ) -> Result<tempfile::NamedTempFile, XetAdapterError> {
-    normalize_owned_with_checkpoint(expected_hash, file.path(), &|| Ok(()))?;
+    normalize_owned_uploaded_xorb_file_with_checkpoint(expected_hash, file, &|| Ok(()))
+}
+
+/// Normalize owned staging with cooperative cancellation between reads.
+/// Admission and staging ownership must remain with the worker until it stops.
+///
+/// # Errors
+/// Returns an error for malformed content, exceeded limits, I/O or cancellation.
+pub fn normalize_owned_uploaded_xorb_file_with_checkpoint(
+    expected_hash: &str,
+    file: tempfile::NamedTempFile,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<tempfile::NamedTempFile, XetAdapterError> {
+    normalize_owned_with_checkpoint(expected_hash, file.path(), checkpoint)?;
     Ok(file)
 }
 

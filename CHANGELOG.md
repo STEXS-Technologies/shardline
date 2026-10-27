@@ -143,6 +143,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Stop cancelled native upload identity preparation between validation and
+  checksum reads, reclaiming staging files while retaining admission until
+  the blocking worker stops.
+
 - Reject Hub commits to tags before consuming upload bodies, preserving the
   branch-only write error contract when concurrent publication retries apply.
 - Avoid redundant conditional S3 writes for recently stored native Xet chunks
