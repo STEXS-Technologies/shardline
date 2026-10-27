@@ -2258,6 +2258,21 @@ and filesystem writes; it is not physical NVMe NAND wear or a backend-inclusive
 cost estimate. Reducing persisted bytes alone would not establish that the
 remaining ingestion I/O amplification has been removed.
 
+An additional October 27 experiment buffered footer serialization in 64 KiB
+blocks. A 64 MiB instrumented baseline/candidate/candidate/baseline comparison
+reduced staging writes from 3,333–3,341 to 167–171, while preserving
+67,167,784 staging bytes, 11,597 synchronization calls and all eight verified
+downloads. These traced timings were excluded from performance conclusions.
+
+The separate uninstrumented 512 MiB comparison observed no competing compiler
+activity. Baseline uploads took 11.69 and 15.78 seconds; the candidate took
+15.70 and 12.47 seconds. Candidate peak server RSS was 57–61 MiB versus
+48–49 MiB for the baseline. Retained bytes were identical and all eight
+downloads passed SHA-256. Adapter tests and local/remote process-interruption
+checks passed, but fewer syscalls did not demonstrate faster ingestion or less
+disk writing. The prototype was removed. These shared-host observations do
+not establish a regression, SSD lifetime savings or native Xet parity.
+
 #### Reusing serialized validation reads
 
 An earlier control compared runtime `84cc1a97` with a candidate that derives
