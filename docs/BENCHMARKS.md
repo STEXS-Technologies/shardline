@@ -2325,6 +2325,18 @@ change the live-server measurements above, establish steady-state storage cost
 or justify forcing a checkpoint on every upload. The largest database page
 consumers were verified Xorb descriptors and their chunk membership indexes.
 
+A bounded 64 KiB read buffer for shard source validation was then compared
+against the copy-free runtime in baseline/candidate/candidate/baseline order,
+using the same 512 MiB corpus, cold stock clients and release profiles. No
+competing compiler or nextest qualification was observed. Initial-upload Linux
+process read calls fell from 246,384–246,388 to 151,972–151,982; edited-upload
+calls fell from 104,550 to 10,085. Retained bytes were identical and all eight
+downloads passed SHA-256. Initial upload times overlapped (2.59–3.74 seconds
+versus 2.94–3.42); edited uploads took 0.711–0.712 versus 0.667–0.699 seconds.
+The result establishes fewer read syscalls, not a general throughput gain or
+less physical storage I/O. The buffer lasts only for validation and is dropped
+before later member reads; cancellation and content checks remain in place.
+
 An additional October 27 experiment buffered footer serialization in 64 KiB
 blocks. A 64 MiB instrumented baseline/candidate/candidate/baseline comparison
 reduced staging writes from 3,333–3,341 to 167–171, while preserving

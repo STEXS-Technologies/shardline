@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs::File,
-    io::{Cursor, Read, Seek},
+    io::{BufReader, Cursor, Read, Seek},
     path::Path,
 };
 
@@ -917,16 +917,22 @@ fn load_xorb_range_info_with_visitor(
         return Err(XetAdapterError::MissingReferencedXorb);
     };
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let validation = crate::xorb::validate_serialized_xorb_with_data_and_visitor(
-        &mut checkpoint_reader::CheckpointReader {
-            reader: &mut reader,
-            checkpoint,
-        },
-        expected_hash,
-        0,
-        Vec::new(),
-        visitor,
-    );
+    let validation = {
+        // Footer fields and member headers are small reads. Buffer only this
+        // validation pass, within its admitted worker, and discard read-ahead
+        // before retaining the source for subsequent member authentication.
+        let mut buffered = BufReader::with_capacity(64 * 1024, &mut reader);
+        crate::xorb::validate_serialized_xorb_with_data_and_visitor(
+            &mut checkpoint_reader::CheckpointReader {
+                reader: &mut buffered,
+                checkpoint,
+            },
+            expected_hash,
+            0,
+            Vec::new(),
+            visitor,
+        )
+    };
     checkpoint()?;
     let (validated, _decoded) = validation?;
     if let Some(references) = member_references {
