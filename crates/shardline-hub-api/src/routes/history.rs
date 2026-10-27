@@ -131,6 +131,98 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn history_continuation_rechecks_branch_access_after_deletion_and_replacement() {
+        use axum::{body::Body, http::Request};
+        use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+        use shardline_server_core::{AuthProvider, LocalHmacProvider};
+        use tower::ServiceExt;
+
+        let (_root, mut state) = crate::routes::tests::make_test_state();
+        let repo = "alice/history";
+        state
+            .store
+            .create_repo(shardline_index::hub::HubRepoType::Model, repo, true)
+            .unwrap();
+        let initial = state.store.resolve_revision(repo, "main").unwrap().unwrap();
+        let ancestor = "a".repeat(64);
+        let head = "b".repeat(64);
+        for (parent, next) in [(&initial, &ancestor), (&ancestor, &head)] {
+            state
+                .store
+                .create_revision(repo, Some(parent), next, "feature", "private history")
+                .unwrap();
+        }
+        let provider = LocalHmacProvider::new(b"history-test-signing-key-32-bytes!").unwrap();
+        let scope = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "alice",
+            "history",
+            Some("feature"),
+        )
+        .unwrap();
+        let claims =
+            TokenClaims::new("local", "reader", TokenScope::Read, scope, u64::MAX).unwrap();
+        let token = provider.mint_token(&claims).unwrap();
+        state.auth = Some(crate::auth::HubAuth::new(Box::new(provider)));
+        let app = crate::routes::router::router(false).with_state(state.clone());
+        let request = |uri: &str| {
+            Request::builder()
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let first = app
+            .clone()
+            .oneshot(request("/api/models/alice/history/commits/feature?limit=1"))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), axum::http::StatusCode::OK);
+        let link = first.headers()[LINK].to_str().unwrap();
+        let continuation = url::Url::parse(
+            link.strip_prefix('<')
+                .unwrap()
+                .strip_suffix(">; rel=\"next\"")
+                .unwrap(),
+        )
+        .unwrap();
+        let target = format!("{}?{}", continuation.path(), continuation.query().unwrap());
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&target))
+                .await
+                .unwrap()
+                .status(),
+            axum::http::StatusCode::OK
+        );
+        state.store.delete_ref(repo, "feature", &head).unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&target))
+                .await
+                .unwrap()
+                .status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+        // A replacement branch sharing only the initial commit must not restore
+        // access to the removed branch's immutable history through an old link.
+        state
+            .store
+            .create_revision(
+                repo,
+                Some(&initial),
+                &"c".repeat(64),
+                "feature",
+                "replacement",
+            )
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request(&target)).await.unwrap().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
     async fn default_history_pages_preserve_large_ancestry_while_branch_advances() {
         let (_root, state) = crate::routes::tests::make_test_state();
         let repo = "alice/history";
