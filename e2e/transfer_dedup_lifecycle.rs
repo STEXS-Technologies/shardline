@@ -8,6 +8,8 @@ use shardline_storage::{
 };
 use std::path::Path;
 
+mod delayed_delete;
+
 type Error = Box<dyn std::error::Error>;
 
 struct Runtime {
@@ -66,16 +68,23 @@ impl Runtime {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires disposable Docker PostgreSQL; objects use a shared filesystem"]
 async fn native_delta_delete_fencing_survives_replica_restart() -> Result<(), Error> {
-    qualify_delta_delete_fencing(false).await
+    qualify_delta_delete_fencing(false, false).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires disposable Docker PostgreSQL and MinIO"]
 async fn native_delta_remote_delete_fencing_survives_replica_restart() -> Result<(), Error> {
-    qualify_delta_delete_fencing(true).await
+    qualify_delta_delete_fencing(true, false).await
 }
 
-async fn qualify_delta_delete_fencing(remote: bool) -> Result<(), Error> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires disposable Docker PostgreSQL and MinIO"]
+async fn native_delta_issued_delete_blocks_publication_until_backend_completion()
+-> Result<(), Error> {
+    qualify_delta_delete_fencing(true, true).await
+}
+
+async fn qualify_delta_delete_fencing(remote: bool, issued: bool) -> Result<(), Error> {
     let stack = tokio::task::spawn_blocking(move || {
         let builder = shardline_test_support::DockerLocalStack::builder().with_postgres();
         if remote {
@@ -153,7 +162,7 @@ async fn qualify_delta_delete_fencing(remote: bool) -> Result<(), Error> {
     client
         .post(format!("{}/v1/xorbs/default/{hash}", first.base))
         .bearer_auth(&write)
-        .body(xorb)
+        .body(xorb.clone())
         .send()
         .await?
         .error_for_status()?;
@@ -169,7 +178,7 @@ async fn qualify_delta_delete_fencing(remote: bool) -> Result<(), Error> {
     client
         .post(format!("{}/v1/shards", first.base))
         .bearer_auth(&write)
-        .body(shard)
+        .body(shard.clone())
         .send()
         .await?
         .error_for_status()?;
@@ -216,6 +225,21 @@ async fn qualify_delta_delete_fencing(remote: bool) -> Result<(), Error> {
     ))?;
     let index = PostgresIndexStore::new(owner.clone());
     let pending = index.begin_remote_delete(&key).await?;
+    let delayed = if issued {
+        Some(
+            delayed_delete::Attempt::start(
+                objects.as_ref().ok_or("issued delete requires S3")?,
+                stack
+                    .s3_raw_config(None)
+                    .and_then(|raw| raw.endpoint)
+                    .ok_or("issued delete requires a backend endpoint")?,
+                &key,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     first.stop().await;
     let takeover_root = tempfile::tempdir()?;
     let restart_root = if remote {
@@ -240,9 +264,56 @@ async fn qualify_delta_delete_fencing(remote: bool) -> Result<(), Error> {
                 .status(),
             StatusCode::NOT_FOUND
         );
+        if issued {
+            for (route, body) in [
+                (format!("/v1/xorbs/default/{hash}"), xorb.clone()),
+                ("/v1/shards".to_owned(), shard.clone()),
+            ] {
+                let response = client
+                    .post(format!("{}{route}", runtime.base))
+                    .bearer_auth(&write)
+                    .body(body)
+                    .send()
+                    .await?;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{route}: publication must not acknowledge bytes endangered by an issued DELETE"
+                );
+                assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+            }
+        }
     }
-    // This fixture never issued a DELETE; settling its marker is unambiguous.
+    if let Some(delayed) = delayed {
+        // Only an observed backend completion permits settling this exact attempt.
+        assert!(AsyncObjectStore::metadata(&storage, &key).await?.is_some());
+        delayed.complete().await?;
+        assert!(AsyncObjectStore::metadata(&storage, &key).await?.is_none());
+    }
+    // The original cases issued no DELETE. The issued case observes its reply above.
     assert!(index.finish_remote_delete(&pending).await?);
+    if issued {
+        for runtime in [&restarted, &second] {
+            assert_eq!(
+                delta_lookup(&client, runtime, &read, &file).await?.status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        client
+            .post(format!("{}/v1/xorbs/default/{hash}", restarted.base))
+            .bearer_auth(&write)
+            .body(xorb)
+            .send()
+            .await?
+            .error_for_status()?;
+        client
+            .post(format!("{}/v1/shards", restarted.base))
+            .bearer_auth(&write)
+            .body(shard)
+            .send()
+            .await?
+            .error_for_status()?;
+    }
     for runtime in [&restarted, &second] {
         assert_eq!(
             delta_lookup(&client, runtime, &read, &file).await?.status(),

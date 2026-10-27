@@ -243,6 +243,14 @@ downloads on PostgreSQL/MinIO, including split roles. These are distinct from
 the composed-file fixture; neither establishes automatic delta selection by
 the Python `hf` CLI or every delayed in-flight deletion scenario.
 
+A separate PostgreSQL/MinIO HTTP regression pauses an issued DELETE before
+MinIO applies it, restarts one API replica, and checks that both replicas reject
+Xorb retries and shard publication with `503` and `Retry-After: 1`. This includes
+retries whose upload intent was already complete. The test observes the actual
+DELETE response before settling its marker, then verifies missing-source reads,
+successful reupload and recovery. It does not establish cluster-wide exactly-once
+execution or authorize clearing markers for requests whose outcome is unknown.
+
 Snapshot-scoped Git credentials currently negotiate the legacy fetch protocol,
 including when stock Git requests v2. Repository and branch credentials retain
 native v2 support. Native v2 snapshot fetch remains unqualified; a requested-v2

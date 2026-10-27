@@ -310,15 +310,34 @@ impl super::PostgresBackend {
             .content_addressed_upload_attempt(&intent)
             .await?;
         let request_session_identity = self.request_session_identity.clone();
+        let delete_guard_index = self.index_store.clone();
         let result = coordinator
             .with_upload_intent(&intent, move || async move {
                 crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
                     .await?;
+                // A visible intent still repeats immutable storage work on retry.
+                // Its original admission cannot authorize a later write while an
+                // earlier remote DELETE remains unresolved. Retain this guard
+                // through storage, rather than leaving a preflight/write race.
+                let mut delete_guard = delete_guard_index
+                    .pool()
+                    .begin()
+                    .await
+                    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+                shardline_index::PostgresIndexStore::require_remote_delete_settled(
+                    &mut delete_guard,
+                    &object_key,
+                )
+                .await?;
                 let result =
-                    store_admitted_xorb(&object_store, expected_hash, staged, permit).await;
+                    store_admitted_xorb(&object_store, expected_hash, staged, permit).await?;
                 crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
                     .await?;
-                result
+                delete_guard
+                    .commit()
+                    .await
+                    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+                Ok(result)
             })
             .await;
         if coordinator.index().owner_lost() {
