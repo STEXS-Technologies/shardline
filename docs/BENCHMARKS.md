@@ -2414,6 +2414,11 @@ with the updated debug binary: it establishes request counts, not a latency,
 CPU or memory improvement. Unique-data uploads do not receive this saving.
 Tests cover the identity-set limit, mutation of a repeated occurrence, failed
 and cancelled persistence, and retry after six actual process-kill boundaries.
+The PostgreSQL/MinIO crash drill also covers 256 alternating 128 KiB members:
+two replacement replicas retry equivalent encodings after each boundary,
+corrupted retries are rejected, and both legacy decoded chunk copies remain
+byte-for-byte intact. These recovery checks establish neither throughput parity
+nor removal of the duplicate-storage requirement.
 
 Run the stock Hub/Xet client against disposable PostgreSQL and MinIO:
 

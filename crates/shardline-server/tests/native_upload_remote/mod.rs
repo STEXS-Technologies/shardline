@@ -77,27 +77,35 @@ impl RemoteFixture {
     }
 }
 
-fn container(byte: u8) -> Result<(String, Vec<u8>)> {
-    container_with_compression(byte, CompressionScheme::None)
-}
-
 fn container_with_compression(
     byte: u8,
     compression: CompressionScheme,
+    interleaved: bool,
 ) -> Result<(String, Vec<u8>)> {
     let member_length = 128 * 1024_u64;
-    let data = vec![byte; 32 * 1024 * 1024];
-    let member = compute_data_hash(
-        data.get(..usize::try_from(member_length)?)
-            .ok_or("member")?,
-    );
-    let members = vec![(member, member_length); 256];
+    let mut data = vec![byte; 32 * 1024 * 1024];
+    if interleaved {
+        for (index, member) in data
+            .chunks_exact_mut(usize::try_from(member_length)?)
+            .enumerate()
+        {
+            if index % 2 == 1 {
+                member.fill(byte ^ 0x80);
+            }
+        }
+    }
+    let members: Vec<_> = data
+        .chunks_exact(usize::try_from(member_length)?)
+        .map(|member| (compute_data_hash(member), member_length))
+        .collect();
     let identity = xorb_hash(&members);
-    let offsets = (1_u64..=256)
-        .map(|index| {
+    let offsets = members
+        .iter()
+        .enumerate()
+        .map(|(index, (member_hash, _))| {
             Ok((
-                member,
-                index
+                *member_hash,
+                u64::try_from(index.checked_add(1).ok_or("member count overflow")?)?
                     .checked_mul(member_length)
                     .ok_or("member offset overflow")?,
             ))
@@ -114,13 +122,19 @@ fn container_with_compression(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "exact remote process crash boundaries require disposable PostgreSQL and MinIO"]
 async fn native_xorb_remote_sigkill_at_every_durable_boundary() -> Result {
-    remote_boundaries(RetryEncoding::Identical).await
+    remote_boundaries(RetryEncoding::Identical, false).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "mixed-encoding process crash retries require disposable PostgreSQL and MinIO"]
 async fn native_xorb_remote_mixed_encoding_sigkill_at_every_durable_boundary() -> Result {
-    remote_boundaries(RetryEncoding::Alternate).await
+    remote_boundaries(RetryEncoding::Alternate, false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "interleaved member crash retries require disposable PostgreSQL and MinIO"]
+async fn native_xorb_remote_interleaved_members_sigkill_at_every_durable_boundary() -> Result {
+    remote_boundaries(RetryEncoding::Alternate, true).await
 }
 
 #[derive(Clone, Copy)]
@@ -129,7 +143,7 @@ enum RetryEncoding {
     Alternate,
 }
 
-async fn remote_boundaries(encoding: RetryEncoding) -> Result {
+async fn remote_boundaries(encoding: RetryEncoding, interleaved: bool) -> Result {
     use std::{io::Read, os::unix::process::ExitStatusExt};
     let remote = RemoteFixture::start().await?;
     let index = PostgresIndexStore::new(remote.pool.clone());
@@ -152,7 +166,8 @@ async fn remote_boundaries(encoding: RetryEncoding) -> Result {
         ("committed", 5),
         ("visible", 6),
     ] {
-        let (hash, mut bytes) = container(byte)?;
+        let (hash, mut bytes) =
+            container_with_compression(byte, CompressionScheme::None, interleaved)?;
         let intent_id = format!("xorb-v2-{hash}-{}", bytes.len());
         let key = shardline_xet_adapter::xorb_object_key(&hash)?;
         let root = tempfile::tempdir()?;
@@ -238,7 +253,8 @@ async fn remote_boundaries(encoding: RetryEncoding) -> Result {
         let mut peer =
             start_with_environment(peer_root.path(), peer_address, None, &remote.environment)?;
         ready(&http, &peer_base, &mut peer).await?;
-        let (alternate_hash, alternate) = container_with_compression(byte, CompressionScheme::LZ4)?;
+        let (alternate_hash, alternate) =
+            container_with_compression(byte, CompressionScheme::LZ4, interleaved)?;
         assert_eq!(alternate_hash, hash);
         assert!(alternate.len() < bytes.len());
         let peer_bytes = match encoding {
@@ -359,6 +375,27 @@ async fn remote_boundaries(encoding: RetryEncoding) -> Result {
             after_rejection, actual,
             "mismatching retry changed bytes at {cut}"
         );
+        // The unchanged predecessor reads standalone decoded copies. Both
+        // identities must survive takeover, including a different encoding
+        // winning the concurrent retry race.
+        for seed in if interleaved {
+            vec![byte, byte ^ 0x80]
+        } else {
+            vec![byte]
+        } {
+            let content = vec![seed; 128 * 1024];
+            let member_hex =
+                shardline_server::test_fixtures::xet_hash_hex(&compute_data_hash(&content));
+            let member_key =
+                shardline_storage::ObjectKey::parse(&format!("{}/{member_hex}", &member_hex[..2]))?;
+            let (mut stored_member, _) = remote
+                .objects
+                .materialize_bounded_object_if_present(&member_key, 0)?
+                .ok_or("missing legacy member")?;
+            let mut decoded = Vec::new();
+            stored_member.read_to_end(&mut decoded)?;
+            assert_eq!(decoded, content, "legacy member bytes after {cut}");
+        }
         drop(takeover);
         drop(peer);
     }
