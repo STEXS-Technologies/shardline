@@ -286,8 +286,8 @@ jobs:
             --test native_upload_process --run-ignored all \
             -E 'test(stock_xet_large_upload_recovers)'
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
-            --test native_huggingface_cli_e2e --run-ignored all \
-            -E 'test(native_huggingface_one_gib)'
+            --test native_huggingface_cli_e2e --run-ignored all --test-threads 1 \
+            -E 'test(native_huggingface_one_gib) or test(native_huggingface_two_gib)'
           SHARDLINE_NATIVE_PEER_PYTHON="$RUNNER_TEMP/native-xet-15-qualification/bin/python" \
             cargo nextest run --locked -p shardline-server --features docker \
             --test native_upload_process --run-ignored all \

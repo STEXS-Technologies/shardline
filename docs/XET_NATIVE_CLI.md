@@ -85,7 +85,8 @@ For large-file qualification, run the explicit Linux tests with stock `hf` and
 ```bash
 SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo nextest run --locked \
   --manifest-path e2e/Cargo.toml --test native_huggingface_cli_e2e \
-  --run-ignored only -E 'test(native_huggingface_one_gib)'
+  --run-ignored only \
+  -E 'test(native_huggingface_one_gib) or test(native_huggingface_two_gib)'
 ```
 
 This checks combined and separate API/transfer roles on local storage and
@@ -105,6 +106,13 @@ Nextest isolates each case in its own process and runs these large cases one at
 a time. The split-role cases use the documented streaming front door and require
 successful ranged downloads through the Shardline transfer role. Both roles run
 inside the measured test process; their combined peak must meet the same ceiling.
+
+The additional 2 GiB case uses PostgreSQL/MinIO with separate API/transfer roles
+and the same byte comparison, cancellation, concurrent-reader and 384 MiB RSS
+checks. It passes with Hub 2.3.0 / hf_xet 1.7.0; measured server/test peak RSS
+was 311,068 KiB (about 304 MiB), excluding client and backend processes. This
+qualifies that larger-file workflow, not arbitrary concurrency or production
+throughput. Both sizes share Nextest's serial large-transfer group.
 
 The same large-file and two-reader checks pass with Hub 1.25.1 / hf_xet 1.5.2
 on local storage and PostgreSQL/MinIO. Process I/O counters include more than
