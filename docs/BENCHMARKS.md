@@ -2305,6 +2305,26 @@ performance. The reference development CAS has weaker persistence and
 synchronization semantics; this optimization retains Shardline's immutable
 publication and validation checks. Shared-host limitations still apply.
 
+A separate symbolized CPU profile of this path used the same 512 MiB fixture,
+stock client and single logical server CPU. Sampling at 199 Hz captured 274
+samples with no lost samples. SHA-256 file verification accounted for about
+15% of sampled cycles; BLAKE3 verification appeared across several workers.
+Kernel copying, networking and filesystem allocation also appeared among the
+largest individual entries. These are sampled CPU costs, not wall-clock time
+attribution, and the short capture cannot explain the complete upload gap.
+Instrumented timings are excluded from the table. The profile provides no
+justification for skipping member authentication, file identity verification
+or durable publication to match the development CAS.
+
+The stopped profile's SQLite files comprised a 5,439,488-byte database,
+7,774,472-byte WAL and 32,768-byte shared-memory file. An isolated copy passed
+SQLite integrity checks before and after a successful truncating checkpoint;
+the resulting database occupied 5,509,120 bytes. Thus this snapshot includes
+reusable journal space as well as retained metadata. This diagnostic does not
+change the live-server measurements above, establish steady-state storage cost
+or justify forcing a checkpoint on every upload. The largest database page
+consumers were verified Xorb descriptors and their chunk membership indexes.
+
 An additional October 27 experiment buffered footer serialization in 64 KiB
 blocks. A 64 MiB instrumented baseline/candidate/candidate/baseline comparison
 reduced staging writes from 3,333–3,341 to 167–171, while preserving
