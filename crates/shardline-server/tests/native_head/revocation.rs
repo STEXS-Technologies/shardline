@@ -52,6 +52,8 @@ impl Metadata {
 impl Read<'_> {
     pub(super) async fn allowed(&self) {
         let started = std::time::Instant::now();
+        let before_heads = self.proxy.head_requests();
+        let before_gets = self.proxy.get_requests();
         let response = self
             .client
             .get(self.url.replace("/v1/xorbs/", "/transfer/xorb/"))
@@ -65,6 +67,8 @@ impl Read<'_> {
             .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.bytes().await.unwrap().as_ref(), self.bytes);
+        let get_elapsed = started.elapsed();
+        let head_started = std::time::Instant::now();
         assert_eq!(
             self.client
                 .head(self.url)
@@ -76,8 +80,15 @@ impl Read<'_> {
             StatusCode::OK
         );
         eprintln!(
-            "membership HTTP GET+HEAD: {} us",
-            started.elapsed().as_micros()
+            "membership HTTP GET+HEAD: {} us (GET={} us HEAD={} us provider GET={} HEAD={})",
+            started.elapsed().as_micros(),
+            get_elapsed.as_micros(),
+            head_started.elapsed().as_micros(),
+            self.proxy.get_requests().checked_sub(before_gets).unwrap(),
+            self.proxy
+                .head_requests()
+                .checked_sub(before_heads)
+                .unwrap(),
         );
     }
 
@@ -151,6 +162,30 @@ impl Read<'_> {
                 "f".repeat(64)
             );
             super::denied_reads(self.client, &missing, self.credential, self.proxy).await;
+            // Compare the same HTTP proof after reclaiming index entries left
+            // by the bulk revocation. SQL-only plans cannot attribute the
+            // complete response time or separate GET from HEAD/provider work.
+            // Both pre-cleanup authorization and denial checks ran above.
+            // Keep this diagnostic within the disposable container's shared
+            // memory budget; parallel VACUUM can exceed Docker's default /dev/shm.
+            for statement in [
+                "VACUUM (ANALYZE, PARALLEL 0) shardline_file_records",
+                "VACUUM (ANALYZE, PARALLEL 0) shardline_record_membership",
+            ] {
+                sqlx::query(statement).execute(pool).await.unwrap();
+            }
+            assert_eq!(metadata.counts().await, (expected, expected));
+            eprintln!("sparse source after vacuum (same authoritative records):");
+            for _ in 0..3 {
+                self.allowed().await;
+            }
+            super::denied_reads(
+                self.client,
+                self.url,
+                &token("other", TokenScope::Read),
+                self.proxy,
+            )
+            .await;
         }
         assert_eq!(
             metadata.delete("latest").await,
