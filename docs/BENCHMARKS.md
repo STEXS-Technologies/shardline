@@ -1891,6 +1891,28 @@ retention fixture; two observations per implementation do not establish
 production Hugging Face performance, isolated-host performance, p95/p99 latency,
 physical device savings or SSD lifetime.
 
+#### Upload synchronization diagnostic
+
+A separate syscall trace uses the same frozen binaries, stock client and
+512 MiB corpus as the matched-build comparison. During the initial upload,
+Shardline issues 91,985 `fsync` calls; upstream issues one `fdatasync` call.
+Neither trace reports a synchronization error. Initial and edited downloads
+from both implementations pass independent SHA-256 verification.
+
+`strace -f -c -w` reports 26.14 seconds of summed syscall wall time for
+Shardline and 0.000534 seconds for upstream. Thread waits overlap, so this is
+not elapsed upload time or the fraction of the untraced performance gap caused
+by synchronization. Tracing perturbs execution, and unrelated compilation was
+present on the shared host; these timings are diagnostic only. The counts
+identify local publication synchronization as further work to investigate,
+not permission to omit payload or directory durability. No synchronization
+behavior changed, and these counts are not a production cost-per-TB estimate.
+The exact count also depends on storage-root depth: anchored writes synchronize
+each directory in the root's path, including existing names, to protect
+concurrent creation and retries after a failed directory sync. This fixture
+uses a deeply nested validation directory. Its count must not be extrapolated
+to a deployment with a different root or treated as 91,985 payload flushes.
+
 #### Earlier runtime control with different build profiles
 
 An October 27 control uses Shardline `9f3d47dc` and unmodified upstream
