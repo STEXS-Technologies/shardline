@@ -43,6 +43,12 @@ pub(super) fn prepare_source(
 ) -> Result<PreparedFile, XetAdapterError> {
     checkpoint()?;
     let expected = parse_xet_hash_hex(expected_hash)?;
+    // Canonical input needs one complete validation, not a complete format
+    // probe followed by the same validation again. Retain its serialized
+    // digest from those reads; immutable storage still verifies before publish.
+    if let Some(prepared) = try_prepare_canonical(expected, &path, checkpoint)? {
+        return Ok(prepared);
+    }
     let normalized = match ownership {
         SourceOwnership::Borrowed => {
             super::normalization::normalize_with_checkpoint(expected_hash, &path, checkpoint)?
@@ -59,29 +65,50 @@ pub(super) fn prepare_source(
     let path = normalized
         .as_ref()
         .map_or(path, |file| file.path().to_owned());
-    let source_file = File::open(&path)?;
+    let mut prepared = try_prepare_canonical(expected, &path, checkpoint)?
+        .ok_or(XetAdapterError::InvalidSerializedXorb)?;
+    prepared.normalized = normalized;
+    Ok(prepared)
+}
+
+fn try_prepare_canonical(
+    expected: ShardlineHash,
+    path: &std::path::Path,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<Option<PreparedFile>, XetAdapterError> {
+    let source_file = File::open(path)?;
     let length = source_file.metadata()?.len();
     let mut reader = digest_reader::DigestReader::new(source_file)?;
-    let validated = validate_serialized_xorb(
+    let validated = match validate_serialized_xorb(
         &mut CheckpointReader {
             reader: &mut reader,
             checkpoint,
         },
         expected,
-    )?;
+    ) {
+        Ok(validated) => validated,
+        // Cancellation and storage failures must never be mistaken for
+        // footerless input or cause normalization to modify owned staging.
+        Err(crate::XorbParseError::Io(error))
+            if error.kind() != std::io::ErrorKind::UnexpectedEof =>
+        {
+            return Err(XetAdapterError::Io(error));
+        }
+        Err(_) => return Ok(None),
+    };
     let (file, digest, observed_length) = reader.finish(checkpoint)?;
     if observed_length != length {
         return Err(XetAdapterError::InvalidSerializedXorb);
     }
     let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), length);
-    Ok(PreparedFile {
-        normalized,
+    Ok(Some(PreparedFile {
+        normalized: None,
         file,
-        path,
+        path: path.to_owned(),
         validated,
         integrity,
         length,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -92,6 +119,49 @@ mod tests {
         xorb_format_test_utils::{ChunkSize, build_raw_xorb},
     };
     use std::{cell::Cell, io::Write};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canonical_preparation_does_not_read_a_second_complete_container() {
+        fn thread_read_characters() -> u64 {
+            std::fs::read_to_string("/proc/thread-self/io")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("rchar:")?.trim().parse().ok())
+                .unwrap()
+        }
+        let serialized = SerializedXorbObject::from_xorb_with_compression(
+            build_raw_xorb(128, ChunkSize::Fixed(65536)),
+            CompressionScheme::None,
+            true,
+        )
+        .unwrap();
+        let mut source = tempfile::NamedTempFile::new().unwrap();
+        source.write_all(&serialized.serialized_data).unwrap();
+        let length = u64::try_from(serialized.serialized_data.len()).unwrap();
+        for ownership in [SourceOwnership::Borrowed, SourceOwnership::OwnedStaging] {
+            let before = thread_read_characters();
+            let prepared = prepare_source(
+                &serialized.hash.hex(),
+                source.path().to_owned(),
+                ownership,
+                &|| Ok(()),
+            )
+            .unwrap();
+            let reads = thread_read_characters() - before;
+            eprintln!("canonical staged preparation: serialized_bytes={length}, rchar={reads}");
+            assert!(prepared.normalized.is_none());
+            assert_eq!(prepared.length, length);
+            assert_eq!(
+                prepared.integrity.hash(),
+                ShardlineHash::from_bytes(*blake3::hash(&serialized.serialized_data).as_bytes())
+            );
+            assert!(
+                reads < length * 3 / 2,
+                "canonical preparation read {reads} bytes for {length} serialized bytes"
+            );
+        }
+    }
 
     #[test]
     fn owned_preparation_cancellation_never_publishes_and_staging_remains_retryable() {

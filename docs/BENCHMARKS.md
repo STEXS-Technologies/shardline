@@ -1776,6 +1776,45 @@ in the workload rather than hidden by full-download throughput.
 
 ### Upstream local CAS reference comparison
 
+#### Canonical staged-validation comparison
+
+On October 27, an optimized candidate based on `ee44af54` removed the second
+complete canonical-Xorb validation in staged-file preparation. It retains full
+validation, the serialized storage digest, footerless normalization and final
+immutable-write verification. A Linux thread-I/O regression measured
+8,402,262–8,402,271 read characters for an 8,395,896-byte canonical container,
+versus 16,798,158 before this change. These are logical process reads, not
+physical device reads or a measurement of SSD lifetime.
+
+The same 512 MiB incompressible corpus and 256 KiB tail edit were then tested
+with stock hf_xet 1.7.0 against upstream xet-core
+`629562cd9fc37432317eb57811faf13a6935c601` and the candidate, in
+upstream/candidate/candidate/upstream order. Each operation used a fresh client
+process and cache; servers used the same logical CPU and local filesystem.
+All eight full downloads passed independent SHA-256 verification.
+
+| Measurement | Shardline candidate | Upstream local CAS |
+| --- | ---: | ---: |
+| Initial upload | 6.09–6.82 s | 1.09–1.15 s |
+| Upload after edit | 0.68–0.72 s | 0.28–0.30 s |
+| Complete download, including client SHA-256 | 0.62–0.68 s | 0.80–0.86 s |
+| Server peak RSS after initial upload | 52–54 MiB | 250 MiB |
+| Retained file lengths after initial upload | 1,087,903,184 B | 538,725,364 B |
+
+Shardline initial-upload process read characters were approximately 3.78 GB.
+This leaves substantial upload work and duplicate retained storage to address;
+the preparation optimization does not establish native Xet performance parity.
+The upstream development server has weaker durability synchronization and is
+not Hugging Face's production service. Two observations per implementation on
+a shared host do not establish production throughput, tail latency or a general
+speedup ratio. Retained file lengths include metadata and are not allocated
+disk blocks or post-retention storage accounting.
+
+Qualification of this candidate passed 388 adapter tests, 24 adapter doctests,
+10 focused server tests, strict adapter/server Clippy, both local and remote
+512 MiB process-cut scenarios, and two actual-v1.12.1 native-Xet upgrade and
+rollback scenarios. These checks do not complete the broader release matrix.
+
 #### Local member-write concurrency qualification
 
 A subsequent local-disk experiment compared exact optimized executables with
