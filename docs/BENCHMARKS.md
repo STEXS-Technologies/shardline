@@ -1795,6 +1795,16 @@ These counters measure preparation only. They do not establish whole-upload
 throughput, lower retained storage or S3 request counts, physical device I/O,
 SSD lifetime, or parity with native Xet.
 
+A separate same-profile 512 MiB baseline/candidate/candidate/baseline control
+measures the complete initial upload. Server logical reads fell from approximately
+3.246 GB to 2.709 GB (16.6%); read calls fell from 357,166–357,169 to
+254,549–254,554 (28.7%). Initial retained file lengths were identical at
+1,087,992,784 bytes, and all eight complete downloads passed SHA-256 checks.
+No competing compilation was detected. Upload times of 6.52–7.15 seconds before
+and 6.29–6.94 seconds after overlap; two observations per binary on this shared
+host do not establish a reliable throughput improvement. Process read counters
+include file and socket reads and do not establish physical device savings.
+
 #### Bounded native member reads
 
 Native member persistence now buffers its staging reader with a fixed 64 KiB
