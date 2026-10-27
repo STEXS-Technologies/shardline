@@ -76,8 +76,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   require upgraded readers, so upgrade all replicas before accepting new writes.
 - Reuse one verified legacy chunk within a download stream, avoiding repeated
   reads and decompression for consecutive complete chunks up to 64 KiB.
-- Avoid a duplicate complete validation pass when preparing owned footerless
-  Xet uploads, retaining final container authentication and storage verification.
+- Avoid a duplicate complete validation pass when preparing owned or borrowed
+  footerless Xet uploads, retaining final container authentication and storage
+  verification.
 - Avoid repeated file-position queries while checking footerless Xet upload
   bounds, retaining chunk limits, malformed-input rejection and full validation.
 - Buffer native Xet member-source reads with a fixed 64 KiB allocation while

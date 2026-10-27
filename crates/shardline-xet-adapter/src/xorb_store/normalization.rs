@@ -58,6 +58,29 @@ pub(super) fn normalize_with_checkpoint(
     checkpoint: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<Option<tempfile::NamedTempFile>, XetAdapterError> {
     use crate::checkpoint_reader::CheckpointReader;
+    let Some(mut normalized) = copy_footerless_with_checkpoint(expected_hash, path, checkpoint)?
+    else {
+        return Ok(None);
+    };
+    validate_serialized_xorb(
+        &mut CheckpointReader {
+            reader: normalized.as_file_mut(),
+            checkpoint,
+        },
+        parse_xet_hash_hex(expected_hash)?,
+    )?;
+    Ok(Some(normalized))
+}
+
+/// Copy verified footerless input into canonical staging. The caller must
+/// authenticate the complete result before publication. Keeping that final
+/// check with preparation lets its serialized digest reuse the same reads.
+pub(super) fn copy_footerless_with_checkpoint(
+    expected_hash: &str,
+    path: &Path,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<Option<tempfile::NamedTempFile>, XetAdapterError> {
+    use crate::checkpoint_reader::CheckpointReader;
     let Some(mut input) = footerless_input(expected_hash, path, checkpoint)? else {
         return Ok(None);
     };
@@ -77,13 +100,6 @@ pub(super) fn normalize_with_checkpoint(
         return Err(XetAdapterError::XorbHashMismatch);
     }
     checkpoint()?;
-    validate_serialized_xorb(
-        &mut CheckpointReader {
-            reader: normalized.as_file_mut(),
-            checkpoint,
-        },
-        expected,
-    )?;
     Ok(Some(normalized))
 }
 

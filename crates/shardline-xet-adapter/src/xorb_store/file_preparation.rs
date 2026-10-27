@@ -50,7 +50,7 @@ pub(super) fn prepare_source(
     }
     let normalized = match ownership {
         SourceOwnership::Borrowed => {
-            super::normalization::normalize_with_checkpoint(expected_hash, &path, checkpoint)?
+            super::normalization::copy_footerless_with_checkpoint(expected_hash, &path, checkpoint)?
         }
         SourceOwnership::OwnedStaging => {
             // Complete validation and serialized digest extraction immediately
@@ -200,6 +200,46 @@ mod tests {
         assert!(
             reads < length * 5 / 2,
             "owned footerless preparation read {reads} bytes for {length} wire bytes"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn borrowed_footerless_preparation_avoids_a_third_payload_read() {
+        let serialized = SerializedXorbObject::from_xorb_with_compression(
+            build_raw_xorb(128, ChunkSize::Fixed(65536)),
+            CompressionScheme::None,
+            false,
+        )
+        .unwrap();
+        let mut source = tempfile::NamedTempFile::new().unwrap();
+        source.write_all(&serialized.serialized_data).unwrap();
+        let read_characters = || {
+            std::fs::read_to_string("/proc/thread-self/io")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("rchar:")?.trim().parse::<u64>().ok())
+                .unwrap()
+        };
+        let length = serialized.serialized_data.len() as u64;
+        let before = read_characters();
+        let prepared =
+            prepare(&serialized.hash.hex(), source.path().to_owned(), &|| Ok(())).unwrap();
+        let reads = read_characters().checked_sub(before).unwrap();
+        assert!(prepared.normalized.is_some());
+        assert!(
+            reads < length * 5 / 2,
+            "read {reads} bytes for {length} input bytes"
+        );
+        assert_eq!(
+            std::fs::read(source.path()).unwrap(),
+            serialized.serialized_data
+        );
+        assert_eq!(
+            prepared.integrity.hash(),
+            ShardlineHash::from_bytes(
+                *blake3::hash(&std::fs::read(prepared.path).unwrap()).as_bytes()
+            )
         );
     }
 
