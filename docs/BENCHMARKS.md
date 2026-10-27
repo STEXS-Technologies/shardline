@@ -1776,6 +1776,38 @@ in the workload rather than hidden by full-download throughput.
 
 ### Upstream local CAS reference comparison
 
+#### Bounded native member reads
+
+Native member persistence now buffers its staging reader with a fixed 64 KiB
+allocation. An instrumented fixture publishing 128 uncompressed 1 KiB members
+made 256 source `Read` calls before the change and three afterward. This
+measures calls to the reader, not physical device I/O, SSD lifetime or complete
+upload throughput. It is separate from the reference timings below.
+
+Every reread member retains its length, offset and content-hash checks. The
+existing decoded-byte/concurrency limits, immutable-object verification and
+durable-write synchronization remain. The buffer adds 64 KiB per active member
+persistence operation; its size does not grow with file or container length.
+
+A same-profile baseline/candidate/candidate/baseline control used the 512 MiB
+stock-client fixture described below. All eight downloads verified; no competing
+compilation was detected in this sequence. Initial-upload server read calls
+fell from 429,820–429,824 to 360,287–360,292, approximately 16%. Retained file
+lengths were identical at 1,088,203,472 bytes. These process counters do not
+measure physical device traffic.
+
+Initial uploads took 9.93–11.33 seconds before and 6.80–9.37 seconds afterward.
+Complete verified downloads also varied, from 0.66–0.74 seconds before to
+0.71–1.16 seconds afterward, although this change affects member persistence.
+The shared host and two observations per binary do not establish a reliable
+throughput improvement or download regression. An earlier sequence detected
+competing compilation; its timing results were rejected.
+
+Qualification passed the adapter suite and doctests, strict server/adapter
+Clippy, both actual 512 MiB stock-client SIGKILL recovery scenarios and both
+actual-v1.12.1 native upgrade/rollback scenarios on local and PostgreSQL/MinIO
+storage. Per-member mutation rejection and cancellation tests remain enabled.
+
 #### Current qualified runtime control
 
 An October 27 control uses Shardline `9f3d47dc` and unmodified upstream

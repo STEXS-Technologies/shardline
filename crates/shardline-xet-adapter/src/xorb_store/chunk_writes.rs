@@ -1,7 +1,7 @@
 //! Bounded immutable member writes; all source bytes were validated beforehand.
 use super::*;
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 
 const MAX_PENDING: usize = 4;
 const MAX_PENDING_BYTES: u64 = 256 * 1024;
@@ -33,6 +33,10 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
     // The mutex shares lifetime ownership without requiring public admission
     // resources to implement Sync. No worker accesses the protected value.
     reader.seek(SeekFrom::Start(0))?;
+    // Coalesce frame headers and small payloads when the staging source is a
+    // file. Every decoded member is still checked against its verified hash.
+    // This buffer is fixed-size and independent of the container's length.
+    let mut reader = BufReader::with_capacity(64 * 1024, reader);
     let mut pending = FuturesUnordered::new();
     let mut pending_bytes = 0_u64;
     let mut unpacked = 0_u64;
@@ -62,8 +66,9 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
                 .checked_add(inserted)
                 .ok_or(XetAdapterError::Overflow)?;
         }
-        let (data, packed, decoded) = shardline_xet_core::xorb_object::deserialize_chunk(reader)
-            .map_err(|_error| XetAdapterError::InvalidSerializedXorb)?;
+        let (data, packed, decoded) =
+            shardline_xet_core::xorb_object::deserialize_chunk(&mut reader)
+                .map_err(|_error| XetAdapterError::InvalidSerializedXorb)?;
         let next_end = packed_end
             .checked_add(u64::try_from(packed)?)
             .ok_or(XetAdapterError::Overflow)?;

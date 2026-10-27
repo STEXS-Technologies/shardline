@@ -24,6 +24,66 @@ struct Counts {
     containers: usize,
 }
 
+#[tokio::test]
+async fn member_persistence_does_not_read_the_source_once_per_frame() {
+    struct ObservedReader {
+        bytes: Cursor<Vec<u8>>,
+        reads: usize,
+    }
+    impl Read for ObservedReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            self.bytes.read(output)
+        }
+    }
+    impl Seek for ObservedReader {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.bytes.seek(position)
+        }
+    }
+    let members: Vec<_> = (0..128_u8)
+        .map(|byte| {
+            let data = vec![byte; 1024];
+            Chunk {
+                hash: shardline_xet_core::merklehash::compute_data_hash(&data),
+                data: data.into(),
+            }
+        })
+        .collect();
+    let serialized = SerializedXorbObject::from_xorb_with_compression(
+        RawXorbData::from_chunks(&members, vec![0]),
+        CompressionScheme::None,
+        true,
+    )
+    .unwrap();
+    let validated = validate_serialized_xorb(
+        &mut Cursor::new(&serialized.serialized_data),
+        parse_xet_hash_hex(&serialized.hash.hex()).unwrap(),
+    )
+    .unwrap();
+    let mut reader = ObservedReader {
+        bytes: Cursor::new(serialized.serialized_data),
+        reads: 0,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let objects = ServerObjectStore::local(root.path()).unwrap();
+    assert_eq!(
+        store(&objects, &mut reader, &validated).await.unwrap(),
+        128 * 1024
+    );
+    eprintln!(
+        "source reads={} for {} members",
+        reader.reads,
+        members.len()
+    );
+    assert!(
+        reader.reads < members.len(),
+        "member persistence performed {} source reads for {} members",
+        reader.reads,
+        members.len(),
+    );
+}
+
 struct Provider {
     counts: Mutex<Counts>,
     entered: Notify,

@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Buffer native Xet member-source reads with a fixed 64 KiB allocation while
+  retaining per-member verification and durable immutable writes.
 - Reuse the original PostgreSQL request session for native Xorb deletion guards,
   avoiding extra metadata checkouts while retaining pending-delete fencing and
   lost-owner rejection.
