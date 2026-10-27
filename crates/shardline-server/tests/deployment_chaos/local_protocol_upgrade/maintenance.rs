@@ -83,6 +83,56 @@ async fn run(
     frontends: &str,
     args: &[&str],
 ) -> std::process::Output {
+    run_with_status(binary, root, postgres, storage_env, frontends, args, 0).await
+}
+
+pub(super) async fn recover_missing_native_index(
+    binary: &Path,
+    root: &Path,
+    postgres: Option<&str>,
+    storage_env: &[(&str, String)],
+) {
+    let output = run_with_status(binary, root, postgres, storage_env, "xet", &["fsck"], 1).await;
+    let summary = String::from_utf8_lossy(&output.stdout);
+    let count = summary
+        .lines()
+        .find_map(|line| line.strip_prefix("issue_count: ")?.parse::<usize>().ok())
+        .unwrap();
+    assert!(count > 0, "missing native discovery must remain observable");
+    let details = String::from_utf8_lossy(&output.stderr);
+    let issues: Vec<_> = details
+        .lines()
+        .filter_map(|line| line.strip_prefix("issue: "))
+        .collect();
+    assert_eq!(
+        issues.len(),
+        count,
+        "every finding must have a classified diagnostic"
+    );
+    assert!(
+        issues.iter().all(|line| line.starts_with("missing_chunk ")),
+        "index loss must not hide other integrity failures"
+    );
+    for args in [&["index", "rebuild"][..], &["fsck"][..]] {
+        let output = run(binary, root, postgres, storage_env, "xet", args).await;
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == "issue_count: 0"),
+            "recovered native index must pass maintenance checks"
+        );
+    }
+}
+
+async fn run_with_status(
+    binary: &Path,
+    root: &Path,
+    postgres: Option<&str>,
+    storage_env: &[(&str, String)],
+    frontends: &str,
+    args: &[&str],
+    expected_status: i32,
+) -> std::process::Output {
     let config = NamedTempFile::new().unwrap();
     let mut command = Command::new(binary);
     command
@@ -125,8 +175,8 @@ async fn run(
     .filter(|category| stderr.contains(category))
     .collect();
     assert!(
-        output.status.success(),
-        "candidate maintenance {args:?} must succeed: {} {diagnostic:?}",
+        output.status.code() == Some(expected_status),
+        "candidate maintenance {args:?} expected exit {expected_status}: {} {diagnostic:?}",
         output.status,
     );
     output

@@ -385,7 +385,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     let published_descriptors = rebuild::descriptors(root.path(), postgres, false).await;
     assert!(published_descriptors > 0);
     assert_eq!(rebuild::descriptors(root.path(), postgres, true).await, 0);
-    maintenance::verify_and_rebuild(&current, root.path(), postgres, storage_env).await;
+    maintenance::recover_missing_native_index(&current, root.path(), postgres, storage_env).await;
     assert!(rebuild::descriptors(root.path(), postgres, false).await >= published_descriptors);
     let mut recovered =
         LocalServer::spawn_with_storage(&current, root.path(), postgres, "xet", storage_env);
@@ -403,7 +403,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     verify_identity_download(&recovered.base, &token, &rebound).await;
     drop(recovered);
     // Repair and the following sweep must preserve historical aliases and the
-    // standalone members required by the unchanged predecessor reader.
+    // Xorbs consumed by the unchanged predecessor's reconstruction path.
     maintenance::gc_before_rollback(&current, root.path(), postgres, storage_env, "xet").await;
     let mut rollback =
         LocalServer::spawn_with_storage(&old, root.path(), postgres, "xet", storage_env);

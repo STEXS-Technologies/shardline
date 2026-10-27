@@ -2258,6 +2258,53 @@ and filesystem writes; it is not physical NVMe NAND wear or a backend-inclusive
 cost estimate. Reducing persisted bytes alone would not establish that the
 remaining ingestion I/O amplification has been removed.
 
+#### Native uploads without decoded copies
+
+Runtime `62795b73` removes decoded standalone-chunk writes from native Xet
+ingestion. Both memory and file inputs retain the verified canonical container;
+generic standalone chunk uploads retain their separate contract. Existing data
+remains readable, but new independent native chunk reads require the upgraded
+reader. See [the rollout boundary](COMPATIBILITY_STATUS.md#current-source-tree-contract).
+
+The October 27 repeat used the same checksummed 512 MiB incompressible corpus,
+256 KiB tail edit, stock hf_xet 1.7.0 / Hub 2.2.0, matched release profiles and
+upstream/Shardline/Shardline/upstream ordering described above. Both servers
+used the same one-logical-CPU affinity. No competing compilation or qualification
+was observed during the timed sequence. All eight downloads passed SHA-256.
+The frozen Shardline binary's SHA-256 was
+`f16dcd4dd967ac1e5d7a826149f2d1bc68bd4ca2a4c2c71eb6101fbd1f74b508`.
+
+| Direct-CAS operation | Shardline `62795b73` seconds | Upstream local reference seconds |
+| --- | ---: | ---: |
+| Initial upload | 2.40–2.75 | 1.17 |
+| Initial full download, including SHA-256 | 0.64–0.66 | 0.91 |
+| Tail-edit upload from a cold client | 0.71–0.74 | 0.27–0.31 |
+| Edited full download, including SHA-256 | 0.68–0.70 | 0.87 |
+
+Initial retained file lengths, including metadata, were 551,121,872 bytes for
+Shardline and 538,731,316 bytes for upstream, a 2.30% difference. After the
+edit they were 551,393,972 and 538,495,004 bytes, a 2.40% difference. This
+removes the previous approximately twofold retained-byte amplification, but
+does not establish exact total-storage parity. After the edit, both stores
+contained the same ten Xorb identities. Their serialized Xorb files occupied
+537,608,956 and 537,541,940 bytes respectively; serialized encodings were not
+byte-identical. Logical downloads were independently verified. These are
+initial/post-edit lengths, not post-retention economic or production-corpus results.
+
+Initial-upload server peak RSS was 53,020–53,284 KiB for Shardline versus
+211,868–212,084 KiB for upstream. Linux server-process `write_bytes` increased
+by 559,476,736–563,277,824 bytes versus 537,792,512–537,841,664 bytes.
+This accounting includes scratch and filesystem writes, not physical NAND wear.
+The earlier `85e225ca` run above used the same corpus and method, but was a
+separate campaign; its timings are historical observations rather than a new
+paired before/after measurement.
+
+Upload-speed parity remains open. Two observations per server do not prove
+general download superiority, p95/p99, multi-node scaling or hosted Hugging Face
+performance. The reference development CAS has weaker persistence and
+synchronization semantics; this optimization retains Shardline's immutable
+publication and validation checks. Shared-host limitations still apply.
+
 An additional October 27 experiment buffered footer serialization in 64 KiB
 blocks. A 64 MiB instrumented baseline/candidate/candidate/baseline comparison
 reduced staging writes from 3,333–3,341 to 167–171, while preserving
