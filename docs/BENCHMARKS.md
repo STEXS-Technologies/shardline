@@ -2338,6 +2338,16 @@ The result establishes fewer read syscalls, not a general throughput gain or
 less physical storage I/O. The buffer lasts only for validation and is dropped
 before later member reads; cancellation and content checks remain in place.
 
+A separate preparation-read buffering prototype was removed. Its 512 MiB
+baseline/candidate/candidate/baseline control cut initial-upload read calls from
+151,960–151,978 to 57,534–57,540, with identical retained bytes and eight verified
+downloads. However, candidate uploads took 3.12–4.68 seconds versus 2.48–2.76,
+and peak RSS was 52,004–54,112 versus 41,052–41,780 KiB. A repeat again verified
+all bytes but observed competing compilation, excluding its timings. The
+prototype passed 375 adapter tests, yet fewer syscalls did not demonstrate a
+speed or memory improvement. These observations do not isolate the cause of
+the RSS difference or establish a general regression.
+
 A separate 1 GiB diagnostic used deterministic incompressible blocks and a
 256 KiB tail replacement, fresh stock clients, the same optimized binaries and
 one logical server CPU. Both initial and edited downloads from each server
