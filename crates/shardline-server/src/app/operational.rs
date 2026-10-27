@@ -26,7 +26,7 @@ use crate::{
     app::{
         AppState,
         reconstruction_helpers::{
-            byte_range_stream_response, full_byte_stream_response,
+            byte_range_stream_response, closed_xorb_transfer_range, full_byte_stream_response,
             parse_required_xorb_transfer_range, single_range_header,
         },
         reconstruction_routes::{XetRepository, XetWriteRepository},
@@ -288,17 +288,42 @@ pub(super) async fn read_xorb_transfer(
     } else {
         None
     };
-    let total_length = state.backend.xorb_length(&hash).await?;
+    // A fully covered explicit payload range needs no provider HEAD: the GET
+    // already yields a pinned, completely verified source and its actual length.
+    // Keep metadata discovery for suffix/open ranges and incomplete grants.
+    let covered_closed_range = closed_xorb_transfer_range(&headers).is_some_and(|range| {
+        coverage
+            .as_ref()
+            .is_some_and(|allowed| allowed.covers(range))
+            && read_grant.as_ref().is_none_or(|grant| {
+                range.start() == grant.range_start && range.end_inclusive() == grant.range_end
+            })
+    });
+    let expected_length = if covered_closed_range {
+        None
+    } else {
+        Some(state.backend.xorb_length(&hash).await?)
+    };
+    // Preserve early range and capability rejection on the metadata path.
+    if let Some(total_length) = expected_length {
+        let range = parse_required_xorb_transfer_range(&headers, total_length)?;
+        if let Some(grant) = read_grant.as_ref()
+            && (range.start() != grant.range_start || range.end_inclusive() != grant.range_end)
+        {
+            return Err(ServerError::NotFound);
+        }
+    }
+    let verified = state
+        .backend
+        .prepare_xorb_range(&hash, expected_length)
+        .await?;
+    let total_length = verified.total_length();
     let range = parse_required_xorb_transfer_range(&headers, total_length)?;
     if let Some(grant) = read_grant
         && (range.start() != grant.range_start || range.end_inclusive() != grant.range_end)
     {
         return Err(ServerError::NotFound);
     }
-    let verified = state
-        .backend
-        .prepare_xorb_range(&hash, total_length)
-        .await?;
     if let Some(namespace) = repository_namespace.as_ref()
         && coverage
             .as_ref()

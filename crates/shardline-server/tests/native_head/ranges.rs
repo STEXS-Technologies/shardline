@@ -65,6 +65,7 @@ pub(super) async fn qualify(
     owner: &str,
     other: &str,
     objects: &shardline_server_core::ServerObjectStore,
+    proxy: &S3FaultProxy,
 ) {
     let left = vec![b'L'; 32 * 1024];
     let right = vec![b'R'; 32 * 1024];
@@ -114,12 +115,30 @@ pub(super) async fn qualify(
     publish(client, base, &other_writer, &info, &right, 1).await;
     signed_member(client, base, owner, &left, &bytes, boundary).await;
     let left_range = format!("bytes=0-{}", boundary.checked_sub(1).unwrap());
+    let heads_before = proxy.head_requests();
+    let gets_before = proxy.get_requests();
     let left_response = read(client, &url, owner, &left_range).await;
     assert_eq!(left_response.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(
         left_response.bytes().await.unwrap().as_ref(),
         bytes.get(..usize::try_from(boundary).unwrap()).unwrap()
     );
+    assert_eq!(proxy.get_requests().checked_sub(gets_before), Some(1));
+    assert_eq!(
+        proxy.head_requests().checked_sub(heads_before),
+        Some(0),
+        "a fully verified GET already establishes the source length"
+    );
+    // Corruption in the other tenant's member must still reject this range:
+    // removing HEAD must not become partial-source verification.
+    let mut damaged = bytes.clone();
+    let other_payload = usize::try_from(boundary).unwrap().checked_add(8).unwrap();
+    *damaged.get_mut(other_payload).unwrap() ^= 1;
+    replace_source(objects, &key_for(&hash), &damaged).await;
+    let damaged_response = read(client, &url, owner, &left_range).await;
+    let damaged_status = damaged_response.status();
+    replace_source(objects, &key_for(&hash), &bytes).await;
+    assert!(!damaged_status.is_success());
     for range in [
         format!("bytes={boundary}-{}", payload_end.checked_sub(1).unwrap()),
         format!("bytes={payload_end}-{end}"),
@@ -174,6 +193,10 @@ pub(super) async fn qualify(
         footer.bytes().await.unwrap().as_ref(),
         bytes.last_chunk::<1>().unwrap()
     );
+}
+
+fn key_for(hash: &MerkleHash) -> shardline_storage::ObjectKey {
+    shardline_xet_adapter::xorb_object_key(&hash.hex()).unwrap()
 }
 
 async fn replace_source(

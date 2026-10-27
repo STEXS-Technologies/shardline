@@ -450,7 +450,7 @@ impl super::PostgresBackend {
     pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
-        total_length: u64,
+        total_length: Option<u64>,
     ) -> Result<VerifiedXorb, ServerError> {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;

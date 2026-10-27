@@ -207,11 +207,11 @@ jobs:
           --run-ignored all
           -E 'test(app::shard_progress::cancellation_http::) | test(disconnected_remote_native_download_stops_before_next_source_and_retries_verified) | test(server_frontend::xet::pressure::)'
 
-      - name: Qualify native shard source reuse and corruption rejection
+      - name: Qualify native source reuse and scoped range integrity
         run: >-
           cargo nextest run --locked -p shardline-server --features docker
           --test native_shard_reads --run-ignored only
-          -E 'test(native_shard_preparation_reuses_each_verified_provider_source)'
+          -E 'test(native_shard_preparation_reuses_each_verified_provider_source) or test(scoped_head_authorizes_before_provider_metadata_)'
 
       - name: Qualify native member recovery without standalone copies
         run: >-

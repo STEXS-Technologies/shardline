@@ -2595,6 +2595,24 @@ uploads and does not isolate this decoder's memory use. This change concerns
 Shardline's native-term reconstruction for plain HTTP reads, not a measured
 speedup of stock `hf_xet` CAS transfers or parity with upstream Xet.
 
+### Native transfer metadata requests
+
+The native serialized-member HTTP contract uses real MinIO with both local and
+PostgreSQL metadata. An authorized explicit member range previously used one
+HEAD and one GET. It now uses one GET and zero HEAD requests when authoritative
+file metadata already covers the requested offsets. The complete GET is still
+validated before response bytes are exposed; the response length comes from
+that verified source, and published member offsets must match its layout.
+
+The contract also replaces a shared Xorb with a different valid compression
+encoding under the same native content hash. The old member grant is rejected
+rather than widening access to the other repository's bytes. Corruption outside
+the requested member also fails verification. Suffix and open-ended requests,
+incomplete coverage and standalone HEAD requests retain metadata discovery.
+This removes one backend request for the qualified path; it does not reduce
+container bytes fetched or establish a throughput, SSD-wear or upstream-Xet
+parity improvement.
+
 ### Rejected decoded-buffer ownership experiment
 
 An experiment transferred decoded buffers directly into HTTP responses instead

@@ -1366,7 +1366,7 @@ impl ServerBackend {
     pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
-        total_length: u64,
+        total_length: Option<u64>,
     ) -> Result<crate::download_stream::VerifiedXorb, ServerError> {
         match self {
             Self::Local(backend) => backend.prepare_xorb_range(hash_hex, total_length).await,

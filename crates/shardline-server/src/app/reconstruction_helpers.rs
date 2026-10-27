@@ -240,6 +240,19 @@ pub(super) async fn load_reconstruction_v2_response(
     Ok(reconstruction_v2_from_v1(response))
 }
 
+/// Only explicit closed ranges can be proven from published member offsets
+/// before discovering the current serialized object length. Actual response
+/// bounds must still be parsed again against the verified source length.
+pub(super) fn closed_xorb_transfer_range(headers: &HeaderMap) -> Option<ByteRange> {
+    let value = single_range_header(headers, RANGE).ok()??.to_str().ok()?;
+    let (start, end) = value.strip_prefix("bytes=")?.split_once('-')?;
+    if start.is_empty() || end.is_empty() {
+        return None;
+    }
+    let synthetic_length = end.parse::<u64>().ok()?.checked_add(1)?;
+    parse_http_byte_range(value, synthetic_length).ok()
+}
+
 pub(super) fn parse_required_xorb_transfer_range(
     headers: &HeaderMap,
     total_length: u64,
@@ -498,6 +511,37 @@ mod tests {
     }
 
     // --- parse_required_xorb_transfer_range tests ---
+
+    #[test]
+    fn closed_xorb_ranges_require_explicit_unambiguous_bounded_offsets() {
+        for value in ["bytes=0-0", "bytes=12-1023"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(RANGE, value.parse().unwrap());
+            assert_eq!(
+                closed_xorb_transfer_range(&headers),
+                Some(parse_required_xorb_transfer_range(&headers, 4096).unwrap())
+            );
+        }
+        for value in [
+            "bytes=-1",
+            "bytes=12-",
+            "bytes=3-2",
+            "bytes=0-1,2-3",
+            "bytes=0-18446744073709551615",
+            "bytes=0-18446744073709551616",
+            "bytes= 0-1",
+            "items=0-1",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(RANGE, value.parse().unwrap());
+            assert!(closed_xorb_transfer_range(&headers).is_none(), "{value}");
+        }
+        let mut headers = HeaderMap::new();
+        assert!(closed_xorb_transfer_range(&headers).is_none());
+        headers.append(RANGE, "bytes=0-1".parse().unwrap());
+        headers.append(RANGE, "bytes=2-3".parse().unwrap());
+        assert!(closed_xorb_transfer_range(&headers).is_none());
+    }
 
     #[test]
     fn xorb_range_valid() {

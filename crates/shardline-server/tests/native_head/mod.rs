@@ -282,7 +282,7 @@ async fn qualify(postgres: bool, million: bool) {
     .qualify(root.path(), services.postgres_url().as_deref(), million)
     .await;
     let objects = shardline_server_core::ServerObjectStore::s3(storage).unwrap();
-    ranges::qualify(&client, &base, &owner, &other, &objects).await;
+    ranges::qualify(&client, &base, &owner, &other, &objects, &proxy).await;
     let key = shardline_xet_adapter::xorb_object_key(&hash.hex()).unwrap();
     assert!(
         shardline_storage::AsyncObjectStore::metadata(&objects, &key)

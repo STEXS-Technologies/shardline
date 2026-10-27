@@ -116,7 +116,7 @@ pub(crate) async fn authorized_xorb_byte_range_stream(
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
     }
-    prepare_xorb_byte_range(object_store, object_key, hash_hex, total_length, pool)
+    prepare_xorb_byte_range(object_store, object_key, hash_hex, Some(total_length), pool)
         .await?
         .into_stream(range, coverage)
 }
@@ -134,7 +134,7 @@ pub(crate) async fn prepare_xorb_byte_range(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
     hash_hex: &str,
-    total_length: u64,
+    total_length: Option<u64>,
     pool: BoundedPool,
 ) -> Result<VerifiedXorb, ServerError> {
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
@@ -148,7 +148,7 @@ pub(crate) async fn prepare_xorb_byte_range(
     } else {
         0
     };
-    let (file, validated) = crate::admission::cancellable_work_with_setup(
+    let (file, observed_length, validated) = crate::admission::cancellable_work_with_setup(
         &pool,
         || (),
         move |(), cancel| {
@@ -180,7 +180,7 @@ pub(crate) async fn prepare_xorb_byte_range(
                     return Err(crate::object_store::ServerObjectStoreError::NotFound.into());
                 }
             };
-            if observed_length != total_length {
+            if total_length.is_some_and(|expected| observed_length != expected) {
                 return Err(
                     crate::object_store::ServerObjectStoreError::StoredObjectLengthMismatch.into(),
                 );
@@ -200,20 +200,24 @@ pub(crate) async fn prepare_xorb_byte_range(
             );
             cancel.check()?;
             let validated = validated?;
-            Ok((file, validated))
+            Ok((file, observed_length, validated))
         },
     )
     .await?;
     Ok(VerifiedXorb {
         file,
         pool,
-        total_length,
+        total_length: observed_length,
         packed_content_length: validated.packed_content_length(),
         chunks: validated.chunks().to_vec(),
     })
 }
 
 impl VerifiedXorb {
+    pub(crate) const fn total_length(&self) -> u64 {
+        self.total_length
+    }
+
     pub(crate) const fn packed_content_length(&self) -> u64 {
         self.packed_content_length
     }
