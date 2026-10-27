@@ -2439,6 +2439,32 @@ measurement overhead. They do not measure physical device reads, writes,
 NAND wear, native-client throughput or production latency. Hashing the existing
 object replaces byte comparison; no end-to-end speedup is established here.
 
+#### Current October 27 native upload CPU diagnostic
+
+Production source `850c1673` was profiled with a stock hf_xet 1.7.0 client,
+the same 512 MiB incompressible corpus and 256 KiB tail edit, local filesystem
+storage and one logical server CPU. Both files downloaded with independently
+verified SHA-256 in each of two diagnostic runs. The optimized stripped binary's
+SHA-256 was `fec904d8b0960ccb265499b6d395a88a9008172abcc628cc2b14075ca6159f01`.
+A symbol-preserving rebuild had byte-identical `.text` sections, independently
+compared with SHA-256 `c259c503663b68ac158027f8e9a2260b628e11b9344cb0d8eed49c3622637d31`.
+
+The initial 199 Hz CPU profile contained only 182 samples. A second 999 Hz run
+captured 1,141 samples with zero lost samples. Its self-cycle shares included
+BLAKE3 bulk hashing at 25.18%, BLAKE3 compression at 2.16%, SHA-256 blocks at
+19.64%, and kernel `_copy_to_iter` at 9.06%. Inclusive stacks attributed 33.34%
+to upload preparation and 27.26% to shard registration's Xorb range loading and
+validation. Inclusive shares contain child functions and must not be added to
+self shares. Hashing is part of the integrity contract; these percentages are
+not removable overhead or predicted speedups.
+
+The profile identifies preparation and registration as targets for controlled
+experiments that preserve authenticated members, final storage verification
+and source-health checks. A flamegraph and raw sampled stacks were retained
+outside the repository. This shared-host, instrumented diagnostic has no
+upstream control and establishes neither upload parity nor a latency improvement.
+Completed payload copies were checksummed and reverified before removal.
+
 #### Intermediate October 27 upload comparison
 
 The checksummed optimized `4af923c9` executable was compared with the preceding
