@@ -332,9 +332,12 @@ verifies lazy fetching of an omitted tree during checkout over protocol v0, v1
 and v2. Native Git checks v2 clone, incremental fetch, deepen/unshallow, shallow
 date/exclusion, omitted objects, lazy checkout and strict fsck. Sparse-checkout
 and other unimplemented filters are rejected explicitly. The same native Git
-2.52.0 and 2.55.0 workflows pass on SQLite/local storage and disposable PostgreSQL/MinIO.
-The 2.55.0 qualification uses an upstream-tag source build with curl-backed
-Smart HTTP; optional WebDAV push is disabled. It does not qualify WebDAV.
+2.39.5, 2.52.0 and 2.55.0 workflows pass on SQLite/local storage and disposable
+PostgreSQL/MinIO. Git 2.39.5 also passes the local and remote snapshot-token
+isolation scenarios using the documented legacy negotiation.
+The 2.39.5 qualification uses the checksum-verified upstream release archive;
+2.55.0 uses an upstream-tag source build. Both builds use curl-backed Smart
+HTTP with optional WebDAV push disabled. They do not qualify WebDAV.
 For four v2 partial-clone filters, the checks prove a historical blob is absent
 before lazy retrieval, fetch its exact bytes and run full strict fsck. Broader
 shallow-history merge and failure qualification remains open; these checks do not establish full Git
