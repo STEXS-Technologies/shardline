@@ -11,11 +11,40 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shardline"))
 from benchmark_gc_contention import command  # noqa: E402
+from compose_smoke import mint_token  # noqa: E402
 from performance_validation.fixtures import Deployment, require_running_server  # noqa: E402
 from verify_disk_pressure import postgres_ready  # noqa: E402
 
 
 class BenchmarkCommandTest(unittest.TestCase):
+    def test_compose_token_preserves_output_and_scoped_arguments(self):
+        with patch("compose_smoke.command", return_value="private-token") as run:
+            self.assertEqual(mint_token(["docker", "compose", "--project-name", "owned"]),
+                             "private-token")
+        args = run.call_args.args
+        self.assertEqual(args[:4], ("docker", "compose", "--project-name", "owned"))
+        self.assertIn("SHARDLINE_TOKEN_SIGNING_KEY", args)
+        self.assertEqual(run.call_args.kwargs, {"timeout": 30})
+        with patch("compose_smoke.command", return_value=""):
+            with self.assertRaisesRegex(ValueError, "no token"):
+                mint_token(["docker", "compose"])
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_compose_token_deadline_stops_owned_descendants(self):
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / "escaped"
+            executable = Path(root) / "docker"
+            executable.write_text(
+                '#!/bin/sh\n(sleep 1; printf escaped > "$MARKER") & wait\n'
+            )
+            executable.chmod(0o700)
+            with patch.dict(os.environ, {"MARKER": str(marker)}):
+                with self.assertRaises(TimeoutError) as caught:
+                    mint_token([str(executable), "compose"], timeout=0.1)
+            self.assertNotIn(str(marker), str(caught.exception))
+            time.sleep(1.2)
+            self.assertFalse(marker.exists())
+
     @unittest.skipUnless(os.name == "posix", "owned executable fixture requires POSIX")
     def test_disk_pressure_readiness_rejects_stalled_and_unready_commands(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as log:

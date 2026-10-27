@@ -8,10 +8,24 @@ import sys
 import urllib.error
 import urllib.request
 
+from fixture_command import command
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def mint_token(compose, timeout=30):
+    token = command(*compose,
+        "exec", "-T", "shardline", "shardline", "admin", "token",
+        "--issuer", "local", "--subject", "compose-smoke", "--scope", "write",
+        "--provider", "generic", "--owner", "team", "--repo", "assets",
+        "--revision", "main", "--key-env", "SHARDLINE_TOKEN_SIGNING_KEY",
+        timeout=timeout)
+    if not token:
+        raise ValueError("container token mint returned no token")
+    return token
 
 
 def main():
@@ -58,18 +72,7 @@ def main():
     else:
         raise ValueError("missing credentials were accepted")
 
-    result = subprocess.run(
-        compose + [
-            "exec", "-T", "shardline", "shardline", "admin", "token",
-            "--issuer", "local", "--subject", "compose-smoke", "--scope", "write",
-            "--provider", "generic", "--owner", "team", "--repo", "assets",
-            "--revision", "main", "--key-env", "SHARDLINE_TOKEN_SIGNING_KEY",
-        ],
-        capture_output=True, timeout=30, check=True,
-    )
-    token = result.stdout.decode().strip()
-    if not token:
-        raise ValueError("container token mint returned no token")
+    token = mint_token(compose)
     request("/v1/stats", token)
     body = bytes(range(251)) * 4178
     path = "/lfs/objects/" + hashlib.sha256(body).hexdigest()
