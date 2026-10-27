@@ -251,6 +251,11 @@ DELETE response before settling its marker, then verifies missing-source reads,
 successful reupload and recovery. It does not establish cluster-wide exactly-once
 execution or authorize clearing markers for requests whose outcome is unknown.
 
+Native Xorb deletion guards use the request's original PostgreSQL session.
+A configured test occupies the entire separate metadata pool and still completes
+both a new upload and an identical retry. Existing pool limits, storage formats
+and owner-loss rejection remain unchanged; this is not a measured throughput gain.
+
 Snapshot-scoped Git credentials currently negotiate the legacy fetch protocol,
 including when stock Git requests v2. Repository and branch credentials retain
 native v2 support. Native v2 snapshot fetch remains unqualified; a requested-v2

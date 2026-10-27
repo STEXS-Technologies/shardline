@@ -10,7 +10,7 @@ use crate::{
     model::UploadFileResponse,
     upload_ingest::{
         FileUploadIngestor, RequestBodyReader, UploadStorage, stage_body_with_spill,
-        store_admitted_xorb, upload_attempt_id,
+        upload_attempt_id,
     },
     validation::validate_identifier,
     xet_adapter::{ShardUploadResponse, XorbUploadResponse, xorb_object_key},
@@ -319,25 +319,15 @@ impl super::PostgresBackend {
                 // Its original admission cannot authorize a later write while an
                 // earlier remote DELETE remains unresolved. Retain this guard
                 // through storage, rather than leaving a preflight/write race.
-                let mut delete_guard = delete_guard_index
-                    .pool()
-                    .begin()
-                    .await
-                    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-                shardline_index::PostgresIndexStore::require_remote_delete_settled(
-                    &mut delete_guard,
-                    &object_key,
+                super::native_guard::store_xorb(
+                    &delete_guard_index,
+                    &request_session_identity,
+                    &object_store,
+                    expected_hash,
+                    staged,
+                    permit,
                 )
-                .await?;
-                let result =
-                    store_admitted_xorb(&object_store, expected_hash, staged, permit).await?;
-                crate::maintenance_barrier::RequestSession::verify_for(&request_session_identity)
-                    .await?;
-                delete_guard
-                    .commit()
-                    .await
-                    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-                Ok(result)
+                .await
             })
             .await;
         if coordinator.index().owner_lost() {

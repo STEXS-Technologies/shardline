@@ -5,6 +5,46 @@ use crate::{
 use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
 
 #[tokio::test]
+async fn native_upload_and_retry_do_not_checkout_metadata_beside_their_owner() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        return;
+    };
+    fixture
+        .index()
+        .initialize_remote_delete_guard()
+        .await
+        .unwrap();
+    let backend = fixture.postgres();
+    let (xorb, hash) = crate::test_fixtures::single_chunk_xorb(b"owned native guard");
+    let session = RequestSession::acquire(
+        &backend.gc_barrier_pool,
+        backend.request_session_identity.clone(),
+    )
+    .await
+    .unwrap();
+    // The fixture has a separate, single-connection metadata pool. Occupy it
+    // completely: an admitted owner must not need another checkout to progress.
+    let reserved = fixture.index().pool().acquire().await.unwrap();
+    let result = session
+        .scope(tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            async {
+                for _ in 0..2 {
+                    backend.upload_xorb(&hash, xorb.clone()).await?;
+                }
+                Ok::<_, crate::ServerError>(())
+            },
+        ))
+        .await;
+    drop(reserved);
+    session.finish().await;
+    fixture.finish().await;
+    result
+        .expect("native uploads must progress without a second metadata checkout")
+        .expect("new and completed native intents must use their original owner");
+}
+
+#[tokio::test]
 async fn failed_native_attempts_preserve_history_and_allow_verified_retries() {
     let Some(fixture) = PostgresFixture::new().await else {
         eprintln!("SKIPPED: failed native retries require DATABASE_URL");

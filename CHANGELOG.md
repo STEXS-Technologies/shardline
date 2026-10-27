@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Reuse the original PostgreSQL request session for native Xorb deletion guards,
+  avoiding extra metadata checkouts while retaining pending-delete fencing and
+  lost-owner rejection.
 - Reuse canonical native Xet validation and its serialized reads for staged
   preparation and the storage digest, avoiding repeated validation and a
   separate checksum scan while retaining footerless normalization, cancellation
