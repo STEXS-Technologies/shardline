@@ -1891,6 +1891,29 @@ retention fixture; two observations per implementation do not establish
 production Hugging Face performance, isolated-host performance, p95/p99 latency,
 physical device savings or SSD lifetime.
 
+An updated matched-profile run at `f59d2dff`, including the upload-local
+repeated-member optimization, used the same frozen upstream binary, client,
+corpus and upstream/Shardline/Shardline/upstream order. All eight downloads
+passed SHA-256 verification, and its monitor detected no competing compilation.
+
+| Measurement | Updated Shardline | Upstream local CAS |
+| --- | ---: | ---: |
+| Initial upload | 9.49–9.90 s | 1.19–1.36 s |
+| Upload after edit | 0.70–0.98 s | 0.27–0.50 s |
+| Complete initial download, including client SHA-256 | 0.78–1.40 s | 0.97–1.05 s |
+| Initial-upload server peak RSS | Approximately 50 MiB | Approximately 206 MiB |
+| Initial retained file lengths | 1,087,992,784 B | 538,731,316 B |
+
+These observations still show substantial upload and storage gaps. The
+repeated-member change targets consecutive duplicate members; it does not
+establish a speed or storage improvement for this incompressible corpus.
+The shared host and two observations per implementation do not establish a
+regression against the earlier run, either. A separate interleaved old/new
+control encountered competing compilation, so its timings were rejected;
+all of its downloads verified. An earlier attempt at the updated upstream
+comparison was rejected for the same reason. The persistence-contract and
+production-performance limitations above continue to apply.
+
 #### Upload synchronization diagnostic
 
 A separate syscall trace uses the same frozen binaries, stock client and
