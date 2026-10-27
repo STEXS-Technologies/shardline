@@ -7,7 +7,7 @@ use shardline_protocol::{ByteRange, SecretString, ShardlineHash};
 use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, S3ObjectStore, S3ObjectStoreConfig,
 };
-use shardline_test_support::{DockerLocalStack, native_client_output};
+use shardline_test_support::{DockerLocalStack, HttpsProxyFixture, native_client_output};
 
 #[test]
 fn s3_https_trusted_root_roundtrip() {
@@ -22,19 +22,26 @@ fn s3_https_trusted_root_roundtrip() {
         .start()
         .unwrap()
         .expect("Docker is required for independent CA qualification");
-    for (ca, reject) in [
-        (stack.minio_tls_ca_cert_path().unwrap(), false),
-        (unrelated.minio_tls_ca_cert_path().unwrap(), true),
+    let mismatched = HttpsProxyFixture::start_with_mismatched_hostname().unwrap();
+    for (ca, endpoint, reject) in [
+        (
+            stack.minio_tls_ca_cert_path().unwrap(),
+            raw.endpoint.as_ref().unwrap().as_str(),
+            "false",
+        ),
+        (
+            unrelated.minio_tls_ca_cert_path().unwrap(),
+            raw.endpoint.as_ref().unwrap().as_str(),
+            "true",
+        ),
+        (mismatched.ca_cert_path(), mismatched.origin(), "hostname"),
     ] {
         let output = native_client_output(
             Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "s3_https_child", "--ignored"])
                 .env("SSL_CERT_FILE", ca)
-                .env("SHARDLINE_TLS_TEST_REJECT", reject.to_string())
-                .env(
-                    "SHARDLINE_TLS_TEST_ENDPOINT",
-                    raw.endpoint.as_ref().unwrap(),
-                )
+                .env("SHARDLINE_TLS_TEST_REJECT", reject)
+                .env("SHARDLINE_TLS_TEST_ENDPOINT", endpoint)
                 .env("SHARDLINE_TLS_TEST_BUCKET", &raw.bucket)
                 .env("SHARDLINE_TLS_TEST_REGION", &raw.region)
                 .env(
@@ -75,15 +82,24 @@ fn s3_https_child() {
     let store = S3ObjectStore::new(config).unwrap();
     let body = vec![73_u8; 131072];
     let key = ObjectKey::parse("tls/verified").unwrap();
-    if value("SHARDLINE_TLS_TEST_REJECT") == "true" {
+    let rejection = value("SHARDLINE_TLS_TEST_REJECT");
+    if rejection != "false" {
         let error = store
             .metadata(&key)
-            .expect_err("untrusted CA must be rejected");
+            .expect_err("invalid CA or hostname must be rejected");
         let diagnostic = format!("{error:?}").to_lowercase();
         assert!(
             diagnostic.contains("certificate") || diagnostic.contains("unknownissuer"),
             "failure must identify certificate validation"
         );
+        if rejection == "hostname" {
+            assert!(
+                diagnostic.contains("notvalidforname")
+                    || diagnostic.contains("not valid for name")
+                    || diagnostic.contains("hostname"),
+                "trusted CA with wrong hostname must fail name validation"
+            );
+        }
         return;
     }
     let integrity = ObjectIntegrity::new(
