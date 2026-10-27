@@ -65,14 +65,27 @@ pub(crate) fn hard_link_file_if_absent(
     temporary: &Path,
     source_file: &File,
 ) -> io::Result<()> {
+    hard_link_verified_file_if_absent(root, path, temporary, source_file, None)
+}
+
+pub(crate) fn hard_link_verified_file_if_absent(
+    root: &Path,
+    path: &Path,
+    temporary: &Path,
+    source_file: &File,
+    integrity: Option<&crate::ObjectIntegrity>,
+) -> io::Result<()> {
     #[cfg(unix)]
     {
-        hard_link_file_if_absent_unix(root, path, temporary, source_file)
+        hard_link_file_if_absent_unix(root, path, temporary, source_file, integrity)
     }
 
     #[cfg(not(unix))]
     {
-        let _source_file = source_file;
+        if let Some(integrity) = integrity {
+            crate::local::io::verify_open_file_integrity(source_file, integrity)
+                .map_err(io::Error::other)?;
+        }
         path.strip_prefix(root)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path escapes root"))?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
@@ -356,9 +369,14 @@ fn hard_link_file_if_absent_unix(
     path: &Path,
     temporary: &Path,
     source_file: &File,
+    integrity: Option<&crate::ObjectIntegrity>,
 ) -> io::Result<()> {
     let anchored = open_anchored_target(root, path)?;
     run_before_local_write_hook(&anchored.logical_path());
+    if let Some(integrity) = integrity {
+        crate::local::io::verify_open_file_integrity(source_file, integrity)
+            .map_err(io::Error::other)?;
+    }
     let final_path = anchored.final_path();
     // The caller pins the verified source inode. Sync it before publication,
     // then reject a source-path replacement rather than acknowledge its bytes.
@@ -395,6 +413,10 @@ fn hard_link_file_if_absent_unix(
             )?;
             let publish_result = (|| {
                 let copied_file = open_existing_regular_file(&copied_temporary)?;
+                if let Some(integrity) = integrity {
+                    crate::local::io::verify_open_file_integrity(&copied_file, integrity)
+                        .map_err(io::Error::other)?;
+                }
                 crate::local::io::ensure_files_match(
                     copied_file.try_clone()?,
                     source_file.try_clone()?,

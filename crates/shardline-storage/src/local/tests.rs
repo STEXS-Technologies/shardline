@@ -151,6 +151,31 @@ fn local_put_temporary_file_handles_source_on_a_different_filesystem() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn local_temporary_publication_rejects_source_mutation_before_link() {
+    let root = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(root.path().to_path_buf()).unwrap();
+    let key = ObjectKey::parse("xorbs/default/mutated-source.xorb").unwrap();
+    let source = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+    let original = b"verified upload bytes";
+    let changed = b"modified upload bytes";
+    assert_eq!(original.len(), changed.len());
+    fs::write(source.path(), original).unwrap();
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(original), original.len() as u64);
+    let source_path = source.path().to_path_buf();
+    set_before_local_write_hook(store.path_for_key(&key), move || {
+        fs::write(source_path, changed).unwrap();
+    });
+
+    let result = store.put_temporary_file_if_absent(&key, source.path(), &integrity);
+    assert!(
+        result.is_err(),
+        "changed source must not be acknowledged: {result:?}"
+    );
+    assert!(!store.path_for_key(&key).exists());
+}
+
 #[test]
 fn local_object_store_rejects_integrity_mismatch_and_out_of_bounds_range() {
     let storage = shardline_test_support::TempStorage::new();

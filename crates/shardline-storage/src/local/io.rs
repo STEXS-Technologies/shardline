@@ -10,13 +10,14 @@ use shardline_protocol::ShardlineHash;
 
 use crate::{
     ObjectIntegrity, PutOutcome,
-    local_fs::{hard_link_file_if_absent, verify_existing_object_durable},
+    local_fs::{hard_link_verified_file_if_absent, verify_existing_object_durable},
 };
 
 use super::metadata::{ensure_parent_directories_are_not_symlinked, ensure_regular_file_metadata};
 use super::store::LocalObjectStoreError;
 use super::util::{VERIFY_BUFFER_A, VERIFY_BUFFER_B, VERIFY_BUFFER_BYTES};
 
+#[cfg(test)]
 pub fn verify_file_integrity(
     path: &Path,
     integrity: &ObjectIntegrity,
@@ -71,11 +72,12 @@ pub fn link_temporary_file_if_absent(
     path: &Path,
     temporary: &Path,
     verified_source: &File,
-    _integrity: &ObjectIntegrity,
+    integrity: &ObjectIntegrity,
     temporary_bytes: Option<&[u8]>,
 ) -> Result<PutOutcome, LocalObjectStoreError> {
     ensure_parent_directories_are_not_symlinked(root, path)?;
-    match hard_link_file_if_absent(root, path, temporary, verified_source) {
+    match hard_link_verified_file_if_absent(root, path, temporary, verified_source, Some(integrity))
+    {
         Ok(()) => {
             remove_temporary_file(temporary)?;
             Ok(PutOutcome::Inserted)
@@ -86,6 +88,25 @@ pub fn link_temporary_file_if_absent(
             outcome
         }
         Err(error) => {
+            // Preserve the public integrity error classifications when the
+            // anchored filesystem helper carries them through an I/O error.
+            if let Some(integrity_error) = error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<LocalObjectStoreError>())
+            {
+                if matches!(
+                    integrity_error,
+                    LocalObjectStoreError::IntegrityHashMismatch
+                ) {
+                    return Err(LocalObjectStoreError::IntegrityHashMismatch);
+                }
+                if matches!(
+                    integrity_error,
+                    LocalObjectStoreError::IntegrityLengthMismatch
+                ) {
+                    return Err(LocalObjectStoreError::IntegrityLengthMismatch);
+                }
+            }
             remove_temporary_file(temporary)?;
             Err(LocalObjectStoreError::Io(error))
         }

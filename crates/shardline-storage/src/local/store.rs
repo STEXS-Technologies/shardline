@@ -20,10 +20,7 @@ use crate::{
 };
 
 use super::{
-    io::{
-        self, ensure_file_matches_bytes, ensure_files_match, open_existing_object_file,
-        verify_file_integrity,
-    },
+    io::{self, ensure_file_matches_bytes, ensure_files_match, open_existing_object_file},
     metadata::{self, ensure_regular_file_metadata, modified_unix_nanos, object_file_metadata},
     util::verify_integrity,
     walk::{self, read_dir_if_exists},
@@ -181,6 +178,8 @@ impl LocalObjectStore {
     /// it is on the same filesystem as the store root, installation uses an atomic
     /// hard link; cross-filesystem sources are copied to a target-side temporary file
     /// before the same atomic publication step.
+    /// The caller must exclusively own the staging file: no other handle may
+    /// modify it during installation or after its inode is published.
     ///
     /// # Errors
     ///
@@ -192,7 +191,9 @@ impl LocalObjectStore {
         temporary: &Path,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, LocalObjectStoreError> {
-        let verified_source = verify_file_integrity(temporary, integrity)?;
+        // Pin the source now; hash it inside the anchored publication boundary.
+        // Hashing here as well would add a redundant full-file read.
+        let verified_source = open_existing_object_file(temporary)?;
         let path = self.key_path(key);
         // The installation helper validates the same parent immediately before
         // publication; do not repeat that complete walk at this boundary.
