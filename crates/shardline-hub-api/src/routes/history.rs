@@ -125,3 +125,84 @@ pub(crate) async fn repo_commits(
     }
     Ok((headers, Json(result)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn default_history_pages_preserve_large_ancestry_while_branch_advances() {
+        let (_root, state) = crate::routes::tests::make_test_state();
+        let repo = "alice/history";
+        state
+            .store
+            .create_repo(shardline_index::hub::HubRepoType::Model, repo, true)
+            .unwrap();
+        let mut head = state.store.resolve_revision(repo, "main").unwrap().unwrap();
+        for index in 0..205 {
+            let next = format!("{index:064x}");
+            state
+                .store
+                .create_revision(repo, Some(&head), &next, "main", &format!("commit {index}"))
+                .unwrap();
+            head = next;
+        }
+        let mut revision = "main".to_owned();
+        let mut titles = Vec::new();
+        let mut identities = HashSet::new();
+        let mut page_sizes = Vec::new();
+        loop {
+            let (headers, Json(page)) = repo_commits(
+                State(state.clone()),
+                crate::routes::helpers::test_repo::<false, true>(&state, &HeaderMap::new()),
+                Path(("models".into(), "alice".into(), "history".into(), revision)),
+                Query(HistoryQuery { limit: None }),
+            )
+            .await
+            .unwrap();
+            page_sizes.push(page.len());
+            for entry in page {
+                assert!(identities.insert(entry["id"].as_str().unwrap().to_owned()));
+                titles.push(entry["title"].as_str().unwrap().to_owned());
+            }
+            let Some(link) = headers.get(LINK) else {
+                break;
+            };
+            let link = link.to_str().unwrap();
+            let continuation = url::Url::parse(
+                link.strip_prefix('<')
+                    .unwrap()
+                    .strip_suffix(">; rel=\"next\"")
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                continuation.origin().ascii_serialization(),
+                state.public_base_url
+            );
+            assert_eq!(continuation.query(), Some("limit=100"));
+            revision = continuation
+                .path_segments()
+                .unwrap()
+                .next_back()
+                .unwrap()
+                .to_owned();
+            assert_ne!(revision, "main");
+            // Publish another head after each response, before its continuation.
+            let next = format!("{:064x}", 1000 + page_sizes.len());
+            state
+                .store
+                .create_revision(repo, Some(&head), &next, "main", "new concurrent head")
+                .unwrap();
+            head = next;
+        }
+        assert_eq!(page_sizes, [100, 100, 6]);
+        let expected: Vec<_> = (0..205)
+            .rev()
+            .map(|index| format!("commit {index}"))
+            .collect();
+        assert_eq!(&titles[..205], expected);
+        assert_eq!(titles.len(), 206); // Includes the repository's initial commit.
+        assert!(!titles.iter().any(|title| title == "new concurrent head"));
+    }
+}
