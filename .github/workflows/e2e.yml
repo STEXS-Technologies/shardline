@@ -62,6 +62,11 @@ jobs:
         run: >-
           cargo test --locked -p shardline-storage --all-features --test s3_tls
 
+      - name: Verify S3 backend retries, streaming and concurrent writes
+        run: >-
+          cargo test --locked -p shardline-storage --all-features
+          --test s3_integration -- --test-threads=2
+
       - name: Verify saved-delete recovery with PostgreSQL and MinIO
         run: >-
           cargo test --locked -p shardline-server --features docker
