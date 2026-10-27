@@ -74,13 +74,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Persist native Xet payloads once as verified Xorb containers, removing redundant
   decoded chunk writes. Existing data stays readable; new native chunk reads
   require upgraded readers, so upgrade all replicas before accepting new writes.
-- Share consecutive identical native Xet member writes within one upload,
-  avoiding redundant storage operations while retaining every member's hash
-  checks, cancellation points, durable completion and existing storage layout.
 - Reuse one verified legacy chunk within a download stream, avoiding repeated
   reads and decompression for consecutive complete chunks up to 64 KiB.
 - Avoid a duplicate complete validation pass when preparing owned footerless
   Xet uploads, retaining final container authentication and storage verification.
+- Avoid repeated file-position queries while checking footerless Xet upload
+  bounds, retaining chunk limits, malformed-input rejection and full validation.
 - Buffer native Xet member-source reads with a fixed 64 KiB allocation while
   retaining per-member verification and durable immutable writes.
 - Reuse the original PostgreSQL request session for native Xorb deletion guards,
@@ -96,8 +95,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Reuse related native Xet containers in bounded, repository-scoped dedup replies,
   reducing retransmission and backend work for partially overlapping versions
   while preserving member authorization and remote-delete coordination.
-- Move verified native Xet member buffers into object writes, avoiding an
-  extra S3 payload copy while retaining integrity and bounded write admission.
 - Avoid decoding unrequested Xorb members twice during native file
   reconstruction, retaining complete source validation and rehashing returned
   members.
@@ -131,8 +128,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   read snapshot, retaining early proofs, corruption errors and cancellation cleanup.
 - Avoid copying already-owned local object writes when handing their bodies to
   blocking storage workers, retaining validation and durable publication.
-- Overlap native Xet member writes on S3 within a bounded memory budget,
-  retaining full validation, conditional writes and publication ordering.
 - Avoid scratch files when GC verifies S3 containers up to 2 MiB, using a fixed
   memory allowance and retaining full content verification and disk spill for
   larger containers.

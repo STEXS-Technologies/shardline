@@ -3,19 +3,15 @@
 #[cfg(all(test, target_os = "linux"))]
 mod io_qualification;
 
-use std::{
-    fs::File,
-    io::{Seek, SeekFrom},
-    path::Path,
-};
+use std::{fs::File, path::Path};
 
 use shardline_index::parse_xet_hash_hex;
 use shardline_xet_core::error::CoreError;
-use shardline_xet_core::xorb_object::{
-    deserialize_chunk_header, reconstruct_xorb_with_footer_from_reader,
-};
+use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer_from_reader;
 
 use crate::{XetAdapterError, validate_serialized_xorb};
+
+mod footerless_bounds;
 
 /// Returns a verified normalized temporary file only when the source needs it.
 /// Canonical input is read in place. The source is never modified.
@@ -177,52 +173,7 @@ fn footerless_input(
     }
     checkpoint()?;
     let length = input.metadata()?.len();
-    // Standard Xet Xorbs contain at most 64 MiB and 8,192 chunks. Preserve the
-    // wider canonical-input acceptance; these bounds apply to normalization.
-    const MAX_FOOTERLESS_BYTES: u64 = 64 * 1024 * 1024 + 8192 * 8;
-    const MAX_FOOTERLESS_DECODED: u64 = 64 * 1024 * 1024;
-    if length > MAX_FOOTERLESS_BYTES {
-        tracing::debug!(
-            length,
-            maximum = MAX_FOOTERLESS_BYTES,
-            "footerless Xorb wire size exceeded normalization limit"
-        );
-        return Err(XetAdapterError::InvalidSerializedXorb);
-    }
-    input.seek(SeekFrom::Start(0))?;
-    let mut decoded = 0_u64;
-    let mut count = 0_usize;
-    while input.stream_position()? < length {
-        checkpoint()?;
-        // Only a complete footerless chunk stream is eligible for repair.
-        // In particular, never discard an invalid footer and authenticate only
-        // the payload prefix that happened to precede it.
-        let header = deserialize_chunk_header(&mut input).map_err(normalization_error)?;
-        count = count.checked_add(1).ok_or(XetAdapterError::Overflow)?;
-        if count > shardline_index::MAX_XET_DESCRIPTOR_CHUNKS {
-            return Err(XetAdapterError::TooManyShardTerms);
-        }
-        decoded = decoded
-            .checked_add(u64::from(header.get_uncompressed_length()))
-            .ok_or(XetAdapterError::Overflow)?;
-        if decoded > MAX_FOOTERLESS_DECODED {
-            tracing::debug!(
-                decoded,
-                count,
-                maximum = MAX_FOOTERLESS_DECODED,
-                "footerless Xorb decoded size exceeded normalization limit"
-            );
-            return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
-        }
-        let end = input
-            .stream_position()?
-            .checked_add(u64::from(header.get_compressed_length()))
-            .ok_or(XetAdapterError::Overflow)?;
-        if end > length {
-            return Err(XetAdapterError::InvalidSerializedXorb);
-        }
-        input.seek(SeekFrom::Start(end))?;
-    }
+    footerless_bounds::check(&mut input, length, checkpoint)?;
     Ok(Some(input))
 }
 
