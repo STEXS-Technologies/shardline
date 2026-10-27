@@ -59,7 +59,13 @@ async fn read(client: &Client, url: &str, credential: &str, range: &str) -> reqw
         .unwrap()
 }
 
-pub(super) async fn qualify(client: &Client, base: &str, owner: &str, other: &str) {
+pub(super) async fn qualify(
+    client: &Client,
+    base: &str,
+    owner: &str,
+    other: &str,
+    objects: &shardline_server_core::ServerObjectStore,
+) {
     let left = vec![b'L'; 32 * 1024];
     let right = vec![b'R'; 32 * 1024];
     let length = u64::try_from(left.len()).unwrap();
@@ -128,6 +134,34 @@ pub(super) async fn qualify(client: &Client, base: &str, owner: &str, other: &st
         read(client, &url, other, &left_range).await.status(),
         StatusCode::NOT_FOUND
     );
+    // A native hash identifies decoded members, not their compression layout.
+    // Simulate replacement in the owned backend with another valid encoding.
+    // Old serialized offsets must never grant access to the other member.
+    let alternate = serialized_xorb_object_from_components(
+        &hash,
+        [left.as_slice(), right.as_slice()].concat(),
+        vec![(left_hash, length), (right_hash, total)],
+        CompressionScheme::LZ4,
+    )
+    .unwrap()
+    .serialized_data;
+    shardline_xet_adapter::validate_serialized_xorb(
+        &mut std::io::Cursor::new(&alternate),
+        shardline_protocol::ShardlineHash::from_bytes(hash.into()),
+    )
+    .unwrap();
+    assert!(u64::try_from(alternate.len()).unwrap() < boundary);
+    let key = shardline_xet_adapter::xorb_object_key(&hash.hex()).unwrap();
+    replace_source(objects, &key, &alternate).await;
+    let replaced = read(client, &url, owner, &left_range).await;
+    let replaced_status = replaced.status();
+    // Restore before asserting so later fixture cleanup sees the original object.
+    replace_source(objects, &key, &bytes).await;
+    assert_eq!(
+        replaced_status,
+        StatusCode::NOT_FOUND,
+        "a changed valid encoding must not widen a published member grant"
+    );
     // A second genuine publication in the same repository completes coverage;
     // neither individual file alone covers the whole container payload.
     publish(client, base, owner, &info, &right, 1).await;
@@ -140,6 +174,23 @@ pub(super) async fn qualify(client: &Client, base: &str, owner: &str, other: &st
         footer.bytes().await.unwrap().as_ref(),
         bytes.last_chunk::<1>().unwrap()
     );
+}
+
+async fn replace_source(
+    objects: &shardline_server_core::ServerObjectStore,
+    key: &shardline_storage::ObjectKey,
+    bytes: &[u8],
+) {
+    use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity};
+    objects.delete_if_present(key).await.unwrap();
+    let integrity = ObjectIntegrity::new(
+        shardline_server_core::validation::chunk_hash(bytes),
+        u64::try_from(bytes.len()).unwrap(),
+    );
+    objects
+        .put_if_absent(key, ObjectBody::from_slice(bytes), &integrity)
+        .await
+        .unwrap();
 }
 
 async fn signed_get(client: &Client, url: &reqwest::Url, range: Option<&str>) -> reqwest::Response {

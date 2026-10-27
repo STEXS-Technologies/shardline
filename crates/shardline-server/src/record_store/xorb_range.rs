@@ -1,6 +1,6 @@
 //! Repository authorization for serialized Xorb payload bytes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use shardline_index::RecordTraversal;
 use shardline_protocol::{ByteRange, RepositoryScope};
@@ -87,7 +87,7 @@ where
 }
 
 #[derive(Default)]
-pub(crate) struct Coverage(BTreeMap<u64, u64>);
+pub(crate) struct Coverage(BTreeMap<u64, u64>, BTreeSet<(u64, u64, u64, u64)>);
 
 impl Coverage {
     fn include(
@@ -111,6 +111,12 @@ impl Coverage {
             for member in &record.chunks {
                 if member.hash == hash && member.packed_end > member.packed_start {
                     self.insert(member.packed_start, member.packed_end.saturating_sub(1));
+                    self.1.insert((
+                        member.range_start,
+                        member.range_end,
+                        member.packed_start,
+                        member.packed_end,
+                    ));
                 }
             }
         }
@@ -129,6 +135,29 @@ impl Coverage {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Native hashes bind decoded content, not compression. Published byte grants
+    /// are valid only for the member layout that was verified at publication.
+    pub(crate) fn matches_layout(
+        &self,
+        chunks: &[shardline_xet_adapter::ValidatedXorbChunk],
+    ) -> bool {
+        self.1
+            .iter()
+            .all(|&(start, end, packed_start, packed_end)| {
+                let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+                    return false;
+                };
+                start < end
+                    && chunks
+                        .get(start)
+                        .is_some_and(|member| member.packed_start() == packed_start)
+                    && end
+                        .checked_sub(1)
+                        .and_then(|last| chunks.get(last))
+                        .is_some_and(|member| member.packed_end() == packed_end)
+            })
     }
 
     /// A complete payload owner may also read the footer. A partial owner may
@@ -193,6 +222,32 @@ mod tests {
     use super::Coverage;
     use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore, StorageRepresentation};
     use shardline_protocol::{ByteRange, RepositoryProvider, RepositoryScope};
+
+    #[test]
+    fn published_member_grants_require_the_verified_serialized_layout() {
+        use shardline_protocol::ShardlineHash;
+        use shardline_xet_adapter::ValidatedXorbChunk;
+
+        let chunks = [
+            ValidatedXorbChunk::new(ShardlineHash::from_bytes([1; 32]), 0, 20, 0, 12),
+            ValidatedXorbChunk::new(ShardlineHash::from_bytes([2; 32]), 20, 40, 12, 24),
+        ];
+        let mut coverage = Coverage::default();
+        coverage.1.insert((0, 1, 0, 20));
+        assert!(coverage.matches_layout(&chunks));
+        for invalid in [(0, 1, 0, 40), (1, 2, 0, 40), (0, 3, 0, 40), (1, 1, 20, 20)] {
+            let mut changed = Coverage::default();
+            changed.1.insert(invalid);
+            assert!(!changed.matches_layout(&chunks));
+        }
+        coverage.1.insert((1, 2, 20, 40));
+        assert!(coverage.matches_layout(&chunks));
+        let recompressed = [
+            ValidatedXorbChunk::new(chunks[0].hash(), 0, 10, 0, 12),
+            ValidatedXorbChunk::new(chunks[1].hash(), 10, 20, 12, 24),
+        ];
+        assert!(!coverage.matches_layout(&recompressed));
+    }
 
     #[tokio::test]
     async fn indexed_range_authorization_uses_exact_scope_and_historical_term_coverage() {

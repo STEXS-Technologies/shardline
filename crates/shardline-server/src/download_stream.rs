@@ -127,6 +127,7 @@ pub(crate) struct VerifiedXorb {
     pool: BoundedPool,
     total_length: u64,
     packed_content_length: u64,
+    chunks: Vec<shardline_xet_adapter::ValidatedXorbChunk>,
 }
 
 pub(crate) async fn prepare_xorb_byte_range(
@@ -147,7 +148,7 @@ pub(crate) async fn prepare_xorb_byte_range(
     } else {
         0
     };
-    let (file, packed_content_length) = crate::admission::cancellable_work_with_setup(
+    let (file, validated) = crate::admission::cancellable_work_with_setup(
         &pool,
         || (),
         move |(), cancel| {
@@ -199,7 +200,7 @@ pub(crate) async fn prepare_xorb_byte_range(
             );
             cancel.check()?;
             let validated = validated?;
-            Ok((file, validated.packed_content_length()))
+            Ok((file, validated))
         },
     )
     .await?;
@@ -207,7 +208,8 @@ pub(crate) async fn prepare_xorb_byte_range(
         file,
         pool,
         total_length,
-        packed_content_length,
+        packed_content_length: validated.packed_content_length(),
+        chunks: validated.chunks().to_vec(),
     })
 }
 
@@ -224,10 +226,10 @@ impl VerifiedXorb {
         if range.end_inclusive() >= self.total_length {
             return Err(ServerError::RangeNotSatisfiable);
         }
-        if coverage
-            .as_ref()
-            .is_some_and(|allowed| !allowed.permits(range, self.packed_content_length))
-        {
+        if coverage.as_ref().is_some_and(|allowed| {
+            !allowed.matches_layout(&self.chunks)
+                || !allowed.permits(range, self.packed_content_length)
+        }) {
             return Err(ServerError::NotFound);
         }
         let state = SerializedXorbStreamState {
