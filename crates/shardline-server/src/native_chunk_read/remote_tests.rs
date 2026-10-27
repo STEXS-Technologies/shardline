@@ -56,9 +56,6 @@ async fn native_members_survive_replica_restart_without_standalone_copies() {
         .unwrap();
     let member = shardline_xet_core::merklehash::compute_data_hash(content).hex();
     let copy = crate::chunk_store::chunk_object_key(&member).unwrap();
-    AsyncObjectStore::delete_if_present(&objects, &copy)
-        .await
-        .unwrap();
     assert!(
         AsyncObjectStore::metadata(&objects, &copy)
             .await

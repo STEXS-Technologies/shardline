@@ -13,6 +13,17 @@ the validated workflows covered by this repository.
 Release notes identify which source-tree capabilities are included in each published
 version.
 
+Native Xet uploads now retain the verified Xorb container without an additional
+decoded chunk copy. Existing Xorbs and standalone chunks remain readable; the
+upgrade does not delete old payloads. Independent native chunk reads use verified
+member discovery and authenticate the backing Xorb. Shard publication records
+the member locations, and index rebuild can recover them from verified content.
+Pause native uploads while upgrading every reader, then resume writes once all
+replicas support this layout. Unchanged v1.12.1 readers
+that require standalone native chunks cannot serve those reads for new uploads;
+full rollback to those readers after new writes is not supported. Generic chunk
+uploads continue storing their explicitly requested standalone objects.
+
 Clients that require an `hf_` token prefix can use the opt-in
 `shardline_protocol::format_hub_token` formatter on an existing signed Shardline
 credential. The prefix changes presentation only; signature, expiry and repository

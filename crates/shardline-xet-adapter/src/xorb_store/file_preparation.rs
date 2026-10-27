@@ -13,7 +13,6 @@ mod digest_reader;
 
 pub(super) struct PreparedFile {
     pub normalized: Option<tempfile::NamedTempFile>,
-    pub file: File,
     pub path: PathBuf,
     pub validated: ValidatedXorb,
     pub integrity: ObjectIntegrity,
@@ -95,14 +94,13 @@ fn try_prepare_canonical(
         }
         Err(_) => return Ok(None),
     };
-    let (file, digest, observed_length) = reader.finish(checkpoint)?;
+    let (_file, digest, observed_length) = reader.finish(checkpoint)?;
     if observed_length != length {
         return Err(XetAdapterError::InvalidSerializedXorb);
     }
     let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), length);
     Ok(Some(PreparedFile {
         normalized: None,
-        file,
         path: path.to_owned(),
         validated,
         integrity,

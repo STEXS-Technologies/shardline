@@ -36,7 +36,7 @@ async fn container_only_retains_one_payload_and_serves_verified_members_after_re
     let root = tempfile::tempdir().unwrap();
     let objects = ServerObjectStore::local(root.path()).unwrap();
     let prepared = prepare_owned_xorb_file_with_checkpoint(&hash, file, &|| Ok(())).unwrap();
-    let stored = store_prepared_xorb_container(&objects, prepared, ())
+    let stored = store_prepared_xorb_file(&objects, prepared, ())
         .await
         .unwrap();
     assert!(stored.was_inserted);
@@ -49,31 +49,28 @@ async fn container_only_retains_one_payload_and_serves_verified_members_after_re
         .unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].length(), bytes.len() as u64);
-    let legacy_root = tempfile::tempdir().unwrap();
-    let legacy = ServerObjectStore::local(legacy_root.path()).unwrap();
-    let legacy_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(legacy_file.path(), &bytes).unwrap();
-    let prepared = prepare_owned_xorb_file_with_checkpoint(&hash, legacy_file, &|| Ok(())).unwrap();
-    let legacy_stored = store_prepared_xorb_file(&legacy, prepared, ())
+    let memory_root = tempfile::tempdir().unwrap();
+    let memory = ServerObjectStore::local(memory_root.path()).unwrap();
+    let memory_stored = crate::store_uploaded_xorb(&memory, &hash, &bytes)
         .await
         .unwrap();
-    let legacy_objects = legacy
+    let memory_objects = memory
         .list_prefix(&shardline_storage::ObjectPrefix::parse("").unwrap())
         .unwrap();
-    let legacy_bytes: u64 = legacy_objects.iter().map(|object| object.length()).sum();
-    assert_eq!(legacy_objects.len(), 3);
-    assert_eq!(legacy_bytes, bytes.len() as u64 + 2 * 65536);
-    assert_eq!(legacy_stored.stored_bytes, legacy_bytes);
+    let memory_bytes: u64 = memory_objects.iter().map(|object| object.length()).sum();
+    assert_eq!(memory_objects.len(), 1);
+    assert_eq!(memory_bytes, bytes.len() as u64);
+    assert_eq!(memory_stored.stored_bytes, memory_bytes);
     eprintln!(
-        "same verified source: compatibility={} objects/{} bytes, container-only={} object/{} bytes",
-        legacy_objects.len(),
-        legacy_bytes,
+        "same verified source: memory={} object/{} bytes, file={} object/{} bytes",
+        memory_objects.len(),
+        memory_bytes,
         all.len(),
         all[0].length(),
     );
     for member in validated.chunks() {
         let member_hash = shardline_index::xet_hash_hex_string(member.hash());
-        let key = super::super::super::chunk_object_key_local(&member_hash).unwrap();
+        let key = shardline_server_core::chunk_object_key(&member_hash).unwrap();
         assert!(objects.metadata(&key).unwrap().is_none());
         let decoded = crate::read_verified_xorb_chunk(&objects, &hash, &member_hash)
             .unwrap()
@@ -84,7 +81,7 @@ async fn container_only_retains_one_payload_and_serves_verified_members_after_re
     // Use exactly the already persisted bytes rather than a fresh random fixture.
     std::fs::write(retry.path(), &bytes).unwrap();
     let prepared = prepare_owned_xorb_file_with_checkpoint(&hash, retry, &|| Ok(())).unwrap();
-    let stored = store_prepared_xorb_container(&objects, prepared, ())
+    let stored = store_prepared_xorb_file(&objects, prepared, ())
         .await
         .unwrap();
     assert!(!stored.was_inserted);
@@ -103,7 +100,7 @@ async fn container_only_rejects_mutated_payload_and_footer_without_publishing() 
         let root = tempfile::tempdir().unwrap();
         let objects = ServerObjectStore::local(root.path()).unwrap();
         assert!(
-            store_prepared_xorb_container(&objects, prepared, ())
+            store_prepared_xorb_file(&objects, prepared, ())
                 .await
                 .is_err()
         );

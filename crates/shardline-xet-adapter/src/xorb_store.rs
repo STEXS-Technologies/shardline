@@ -7,21 +7,8 @@ use std::{
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ShardlineHash;
 use shardline_server_core::{ServerObjectStore, chunk_hash};
-use shardline_storage::{
-    AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome,
-};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome};
 use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer;
-
-fn chunk_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
-    shardline_server_core::validate_content_hash_with(hash_hex, || {
-        XetAdapterError::InvalidContentHash
-    })?;
-    let prefix = hash_hex
-        .get(..2)
-        .ok_or(XetAdapterError::InvalidContentHash)?;
-    let key = format!("{prefix}/{hash_hex}");
-    ObjectKey::parse(&key).map_err(map_object_key_error)
-}
 
 use crate::{
     error::XetAdapterError,
@@ -31,7 +18,6 @@ use crate::{
 use super::{ValidatedXorb, validate_serialized_xorb};
 
 mod blocking;
-mod chunk_writes;
 mod encoding;
 mod file_preparation;
 mod member_read;
@@ -43,8 +29,7 @@ pub use normalization::{
     normalize_uploaded_xorb_file,
 };
 pub use owned_preparation::{
-    PreparedXorbFile, prepare_owned_xorb_file_with_checkpoint, store_prepared_xorb_container,
-    store_prepared_xorb_file,
+    PreparedXorbFile, prepare_owned_xorb_file_with_checkpoint, store_prepared_xorb_file,
 };
 
 #[derive(Debug)]
@@ -233,16 +218,6 @@ pub async fn store_xorb_bytes_with_resources<R: Send + 'static>(
     let (canonical_bytes, validated) =
         canonicalize_uploaded_xorb(expected_hash_value, uploaded_bytes)?;
     let canonical_length = u64::try_from(canonical_bytes.len())?;
-    let mut cursor = Cursor::new(canonical_bytes.as_ref());
-    let resources = std::sync::Arc::new(std::sync::Mutex::new(resources));
-    let mut stored_bytes = chunk_writes::store_with_resources(
-        object_store,
-        &mut cursor,
-        &validated,
-        std::sync::Arc::clone(&resources),
-    )
-    .await?;
-
     let serialized_key = xorb_object_key(expected_hash)?;
     let serialized_integrity =
         ObjectIntegrity::new(chunk_hash(canonical_bytes.as_ref()), canonical_length);
@@ -258,22 +233,19 @@ pub async fn store_xorb_bytes_with_resources<R: Send + 'static>(
         encoding::resolve_conflict(&store, &serialized_key, &validated, result)
     })
     .await?;
-    if matches!(serialized_outcome, PutOutcome::Inserted) {
-        stored_bytes = stored_bytes
-            .checked_add(canonical_length)
-            .ok_or(XetAdapterError::Overflow)?;
-    }
-
     Ok(StoredXorbUpload {
         was_inserted: matches!(serialized_outcome, PutOutcome::Inserted),
-        stored_bytes,
+        stored_bytes: if matches!(serialized_outcome, PutOutcome::Inserted) {
+            canonical_length
+        } else {
+            0
+        },
     })
 }
 
-/// Stores a canonical serialized xorb directly from a seekable file. The
-/// Member writes retain at most 256 KiB of decoded chunks, or one larger member
-/// alone. Footerless inputs use a verified temporary file, preserving bounded
-/// memory at standard Xorb sizes.
+/// Stores only the canonical serialized Xorb from a seekable file. Decoded
+/// members are authenticated during validation, without a second stored copy.
+/// Footerless inputs use verified file-backed normalization with bounded memory.
 ///
 /// # Errors
 ///
@@ -347,66 +319,28 @@ async fn store_prepared_file_with_resources<R: Send + 'static>(
     prepared: file_preparation::PreparedFile,
     resources: R,
 ) -> Result<StoredXorbUpload, XetAdapterError> {
-    persist_prepared_file(
-        object_store,
-        expected_hash,
-        prepared,
-        resources,
-        MemberPersistence::StandaloneCompatibilityCopies,
-    )
-    .await
-}
-
-enum MemberPersistence {
-    StandaloneCompatibilityCopies,
-    ContainerOnly,
-}
-
-async fn persist_prepared_file<R: Send + 'static>(
-    object_store: &ServerObjectStore,
-    expected_hash: &str,
-    prepared: file_preparation::PreparedFile,
-    resources: R,
-    members: MemberPersistence,
-) -> Result<StoredXorbUpload, XetAdapterError> {
     let file_preparation::PreparedFile {
         normalized,
-        mut file,
         path: path_for_store,
         validated,
         integrity,
         length: canonical_length,
     } = prepared;
-    let resources = std::sync::Arc::new(std::sync::Mutex::new((normalized, resources)));
-    let stored_bytes = if matches!(members, MemberPersistence::StandaloneCompatibilityCopies) {
-        chunk_writes::store_with_resources(
-            object_store,
-            &mut file,
-            &validated,
-            std::sync::Arc::clone(&resources),
-        )
-        .await?
-    } else {
-        0
-    };
     let key = xorb_object_key(expected_hash)?;
     tracing::debug!(xorb_hash = expected_hash, "persisting verified Xorb");
     let store = object_store.clone();
-    let key_for_store = key.clone();
-    let outcome = blocking::cancellable_write(resources, move || {
-        let result = store.put_content_addressed_file(&key_for_store, &path_for_store, &integrity);
-        encoding::resolve_conflict(&store, &key_for_store, &validated, result)
+    let outcome = blocking::cancellable_write((normalized, resources), move || {
+        let result = store.put_content_addressed_file(&key, &path_for_store, &integrity);
+        encoding::resolve_conflict(&store, &key, &validated, result)
     })
     .await?;
-    let mut stored = stored_bytes;
-    if matches!(outcome, PutOutcome::Inserted) {
-        stored = stored
-            .checked_add(canonical_length)
-            .ok_or(XetAdapterError::Overflow)?;
-    }
     Ok(StoredXorbUpload {
         was_inserted: matches!(outcome, PutOutcome::Inserted),
-        stored_bytes: stored,
+        stored_bytes: if matches!(outcome, PutOutcome::Inserted) {
+            canonical_length
+        } else {
+            0
+        },
     })
 }
 
@@ -654,7 +588,7 @@ mod tests {
     // ---- store_uploaded_xorb tests ----
 
     #[test]
-    fn store_uploaded_xorb_stores_chunks_and_xorb() {
+    fn store_uploaded_xorb_stores_only_the_verified_container() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
@@ -668,11 +602,13 @@ mod tests {
         assert!(result.is_ok(), "store_uploaded_xorb failed: {result:?}");
         let stored = result.unwrap();
         assert!(stored.was_inserted, "xorb should be newly inserted");
-        assert!(
-            stored.stored_bytes > 0,
-            "stored_bytes should be > 0, got {}",
-            stored.stored_bytes
-        );
+        assert_eq!(stored.stored_bytes, serialized.serialized_data.len() as u64);
+        let objects = shardline_storage::ObjectStore::list_prefix(
+            &object_store,
+            &shardline_storage::ObjectPrefix::parse("").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(objects.len(), 1);
     }
 
     #[test]
@@ -1113,7 +1049,7 @@ mod tests {
         assert!(key.as_str().ends_with(".xorb"));
     }
 
-    // ── chunk_object_key_local (tests through canonicalize path) ───────
+    // ── Canonicalization and validation ──────────────────────────────
 
     #[test]
     fn canonicalize_uploaded_xorb_rejects_invalid_hash() {
@@ -1357,9 +1293,8 @@ mod tests {
     // ── store_uploaded_xorb unpacked_length sanity checks ────────────────
 
     #[test]
-    fn store_uploaded_xorb_stores_zero_stored_bytes_for_existing_chunks() {
-        // Store same xorb twice: first time inserts chunks, second time
-        // finds them already present so stored_bytes doesn't count them again.
+    fn store_uploaded_xorb_stores_zero_bytes_for_existing_container() {
+        // A retry verifies the retained container without counting it again.
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
@@ -1374,6 +1309,7 @@ mod tests {
 
         let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
+        assert_eq!(second.stored_bytes, 0);
     }
 
     // ── canonicalize_uploaded_xorb with complete error path ──────────────
@@ -1411,7 +1347,7 @@ mod tests {
     // ── store_uploaded_xorb with stored_bytes accumulation ─────────────
 
     #[test]
-    fn store_uploaded_xorb_stored_bytes_sum_chunks_and_xorb() {
+    fn store_uploaded_xorb_stored_bytes_count_only_the_container() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
@@ -1423,11 +1359,12 @@ mod tests {
 
         let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(result.was_inserted);
-        assert!(result.stored_bytes > 0, "should count stored bytes");
+        assert_eq!(result.stored_bytes, serialized.serialized_data.len() as u64);
 
-        // Second store: chunks exist, xorb exists -> stored_bytes unchanged
+        // Reusing the retained container inserts no additional payload bytes.
         let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
+        assert_eq!(second.stored_bytes, 0);
     }
 
     #[test]
@@ -1584,11 +1521,12 @@ mod tests {
             stored.stored_bytes
         );
 
-        // Store again (idempotent) - stored_bytes should only count chunks+xorb once
+        // An idempotent retry adds no payload bytes.
         let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
         assert!(second.is_ok(), "second store should succeed: {second:?}");
-        // was_inserted = false because AlreadyExists
-        // stored_bytes might be positive because chunks were already stored
+        let second = second.unwrap();
+        assert!(!second.was_inserted);
+        assert_eq!(second.stored_bytes, 0);
     }
 
     // ── store_uploaded_xorb_with_metrics full round-trip ─────────────────
@@ -2260,7 +2198,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── chunk_object_key_local invoked through store path ──────────────
+    // ── Container persistence accounting ─────────────────────────────
 
     #[test]
     fn store_uploaded_xorb_multiple_chunks_counts_stored_bytes() {

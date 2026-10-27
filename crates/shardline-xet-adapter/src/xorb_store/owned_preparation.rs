@@ -7,9 +7,8 @@ mod tests;
 
 /// An owned, fully verified native container ready for immutable persistence.
 /// The validation result cannot be constructed or changed by callers. Storage
-/// rechecks the serialized digest before publication; compatibility-copy writes
-/// also recheck decoded members. This is not a cache of the health of an already
-/// published object.
+/// rechecks the serialized digest before publication. This is not a cache of
+/// the health of an already published object.
 pub struct PreparedXorbFile {
     expected_hash: String,
     staging: tempfile::NamedTempFile,
@@ -61,11 +60,13 @@ pub fn prepare_owned_xorb_file_with_checkpoint(
 }
 
 /// Persist a prepared owned container without repeating its complete format
-/// validation. Member rereads and immutable publication retain their integrity
-/// checks. Started writes keep staging and admission after caller cancellation.
+/// validation or storing decoded copies. Immutable publication rechecks the
+/// serialized digest. Started writes keep staging and admission after caller
+/// cancellation. Independent chunk readers require published member discovery
+/// metadata and support for authenticated Xorb-backed reads.
 ///
 /// # Errors
-/// Returns source mutation, member validation or immutable-storage errors.
+/// Returns source mutation or immutable-storage errors.
 pub async fn store_prepared_xorb_file<R: Send + 'static>(
     objects: &ServerObjectStore,
     file: PreparedXorbFile,
@@ -81,37 +82,6 @@ pub async fn store_prepared_xorb_file<R: Send + 'static>(
         &expected_hash,
         prepared,
         (staging, resources),
-    )
-    .await
-}
-
-/// Persist only the authenticated container, without standalone decoded chunks.
-///
-/// The caller must publish verified member discovery metadata before promising
-/// independent chunk reads. Readers that require standalone chunk objects cannot
-/// read those members. This method does not change the compatibility behavior of
-/// [`store_prepared_xorb_file`]. The serialized digest is rechecked during durable
-/// immutable publication, including any mutation after preparation. Staging and
-/// admission remain owned until started synchronous writes finish.
-///
-/// # Errors
-/// Returns source mutation, immutable-storage or retained-container validation errors.
-pub async fn store_prepared_xorb_container<R: Send + 'static>(
-    objects: &ServerObjectStore,
-    file: PreparedXorbFile,
-    resources: R,
-) -> Result<StoredXorbUpload, XetAdapterError> {
-    let PreparedXorbFile {
-        expected_hash,
-        staging,
-        prepared,
-    } = file;
-    super::persist_prepared_file(
-        objects,
-        &expected_hash,
-        prepared,
-        (staging, resources),
-        super::MemberPersistence::ContainerOnly,
     )
     .await
 }

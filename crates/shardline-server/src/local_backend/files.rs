@@ -579,7 +579,6 @@ mod tests {
         let chunk = shardline_xet_core::merklehash::compute_data_hash(content).hex();
         let objects = backend.object_store();
         let chunk_key = crate::chunk_store::chunk_object_key(&chunk).unwrap();
-        objects.delete_if_present(&chunk_key).unwrap();
         assert!(objects.metadata(&chunk_key).unwrap().is_none());
         assert_eq!(backend.read_chunk(&chunk).await.unwrap(), content);
         let generic = blake3::hash(content).to_hex().to_string();

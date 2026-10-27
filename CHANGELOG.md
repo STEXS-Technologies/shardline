@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Persist native Xet payloads once as verified Xorb containers, removing redundant
+  decoded chunk writes. Existing data stays readable; new native chunk reads
+  require upgraded readers, so upgrade all replicas before accepting new writes.
 - Share consecutive identical native Xet member writes within one upload,
   avoiding redundant storage operations while retaining every member's hash
   checks, cancellation points, durable completion and existing storage layout.
