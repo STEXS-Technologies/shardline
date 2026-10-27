@@ -49,7 +49,10 @@ impl KindDeploymentConfig {
 #[ignore = "requires the disposable kind deployment created by scripts/k8s/kind-smoke.sh"]
 async fn kind_scaled_deployment_serves_split_roles_with_real_backends() -> Result<(), TestError> {
     let config = KindDeploymentConfig::from_env()?;
-    let client = Client::new();
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .build()?;
 
     wait_for_health(&client, &config.api_url).await?;
     wait_for_health(&client, &config.transfer_url).await?;
