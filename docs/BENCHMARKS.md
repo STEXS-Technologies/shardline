@@ -2317,6 +2317,21 @@ Instrumented timings are excluded from the table. The profile provides no
 justification for skipping member authentication, file identity verification
 or durable publication to match the development CAS.
 
+A later remote profile used the copy-free runtime with shard read buffering,
+PostgreSQL/MinIO, the stock Hub 2.2.0 / hf_xet 1.7.0 client and a 512 MiB
+incompressible file. Native counters confirmed nine Xorbs and one shard, with
+no regular Hub body upload; the complete download passed SHA-256 verification.
+Sampling at 99 Hz captured 1,211 samples with none lost. Among self-cycle
+entries, BLAKE3's bulk AVX-512 routine accounted for about 22%, SHA-256's digest
+routine 11%, and kernel file copying 11%. Application offsets were resolved
+using independently verified identical executable-code bytes and ELF mappings
+from a symbol-bearing build. These short, instrumented observations locate CPU
+work; they do not measure wall-clock attribution or upload-speed parity.
+A separate symbol-bearing repeat encountered 414 MinIO HTTP 507 storage-reserve
+responses and was stopped. Its timings and CPU samples are excluded. Repeated
+reads and scratch handling remain optimization targets; authentication and
+durable publication remain required.
+
 The stopped profile's SQLite files comprised a 5,439,488-byte database,
 7,774,472-byte WAL and 32,768-byte shared-memory file. An isolated copy passed
 SQLite integrity checks before and after a successful truncating checkpoint;
