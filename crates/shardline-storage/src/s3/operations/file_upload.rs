@@ -1,7 +1,9 @@
 use std::path::Path;
 
+use crate::ObjectIntegrity;
 use futures_util::{TryStreamExt, stream::FuturesOrdered};
 use object_store::{PutPayload, multipart::MultipartStore, path::Path as ObjectStorePath};
+use shardline_protocol::ShardlineHash;
 use tokio::{fs::File, io::AsyncReadExt};
 
 use super::{S3ObjectStore, S3ObjectStoreError, STREAM_UPLOAD_CHUNK_BYTES};
@@ -13,7 +15,7 @@ impl S3ObjectStore {
         &self,
         location: &ObjectStorePath,
         path: &Path,
-        expected_length: u64,
+        integrity: &ObjectIntegrity,
     ) -> Result<(), S3ObjectStoreError> {
         self.block_on_result(async {
             // Do not create remote state if the source cannot be opened.
@@ -24,6 +26,7 @@ impl S3ObjectStore {
                 let mut pending = FuturesOrdered::new();
                 let mut parts = Vec::new();
                 let mut total = 0_u64;
+                let mut digest = blake3::Hasher::new();
                 let mut part_index = 0_usize;
                 loop {
                     // Bound submitted payloads before allocating the next part.
@@ -46,8 +49,9 @@ impl S3ObjectStore {
                     }
                     total = total
                         .checked_add(bytes.len() as u64)
-                        .filter(|length| *length <= expected_length)
+                        .filter(|length| *length <= integrity.length())
                         .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
+                    digest.update(&bytes);
                     let final_part = bytes.len() < STREAM_UPLOAD_CHUNK_BYTES;
                     let index = part_index;
                     part_index = part_index
@@ -66,8 +70,13 @@ impl S3ObjectStore {
                         break;
                     }
                 }
-                if total != expected_length {
+                if total != integrity.length() {
                     return Err(S3ObjectStoreError::IntegrityLengthMismatch);
+                }
+                // Authenticate the exact submitted bytes, including mutations
+                // after caller validation, before any completion can publish.
+                if ShardlineHash::from_bytes(*digest.finalize().as_bytes()) != integrity.hash() {
+                    return Err(S3ObjectStoreError::IntegrityHashMismatch);
                 }
                 while let Some(part) = pending.try_next().await? {
                     parts.push(part);

@@ -6,14 +6,15 @@ use object_store::GetResult;
 use tokio::io::AsyncReadExt;
 
 use super::{S3ObjectStore, S3ObjectStoreError, stream_payload_for_range};
-use crate::PutOutcome;
+use crate::{ObjectIntegrity, PutOutcome};
 
 pub(super) fn compare_existing_file(
     store: &S3ObjectStore,
     result: GetResult,
     path: &Path,
-    expected_length: u64,
+    integrity: &ObjectIntegrity,
 ) -> Result<PutOutcome, S3ObjectStoreError> {
+    let expected_length = integrity.length();
     store.block_on_result(async {
         let file = tokio::fs::File::open(path)
             .await
@@ -31,8 +32,10 @@ pub(super) fn compare_existing_file(
         let mut stream = stream_payload_for_range(result, 0..expected_length)?;
         let mut buffer = vec![0_u8; crate::s3::STREAM_COMPARE_CHUNK_BYTES];
         let mut compared = 0_u64;
+        let mut digest = blake3::Hasher::new();
         while let Some(bytes) = stream.next().await {
             let bytes = bytes?;
+            digest.update(&bytes);
             compared = compared
                 .checked_add(
                     u64::try_from(bytes.len())
@@ -59,6 +62,11 @@ pub(super) fn compare_existing_file(
                 .await
                 .map_err(S3ObjectStoreError::Io)?
                 != 0
+        {
+            return Err(S3ObjectStoreError::ExistingObjectConflict);
+        }
+        if shardline_protocol::ShardlineHash::from_bytes(*digest.finalize().as_bytes())
+            != integrity.hash()
         {
             return Err(S3ObjectStoreError::ExistingObjectConflict);
         }

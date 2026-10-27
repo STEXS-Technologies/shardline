@@ -674,8 +674,9 @@ impl S3ObjectStore {
     /// # Errors
     ///
     /// Callers are expected to have already validated the file hash before invoking this
-    /// method. The S3 adapter rechecks file length up front and fully compares against an
-    /// existing destination object on conflict.
+    /// method. The S3 adapter rechecks file length up front and authenticates the
+    /// streamed bytes before multipart completion. Existing destinations are
+    /// fully compared and authenticated before acknowledging a replay.
     ///
     /// Returns [`S3ObjectStoreError`] when the local file length does not match the
     /// supplied integrity metadata, multipart upload fails, or an existing destination
@@ -691,7 +692,7 @@ impl S3ObjectStore {
         }
 
         let location = self.location_for_key(key)?;
-        match self.stream_file_if_absent(&location, path, integrity.length()) {
+        match self.stream_file_if_absent(&location, path, integrity) {
             Ok(()) => Ok(PutOutcome::Inserted),
             Err(S3ObjectStoreError::External(ExternalObjectStoreError::AlreadyExists {
                 ..
@@ -714,8 +715,9 @@ impl S3ObjectStore {
     /// # Errors
     ///
     /// Callers are expected to have already validated the file hash before invoking this
-    /// method. The S3 adapter rechecks file length up front and fully compares against an
-    /// existing destination object on conflict.
+    /// method. The S3 adapter rechecks file length up front and authenticates the
+    /// streamed bytes before multipart completion. Existing destinations are
+    /// fully compared and authenticated before acknowledging a replay.
     ///
     /// Returns [`S3ObjectStoreError`] when the local file length does not match the
     /// supplied integrity metadata, an existing destination object conflicts with the
@@ -1306,7 +1308,7 @@ pub(crate) fn existing_object_outcome_from_file(
         }
         Err(error) => return Err(error),
     };
-    file_compare::compare_existing_file(store, result, path, integrity.length()).map(Some)
+    file_compare::compare_existing_file(store, result, path, integrity).map(Some)
 }
 
 fn missing_copy_source(source: &ObjectKey) -> S3ObjectStoreError {

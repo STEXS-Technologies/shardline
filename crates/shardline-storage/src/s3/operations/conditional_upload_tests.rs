@@ -32,6 +32,7 @@ struct State {
     destination_heads: usize,
     completion_status: Option<&'static str>,
     completion_requests: usize,
+    mutate_source_on_create: Option<(std::path::PathBuf, Vec<u8>)>,
 }
 
 struct Provider {
@@ -138,6 +139,9 @@ impl Provider {
                     }
                     "POST" if !path.contains("uploadId=") => {
                         state.creates = state.creates.checked_add(1).unwrap();
+                        if let Some((path, bytes)) = state.mutate_source_on_create.take() {
+                            std::fs::write(path, bytes).unwrap();
+                        }
                         let body = b"<InitiateMultipartUploadResult><Bucket>fixture</Bucket><Key>destination</Key><UploadId>fixture-id</UploadId></InitiateMultipartUploadResult>".to_vec();
                         let length = body.len();
                         ("200 OK", body, length)
@@ -362,6 +366,43 @@ fn direct_file_upload_uses_four_requests_and_no_temporary_object() {
 }
 
 #[test]
+fn direct_file_upload_rejects_same_length_source_mutation_and_matching_bad_replay() {
+    for exists in [false, true] {
+        let provider = Provider::new(None);
+        let store = provider.store().unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3::hash(SOURCE).as_bytes()),
+            SOURCE.len() as u64,
+        );
+        let mut changed = SOURCE.to_vec();
+        changed[0] ^= 1;
+        if exists {
+            std::fs::write(file.path(), &changed).unwrap();
+            provider.state.lock().unwrap().destination = Some(changed.clone());
+        } else {
+            std::fs::write(file.path(), SOURCE).unwrap();
+            // Change the already-open source only after remote upload
+            // creation, beyond caller validation and the existence probe.
+            provider.state.lock().unwrap().mutate_source_on_create =
+                Some((file.path().to_owned(), changed.clone()));
+        }
+        let result = store.put_content_addressed_file(
+            &ObjectKey::parse("destination").unwrap(),
+            file.path(),
+            &integrity,
+        );
+        assert!(result.is_err(), "changed source must not be acknowledged");
+        let state = provider.state.lock().unwrap();
+        assert_eq!(state.completion_requests, 0);
+        assert_eq!(state.destination.as_ref(), exists.then_some(&changed));
+        if !exists {
+            assert!(state.aborted);
+        }
+    }
+}
+
+#[test]
 fn direct_file_upload_preserves_concurrent_writers_and_verifies_replays() {
     for winner in [SOURCE, b"winner bytes".as_slice()] {
         let provider = Provider::new(Some(winner.to_vec()));
@@ -406,7 +447,14 @@ fn direct_file_upload_aborts_parts_and_length_failures_before_publication() {
             .unwrap();
         assert!(
             store
-                .stream_file_if_absent(&location, file.path(), length)
+                .stream_file_if_absent(
+                    &location,
+                    file.path(),
+                    &ObjectIntegrity::new(
+                        ShardlineHash::from_bytes(*blake3::hash(SOURCE).as_bytes()),
+                        length,
+                    )
+                )
                 .is_err()
         );
         let state = provider.state.lock().unwrap();
@@ -426,7 +474,11 @@ fn direct_file_upload_does_not_create_remote_state_for_missing_source() {
         .unwrap();
     assert!(
         store
-            .stream_file_if_absent(&location, &dir.path().join("missing"), 0)
+            .stream_file_if_absent(
+                &location,
+                &dir.path().join("missing"),
+                &ObjectIntegrity::new(ShardlineHash::from_bytes(*blake3::hash(&[]).as_bytes()), 0,)
+            )
             .is_err()
     );
     assert_eq!(provider.state.lock().unwrap().requests, 0);

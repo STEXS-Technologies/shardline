@@ -161,6 +161,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Recheck S3 file-upload digests while streaming, rejecting changed source
+  bytes before multipart completion or existing-object acknowledgment without
+  adding a file pass or backend request.
+
 - Reject native Xorb upload retries while their object has an unresolved remote
   delete, including retries of previously completed uploads.
 - Stop cancelled native upload identity preparation between validation and
