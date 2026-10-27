@@ -58,6 +58,10 @@ jobs:
         run: >-
           cargo test --locked -p shardline-storage --test provider_signed_ranges -- --ignored
 
+      - name: Verify S3 backend certificate trust and hostname validation
+        run: >-
+          cargo test --locked -p shardline-storage --all-features --test s3_tls
+
       - name: Verify saved-delete recovery with PostgreSQL and MinIO
         run: >-
           cargo test --locked -p shardline-server --features docker
