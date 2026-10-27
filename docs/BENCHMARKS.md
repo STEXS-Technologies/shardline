@@ -2338,6 +2338,24 @@ The result establishes fewer read syscalls, not a general throughput gain or
 less physical storage I/O. The buffer lasts only for validation and is dropped
 before later member reads; cancellation and content checks remain in place.
 
+A separate 1 GiB diagnostic used deterministic incompressible blocks and a
+256 KiB tail replacement, fresh stock clients, the same optimized binaries and
+one logical server CPU. Both initial and edited downloads from each server
+passed independent SHA-256 checks. Shardline's retained file lengths rose from
+1,096,177,888 to 1,096,491,979 bytes after the cold-client edit, a 314,091-byte
+increase including metadata. Its final 18 Xorbs occupied 1,074,991,059 bytes.
+This fixture did not reproduce the hundreds-of-megabytes edit amplification
+observed in the historical remote fixture below. It does not establish optimal
+reuse for every corpus or reproduce that earlier fixture exactly.
+
+The same diagnostic observed initial/edited upload times of 6.23/1.29 seconds
+for Shardline and 3.71/0.69 seconds for upstream. Initial-upload server peak
+RSS was 51,172 versus 329,588 KiB. These are single-run, shared-host local-CAS
+observations without a contention qualification, not a speed-parity result or
+an aggregate memory bound. Upstream's development CAS retains weaker durability
+semantics. Input checksums, inventory and verified results were preserved before
+removing the completed diagnostic's payload copies.
+
 An additional October 27 experiment buffered footer serialization in 64 KiB
 blocks. A 64 MiB instrumented baseline/candidate/candidate/baseline comparison
 reduced staging writes from 3,333–3,341 to 167–171, while preserving
