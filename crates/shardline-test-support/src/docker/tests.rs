@@ -2,6 +2,24 @@
 
 use super::*;
 
+#[test]
+fn mandatory_fixture_diagnostic_preserves_capacity_guidance_without_error_contents() {
+    let secret = "https://access:private-token@example.invalid/?signature=private";
+    let full = IoError::new(ErrorKind::StorageFull, secret);
+    let diagnostic = fixture_requirement(Some(&full));
+    assert!(diagnostic.contains("restore free disk space"));
+    assert!(!diagnostic.contains(secret));
+    let other = IoError::other(secret);
+    assert_eq!(
+        fixture_requirement(Some(&other)),
+        "disposable Docker service fixture"
+    );
+    assert_eq!(
+        fixture_requirement(None),
+        "disposable Docker service fixture"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn failed_fixture_command_does_not_disclose_client_output() {

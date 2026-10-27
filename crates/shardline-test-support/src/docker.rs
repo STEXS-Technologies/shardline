@@ -395,8 +395,10 @@ impl DockerLocalStackBuilder {
             return Ok(None);
         }
         let result = self.start_available();
-        let _ready =
-            crate::require_native_client("disposable Docker service fixture", result.is_ok());
+        let _ready = crate::require_native_client(
+            fixture_requirement(result.as_ref().err()),
+            result.is_ok(),
+        );
         result.map(Some)
     }
 
@@ -434,6 +436,14 @@ impl DockerLocalStackBuilder {
         }
 
         Ok(stack)
+    }
+}
+
+fn fixture_requirement(error: Option<&IoError>) -> &'static str {
+    if error.is_some_and(|error| error.kind() == ErrorKind::StorageFull) {
+        "disposable Docker service fixture: storage is full; restore free disk space before qualification"
+    } else {
+        "disposable Docker service fixture"
     }
 }
 

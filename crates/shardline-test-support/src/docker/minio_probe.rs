@@ -78,11 +78,18 @@ fn run_mc(
             message.contains("XMinioStorageFull")
                 || message.contains("minimum free drive threshold")
         });
-        return Err(IoError::other(if full {
-            "MinIO storage preflight failed: XMinioStorageFull; restore free disk space before running storage qualification"
-        } else {
-            "MinIO storage preflight failed; HTTP readiness and bucket creation do not prove writable object storage"
-        }));
+        return Err(IoError::new(
+            if full {
+                ErrorKind::StorageFull
+            } else {
+                ErrorKind::Other
+            },
+            if full {
+                "MinIO storage preflight failed: XMinioStorageFull; restore free disk space before running storage qualification"
+            } else {
+                "MinIO storage preflight failed; HTTP readiness and bucket creation do not prove writable object storage"
+            },
+        ));
     }
     Ok(output)
 }
