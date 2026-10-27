@@ -66,10 +66,18 @@ fn run_mc(
             .arg(format!("{}:/probe:ro", source.display()));
     }
     command.arg(MINIO_MC_IMAGE).arg("--json").args(args);
+    // Register before starting the CLI: a failed or timed-out start can still
+    // leave a container in the daemon. Keep ownership if immediate removal fails.
+    track_container_for_process_cleanup(&name);
     let result = crate::native_client_output(&mut command, Duration::from_secs(30));
     // Killing the Docker CLI process group does not prove its container stopped.
     // Remove only this fixture's named probe, including after a deadline.
-    let _cleanup = remove_container(&name);
+    let cleanup = remove_container(&name);
+    if cleanup.is_ok() || result.as_ref().is_ok_and(|output| output.status.success()) {
+        // Successful `docker run --rm` owns its automatic removal. Otherwise
+        // only forget the probe after our explicit removal was acknowledged.
+        untrack_container_for_process_cleanup(&name);
+    }
     let output = result?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -153,3 +161,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, unix))]
+mod cleanup_retry;
