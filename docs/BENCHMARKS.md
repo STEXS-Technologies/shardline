@@ -2613,6 +2613,17 @@ This removes one backend request for the qualified path; it does not reduce
 container bytes fetched or establish a throughput, SSD-wear or upstream-Xet
 parity improvement.
 
+A stock Hub 2.2.0/hf_xet 1.7.0 check uploaded and downloaded the same 64 MiB
+incompressible file through real PostgreSQL/MinIO, with fresh clients and owned
+deployments in before/after/after/before order. All four downloads passed
+independent SHA-256 verification and their traces reconciled with MinIO API
+counters. Complete-download backend requests fell from eight to seven in both
+pairs: one Xorb GET remains, its HEAD disappears, and the three other
+HEAD/GET pairs remain. Both versions retained 1,066 objects totaling
+134,346,551–134,346,555 payload bytes; the few-byte variation is metadata,
+with identical chunk, Xorb and shard lengths. These debug-binary controls do not
+establish a production timing or memory improvement.
+
 ### Rejected decoded-buffer ownership experiment
 
 An experiment transferred decoded buffers directly into HTTP responses instead
