@@ -136,17 +136,37 @@ async fn ready(client: &reqwest::Client, base: &str, child: &mut Process) -> Res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_xorb_retry_survives_sigkill_at_every_durable_boundary() -> Result {
+    qualify_native_retry(1).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_native_members_survive_sigkill_at_every_durable_boundary() -> Result {
+    qualify_native_retry(128).await
+}
+
+async fn qualify_native_retry(repetitions: usize) -> Result {
     use shardline_index::UploadIntentStore;
     use std::os::unix::process::ExitStatusExt;
     let content = b"verified native process interruption payload";
     let chunk = compute_data_hash(content);
     let content_length = u64::try_from(content.len())?;
-    let identity = xorb_hash(&[(chunk, content_length)]);
+    let members = vec![(chunk, content_length); repetitions];
+    let identity = xorb_hash(&members);
     let hash = shardline_server::test_fixtures::xet_hash_hex(&identity);
+    let boundaries = (1..=repetitions)
+        .map(|count| {
+            Ok((
+                chunk,
+                content_length
+                    .checked_mul(u64::try_from(count)?)
+                    .ok_or("chunk boundary overflow")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let bytes = serialized_xorb_object_from_components(
         &identity,
-        content.to_vec(),
-        vec![(chunk, content_length)],
+        content.repeat(repetitions),
+        boundaries,
         CompressionScheme::None,
     )?
     .serialized_data;
@@ -181,15 +201,26 @@ async fn native_xorb_retry_survives_sigkill_at_every_durable_boundary() -> Resul
             .post(format!("{base}/v1/xorbs/default/{hash}"))
             .bearer_auth(&token)
             .body(bytes.clone());
-        let upload = tokio::spawn(async move { request.send().await });
+        let mut upload = tokio::spawn(async move { request.send().await });
         tokio::time::timeout(Duration::from_secs(30), async {
             while !root.path().join("reached").exists() {
                 assert!(child.0.try_wait()?.is_none(), "process exited before {cut}");
+                if upload.is_finished() {
+                    let response = (&mut upload).await??;
+                    return Err(format!(
+                        "upload returned {} before {cut} pause ({repetitions} members)",
+                        response.status()
+                    )
+                    .into());
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Ok::<(), Box<dyn std::error::Error>>(())
         })
-        .await??;
+        .await
+        .map_err(|error| {
+            format!("upload did not reach {cut} ({repetitions} members): {error}")
+        })??;
         child.0.kill()?;
         assert_eq!(child.0.wait()?.signal(), Some(9));
         upload.abort();
@@ -214,6 +245,12 @@ async fn native_xorb_retry_survives_sigkill_at_every_durable_boundary() -> Resul
                 .join(format!("chunks/xorbs/default/{}/{hash}.xorb", &hash[..2])),
         )?;
         assert_eq!(stored, bytes, "persisted Xorb at {cut}");
+        let chunk_hash = shardline_server::test_fixtures::xet_hash_hex(&chunk);
+        let stored_member = std::fs::read(
+            root.path()
+                .join(format!("chunks/{}/{chunk_hash}", &chunk_hash[..2])),
+        )?;
+        assert_eq!(stored_member, content, "old-reader chunk copy at {cut}");
         let index = shardline_index::LocalIndexStore::new(root.path().to_owned())?;
         let original = index
             .intent_by_id(&intent)
