@@ -72,6 +72,21 @@ development fixture does not replace the released upgrade/rollback baseline.
 Use absolute paths and keep these executables unchanged throughout the run.
 Missing fixtures fail qualification; they must not be counted as passing tests.
 
+### Distributed-integrity qualification
+
+Use Docker, Git, `libfaketime`, and a Python 3 environment with
+`huggingface_hub==2.2.0` and `hf_xet==1.7.0` on `PATH`. Run:
+
+```bash
+SHARDLINE_FAKETIME_LIBRARY=/path/to/libfaketime.so.1 \
+  cargo make test-distributed-integrity /private/evidence/distributed
+```
+
+The gate freezes the current binary, verifies the released v1.12.1 baseline,
+and runs every deployment and multi-node test, including ignored qualification
+cases. Missing clients, skipped cases and failed assertions fail the gate.
+Keep evidence outside the checkout; logs can contain backend addresses.
+
 ### Disk-pressure qualification
 
 On Linux, run the candidate CLI against a disposable 512 MiB ext4 image with

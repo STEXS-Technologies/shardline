@@ -4,7 +4,7 @@ set -euo pipefail
 test "$#" -le 1 || { echo 'usage: run_distributed_integrity_gate.sh [OUTPUT_DIRECTORY]' >&2; exit 2; }
 : "${SHARDLINE_FAKETIME_LIBRARY:?Set SHARDLINE_FAKETIME_LIBRARY to libfaketime.so.1 for the clock-skew drill}"
 test -r "$SHARDLINE_FAKETIME_LIBRARY"
-for tool in cargo curl docker jq sha256sum tar rg; do
+for tool in cargo curl docker git python3 jq sha256sum tar rg; do
     command -v "$tool" >/dev/null || { echo "Missing required verification tool: $tool" >&2; exit 1; }
 done
 docker info >/dev/null
@@ -16,6 +16,9 @@ umask 077
 output=${1:-distributed-integrity-results}
 mkdir -p "$output"
 output=$(realpath "$output")
+python3 -c 'import huggingface_hub, hf_xet; import importlib.metadata as m, json; print(json.dumps({name: m.version(name) for name in ("huggingface_hub", "hf_xet")}))' \
+    > "$output/native-client-versions.json"
+git --version > "$output/git-version.txt"
 
 cargo build --locked --all-features -p shardline --message-format=json \
     > "$output/current-build.json" 2> "$output/current-build.log"
@@ -33,7 +36,7 @@ sha256sum "$CARGO_BIN_EXE_shardline" "$SHARDLINE_N_MINUS_ONE_BINARY" \
     "$SHARDLINE_FAKETIME_LIBRARY" > "$output/binaries.sha256"
 
 cargo nextest run --locked -p shardline-server --all-features --test deployment_chaos \
-    --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \
+    --run-ignored all --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \
     > "$output/deployment.log" 2>&1
 if rg -ni 'SKIP:|SKIPPED:|skipping:|panicked at' "$output/deployment.log"; then
     echo 'FAIL: a deployment drill skipped or a task panicked' >&2
@@ -41,13 +44,13 @@ if rg -ni 'SKIP:|SKIPPED:|skipping:|panicked at' "$output/deployment.log"; then
 fi
 expected_deployment_tests=$(cargo nextest list --locked -p shardline-server --all-features \
     --test deployment_chaos --message-format json \
-    | jq -er '[."rust-suites"[]?.testcases[]? | select(.ignored != true)] | length')
+    | jq -er '[."rust-suites"[]?.testcases[]?] | length')
 rg "Starting ${expected_deployment_tests} tests across 1 binary" "$output/deployment.log"
-rg "Summary.*${expected_deployment_tests} tests run: ${expected_deployment_tests} passed" \
+rg "Summary.*${expected_deployment_tests} tests run: ${expected_deployment_tests} passed, 0 skipped" \
     "$output/deployment.log"
 
 cargo nextest run --locked -p shardline-server --all-features --test multinode_chaos \
-    --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \
+    --run-ignored all --test-threads 1 --no-fail-fast --success-output immediate --failure-output immediate \
     > "$output/multinode.log" 2>&1
 if rg -ni 'SKIP:|SKIPPED:|skipping:|panicked at' "$output/multinode.log"; then
     echo 'FAIL: a multi-node drill skipped or a task panicked' >&2
@@ -55,8 +58,8 @@ if rg -ni 'SKIP:|SKIPPED:|skipping:|panicked at' "$output/multinode.log"; then
 fi
 expected_multinode_tests=$(cargo nextest list --locked -p shardline-server --all-features \
     --test multinode_chaos --message-format json \
-    | jq -er '[."rust-suites"[]?.testcases[]? | select(.ignored != true)] | length')
+    | jq -er '[."rust-suites"[]?.testcases[]?] | length')
 rg "Starting ${expected_multinode_tests} tests across 1 binary" "$output/multinode.log"
-rg "Summary.*${expected_multinode_tests} tests run: ${expected_multinode_tests} passed" \
+rg "Summary.*${expected_multinode_tests} tests run: ${expected_multinode_tests} passed, 0 skipped" \
     "$output/multinode.log"
 echo 'PASS: deployment faults, mixed-version rollback and multi-node role integrity'

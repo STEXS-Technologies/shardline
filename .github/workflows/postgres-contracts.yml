@@ -33,6 +33,13 @@ jobs:
           test -n "$faketime_library"
           echo "SHARDLINE_FAKETIME_LIBRARY=$faketime_library" >> "$GITHUB_ENV"
 
+      - name: Install pinned Hub clients for history and upgrade drills
+        run: |
+          client_env="$RUNNER_TEMP/distributed-hub-clients"
+          python3 -m venv "$client_env"
+          "$client_env/bin/pip" install huggingface_hub==2.2.0 hf_xet==1.7.0
+          echo "$client_env/bin" >> "$GITHUB_PATH"
+
       - name: Verify distributed integrity and mixed-version operation
         run: cargo make test-distributed-integrity distributed-integrity-results
 
