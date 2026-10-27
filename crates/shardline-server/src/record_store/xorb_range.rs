@@ -139,13 +139,12 @@ impl Coverage {
 
     /// Native hashes bind decoded content, not compression. Published byte grants
     /// are valid only for the member layout that was verified at publication.
-    pub(crate) fn matches_layout(
-        &self,
-        chunks: &[shardline_xet_adapter::ValidatedXorbChunk],
-    ) -> bool {
-        self.1
-            .iter()
-            .all(|&(start, end, packed_start, packed_end)| {
+    /// Discard mismatching terms independently so an invalid current term cannot
+    /// invalidate a complete historical grant from the same authoritative scope.
+    pub(crate) fn for_layout(&self, chunks: &[shardline_xet_adapter::ValidatedXorbChunk]) -> Self {
+        let mut verified = Self::default();
+        for &(start, end, packed_start, packed_end) in &self.1 {
+            let matches = (|| {
                 let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
                     return false;
                 };
@@ -157,7 +156,13 @@ impl Coverage {
                         .checked_sub(1)
                         .and_then(|last| chunks.get(last))
                         .is_some_and(|member| member.packed_end() == packed_end)
-            })
+            })();
+            if matches {
+                verified.insert(packed_start, packed_end.saturating_sub(1));
+                verified.1.insert((start, end, packed_start, packed_end));
+            }
+        }
+        verified
     }
 
     /// A complete payload owner may also read the footer. A partial owner may
@@ -234,19 +239,33 @@ mod tests {
         ];
         let mut coverage = Coverage::default();
         coverage.1.insert((0, 1, 0, 20));
-        assert!(coverage.matches_layout(&chunks));
+        assert!(
+            coverage
+                .for_layout(&chunks)
+                .covers(ByteRange::new(0, 19).unwrap())
+        );
         for invalid in [(0, 1, 0, 40), (1, 2, 0, 40), (0, 3, 0, 40), (1, 1, 20, 20)] {
             let mut changed = Coverage::default();
             changed.1.insert(invalid);
-            assert!(!changed.matches_layout(&chunks));
+            assert!(changed.for_layout(&chunks).is_empty());
         }
         coverage.1.insert((1, 2, 20, 40));
-        assert!(coverage.matches_layout(&chunks));
+        assert!(
+            coverage
+                .for_layout(&chunks)
+                .covers(ByteRange::new(0, 39).unwrap())
+        );
+        coverage.1.insert((0, 1, 0, 1));
+        assert!(
+            coverage
+                .for_layout(&chunks)
+                .covers(ByteRange::new(0, 39).unwrap())
+        );
         let recompressed = [
             ValidatedXorbChunk::new(chunks[0].hash(), 0, 10, 0, 12),
             ValidatedXorbChunk::new(chunks[1].hash(), 10, 20, 12, 24),
         ];
-        assert!(!coverage.matches_layout(&recompressed));
+        assert!(coverage.for_layout(&recompressed).is_empty());
     }
 
     #[tokio::test]

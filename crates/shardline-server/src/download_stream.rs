@@ -231,8 +231,9 @@ impl VerifiedXorb {
             return Err(ServerError::RangeNotSatisfiable);
         }
         if coverage.as_ref().is_some_and(|allowed| {
-            !allowed.matches_layout(&self.chunks)
-                || !allowed.permits(range, self.packed_content_length)
+            !allowed
+                .for_layout(&self.chunks)
+                .permits(range, self.packed_content_length)
         }) {
             return Err(ServerError::NotFound);
         }

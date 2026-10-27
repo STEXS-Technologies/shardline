@@ -111,6 +111,11 @@ async fn signed_transfer_uses_file_proof_and_retains_historical_fallback() {
     let (app, root) = test_app(&[ServerFrontend::Xet]).await;
     let content = b"file-specific HTTP authorization must preserve verified bytes";
     let (encoded, hash) = test_fixtures::single_chunk_xorb(content);
+    let validated = crate::xet_adapter::validate_serialized_xorb(
+        &mut std::io::Cursor::new(encoded.as_ref()),
+        shardline_index::parse_xet_hash_hex(&hash).unwrap(),
+    )
+    .unwrap();
     let uploaded = app
         .clone()
         .oneshot(
@@ -139,7 +144,9 @@ async fn signed_transfer_uses_file_proof_and_retains_historical_fallback() {
             range_start: 0,
             range_end: 1,
             packed_start: 0,
-            packed_end: encoded.len() as u64,
+            // File terms cover serialized members; the container footer is
+            // readable because this file owns the complete verified payload.
+            packed_end: validated.packed_content_length(),
         }],
     };
     store.commit_file_version_metadata(&record).await.unwrap();
