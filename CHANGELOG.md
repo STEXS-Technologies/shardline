@@ -81,8 +81,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Avoid a duplicate complete validation pass when preparing owned or borrowed
   footerless Xet uploads, retaining final container authentication and storage
   verification.
-- Avoid repeated file-position queries while checking footerless Xet upload
-  bounds, retaining chunk limits, malformed-input rejection and full validation.
+- Avoid repeated file-position queries during footerless Xet upload bounds
+  checks and normalization, retaining chunk limits, malformed-input rejection
+  and full validation.
 - Buffer native Xet member-source reads with a fixed 64 KiB allocation while
   retaining per-member verification and durable immutable writes.
 - Reuse the original PostgreSQL request session for native Xorb deletion guards,

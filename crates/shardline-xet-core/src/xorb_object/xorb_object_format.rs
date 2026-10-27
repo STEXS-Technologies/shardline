@@ -16,6 +16,9 @@ use crate::{
     utils::serialization_utils::*,
 };
 
+#[cfg(test)]
+mod footerless_io_tests;
+
 pub type XorbObjectIdent = [u8; 7];
 pub(crate) const XORB_OBJECT_FORMAT_IDENT: XorbObjectIdent = *b"XETBLOB";
 pub(crate) const XORB_OBJECT_FORMAT_VERSION_V0: u8 = 0;
@@ -886,7 +889,8 @@ fn inspect_footerless_chunks(
     let mut info = XorbObjectInfoV1::default();
     let mut total_decompressed_bytes: u64 = 0;
 
-    while reader.stream_position()? < raw_length {
+    let mut position = 0_u64;
+    while position < raw_length {
         let chunk_header = match deserialize_chunk_header(reader) {
             Ok(header) => header,
             Err(CoreError::ChunkHeaderParse) => break,
@@ -894,19 +898,20 @@ fn inspect_footerless_chunks(
         };
 
         let compressed_len = chunk_header.get_compressed_length() as usize;
-        if reader
-            .stream_position()?
-            .checked_add(compressed_len as u64)
-            .is_none_or(|end| end > raw_length)
-        {
+        let packed_end = position
+            .checked_add(size_of::<XorbChunkHeader>() as u64)
+            .and_then(|start| start.checked_add(compressed_len as u64))
+            .filter(|end| *end <= raw_length);
+        let Some(packed_end) = packed_end else {
             return Err(CoreError::MalformedData(
                 "chunk exceeds bounded serialized input".to_owned(),
             ));
-        }
+        };
         let mut compressed_buf = vec![0u8; compressed_len];
         reader
             .read_exact(&mut compressed_buf)
             .map_err(|e| CoreError::MalformedData(format!("Failed to read chunk data: {e}")))?;
+        position = packed_end;
 
         let declared_uncompressed_len = u64::from(chunk_header.get_uncompressed_length());
         if total_decompressed_bytes
