@@ -2,6 +2,17 @@
 # Qualify the documented Git LFS and OCI endpoints with upstream clients.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Bound network-dependent tool preparation separately from the full client suite.
+# timeout also signals the owned process group, including Git/Go subprocesses.
+command -v timeout >/dev/null
+protocol_setup_seconds=${SHARDLINE_PROTOCOL_SETUP_TIMEOUT_SECONDS:-600}
+if [[ ! "$protocol_setup_seconds" =~ ^[1-9][0-9]{0,4}$ ]]; then
+  echo 'SHARDLINE_PROTOCOL_SETUP_TIMEOUT_SECONDS must be a positive integer below 100000' >&2
+  exit 2
+fi
+protocol_prepare() {
+  timeout --kill-after=15s "${protocol_setup_seconds}s" "$@"
+}
 git lfs version
 command -v aws >/dev/null
 aws --version
@@ -12,7 +23,7 @@ if [[ -z "${MINIO_SIGNER_BIN:-}" ]]; then
   command -v go >/dev/null
   protocol_signer_workdir="$(mktemp -d "${TMPDIR:-/tmp}/shardline-minio-signer.XXXXXXXX")"
   trap 'rm -rf -- "${protocol_signer_workdir:-}" "${protocol_workdir:-}"' EXIT
-  (cd e2e/clients/minio-signed-stream && go build -mod=readonly -o "$protocol_signer_workdir/minio-signed-stream" .)
+  (cd e2e/clients/minio-signed-stream && protocol_prepare go build -mod=readonly -o "$protocol_signer_workdir/minio-signed-stream" .)
   export MINIO_SIGNER_BIN="$protocol_signer_workdir/minio-signed-stream"
 fi
 [[ -x "$MINIO_SIGNER_BIN" ]]
@@ -35,11 +46,11 @@ if [[ -z "${OCI_CONFORMANCE_BIN:-}" ]]; then
   # OCI Distribution v1.1.1, pinned to the commit rather than a movable tag.
   protocol_revision=a139cc423184af6078077b9b7ee336eddbd03f8f
   git -C "$protocol_workdir" init --quiet
-  git -C "$protocol_workdir" fetch --quiet --depth=1 \
+  protocol_prepare git -C "$protocol_workdir" fetch --quiet --depth=1 \
     https://github.com/opencontainers/distribution-spec.git "$protocol_revision"
   git -C "$protocol_workdir" checkout --quiet --detach FETCH_HEAD
   [[ "$(git -C "$protocol_workdir" rev-parse HEAD)" == "$protocol_revision" ]]
-  (cd "$protocol_workdir/conformance" && go test -c -o "$protocol_workdir/conformance.test")
+  (cd "$protocol_workdir/conformance" && protocol_prepare go test -c -o "$protocol_workdir/conformance.test")
   export OCI_CONFORMANCE_BIN="$protocol_workdir/conformance.test"
 fi
 [[ -x "$OCI_CONFORMANCE_BIN" ]]
