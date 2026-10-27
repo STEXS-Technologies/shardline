@@ -2439,6 +2439,44 @@ measurement overhead. They do not measure physical device reads, writes,
 NAND wear, native-client throughput or production latency. Hashing the existing
 object replaces byte comparison; no end-to-end speedup is established here.
 
+#### Bounded preparation buffering and current native comparison
+
+A 64 KiB source buffer below the existing digest/checkpoint reader reduced
+canonical preparation's 8 MiB/128-member fixture from 1,556 read syscalls to
+137. Footerless preparation made 525 calls. Complete format/member/root and
+final storage verification remain enabled. The adapter suite passed 380 tests
+with one ignored; the real 512 MiB hf_xet client recovered at all six process
+kill boundaries.
+
+In a matched 512 MiB baseline/candidate/candidate/baseline run, upload read
+calls fell from 150,617–150,624 to 56,856–56,860. Server CPU ticks fell from
+120–123 to 114–115, but peak RSS increased from 51,456–52,208 to
+53,564–55,244 KiB. Upload times overlapped widely: baseline 1.43–4.46 seconds,
+candidate 3.32–3.48 seconds. All eight downloads passed SHA-256, retained bytes
+were identical, and no competing compiler was observed. Fewer calls do not
+establish a throughput improvement.
+
+A separate upstream/candidate/candidate/upstream comparison used stock hf_xet
+1.7.0, fresh caches, the same 512 MiB source/tail edit, and one server CPU:
+
+| Metric | Buffered Shardline | Native upstream reference |
+| --- | --- | --- |
+| Initial upload | 175–177 MiB/s | 471–494 MiB/s |
+| Server CPU ticks | 115–134 | 86–89 |
+| Server peak RSS | 47,496–48,204 KiB | 211,364–211,688 KiB |
+| Initial retained bytes | 550,890,136 | 538,716,820 |
+
+All eight downloads verified; no competing compiler was observed. One candidate
+tail-edit upload took 8.35 seconds, versus 0.94 seconds in its other run; stable
+tail latency is unproven. Shared-host timings and different upstream durability
+semantics limit this comparison. Upload parity remains open.
+
+A separate write/sync trace observed 87 `fsync` calls totaling approximately
+0.16 seconds across threads. Instrumented syscall durations are not additive
+wall-time attribution and do not justify weakening durability. All payload
+copies were inventoried and verified before removal; private traces remain
+outside the repository.
+
 #### Current October 27 native upload CPU diagnostic
 
 Production source `850c1673` was profiled with a stock hf_xet 1.7.0 client,

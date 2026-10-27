@@ -1,6 +1,6 @@
 //! Synchronous preparation of a staged native Xorb before immutable writes.
 
-use std::{fs::File, path::PathBuf};
+use std::{fs::File, io::BufReader, path::PathBuf};
 
 use crate::checkpoint_reader::CheckpointReader;
 use shardline_index::parse_xet_hash_hex;
@@ -76,7 +76,10 @@ fn try_prepare_canonical(
 ) -> Result<Option<PreparedFile>, XetAdapterError> {
     let source_file = File::open(path)?;
     let length = source_file.metadata()?.len();
-    let mut reader = digest_reader::DigestReader::new(source_file)?;
+    // Footer decoding reads many small fields. Buffer the source without
+    // changing the authenticated byte order or cancellation checkpoints.
+    let mut reader =
+        digest_reader::DigestReader::new(BufReader::with_capacity(64 * 1024, source_file))?;
     let validated = match validate_serialized_xorb(
         &mut CheckpointReader {
             reader: &mut reader,
@@ -116,6 +119,40 @@ mod tests {
         xorb_format_test_utils::{ChunkSize, build_raw_xorb},
     };
     use std::{cell::Cell, io::Write};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn staged_preparation_bounds_small_read_syscalls() {
+        fn read_calls() -> u64 {
+            std::fs::read_to_string("/proc/thread-self/io")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("syscr:")?.trim().parse().ok())
+                .unwrap()
+        }
+        for footer in [true, false] {
+            let serialized = SerializedXorbObject::from_xorb_with_compression(
+                build_raw_xorb(128, ChunkSize::Fixed(65536)),
+                CompressionScheme::None,
+                footer,
+            )
+            .unwrap();
+            let mut source = tempfile::NamedTempFile::new().unwrap();
+            source.write_all(&serialized.serialized_data).unwrap();
+            let before = read_calls();
+            let prepared = prepare_source(
+                &serialized.hash.hex(),
+                source.path().to_owned(),
+                SourceOwnership::OwnedStaging,
+                &|| Ok(()),
+            )
+            .unwrap();
+            let calls = read_calls() - before;
+            eprintln!("staged preparation: footer={footer}, syscr={calls}");
+            assert_eq!(prepared.validated.chunks().len(), 128);
+            assert!(calls < 640, "small parser reads caused {calls} syscalls");
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Buffer small native Xet preparation reads within a fixed 64 KiB per worker,
+  retaining content verification and cancellation checks.
 - Verify duplicate local staged uploads against the existing object's digest,
   avoiding a second read of the candidate while retaining length, content and
   durability checks.
