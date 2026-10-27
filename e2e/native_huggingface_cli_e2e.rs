@@ -21,6 +21,7 @@ mod native_huggingface_repository_download;
 mod native_huggingface_requirements;
 mod native_huggingface_shard_retry;
 mod native_huggingface_small;
+mod native_huggingface_startup;
 mod native_huggingface_whoami;
 mod support;
 
@@ -1194,8 +1195,8 @@ async fn start_runtime_with_roles(
         config = config.with_server_role(shardline_server::ServerRole::Api);
     }
     let maintenance_config = config.clone();
-    let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
-    wait_for_health(&base_url).await?;
+    let mut server = tokio::spawn(async move { serve_with_listener(config, listener).await });
+    native_huggingface_startup::wait(&base_url, &mut server, "API").await?;
     let transfer = if split {
         let transfer_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let transfer_address = transfer_listener.local_addr()?;
@@ -1209,11 +1210,16 @@ async fn start_runtime_with_roles(
             transfer_config = transfer_config
                 .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(objects));
         }
-        let task =
+        let mut task =
             tokio::spawn(
                 async move { serve_with_listener(transfer_config, transfer_listener).await },
             );
-        wait_for_health(&transfer_url).await?;
+        if let Err(error) =
+            native_huggingface_startup::wait(&transfer_url, &mut task, "transfer").await
+        {
+            server.abort();
+            return Err(error);
+        }
         Some((transfer_url, task))
     } else {
         None
