@@ -374,5 +374,24 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     for file in [&original, &added, &repacked, &replaced] {
         verify(&recovered.base, &token, file).await;
     }
+    verify_identities(root.path(), postgres, &rebound, &original).await;
+    verify_identities(root.path(), postgres, &rebound, &repacked).await;
     verify_identity_download(&recovered.base, &token, &rebound).await;
+    drop(recovered);
+    // Repair and the following sweep must preserve historical aliases and the
+    // standalone members required by the unchanged predecessor reader.
+    maintenance::gc_before_rollback(&current, root.path(), postgres, storage_env, "xet").await;
+    let mut rollback =
+        LocalServer::spawn_with_storage(&old, root.path(), postgres, "xet", storage_env);
+    rollback.ready().await;
+    for file in [&original, &added, &repacked, &replaced] {
+        verify(&rollback.base, &token, file).await;
+    }
+    drop(rollback);
+    let mut retained =
+        LocalServer::spawn_with_storage(&current, root.path(), postgres, "xet", storage_env);
+    retained.ready().await;
+    verify_identities(root.path(), postgres, &rebound, &original).await;
+    verify_identities(root.path(), postgres, &rebound, &repacked).await;
+    verify_identity_download(&retained.base, &token, &rebound).await;
 }
