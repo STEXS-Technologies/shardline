@@ -103,7 +103,7 @@ async fn wait_visible<S: UploadIntentStore>(index: &S, intent: &UploadIntent)
 where
     S::Error: std::fmt::Debug,
 {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let visible = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if index
                 .intent_by_id(intent.intent_id())
@@ -118,8 +118,23 @@ where
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    if visible.is_err() {
+        let state = tokio::time::timeout(
+            Duration::from_secs(1),
+            index.intent_by_id(intent.intent_id()),
+        )
+        .await;
+        let events = tokio::time::timeout(
+            Duration::from_secs(1),
+            index.reliability_events(intent.intent_id()),
+        )
+        .await;
+        panic!(
+            "recovery did not become Visible: intent={}, state={state:?}, events={events:?}",
+            intent.intent_id()
+        );
+    }
     assert_eq!(
         index
             .reliability_events(intent.intent_id())
