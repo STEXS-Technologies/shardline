@@ -1830,8 +1830,9 @@ include file and socket reads and do not establish physical device savings.
 
 #### Bounded native member reads
 
-Native member persistence now buffers its staging reader with a fixed 64 KiB
-allocation. An instrumented fixture publishing 128 uncompressed 1 KiB members
+Before the decoded-copy writer was removed, native member persistence buffered
+its staging reader with a fixed 64 KiB allocation. An instrumented fixture
+publishing 128 uncompressed 1 KiB members
 made 256 source `Read` calls before the change and three afterward. This
 measures calls to the reader, not physical device I/O, SSD lifetime or complete
 upload throughput. It is separate from the reference timings below.
@@ -2450,6 +2451,50 @@ staging writes still matter; lower process I/O does not establish device-level
 write amplification, NAND endurance or a replacement interval.
 
 ### PostgreSQL and MinIO backend cost
+
+#### Copy-free native ingestion
+
+An October 27 comparison used frozen copy-retaining runtime `f59d2dff` and
+the copy-free runtime with shard read buffering (`74406a92`). Both used the
+same deterministic 512 MiB incompressible input, stock Hub 2.2.0/hf_xet 1.7.0,
+fresh client homes and disposable PostgreSQL/MinIO. Each combined-role server
+had four CPUs and a 1 GiB limit. Two successful runs per runtime completed
+native upload, shard publication and an independently SHA-256-verified download;
+MinIO traces reconciled with provider counters.
+
+| Initial native upload | Copy-retaining | Copy-free |
+| --- | ---: | ---: |
+| Backend requests | 8,635 | 169 |
+| Standalone chunk PUTs | 8,460 | 0 |
+| Retained objects | 8,476 | 16 |
+| Retained payload bytes | 1,074,761,387–1,074,761,389 | 537,890,475 |
+| Trace bytes received by MinIO | 1,075,611,992–1,075,611,994 | 537,911,460 |
+| PostgreSQL calls, top-level / nested | 1,029 / 8,572 | 1,029 / 8,572 |
+| Top-level statement WAL | approximately 6.64 MB | approximately 6.64 MB |
+| Server-process write bytes | approximately 1.075 GB | approximately 1.075 GB |
+| Server-process peak RSS | 162,736–164,912 KiB | 163,640–212,264 KiB |
+
+This fixture demonstrates 98.0% fewer S3 requests and approximately 50% less
+retained payload, without a corresponding reduction in PostgreSQL work or
+temporary disk writes. RSS ranges overlap but the copy-free maximum was higher;
+there is no demonstrated memory saving. Uploads took 12.23–12.38 seconds versus
+4.12–4.67 seconds. These are shared-host observations, not a native-CAS parity,
+production latency or scale-out result. Process I/O is not physical NAND wear.
+All readers must be upgraded before accepting copy-free native uploads; old
+standalone-chunk readers cannot fully serve the new layout.
+
+One additional copy-free attempt failed: MinIO returned 507 for 676 multipart
+part attempts as host disk space became constrained, and the stock client
+ultimately reported an error. It is excluded from successful performance
+results. After reclaiming only completed benchmark payload copies, the repeat
+passed. Failed-run diagnostics were retained. These retained-byte measurements
+precede GC retention and are not annual cloud-bill projections.
+
+#### Historical measurements with decoded copies
+
+The following observations predate removal of the decoded-copy writer. Its
+request-hint and repeated-member optimizations describe the old implementation,
+not an additional write path retained by the copy-free runtime.
 
 A separate October 26 run used executable `97df1303`, Hub 2.2.0/hf_xet
 1.7.0 and the same runner with `--file-mib 1024`. One combined-role server
