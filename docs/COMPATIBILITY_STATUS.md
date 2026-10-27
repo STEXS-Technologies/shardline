@@ -230,6 +230,9 @@ MinIO. The gate requires matching reconstructed size and SHA-256, and a visible
 intent for the exact interrupted immutable object. It permits different legal
 container boundaries between client versions. This is a shared-host recovery
 test, not a throughput comparison or a mixed Shardline-version rollout test.
+Both pairings were repeated after enabling copy-free native storage and buffered
+shard validation. All twelve interruption cases passed, with both clients
+retrying and verifying downloaded bytes through their replacement replicas.
 
 Cold 1 GiB uploads with `hf_xet` 1.5.2, 1.6.0 and 1.7.0 also exercise
 footerless normalization beyond the former 16 MiB limit. Each run sent
