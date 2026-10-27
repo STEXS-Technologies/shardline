@@ -55,6 +55,22 @@ authorized by the token. Use exact object paths when a revision-pinned file
 identity is required; mutable globs are appropriate only for external ad-hoc
 analysis.
 
+## Reading Hub files
+
+DuckDB can also read Parquet through the Hub's ordinary HTTP download routes.
+Configure an HTTP bearer secret scoped to Shardline's public endpoint, then
+pass a Hub resolve URL to `read_parquet`. Use an immutable commit in the URL
+when the query must read a fixed version. Both regular and native-Xet files
+support authenticated HTTP ranges; downloads stay through Shardline.
+
+The real-client suite passes with DuckDB 2.0.0, PyArrow 26.0.0,
+`huggingface_hub` 2.3.0 and `hf_xet` 1.7.0 on SQLite/filesystem and
+PostgreSQL/MinIO, with combined and separate API/transfer roles. It checks
+Parquet filtering and aggregates, actual partial responses, HEAD metadata,
+conditional requests and anonymous-access rejection. These shared-host
+correctness checks do not establish production latency or multi-host scaling.
+They supplement the pinned CI matrix rather than replacing it.
+
 ## Server-side query boundary
 
 The typed request contract is available as

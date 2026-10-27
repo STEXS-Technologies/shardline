@@ -155,6 +155,13 @@ branch advances. These selected shared-host checks do not qualify every Hub API,
 multi-host load or the complete failure matrix. They are separate from the
 pinned CI requirements above and do not establish final-head release acceptance.
 
+DuckDB 2.0.0 / PyArrow 26.0.0 also pass authenticated Hub HTTP Parquet reads
+with Hub 2.3.0 / `hf_xet` 1.7.0. Regular and native-Xet files pass filtering,
+aggregates, HEAD/conditional checks and real partial responses on local storage
+and PostgreSQL/MinIO, with combined and split roles. Anonymous reads are denied.
+These four shared-host workflows qualify the tested analytical reads, not all
+DuckDB operations or performance; see [DuckDB integration](DUCKDB.md).
+
 Hub 1.25.1 and 2.3.0 with `hf_xet` 1.7.0 also pass a real PostgreSQL publication
 session termination during a 9 MiB native upload. The interrupted transaction
 publishes no records; the stock client receives a retryable v2 shard error,
