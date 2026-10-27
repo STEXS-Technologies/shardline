@@ -1776,6 +1776,38 @@ in the workload rather than hidden by full-download throughput.
 
 ### Upstream local CAS reference comparison
 
+#### Current qualified runtime control
+
+An October 27 control uses Shardline `9f3d47dc` and unmodified upstream
+xet-core `629562cd9fc37432317eb57811faf13a6935c601`, with stock hf_xet 1.7.0
+and Hub 2.2.0. The fixture is 512 MiB of incompressible content followed by a
+256 KiB tail edit. The order is upstream/Shardline/Shardline/upstream, with
+fresh client processes and caches, the same logical CPU affinity and local
+filesystem. All eight complete downloads passed independent SHA-256 checks.
+No competing compilation was observed during the timed sequence.
+
+| Measurement | Shardline | Upstream local CAS |
+| --- | ---: | ---: |
+| Initial upload | 6.19–6.90 s | 1.07–1.17 s |
+| Upload after edit | 0.73–0.75 s | 0.29–0.30 s |
+| Complete download, including client SHA-256 | 0.65–0.67 s | 0.87–1.27 s |
+| Initial-upload server peak RSS | 59 MiB | 208 MiB |
+| Initial retained file lengths | 1,087,967,176 B | 538,730,548 B |
+
+These binaries use different optimized native release settings: Shardline uses
+thin LTO, one codegen unit, abort-on-panic and frame pointers; upstream's
+recorded release uses fat LTO, debug information and no additional rustflags.
+They are not identical build profiles. Upstream is a development CAS with
+weaker synchronization guarantees, not Hugging Face's production service.
+The host is shared, including an aging retention fixture; these two observations
+per implementation do not establish isolated-host or tail-latency performance.
+
+Shardline's initial-upload logical process reads remain approximately 3.247 GB.
+Decoded chunk copies remain alongside Xorbs for old-reader compatibility.
+There is no demonstrated upload parity or retained-storage reduction. This
+local-storage control does not exercise or quantify the PostgreSQL connection
+checkout optimization in `9f3d47dc`.
+
 #### Owned validation across upload phases
 
 A subsequent candidate based on `04ddedff` carries an opaque, owned validation
