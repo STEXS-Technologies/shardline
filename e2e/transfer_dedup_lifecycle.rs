@@ -219,12 +219,53 @@ async fn qualify_delta_delete_fencing(remote: bool, issued: bool) -> Result<(), 
         delta_lookup(&client, &second, &read, &file).await?.status(),
         StatusCode::OK
     );
+    if issued {
+        let pressure_client = Client::builder().timeout(Duration::from_secs(30)).build()?;
+        let requests = (0..32).map(|ordinal| {
+            let runtime = if ordinal % 2 == 0 { &first } else { &second };
+            let client = &pressure_client;
+            let write = &write;
+            let xorb = &xorb;
+            let hash = &hash;
+            async move {
+                for attempt in 0..8 {
+                    let reply = client
+                        .post(format!("{}/v1/xorbs/default/{hash}", runtime.base))
+                        .bearer_auth(write)
+                        .body(xorb.clone())
+                        .send()
+                        .await?;
+                    if reply.status() == StatusCode::OK {
+                        return Ok::<_, Error>(());
+                    }
+                    assert_eq!(reply.status(), StatusCode::SERVICE_UNAVAILABLE);
+                    assert_eq!(reply.headers().get("retry-after").unwrap(), "1");
+                    let diagnostic: serde_json::Value = reply.json().await?;
+                    assert_eq!(diagnostic["error"], "server work queue is saturated");
+                    assert!(attempt < 7, "completed-intent retries must make progress");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                unreachable!("the final unsuccessful attempt must fail")
+            }
+        });
+        let replies = tokio::time::timeout(
+            Duration::from_secs(90),
+            futures_util::future::try_join_all(requests),
+        )
+        .await??;
+        assert_eq!(replies.len(), 32);
+        assert_eq!(
+            delta_lookup(&client, &second, &read, &file).await?.status(),
+            StatusCode::OK
+        );
+    }
     let key = ObjectKey::parse(&format!(
         "xorbs/default/{}/{hash}.xorb",
         hash.get(..2).ok_or("invalid hash")?
     ))?;
     let index = PostgresIndexStore::new(owner.clone());
-    let pending = index.begin_remote_delete(&key).await?;
+    let pending =
+        tokio::time::timeout(Duration::from_secs(10), index.begin_remote_delete(&key)).await??;
     let delayed = if issued {
         Some(
             delayed_delete::Attempt::start(
