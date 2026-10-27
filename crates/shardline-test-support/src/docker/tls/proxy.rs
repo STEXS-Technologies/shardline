@@ -14,7 +14,20 @@ impl HttpsProxyFixture {
     /// # Errors
     /// Returns an error if certificates, Python or the listener are unavailable.
     pub fn start() -> Result<Self, IoError> {
-        let material = TlsMaterial::generate(false)?;
+        Self::start_for_hostname("localhost", "127.0.0.1")
+    }
+
+    /// Starts a trusted-CA fixture whose certificate does not match its URL.
+    /// No DNS override or change to the client's certificate checks is needed.
+    ///
+    /// # Errors
+    /// Returns an error if certificates, Python or the listener are unavailable.
+    pub fn start_with_mismatched_hostname() -> Result<Self, IoError> {
+        Self::start_for_hostname("shardline-mismatch.invalid", "localhost")
+    }
+
+    fn start_for_hostname(server_name: &str, url_host: &str) -> Result<Self, IoError> {
+        let material = TlsMaterial::generate_for_server(false, server_name)?;
         let child = Command::new("python3")
             .args(["-c", include_str!("proxy.py")])
             .arg(material.directory.path())
@@ -34,7 +47,7 @@ impl HttpsProxyFixture {
             }
             if let Ok(port) = fs::read_to_string(fixture.material.directory.path().join("port")) {
                 let port: u16 = port.parse().map_err(IoError::other)?;
-                fixture.origin = format!("https://127.0.0.1:{port}");
+                fixture.origin = format!("https://{url_host}:{port}");
                 return Ok(fixture);
             }
             if started.elapsed() >= Duration::from_secs(5) {

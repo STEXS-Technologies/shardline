@@ -8,7 +8,7 @@ from huggingface_hub import HfApi,hf_hub_download
 r=json.load(sys.stdin)
 try:
     api=HfApi(endpoint=r['endpoint'],token=r['token'])
-    if r['action']=='untrusted':
+    if r['action'] in ('untrusted', 'hostname_mismatch'):
         api.whoami()
     elif r['action']=='upload':
         api.create_repo('team/cli-model',private=True,exist_ok=True)
@@ -21,7 +21,10 @@ try:
         raise ValueError('unknown fixture operation')
     print(json.dumps({'success':True}))
 except BaseException as error:
-    print(json.dumps({'success':False,'certificate_rejected':'CERTIFICATE_VERIFY_FAILED' in str(error)}))
+    diagnostic = str(error).lower()
+    print(json.dumps({'success':False,
+        'certificate_rejected':'certificate_verify_failed' in diagnostic,
+        'hostname_rejected':'hostname mismatch' in diagnostic or 'ip address mismatch' in diagnostic}))
 "#;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -33,6 +36,7 @@ async fn native_huggingface_https_frontdoor_preserves_native_transfer() -> Resul
         "HTTPS qualification requires hf_xet"
     );
     let proxy = HttpsProxyFixture::start()?;
+    let mismatched = HttpsProxyFixture::start_with_mismatched_hostname()?;
     let services = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
         .with_minio()
@@ -63,12 +67,17 @@ async fn native_huggingface_https_frontdoor_preserves_native_transfer() -> Resul
     }
     write(&path, &bytes)?;
     let digest = hex::encode(Sha256::digest(&bytes));
-    for action in ["untrusted", "upload", "download"] {
+    for action in ["hostname_mismatch", "untrusted", "upload", "download"] {
         // A separate process/cache also prevents upload-side state or a cached
         // HTTP client's earlier trust configuration from masking the download.
         let home = tempfile::tempdir()?;
+        let frontdoor = if action == "hostname_mismatch" {
+            &mismatched
+        } else {
+            &proxy
+        };
         let request = serde_json::to_vec(&serde_json::json!({
-            "endpoint": proxy.origin(), "token": runtime.model_token,
+            "endpoint": frontdoor.origin(), "token": runtime.model_token,
             "action": action, "path": path, "sha256": digest,
         }))?;
         let mut client = Command::new(hf_python());
@@ -93,7 +102,7 @@ async fn native_huggingface_https_frontdoor_preserves_native_transfer() -> Resul
         }
         if action != "untrusted" {
             for name in ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
-                client.env(name, proxy.ca_cert_path());
+                client.env(name, frontdoor.ca_cert_path());
             }
         }
         let output = shardline_test_support::native_client_output_with_input(
@@ -106,9 +115,12 @@ async fn native_huggingface_https_frontdoor_preserves_native_transfer() -> Resul
             "HTTPS client exited unsuccessfully; raw diagnostics withheld"
         );
         let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        if action == "untrusted" {
+        if action == "untrusted" || action == "hostname_mismatch" {
             assert_eq!(result["success"], false);
             assert_eq!(result["certificate_rejected"], true);
+            if action == "hostname_mismatch" {
+                assert_eq!(result["hostname_rejected"], true);
+            }
         } else {
             assert_eq!(
                 result["success"], true,

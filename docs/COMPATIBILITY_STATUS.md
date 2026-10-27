@@ -140,11 +140,14 @@ backing MinIO service is not a client download endpoint. These shared-host
 checks do not qualify every TLS proxy, split-role deployment or backend TLS
 configuration, and do not replace final-head CI.
 
-The committed HTTPS regression test also passes with these three Xet versions.
+The committed HTTPS regression test also passes with these three Xet versions
+and with Hub 2.3.0 / `hf_xet` 1.7.0.
 It uses separate upload/download processes and empty caches, checks rejection
-of an untrusted certificate, counts successful HTTPS Xorb download requests,
-and verifies the downloaded SHA-256. The pinned-client CI selections include
-this test; the hostname-mismatch check above remains a separate local control.
+of an untrusted certificate and a trusted-CA certificate with the wrong hostname,
+counts successful HTTPS Xorb download requests, and verifies the downloaded
+SHA-256. The negative checks use ordinary Hub API calls; the successful transfer
+also exercises the native Xet client. The pinned-client CI selections include
+this test.
 
 Additional source-tree qualification with Hub 2.3.0 / `hf_xet` 1.7.0 passes
 model/dataset workflows on SQLite/local, PostgreSQL/local and PostgreSQL/MinIO,
@@ -154,6 +157,13 @@ publication, a healthy native-Xet retry and byte-exact cold download after the
 branch advances. These selected shared-host checks do not qualify every Hub API,
 multi-host load or the complete failure matrix. They are separate from the
 pinned CI requirements above and do not establish final-head release acceptance.
+
+The Hub 2.3.0 combination also passes a 1 GiB native upload and cold download
+on PostgreSQL/MinIO with separate API and transfer roles, an abandoned HTTP
+response and two concurrent slow full-file HTTP readers. The server/test process
+peaked at 213,868 KiB RSS, excluding client memory, below the fixture's 384 MiB
+ceiling. This shared-host resource check is not a paired performance measurement;
+its process I/O includes reaped clients as described above.
 
 DuckDB 2.0.0 / PyArrow 26.0.0 also pass authenticated Hub HTTP Parquet reads
 with Hub 2.3.0 / `hf_xet` 1.7.0. Regular and native-Xet files pass filtering,
