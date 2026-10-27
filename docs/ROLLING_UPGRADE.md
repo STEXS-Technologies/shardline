@@ -69,20 +69,19 @@ data and compare clean FSCK results from both binaries at concurrency 1, 32 and
 do not yet qualify native Hub/Xet identity replacement through mixed-version
 clients or every deployment's grants and security policies.
 
-A separate local native-CAS drill uploads a multi-container file with the actual
-1.12.1 binary, migrates it, and verifies its reconstruction and bytes with the
-candidate. It then uploads another file with the candidate and verifies both
-files after rollback to 1.12.1 and another candidate restart. The candidate also
-publishes the original bytes with two different chunk layouts and a verified
-SHA-256 identity. Both file IDs remain readable; replaying the original upload
-with 1.12.1 preserves the candidate's current mapping and historical alias.
-The candidate's SHA-256 download returns the original bytes after restart and
-denies another repository. The same drill also passes with disposable PostgreSQL
-and MinIO, retaining the database and object prefix across each binary switch.
-The rollback binary also uploads a third chunk layout. Its native file remains
-readable after re-upgrade. An identical retry through the candidate verifies and
-adds its SHA-256 binding while preserving the earlier file aliases. Version
-1.12.1 itself does not populate the newer identity index.
+Native-CAS drills use the actual 1.12.1 binary with both SQLite/filesystem and
+PostgreSQL/MinIO. They upgrade existing files, run old and new servers together,
+and upload the same bytes with different chunk layouts through both versions.
+Both readers verify the resulting bytes. After GC, descriptor rebuild, rollback
+and another upgrade, all six tested native file identities remain readable and
+the candidate retains its historical SHA-256 aliases. Candidate SHA-256 reads
+also reject access from another repository.
+
+Version 1.12.1 does not create the newer SHA-256 identity bindings. An identical
+retry through the candidate verifies an old publication and adds that binding
+without losing earlier aliases. Keep requests using the new identity behavior
+on upgraded replicas. These drills exercise simultaneous HTTP upload requests;
+they do not qualify every publication ordering, failure timing or Hub client.
 Stock Hub 1.25.1, 2.2.0 and 2.3.0 clients each pass a history drill against the
 actual 1.12.1 binary and the candidate, on local storage and PostgreSQL/MinIO.
 The native-upload history drill also passes with Hub 1.25.1/hf_xet 1.5.2 and

@@ -1,5 +1,6 @@
 //! Actual predecessor native-CAS publication, upgrade and rollback reads.
 
+mod mixed_writers;
 mod rebuild;
 
 use super::*;
@@ -306,6 +307,16 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
         LocalServer::spawn_with_storage(&current, root.path(), postgres, "xet", storage_env);
     candidate.ready().await;
     verify(&candidate.base, &token, &original).await;
+    let mixed = mixed_writers::publish(
+        &old,
+        root.path(),
+        postgres,
+        storage_env,
+        &candidate.base,
+        &token,
+        &original,
+    )
+    .await;
     let added = upload(&candidate.base, &token, 29).await;
     verify(&candidate.base, &token, &added).await;
     // The predecessor's original identity did not include an extended SHA-256.
@@ -330,6 +341,9 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     verify(&rollback.base, &token, &original).await;
     verify(&rollback.base, &token, &added).await;
     verify(&rollback.base, &token, &repacked).await;
+    for file in [&mixed.0, &mixed.1] {
+        verify(&rollback.base, &token, file).await;
+    }
     // Old writers do not populate the new SHA-256/alias indexes, even when the
     // shard carries extended SHA-256 metadata. They must preserve existing
     // bindings while publishing additional readable native file identities.
@@ -371,11 +385,14 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     let mut recovered =
         LocalServer::spawn_with_storage(&current, root.path(), postgres, "xet", storage_env);
     recovered.ready().await;
-    for file in [&original, &added, &repacked, &replaced] {
+    for file in [&original, &added, &repacked, &replaced, &mixed.0, &mixed.1] {
         verify(&recovered.base, &token, file).await;
     }
     verify_identities(root.path(), postgres, &rebound, &original).await;
     verify_identities(root.path(), postgres, &rebound, &repacked).await;
+    for historical in [&mixed.0, &mixed.1] {
+        verify_identities(root.path(), postgres, &rebound, historical).await;
+    }
     verify_identity_download(&recovered.base, &token, &rebound).await;
     drop(recovered);
     // Repair and the following sweep must preserve historical aliases and the
@@ -384,7 +401,7 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     let mut rollback =
         LocalServer::spawn_with_storage(&old, root.path(), postgres, "xet", storage_env);
     rollback.ready().await;
-    for file in [&original, &added, &repacked, &replaced] {
+    for file in [&original, &added, &repacked, &replaced, &mixed.0, &mixed.1] {
         verify(&rollback.base, &token, file).await;
     }
     drop(rollback);
@@ -393,5 +410,8 @@ async fn upgrade(postgres: Option<&str>, storage_env: &[(&str, String)]) {
     retained.ready().await;
     verify_identities(root.path(), postgres, &rebound, &original).await;
     verify_identities(root.path(), postgres, &rebound, &repacked).await;
+    for historical in [&mixed.0, &mixed.1] {
+        verify_identities(root.path(), postgres, &rebound, historical).await;
+    }
     verify_identity_download(&retained.base, &token, &rebound).await;
 }
