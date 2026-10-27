@@ -2360,6 +2360,18 @@ also read repeated-member content with unchanged v1.12.1 after GC and rebuild.
 This is a specific repeated-member saving, not a stock-client throughput result
 or a reduction in unique-data storage copies.
 
+A PostgreSQL/MinIO follow-up uploaded that same 128-member Xorb through the
+native HTTP endpoint, then retried it unchanged. Initial-upload requests fell
+from 133 to six; retry requests fell from 129 to two. Each phase avoided 127
+standalone-chunk GETs, saving 508 KiB of backend response bytes. Both versions
+retained two objects totaling 535,672 bytes, and independent reads verified the
+stored chunk and complete Xorb exactly. Traces reconciled with MinIO's API
+counters. This single local comparison covers Xorb upload and retry before
+shard publication, using a frozen pre-change binary and the updated debug
+binary. It establishes request counts, not comparable CPU, memory or latency.
+Stock clients may deduplicate repetitions before constructing an Xorb; these
+figures must not be applied to all native uploads or annual storage bills.
+
 Run the stock Hub/Xet client against disposable PostgreSQL and MinIO:
 
 ```bash
