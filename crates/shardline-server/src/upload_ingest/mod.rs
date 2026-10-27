@@ -10,8 +10,9 @@ mod upload_attempt;
 pub mod xorb_packer;
 
 pub(super) use body_reader::{
-    RequestBodyReader, StagedRequestBody, read_body_to_bytes, stage_body_for_object_store,
-    stage_body_to_tempfile, stage_body_with_spill,
+    RequestBodyReader, StagedRequestBody, StagedXorbBody, read_body_to_bytes,
+    stage_body_for_object_store, stage_body_to_tempfile, stage_body_with_spill,
+    stage_xorb_with_spill,
 };
 pub(crate) use ingestor::FileUploadIngestor;
 pub(crate) use native_shard::prepare_native_shard;

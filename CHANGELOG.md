@@ -74,6 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Persist native Xet payloads once as verified Xorb containers, removing redundant
   decoded chunk writes. Existing data stays readable; new native chunk reads
   require upgraded readers, so upgrade all replicas before accepting new writes.
+- Remove the unused raw-wire checksum from native Xorb request staging, retaining
+  member/root authentication, final storage verification and shard checksums.
 - Reuse one verified legacy chunk within a download stream, avoiding repeated
   reads and decompression for consecutive complete chunks up to 64 KiB.
 - Avoid a duplicate complete validation pass when preparing owned or borrowed

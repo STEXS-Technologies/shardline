@@ -12,7 +12,7 @@ use crate::{
     download_stream::{
         ServerByteStream, VerifiedXorb, object_byte_stream, prepare_xorb_byte_range,
     },
-    upload_ingest::{RequestBodyReader, stage_body_with_spill, store_admitted_xorb},
+    upload_ingest::{RequestBodyReader, stage_xorb_with_spill, store_admitted_xorb},
     xet_adapter::{XorbUploadResponse, resolve_dedupe_shard_object, xorb_object_key},
 };
 
@@ -46,7 +46,7 @@ impl LocalBackend {
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
         let object_store = self.object_store();
-        let staged = stage_body_with_spill(&mut body).await?;
+        let staged = stage_xorb_with_spill(&mut body).await?;
         let (staged, body_length) =
             crate::upload_identity::xorb_length(expected_hash, staged, &self.stream_work_pool)
                 .await?;

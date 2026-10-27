@@ -104,26 +104,33 @@ pub(crate) struct RequestBodyReader {
     read_bytes: u64,
 }
 
-pub(crate) enum StagedRequestBody {
+mod staging_digest;
+use staging_digest::StagingDigest;
+
+pub(crate) type StagedXorbBody = StagedRequestBody<()>;
+
+pub(crate) enum StagedRequestBody<H = shardline_protocol::ShardlineHash> {
     Memory {
         bytes: Bytes,
         length: u64,
-        hash: shardline_protocol::ShardlineHash,
+        hash: H,
     },
     File {
         file: tempfile::NamedTempFile,
         length: u64,
-        hash: shardline_protocol::ShardlineHash,
+        hash: H,
     },
 }
 
-impl StagedRequestBody {
+impl<H> StagedRequestBody<H> {
     pub(crate) const fn length(&self) -> u64 {
         match self {
             Self::Memory { length, .. } | Self::File { length, .. } => *length,
         }
     }
+}
 
+impl StagedRequestBody {
     pub(crate) const fn hash(&self) -> shardline_protocol::ShardlineHash {
         match self {
             Self::Memory { hash, .. } | Self::File { hash, .. } => *hash,
@@ -330,9 +337,15 @@ pub(crate) async fn stage_body_to_tempfile(
     ),
     ServerError,
 > {
+    stage_to_tempfile::<blake3::Hasher>(reader).await
+}
+
+async fn stage_to_tempfile<D: StagingDigest>(
+    reader: &mut RequestBodyReader,
+) -> Result<(tempfile::NamedTempFile, u64, D::Hash), ServerError> {
     let temporary = tempfile::NamedTempFile::new()?;
     let mut output = tokio::fs::File::create(temporary.path()).await?;
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = D::default();
     let mut length = 0_u64;
     while let Some(bytes) = reader.next_bytes().await? {
         hasher.update(&bytes);
@@ -340,11 +353,7 @@ pub(crate) async fn stage_body_to_tempfile(
         tokio::io::AsyncWriteExt::write_all(&mut output, &bytes).await?;
     }
     tokio::io::AsyncWriteExt::flush(&mut output).await?;
-    Ok((
-        temporary,
-        length,
-        shardline_protocol::ShardlineHash::from_bytes(*hasher.finalize().as_bytes()),
-    ))
+    Ok((temporary, length, hasher.finish()))
 }
 
 /// Stages a bounded protocol object in memory for remote object storage and
@@ -372,6 +381,21 @@ pub(crate) async fn stage_body_for_object_store(
 pub(crate) async fn stage_body_with_spill(
     reader: &mut RequestBodyReader,
 ) -> Result<StagedRequestBody, ServerError> {
+    stage_with_spill::<blake3::Hasher>(reader).await
+}
+
+/// Stage native Xorb bytes without an unused raw-wire checksum. The caller
+/// must authenticate members/root and the final serialized object before
+/// publication. Size bounds, spill behavior and cancellation remain shared.
+pub(crate) async fn stage_xorb_with_spill(
+    reader: &mut RequestBodyReader,
+) -> Result<StagedXorbBody, ServerError> {
+    stage_with_spill::<()>(reader).await
+}
+
+async fn stage_with_spill<D: StagingDigest>(
+    reader: &mut RequestBodyReader,
+) -> Result<StagedRequestBody<D::Hash>, ServerError> {
     // Small protocol objects can be validated in memory and then written
     // once to their final content-addressed path. Avoid a disposable scratch
     // write for those bodies. Unknown or larger bodies spill after a strict
@@ -380,7 +404,7 @@ pub(crate) async fn stage_body_with_spill(
         .expected_total_bytes
         .is_some_and(|length| length > MAX_IN_MEMORY_STAGED_BODY_BYTES)
     {
-        let (file, length, hash) = stage_body_to_tempfile(reader).await?;
+        let (file, length, hash) = stage_to_tempfile::<D>(reader).await?;
         return Ok(StagedRequestBody::File { file, length, hash });
     }
 
@@ -392,7 +416,7 @@ pub(crate) async fn stage_body_with_spill(
     memory
         .try_reserve(initial_capacity)
         .map_err(|_error| ServerError::RequestBodyTooLarge)?;
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = D::default();
     let mut length = 0_u64;
     let mut temporary: Option<(tempfile::NamedTempFile, tokio::fs::File)> = None;
 
@@ -424,7 +448,7 @@ pub(crate) async fn stage_body_with_spill(
         tokio::io::AsyncWriteExt::write_all(output, &bytes).await?;
     }
 
-    let hash = shardline_protocol::ShardlineHash::from_bytes(*hasher.finalize().as_bytes());
+    let hash = hasher.finish();
     if let Some((file, mut output)) = temporary {
         tokio::io::AsyncWriteExt::flush(&mut output).await?;
         drop(output);
@@ -651,20 +675,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_staging_preserves_memory_and_stream_limits_without_a_wire_digest() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"native"));
+        let staged = super::stage_xorb_with_spill(&mut reader).await.unwrap();
+        assert!(
+            matches!(staged, StagedRequestBody::Memory { bytes, length: 6, hash: () } if bytes == b"native"[..])
+        );
+
+        let body = axum::body::Body::from_stream(futures_util::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
+            Ok(Bytes::from_static(b"c")),
+        ]));
+        let mut reader =
+            RequestBodyReader::from_body(body, std::num::NonZeroUsize::new(2).unwrap()).unwrap();
+        assert!(matches!(
+            super::stage_xorb_with_spill(&mut reader).await,
+            Err(crate::ServerError::RequestBodyTooLarge)
+        ));
+    }
+
+    #[tokio::test]
     #[allow(clippy::panic)] // A memory result must fail this spill/cleanup test immediately.
     async fn native_staging_spills_and_removes_the_owned_file_on_drop() {
         let bytes = vec![0x5a; MAX_IN_MEMORY_STAGED_BODY_BYTES + 1];
-        let expected_hash =
-            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes());
         let mut reader = RequestBodyReader::from_bytes(Bytes::from(bytes.clone()));
-        let staged = super::stage_body_with_spill(&mut reader).await.unwrap();
-        let StagedRequestBody::File { file, length, hash } = staged else {
+        let staged = super::stage_xorb_with_spill(&mut reader).await.unwrap();
+        let StagedRequestBody::File {
+            file,
+            length,
+            hash: (),
+        } = staged
+        else {
             panic!("large native body must spill independently of its destination");
         };
         let path = file.path().to_owned();
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(length, bytes.len() as u64);
-        assert_eq!(hash, expected_hash);
         drop(file);
         assert!(!path.exists());
     }

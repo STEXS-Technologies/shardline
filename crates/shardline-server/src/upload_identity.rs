@@ -23,7 +23,7 @@ pub(crate) fn xorb(hash: &str, canonical_length: u64) -> String {
 
 pub(crate) async fn xorb_length(
     hash: &str,
-    staged: crate::upload_ingest::StagedRequestBody,
+    staged: crate::upload_ingest::StagedXorbBody,
     pool: &crate::admission::BoundedPool,
 ) -> Result<(PreparedNativeXorb, u64), ServerError> {
     let hash = hash.to_owned();
@@ -37,7 +37,7 @@ pub(crate) async fn xorb_length(
 
 fn prepare_staged_xorb(
     hash: &str,
-    staged: crate::upload_ingest::StagedRequestBody,
+    staged: crate::upload_ingest::StagedXorbBody,
     checkpoint: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<(PreparedNativeXorb, u64), ServerError> {
     checkpoint()?;

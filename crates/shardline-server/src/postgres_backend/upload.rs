@@ -10,7 +10,7 @@ use crate::{
     model::UploadFileResponse,
     upload_ingest::{
         FileUploadIngestor, RequestBodyReader, UploadStorage, stage_body_with_spill,
-        upload_attempt_id,
+        stage_xorb_with_spill, upload_attempt_id,
     },
     validation::validate_identifier,
     xet_adapter::{ShardUploadResponse, XorbUploadResponse, xorb_object_key},
@@ -274,7 +274,7 @@ impl super::PostgresBackend {
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
         let object_store = self.object_store();
-        let staged = stage_body_with_spill(&mut body).await?;
+        let staged = stage_xorb_with_spill(&mut body).await?;
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
         let (staged, body_length) =

@@ -2,7 +2,7 @@ use super::*;
 use crate::{admission::BoundedPool, upload_ingest::StagedRequestBody};
 use std::{io::Write, num::NonZeroUsize, path::PathBuf};
 
-fn staged(bytes: &[u8]) -> (StagedRequestBody, PathBuf) {
+fn staged(bytes: &[u8]) -> (crate::upload_ingest::StagedXorbBody, PathBuf) {
     let mut file = tempfile::NamedTempFile::new().unwrap();
     file.write_all(bytes).unwrap();
     let path = file.path().to_path_buf();
@@ -10,7 +10,7 @@ fn staged(bytes: &[u8]) -> (StagedRequestBody, PathBuf) {
         StagedRequestBody::File {
             file,
             length: u64::try_from(bytes.len()).unwrap(),
-            hash: shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes()),
+            hash: (),
         },
         path,
     )
@@ -145,9 +145,8 @@ async fn already_normalized_staging_repairs_the_earlier_footerless_identity() {
     let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
     let (wire, canonical, expected) = crate::test_fixtures::footerless_xorb().unwrap();
     let (mut input, _) = staged(&canonical);
-    if let StagedRequestBody::File { length, hash, .. } = &mut input {
+    if let StagedRequestBody::File { length, .. } = &mut input {
         *length = u64::try_from(wire.len()).unwrap();
-        *hash = shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&wire).as_bytes());
     }
     let (output, length) = xorb_length(&expected, input, &pool).await.unwrap();
     let PreparedNativeXorb::File(file) = output else {
