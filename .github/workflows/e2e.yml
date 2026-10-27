@@ -172,7 +172,7 @@ jobs:
         run: >-
           cargo nextest run --locked --manifest-path e2e/Cargo.toml
           --test native_huggingface_cli_e2e --run-ignored all
-          -E 'test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_lost_commit_reply_preserves_peer_publication)'
+          -E 'test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_cli_flows_with_combined_frontends_postgres_minio) or test(native_huggingface_lost_commit_reply_preserves_peer_publication)'
 
       - name: Qualify stock git-xet through the real Hub with PostgreSQL and MinIO
         run: >-
@@ -243,7 +243,7 @@ jobs:
             -E 'test(stock_xet_large_upload_recovers) or test(native_xorb_remote_) or test(native_xorb_retry_survives_sigkill_at_every_durable_boundary) or test(native_upload_client::prerequisites::)'
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_huggingface_cli_e2e --run-ignored all \
-            -E 'test(native_huggingface_one_gib) or test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_cli_flows_with_postgres_and_local_objects) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_sdx_reads_expired_xorb_url) or test(native_huggingface_permissive_whoami_preserves_anonymous_identity) or test(native_huggingface_cold_dedup_after_) or test(native_huggingface_retries_shard_owner_loss) or test(native_huggingface_https_frontdoor_preserves_native_transfer)'
+            -E 'test(native_huggingface_one_gib) or test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_frontends::) or test(native_huggingface_cli_flows_with_postgres_and_local_objects) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_sdx_reads_expired_xorb_url) or test(native_huggingface_permissive_whoami_preserves_anonymous_identity) or test(native_huggingface_cold_dedup_after_) or test(native_huggingface_retries_shard_owner_loss) or test(native_huggingface_https_frontdoor_preserves_native_transfer)'
 
       - name: Qualify official JavaScript native delta edits
         run: |
@@ -262,7 +262,7 @@ jobs:
           export PATH="$client_env/bin:$PATH"
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_huggingface_cli_e2e --run-ignored all \
-            -E 'test(native_huggingface_one_gib) or test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_cli_flows_with_postgres_and_local_objects) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_huggingface_cold_dedup_after_) or test(native_huggingface_retries_shard_owner_loss) or test(native_huggingface_https_frontdoor_preserves_native_transfer)'
+            -E 'test(native_huggingface_one_gib) or test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_frontends::) or test(native_huggingface_cli_flows_with_postgres_and_local_objects) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_huggingface_cold_dedup_after_) or test(native_huggingface_retries_shard_owner_loss) or test(native_huggingface_https_frontdoor_preserves_native_transfer)'
 
       - name: Qualify hf_xet 1.7 client compatibility
         run: |
@@ -272,7 +272,7 @@ jobs:
           export PATH="$client_env/bin:$PATH"
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_huggingface_cli_e2e --run-ignored all \
-            -E 'test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_cli_flows_with_postgres_and_local_objects) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_huggingface_cold_dedup_after_) or test(native_huggingface_retries_shard_owner_loss) or test(native_huggingface_https_frontdoor_preserves_native_transfer) or test(native_huggingface_repository_wide_http_)'
+            -E 'test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_frontends::) or test(native_huggingface_cli_flows_with_postgres_and_local_objects) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_huggingface_cold_dedup_after_) or test(native_huggingface_retries_shard_owner_loss) or test(native_huggingface_https_frontdoor_preserves_native_transfer) or test(native_huggingface_repository_wide_http_)'
           cargo nextest run --locked -p shardline-server --features docker \
             --test native_upload_process --run-ignored all \
             -E 'test(stock_xet_large_upload_recovers)'
@@ -296,7 +296,7 @@ jobs:
           export PATH="$client_env/bin:$PATH"
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_huggingface_cli_e2e --run-ignored all \
-            -E 'test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_huggingface_model_card_push)'
+            -E 'test(native_huggingface_cli_model_and_dataset_flows_work_against_shardline) or test(native_huggingface_cli_flows_with_postgres_and_minio) or test(native_huggingface_frontends::) or test(native_huggingface_cli_recovers_after_expired_xorb_url) or test(native_huggingface_model_card_push)'
           cargo nextest run --locked --manifest-path e2e/Cargo.toml \
             --test native_huggingface_cli_e2e --run-ignored all --test-threads 1 \
             -E 'test(native_huggingface_http_analytics::)'
