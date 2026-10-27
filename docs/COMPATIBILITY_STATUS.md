@@ -281,6 +281,16 @@ shallow-root warnings; the unfiltered control makes one request without warnings
 Both pass strict fsck. This is a stock-Git comparison, not qualification of
 Shardline's native v2 snapshot flow or a requirement to upgrade client Git.
 
+A separate Git 2.55.0 diagnostic identifies pre-pack shallow-root classification
+as a cause: it permits a promisor fetch while deciding whether an advertised
+root exists locally, before the incoming pack supplies that root. Disabling
+that fetch in an isolated client build reduces recursive fetch processes from
+22 (filtered v2) and 31 (filtered v0) to zero in the same depth-one Git-source
+control. All six baseline/patched clones reach the expected commit and pass
+strict fsck. This experimental client patch is not distributed with Shardline
+and does not qualify native v2 snapshots for existing stock clients; the
+compatibility fallback remains in place.
+
 The Hub API's native Git regression compares incremental-fetch HTTP response
 bytes with a fresh clone at the same commit. It requires less transfer for the
 incremental fetch, exact current and historical file contents, a successful
